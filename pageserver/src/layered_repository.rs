@@ -136,7 +136,9 @@ pub struct LayeredRepository {
 
 /// Public interface
 impl Repository for LayeredRepository {
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline> {
+    type Timeline = LayeredTimeline;
+
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<LayeredTimeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         Ok(
             match self.get_or_init_timeline(timelineid, &mut timelines)? {
@@ -156,7 +158,7 @@ impl Repository for LayeredRepository {
         &self,
         timelineid: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<dyn Timeline>> {
+    ) -> Result<Arc<LayeredTimeline>> {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
@@ -1072,10 +1074,6 @@ impl Timeline for LayeredTimeline {
             tl: self,
             _write_guard: self.write_lock.lock().unwrap(),
         })
-    }
-
-    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline {
-        self
     }
 }
 
@@ -2143,20 +2141,20 @@ impl LayeredTimeline {
     }
 }
 
-struct LayeredTimelineWriter<'a> {
+pub struct LayeredTimelineWriter<'a> {
     tl: &'a LayeredTimeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
 impl Deref for LayeredTimelineWriter<'_> {
-    type Target = dyn Timeline;
+    type Target = LayeredTimeline;
 
     fn deref(&self) -> &Self::Target {
         self.tl
     }
 }
 
-impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
+impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
     fn put_wal_record(
         &self,
         lsn: Lsn,

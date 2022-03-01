@@ -29,9 +29,9 @@ use zenith_utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a> {
+pub struct Basebackup<'a, T> {
     ar: Builder<&'a mut dyn Write>,
-    timeline: &'a Arc<dyn Timeline>,
+    timeline: &'a Arc<T>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
@@ -43,12 +43,14 @@ pub struct Basebackup<'a> {
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a> Basebackup<'a> {
+impl<'a, T> Basebackup<'a, T>
+where T: Timeline,
+{
     pub fn new(
         write: &'a mut dyn Write,
-        timeline: &'a Arc<dyn Timeline>,
+        timeline: &'a Arc<T>,
         req_lsn: Option<Lsn>,
-    ) -> Result<Basebackup<'a>> {
+    ) -> Result<Basebackup<'a, T>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the

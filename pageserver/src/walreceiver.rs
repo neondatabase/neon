@@ -6,6 +6,8 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::config::PageServerConf;
+use crate::repository::Repository;
+use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -250,11 +252,11 @@ fn walreceiver_main(
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hittind a deadlock.
+                    // at risk of hitting a deadlock.
                     assert!(lsn.is_aligned());
 
                     let writer = timeline.writer();
-                    walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
+                    walingest.ingest_record(&*timeline, writer.as_ref(), recdata, lsn)?;
 
                     fail_point!("walreceiver-after-ingest");
 

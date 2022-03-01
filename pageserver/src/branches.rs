@@ -25,6 +25,7 @@ use crate::CheckpointConfig;
 use crate::{config::PageServerConf, repository::Repository};
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
+use crate::repository::Timeline;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -39,9 +40,9 @@ pub struct BranchInfo {
 }
 
 impl BranchInfo {
-    pub fn from_path<T: AsRef<Path>>(
-        path: T,
-        repo: &Arc<dyn Repository>,
+    pub fn from_path<R: Repository, P: AsRef<Path>>(
+        path: P,
+        repo: &R,
         include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
@@ -129,7 +130,7 @@ pub fn create_repo(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-) -> Result<Arc<dyn Repository>> {
+) -> Result<Arc<crate::layered_repository::LayeredRepository>> {
     let repo_dir = conf.tenant_path(&tenantid);
     if repo_dir.exists() {
         bail!("repo for {} already exists", tenantid)
@@ -211,11 +212,11 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
 //
-fn bootstrap_timeline(
+fn bootstrap_timeline<R: Repository>(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
-    repo: &dyn Repository,
+    repo: &R,
 ) -> Result<()> {
     let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
 
@@ -234,7 +235,7 @@ fn bootstrap_timeline(
     let timeline = repo.create_empty_timeline(tli, lsn)?;
     import_datadir::import_timeline_from_postgres_datadir(
         &pgdata_path,
-        timeline.writer().as_ref(),
+        &*timeline,
         lsn,
     )?;
     timeline.checkpoint(CheckpointConfig::Forced)?;
@@ -284,7 +285,7 @@ pub(crate) fn get_branches(
             })?;
             BranchInfo::from_path(
                 dir_entry.path(),
-                &repo,
+                repo.as_ref(),
                 include_non_incremental_logical_size,
             )
         })

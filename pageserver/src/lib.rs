@@ -22,6 +22,8 @@ use lazy_static::lazy_static;
 use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
+use layered_repository::{LayeredRepository, LayeredTimeline};
+
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_live_connections_count",
@@ -43,3 +45,7 @@ pub enum CheckpointConfig {
     // Flush all in-memory data and reconstruct all page images
     Forced,
 }
+
+pub type RepositoryImpl = LayeredRepository;
+pub type TimelineImpl = LayeredTimeline;
+

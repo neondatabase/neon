@@ -6,7 +6,7 @@ use bytes::Bytes;
 use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::ops::{AddAssign, Deref};
+use std::ops::AddAssign;
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
@@ -19,6 +19,8 @@ pub type BlockNumber = u32;
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
+    type Timeline: Timeline;
+
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     /// Updates timeline based on the new sync state, received from the remote storage synchronization.
@@ -34,7 +36,7 @@ pub trait Repository: Send + Sync {
     fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState>;
 
     /// Get Timeline handle for given zenith timeline ID.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline>;
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<Self::Timeline>>;
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
@@ -42,7 +44,7 @@ pub trait Repository: Send + Sync {
         &self,
         timelineid: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<dyn Timeline>>;
+    ) -> Result<Arc<Self::Timeline>>;
 
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
@@ -69,10 +71,10 @@ pub trait Repository: Send + Sync {
 }
 
 /// A timeline, that belongs to the current repository.
-pub enum RepositoryTimeline {
+pub enum RepositoryTimeline<T> {
     /// Timeline, with its files present locally in pageserver's working directory.
     /// Loaded into pageserver's memory and ready to be used.
-    Local(Arc<dyn Timeline>),
+    Local(Arc<T>),
     /// Timeline, found on the pageserver's remote storage, but not yet downloaded locally.
     Remote {
         id: ZTimelineId,
@@ -81,8 +83,8 @@ pub enum RepositoryTimeline {
     },
 }
 
-impl RepositoryTimeline {
-    pub fn local_timeline(&self) -> Option<Arc<dyn Timeline>> {
+impl<T> RepositoryTimeline<T> {
+    pub fn local_timeline(&self) -> Option<Arc<T>> {
         if let Self::Local(local_timeline) = self {
             Some(Arc::clone(local_timeline))
         } else {
@@ -217,7 +219,6 @@ pub trait Timeline: Send + Sync {
     //
     // These are called by the WAL receiver to digest WAL records.
     //------------------------------------------------------------------------------
-
     /// Atomically get both last and prev.
     fn get_last_record_rlsn(&self) -> RecordLsn;
 
@@ -229,6 +230,10 @@ pub trait Timeline: Send + Sync {
     fn get_disk_consistent_lsn(&self) -> Lsn;
 
     /// Mutate the timeline with a [`TimelineWriter`].
+    ///
+    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
+    /// is a generic type in this trait. But that doesn't currently work in
+    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
 
     ///
@@ -255,16 +260,13 @@ pub trait Timeline: Send + Sync {
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used in tests to ensure that incremental and non incremental variants match.
     fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
-
-    /// An escape hatch to allow "casting" a generic Timeline to LayeredTimeline.
-    fn upgrade_to_layered_timeline(&self) -> &crate::layered_repository::LayeredTimeline;
 }
 
 /// Various functions to mutate the timeline.
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
 // This is probably considered a bad practice in Rust and should be fixed eventually,
 // but will cause large code changes.
-pub trait TimelineWriter: Deref<Target = dyn Timeline> {
+pub trait TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
@@ -395,15 +397,15 @@ pub mod repo_harness {
             Ok(Self { conf, tenant_id })
         }
 
-        pub fn load(&self) -> Box<dyn Repository> {
+        pub fn load(&self) -> LayeredRepository {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            Box::new(LayeredRepository::new(
+            LayeredRepository::new(
                 self.conf,
                 walredo_mgr,
                 self.tenant_id,
                 false,
-            ))
+            )
         }
 
         pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
@@ -467,7 +469,7 @@ mod tests {
         forknum: 0,
     });
 
-    fn assert_current_logical_size(timeline: &Arc<dyn Timeline>, lsn: Lsn) {
+    fn assert_current_logical_size<T: Timeline>(timeline: &Arc<T>, lsn: Lsn) {
         let incremental = timeline.get_current_logical_size();
         let non_incremental = timeline
             .get_current_logical_size_non_incremental(lsn)
@@ -915,7 +917,7 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers(tline: &Arc<dyn Timeline>, start_lsn: Lsn) -> Result<()> {
+    fn make_some_layers<T: Timeline>(tline: &Arc<T>, start_lsn: Lsn) -> Result<()> {
         let mut lsn = start_lsn;
         {
             let writer = tline.writer();

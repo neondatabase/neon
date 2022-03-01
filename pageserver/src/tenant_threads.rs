@@ -1,6 +1,7 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as checkpointer and GC
 use crate::config::PageServerConf;
+use crate::repository::Repository;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use crate::CheckpointConfig;

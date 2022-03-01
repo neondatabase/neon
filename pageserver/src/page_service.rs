@@ -33,7 +33,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use crate::basebackup;
 use crate::config::PageServerConf;
 use crate::relish::*;
-use crate::repository::Timeline;
+use crate::repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -395,8 +395,8 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn(
-        timeline: &dyn Timeline,
+    fn wait_or_get_last_lsn<T: Timeline>(
+        timeline: &T,
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
@@ -443,9 +443,9 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request(
+    fn handle_get_rel_exists_request<T: Timeline>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &T,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -461,9 +461,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_nblocks_request(
+    fn handle_get_nblocks_request<T: Timeline>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &T,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -482,9 +482,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_page_at_lsn_request(
+    fn handle_get_page_at_lsn_request<T: Timeline>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &T,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)

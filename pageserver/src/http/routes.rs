@@ -26,7 +26,7 @@ use super::models::BranchCreateRequest;
 use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
-use crate::repository::RepositoryTimeline;
+use crate::repository::{Repository, RepositoryTimeline, Timeline};
 use crate::repository::TimelineSyncState;
 use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
 
@@ -138,7 +138,7 @@ async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>,
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("branch_detail", tenant = %tenantid, branch=%branch_name).entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        BranchInfo::from_path(path, &repo, include_non_incremental_logical_size)
+        BranchInfo::from_path(path, repo.as_ref(), include_non_incremental_logical_size)
     })
     .await
     .map_err(ApiError::from_err)??;

@@ -2,9 +2,10 @@
 //! page server.
 
 use crate::branches;
+use crate::{RepositoryImpl, TimelineImpl};
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
-use crate::repository::{Repository, Timeline, TimelineSyncState};
+use crate::repository::{Repository, TimelineSyncState};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
@@ -24,7 +25,7 @@ lazy_static! {
 
 struct Tenant {
     state: TenantState,
-    repo: Arc<dyn Repository>,
+    repo: Arc<RepositoryImpl>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +79,7 @@ pub fn set_timeline_states(
             let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
             // Set up an object repository, for actual data storage.
-            let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
+            let repo: Arc<RepositoryImpl> = Arc::new(LayeredRepository::new(
                 conf,
                 Arc::new(walredo_mgr),
                 tenant_id,
@@ -248,7 +249,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
+pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<RepositoryImpl>> {
     let m = access_tenants();
     let tenant = m
         .get(&tenantid)
@@ -260,7 +261,7 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
 pub fn get_timeline_for_tenant(
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
-) -> Result<Arc<dyn Timeline>> {
+) -> Result<Arc<TimelineImpl>> {
     get_repository_for_tenant(tenantid)?
         .get_timeline(timelineid)?
         .local_timeline()

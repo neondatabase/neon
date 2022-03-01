@@ -27,12 +27,15 @@ use zenith_utils::lsn::Lsn;
 /// This is currently only used to import a cluster freshly created by initdb.
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
-pub fn import_timeline_from_postgres_datadir(
+pub fn import_timeline_from_postgres_datadir<T: Timeline>(
     path: &Path,
-    writer: &dyn TimelineWriter,
+    timeline: &T,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
+
+    let writer_box = timeline.writer();
+    let writer = writer_box.as_ref();
 
     // Scan 'global'
     for direntry in fs::read_dir(path.join("global"))? {
@@ -141,6 +144,7 @@ pub fn import_timeline_from_postgres_datadir(
     // *after* the checkpoint record. And crucially, it initializes the 'prev_lsn'.
     import_wal(
         &path.join("pg_wal"),
+        timeline,
         writer,
         Lsn(pg_control.checkPointCopy.redo),
         lsn,
@@ -310,8 +314,9 @@ fn import_slru_file(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(
+fn import_wal<T: Timeline>(
     walpath: &Path,
+    timeline: &T,
     writer: &dyn TimelineWriter,
     startpoint: Lsn,
     endpoint: Lsn,
@@ -322,7 +327,7 @@ fn import_wal(
     let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(writer.deref(), startpoint)?;
+    let mut walingest = WalIngest::new(timeline, startpoint)?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -355,7 +360,7 @@ fn import_wal(
         let mut nrecords = 0;
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(writer, recdata, lsn)?;
+                walingest.ingest_record(timeline, writer, recdata, lsn)?;
                 last_lsn = lsn;
 
                 nrecords += 1;

@@ -46,7 +46,7 @@ pub struct WalIngest {
 }
 
 impl WalIngest {
-    pub fn new(timeline: &dyn Timeline, startpoint: Lsn) -> Result<WalIngest> {
+    pub fn new<T: Timeline>(timeline: &T, startpoint: Lsn) -> Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_page_at_lsn(RelishTag::Checkpoint, 0, startpoint)?;
@@ -66,9 +66,10 @@ impl WalIngest {
     /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
     /// relations/pages that the record affects.
     ///
-    pub fn ingest_record(
+    pub fn ingest_record<T: Timeline>(
         &mut self,
-        timeline: &dyn TimelineWriter,
+        timeline: &T,
+        writer: &dyn TimelineWriter,
         recdata: Bytes,
         lsn: Lsn,
     ) -> Result<()> {
@@ -86,7 +87,7 @@ impl WalIngest {
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
             || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
         {
-            self.ingest_heapam_record(&mut buf, timeline, lsn, &mut decoded)?;
+            self.ingest_heapam_record(&mut buf, writer, lsn, &mut decoded)?;
         }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
@@ -94,13 +95,13 @@ impl WalIngest {
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&mut buf);
-            self.ingest_xlog_smgr_truncate(timeline, lsn, &truncate)?;
+            self.ingest_xlog_smgr_truncate(writer, lsn, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
             if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_CREATE
             {
                 let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(timeline, lsn, &createdb)?;
+                self.ingest_xlog_dbase_create(timeline, writer, lsn, &createdb)?;
             } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_DROP
             {
@@ -113,7 +114,7 @@ impl WalIngest {
                 for tablespace_id in dropdb.tablespace_ids {
                     let rels = timeline.list_rels(tablespace_id, dropdb.db_id, req_lsn)?;
                     for rel in rels {
-                        timeline.drop_relish(rel, lsn)?;
+                        writer.drop_relish(rel, lsn)?;
                     }
                     trace!(
                         "Drop FileNodeMap {}, {} at lsn {}",
@@ -121,7 +122,7 @@ impl WalIngest {
                         dropdb.db_id,
                         lsn
                     );
-                    timeline.drop_relish(
+                    writer.drop_relish(
                         RelishTag::FileNodeMap {
                             spcnode: tablespace_id,
                             dbnode: dropdb.db_id,
@@ -138,7 +139,7 @@ impl WalIngest {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                timeline.put_page_image(
+                writer.put_page_image(
                     RelishTag::Slru {
                         slru: SlruKind::Clog,
                         segno,
@@ -150,7 +151,7 @@ impl WalIngest {
             } else {
                 assert!(info == pg_constants::CLOG_TRUNCATE);
                 let xlrec = XlClogTruncate::decode(&mut buf);
-                self.ingest_clog_truncate_record(timeline, lsn, &xlrec)?;
+                self.ingest_clog_truncate_record(timeline, writer, lsn, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
             let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -158,7 +159,7 @@ impl WalIngest {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    timeline,
+                    writer,
                     lsn,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT,
@@ -169,7 +170,7 @@ impl WalIngest {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    timeline,
+                    writer,
                     lsn,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
@@ -181,14 +182,14 @@ impl WalIngest {
                     parsed_xact.xid,
                     lsn
                 );
-                timeline.drop_relish(
+                writer.drop_relish(
                     RelishTag::TwoPhase {
                         xid: parsed_xact.xid,
                     },
                     lsn,
                 )?;
             } else if info == pg_constants::XLOG_XACT_PREPARE {
-                timeline.put_page_image(
+                writer.put_page_image(
                     RelishTag::TwoPhase {
                         xid: decoded.xl_xid,
                     },
@@ -204,7 +205,7 @@ impl WalIngest {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                timeline.put_page_image(
+                writer.put_page_image(
                     RelishTag::Slru {
                         slru: SlruKind::MultiXactOffsets,
                         segno,
@@ -217,7 +218,7 @@ impl WalIngest {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                timeline.put_page_image(
+                writer.put_page_image(
                     RelishTag::Slru {
                         slru: SlruKind::MultiXactMembers,
                         segno,
@@ -228,14 +229,14 @@ impl WalIngest {
                 )?;
             } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                 let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(timeline, lsn, &xlrec)?;
+                self.ingest_multixact_create_record(writer, lsn, &xlrec)?;
             } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                 let xlrec = XlMultiXactTruncate::decode(&mut buf);
-                self.ingest_multixact_truncate_record(timeline, lsn, &xlrec)?;
+                self.ingest_multixact_truncate_record(writer, lsn, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
             let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(timeline, lsn, &xlrec, &decoded)?;
+            self.ingest_relmap_page(writer, lsn, &xlrec, &decoded)?;
         } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_NEXTOID {
@@ -270,20 +271,20 @@ impl WalIngest {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
-            self.ingest_decoded_block(timeline, lsn, &decoded, blk)?;
+            self.ingest_decoded_block(writer, lsn, &decoded, blk)?;
         }
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
             let new_checkpoint_bytes = self.checkpoint.encode();
 
-            timeline.put_page_image(RelishTag::Checkpoint, 0, lsn, new_checkpoint_bytes)?;
+            writer.put_page_image(RelishTag::Checkpoint, 0, lsn, new_checkpoint_bytes)?;
             self.checkpoint_modified = false;
         }
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        timeline.advance_last_record_lsn(lsn);
+        writer.advance_last_record_lsn(lsn);
 
         Ok(())
     }
@@ -465,9 +466,10 @@ impl WalIngest {
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_DBASE_CREATE record.
-    fn ingest_xlog_dbase_create(
+    fn ingest_xlog_dbase_create<T: Timeline>(
         &mut self,
-        timeline: &dyn TimelineWriter,
+        timeline: &T,
+        writer: &dyn TimelineWriter,
         lsn: Lsn,
         rec: &XlCreateDatabase,
     ) -> Result<()> {
@@ -508,13 +510,13 @@ impl WalIngest {
 
                     debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-                    timeline.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
+                    writer.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
                     num_blocks_copied += 1;
                 }
 
                 if nblocks == 0 {
                     // make sure we have some trace of the relation, even if it's empty
-                    timeline.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
+                    writer.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
                 }
 
                 num_rels_copied += 1;
@@ -532,7 +534,7 @@ impl WalIngest {
                         spcnode: tablespace_id,
                         dbnode: db_id,
                     };
-                    timeline.put_page_image(new_tag, 0, lsn, img)?;
+                    writer.put_page_image(new_tag, 0, lsn, img)?;
                     break;
                 }
             }
@@ -680,9 +682,10 @@ impl WalIngest {
         Ok(())
     }
 
-    fn ingest_clog_truncate_record(
+    fn ingest_clog_truncate_record<T: Timeline>(
         &mut self,
-        timeline: &dyn TimelineWriter,
+        timeline: &T,
+        writer: &dyn TimelineWriter,
         lsn: Lsn,
         xlrec: &XlClogTruncate,
     ) -> Result<()> {
@@ -732,7 +735,7 @@ impl WalIngest {
                 if slru == SlruKind::Clog {
                     let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
                     if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
-                        timeline.drop_relish(RelishTag::Slru { slru, segno }, lsn)?;
+                        writer.drop_relish(RelishTag::Slru { slru, segno }, lsn)?;
                         trace!("Drop CLOG segment {:>04X} at lsn {}", segno, lsn);
                     }
                 }
