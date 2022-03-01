@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -342,10 +343,22 @@ impl PageServerNode {
     pub fn tenant_create(
         &self,
         new_tenant_id: Option<ZTenantId>,
+		settings: HashMap<&str, &str>
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest::new(tenantid))
+            .json(&TenantCreateRequest {
+                new_tenant_id,
+                checkpoint_distance: settings
+                    .get("checkpoint_distance")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                gc_horizon: settings
+                    .get("gc_horizon")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+            })
             .send()?
             .error_from_body()?
             .json::<Option<String>>()?;
