@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         None => RouterConfig::Dynamic(auth_method),
         Some(addr) => {
             if let ClientAuthMethod::Password = auth_method {
-                let (host, port) = addr.split_once(":").unwrap();
+                let (host, port) = addr.split_once(':').unwrap();
                 RouterConfig::Static {
                     host: host.to_string(),
                     port: port.parse().unwrap(),

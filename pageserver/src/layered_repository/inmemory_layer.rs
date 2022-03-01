@@ -170,12 +170,11 @@ impl Layer for InMemoryLayer {
     fn filename(&self) -> PathBuf {
         let inner = self.inner.read().unwrap();
 
-        let end_lsn;
-        if let Some(drop_lsn) = inner.end_lsn {
-            end_lsn = drop_lsn;
+        let end_lsn = if let Some(drop_lsn) = inner.end_lsn {
+            drop_lsn
         } else {
-            end_lsn = Lsn(u64::MAX);
-        }
+            Lsn(u64::MAX)
+        };
 
         let delta_filename = DeltaFileName {
             seg: self.seg,
