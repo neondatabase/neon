@@ -893,12 +893,11 @@ impl Timeline for LayeredTimeline {
 
         let seg = SegmentTag { rel, segno: 0 };
 
-        let result;
-        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            result = layer.get_seg_exists(lsn)?;
+        let result = if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
+            layer.get_seg_exists(lsn)?
         } else {
-            result = false;
-        }
+            false
+        };
 
         trace!("get_rel_exists: {} at {} -> {}", rel, lsn, result);
         Ok(result)
