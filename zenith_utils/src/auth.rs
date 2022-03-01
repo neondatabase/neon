@@ -5,9 +5,7 @@
 // The second one is that we wanted to use ed25519 keys, but they are also not supported until next version. So we go with RSA keys for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/162
 
-use hex::{self, FromHex};
-use serde::de::Error;
-use serde::{self, Deserializer, Serializer};
+use serde;
 use std::fs;
 use std::path::Path;
 
@@ -17,7 +15,7 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::zid::ZTenantId;
+use crate::zid::{HexZTenantId, ZTenantId};
 
 const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 
@@ -28,44 +26,18 @@ pub enum Scope {
     PageServerApi,
 }
 
-pub fn to_hex_option<S>(value: &Option<ZTenantId>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(tid) => hex::serialize(tid, serializer),
-        None => Option::serialize(value, serializer),
-    }
-}
-
-fn from_hex_option<'de, D>(deserializer: D) -> Result<Option<ZTenantId>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    match opt {
-        Some(tid) => Ok(Some(ZTenantId::from_hex(tid).map_err(Error::custom)?)),
-        None => Ok(None),
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    // this custom serialize/deserialize_with is needed because Option is not transparent to serde
-    // so clearest option is serde(with = "hex") but it is not working, for details see https://github.com/serde-rs/serde/issues/1301
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "to_hex_option",
-        deserialize_with = "from_hex_option"
-    )]
-    pub tenant_id: Option<ZTenantId>,
+    pub tenant_id: Option<HexZTenantId>,
     pub scope: Scope,
 }
 
 impl Claims {
     pub fn new(tenant_id: Option<ZTenantId>, scope: Scope) -> Self {
-        Self { tenant_id, scope }
+        Self {
+            tenant_id: tenant_id.map(HexZTenantId::from),
+            scope,
+        }
     }
 }
 
@@ -75,7 +47,7 @@ pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<
             bail!("Attempt to access management api with tenant scope. Permission denied")
         }
         (Scope::Tenant, Some(tenantid)) => {
-            if claims.tenant_id.unwrap() != tenantid {
+            if ZTenantId::from(claims.tenant_id.unwrap()) != tenantid {
                 bail!("Tenant id mismatch. Permission denied")
             }
             Ok(())

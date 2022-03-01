@@ -16,10 +16,9 @@ use std::{
 };
 use tracing::*;
 
-use zenith_utils::crashsafe_dir;
-use zenith_utils::logging;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::{crashsafe_dir, logging};
 
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
