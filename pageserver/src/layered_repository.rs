@@ -94,7 +94,7 @@ lazy_static! {
 lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_time",
-        "FIXME Time spent on storage operations",
+        "Time spent on storage operations",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
@@ -868,8 +868,7 @@ impl Timeline for LayeredTimeline {
         let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
 
         if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            self.reconstruct_time_histo
-                .observe_closure_duration(|| self.materialize_page(seg, seg_blknum, lsn, &*layer))
+            self.materialize_page(seg, seg_blknum, lsn, &*layer)
         } else {
             // FIXME: This can happen if PostgreSQL extends a relation but never writes
             // the page. See https://github.com/zenithdb/zenith/issues/841
@@ -2022,17 +2021,19 @@ impl LayeredTimeline {
         let mut layer_ref = layer;
         let mut curr_lsn = lsn;
         loop {
-            let result = layer_ref
-                .get_page_reconstruct_data(seg_blknum, curr_lsn, &mut data)
-                .with_context(|| {
-                    format!(
-                        "Failed to get reconstruct data {} {:?} {} {}",
-                        layer_ref.get_seg_tag(),
-                        layer_ref.filename(),
-                        seg_blknum,
-                        curr_lsn,
-                    )
-                })?;
+            let result = self.reconstruct_time_histo.observe_closure_duration(|| {
+                layer_ref
+                    .get_page_reconstruct_data(seg_blknum, curr_lsn, &mut data)
+                    .with_context(|| {
+                        format!(
+                            "Failed to get reconstruct data {} {:?} {} {}",
+                            layer_ref.get_seg_tag(),
+                            layer_ref.filename(),
+                            seg_blknum,
+                            curr_lsn,
+                        )
+                    })
+            })?;
             match result {
                 PageReconstructResult::Complete => break,
                 PageReconstructResult::Continue(cont_lsn) => {
