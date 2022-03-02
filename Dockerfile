@@ -6,7 +6,7 @@
 # Build Postgres separately --- this layer will be rebuilt only if one of
 # mentioned paths will get any changes.
 #
-FROM zenithdb/build:buster AS pg-build
+FROM zimg/rust:1.56 AS pg-build
 WORKDIR /zenith
 COPY ./vendor/postgres vendor/postgres
 COPY ./Makefile Makefile
@@ -20,7 +20,7 @@ RUN rm -rf postgres_install/build
 # TODO: build cargo deps as separate layer. We used cargo-chef before but that was
 # net time waste in a lot of cases. Copying Cargo.lock with empty lib.rs should do the work.
 #
-FROM zenithdb/build:buster AS build
+FROM zimg/rust:1.56 AS build
 
 ARG GIT_VERSION
 RUN if [ -z "$GIT_VERSION" ]; then echo "GIT_VERSION is reqired, use build_arg to pass it"; exit 1; fi
@@ -34,7 +34,7 @@ RUN GIT_VERSION=$GIT_VERSION cargo build --release
 #
 # Copy binaries to resulting image.
 #
-FROM debian:buster-slim
+FROM debian:bullseye-slim
 WORKDIR /data
 
 RUN apt-get update && apt-get -yq install libreadline-dev libseccomp-dev openssl ca-certificates && \
