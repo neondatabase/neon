@@ -220,7 +220,7 @@ paths:
                   format: hex
       responses:
         "201":
-          description: CREATED
+          description: Already exists or created
           content:
             application/json:
               schema:
