@@ -21,17 +21,6 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde(with = "opt_display_serde")]
     pub new_tenant_id: Option<ZTenantId>,
-    #[serde(default)]
-    #[serde(with = "opt_display_serde")]
-    pub initial_timeline_id: Option<ZTimelineId>,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct TenantCreateResponse {
-    #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
 }
 
 #[derive(Serialize)]

@@ -9,7 +9,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest};
+use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -336,20 +336,19 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(
-        &self,
-        new_tenant_id: Option<ZTenantId>,
-        initial_timeline_id: Option<ZTimelineId>,
-    ) -> Result<TenantCreateResponse> {
-        Ok(self
+    pub fn tenant_create(&self, new_tenant_id: Option<ZTenantId>) -> anyhow::Result<ZTenantId> {
+        let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest {
-                new_tenant_id,
-                initial_timeline_id,
-            })
+            .json(&TenantCreateRequest { new_tenant_id })
             .send()?
             .error_from_body()?
-            .json()?)
+            .json::<String>()?;
+        tenant_id_string.parse().with_context(|| {
+            format!(
+                "Failed to parse tennat creation response as tenant id: {}",
+                tenant_id_string
+            )
+        })
     }
 
     pub fn timeline_list(&self, tenant_id: &ZTenantId) -> Result<Vec<TimelineInfo>> {

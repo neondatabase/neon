@@ -43,7 +43,7 @@ fn main() -> Result<()> {
             Arg::new("init")
                 .long("init")
                 .takes_value(false)
-                .help("Initialize pageserver repo"),
+                .help("Initialize pageserver service: creates an initial config, tenant and timeline, if specified"),
         )
         .arg(
             Arg::new("workdir")

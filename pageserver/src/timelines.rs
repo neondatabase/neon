@@ -17,9 +17,9 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{opt_display_serde, ZTenantId, ZTimelineId};
 use zenith_utils::{crashsafe_dir, logging};
 
-use crate::walredo::WalRedoManager;
 use crate::{config::PageServerConf, repository::Repository};
 use crate::{import_datadir, LOG_FILE_NAME};
+use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 use crate::{repository::Timeline, CheckpointConfig};
 
@@ -179,8 +179,13 @@ pub fn init_pageserver(
 
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        create_repo(conf, tenant_id, initial_timeline_id, dummy_redo_mgr)
-            .context("failed to create repo")?;
+        let repo = create_repo(conf, tenant_id, dummy_redo_mgr).context("failed to create repo")?;
+        let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
+        bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
+            .context("failed to create initial timeline")?;
+        println!("initial timeline {} created", new_timeline_id)
+    } else if initial_timeline_id.is_some() {
+        println!("Ignoring initial timeline parameter, due to no tenant id to create given");
     }
     crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
@@ -191,9 +196,8 @@ pub fn init_pageserver(
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
-    init_timeline_id: Option<ZTimelineId>,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-) -> Result<(ZTimelineId, Arc<dyn Repository>)> {
+) -> Result<Arc<dyn Repository>> {
     let repo_dir = conf.tenant_path(&tenant_id);
     if repo_dir.exists() {
         bail!("repo for {} already exists", tenant_id)
@@ -207,25 +211,12 @@ pub fn create_repo(
 
     info!("created directory structure in {}", repo_dir.display());
 
-    // create a new timeline directory
-    let timeline_id = init_timeline_id.unwrap_or_else(ZTimelineId::generate);
-    let timelinedir = conf.timeline_path(&timeline_id, &tenant_id);
-
-    crashsafe_dir::create_dir(&timelinedir)?;
-
-    let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
+    Ok(Arc::new(LayeredRepository::new(
         conf,
         wal_redo_manager,
         tenant_id,
         conf.remote_storage_config.is_some(),
-    ));
-
-    // Load data into pageserver
-    // TODO To implement zenith import we need to
-    //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenant_id, timeline_id, repo.as_ref())?;
-
-    Ok((timeline_id, repo))
+    )))
 }
 
 // Returns checkpoint LSN from controlfile

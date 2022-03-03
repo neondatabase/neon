@@ -15,10 +15,10 @@ def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_wal_acce
     tenant_1 = env.zenith_cli.create_tenant()
     tenant_2 = env.zenith_cli.create_tenant()
 
-    env.zenith_cli.create_branch(f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}',
-                                 tenant_id=tenant_1)
-    env.zenith_cli.create_branch(f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}',
-                                 tenant_id=tenant_2)
+    env.zenith_cli.create_timeline(
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}', tenant_id=tenant_1)
+    env.zenith_cli.create_timeline(
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}', tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
         f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}',
