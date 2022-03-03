@@ -218,23 +218,14 @@ paths:
                 new_tenant_id:
                   type: string
                   format: hex
-                initial_timeline_id:
-                  type: string
-                  format: hex
       responses:
         "201":
           description: CREATED
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  tenant_id:
-                    type: string
-                    format: hex
-                  timeline_id:
-                    type: string
-                    format: hex
+                type: string
+                format: hex
         "400":
           description: Malformed tenant create request
           content:

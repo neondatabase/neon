@@ -20,7 +20,6 @@ use zenith_utils::zid::{HexZTimelineId, ZTimelineId};
 
 use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
-use super::models::TenantCreateResponse;
 use super::models::TimelineCreateRequest;
 use crate::repository::RepositoryTimeline;
 use crate::timelines::TimelineInfo;
@@ -215,20 +214,17 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
-    let initial_timeline_id = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_create", tenant = ?request_data.new_tenant_id, initial_timeline = ?request_data.initial_timeline_id).entered();
-        tenant_mgr::create_repository_for_tenant(
-            get_config(&request),
-            request_data.new_tenant_id,
-            request_data.initial_timeline_id,
-        ).map(|new_ids| TenantCreateResponse {
-            tenant_id: new_ids.tenant_id,
-            timeline_id: new_ids.timeline_id,
-        })
+    let new_tenant_id = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_create", tenant = ?request_data.new_tenant_id).entered();
+        // TODO kb this has to be changed to create tenant only
+        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.new_tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::CREATED, initial_timeline_id)?)
+    Ok(json_response(
+        StatusCode::CREATED,
+        new_tenant_id.to_string(),
+    )?)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {

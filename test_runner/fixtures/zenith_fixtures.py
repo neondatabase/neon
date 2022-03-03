@@ -57,6 +57,7 @@ Fn = TypeVar('Fn', bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
+DEFAULT_BRANCH_NAME = 'main'
 
 BASE_PORT = 15000
 WORKER_PORT_NUM = 100
@@ -424,7 +425,7 @@ class ZenithEnvBuilder:
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None,
-                 default_branch_name='main'):
+                 default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -547,7 +548,6 @@ class ZenithEnv:
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.s3_mock_server
-        self.default_branch_name = config.default_branch_name
         self.zenith_cli = ZenithCli(env=self)
         self.postgres = PostgresFactory(self)
         self.safekeepers: List[Safekeeper] = []
@@ -639,7 +639,7 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.zenith_cli.create_branch("empty")
+        env.zenith_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
 
         yield env
 
@@ -750,20 +750,17 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self,
-                      tenant_id: Optional[uuid.UUID] = None,
-                      new_timeline_id: Optional[uuid.UUID] = None) -> Dict[Any, Any]:
+    def tenant_create(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
                 'new_tenant_id': tenant_id.hex if tenant_id else None,
-                'initial_timeline_id': new_timeline_id.hex if new_timeline_id else None,
             },
         )
         self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
+        new_tenant_id = res.json()
+        assert isinstance(new_tenant_id, str)
+        return uuid.UUID(new_tenant_id)
 
     def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
@@ -834,8 +831,36 @@ class ZenithCli:
         res.check_returncode()
         return res
 
+    def create_timeline(self,
+                        new_branch_name: str,
+                        tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+        cmd = [
+            'timeline',
+            'create',
+            '--branch-name',
+            new_branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        create_timeline_id_extractor = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                                  re.MULTILINE)
+        matches = create_timeline_id_extractor.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
+
     def create_branch(self,
-                      new_branch_name: str,
+                      new_branch_name: str = DEFAULT_BRANCH_NAME,
                       ancestor_branch_name: Optional[str] = None,
                       tenant_id: Optional[uuid.UUID] = None,
                       ancestor_start_lsn: Optional[str] = None) -> uuid.UUID:
@@ -846,9 +871,9 @@ class ZenithCli:
             new_branch_name,
             '--tenant-id',
             (tenant_id or self.env.initial_tenant).hex,
-            '--ancestor-branch-name',
-            ancestor_branch_name or self.env.default_branch_name,
         ]
+        if ancestor_branch_name is not None:
+            cmd.extend(['--ancestor-branch-name', ancestor_branch_name])
         if ancestor_start_lsn is not None:
             cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
 

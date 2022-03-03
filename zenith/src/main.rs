@@ -528,17 +528,10 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
         }
         Some(("create", create_match)) => {
             let initial_tenant_id = parse_tenant_id(create_match)?;
-            let initial_timeline_id_argument = parse_timeline_id(create_match)?;
-            let new_ds =
-                pageserver.tenant_create(initial_tenant_id, initial_timeline_id_argument)?;
-            env.register_branch_mapping(
-                DEFAULT_BRANCH_NAME.to_owned(),
-                new_ds.tenant_id,
-                new_ds.timeline_id,
-            )?;
+            let new_tenant_id = pageserver.tenant_create(initial_tenant_id)?;
             println!(
-                "tenant {} successfully created on the pageserver, initial timeline: '{}'",
-                new_ds.tenant_id, new_ds.timeline_id
+                "tenant {} successfully created on the pageserver",
+                new_tenant_id
             );
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),

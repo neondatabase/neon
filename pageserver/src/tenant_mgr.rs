@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
     static ref TENANTS: Mutex<HashMap<ZTenantId, Tenant>> = Mutex::new(HashMap::new());
@@ -180,15 +180,13 @@ pub fn shutdown_all_tenants() {
 pub fn create_repository_for_tenant(
     conf: &'static PageServerConf,
     new_tenant_id: Option<ZTenantId>,
-    initial_timeline_id: Option<ZTimelineId>,
-) -> Result<ZTenantTimelineId> {
-    let tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
-    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-    let (initial_timeline_id, repo) =
-        timelines::create_repo(conf, tenant_id, initial_timeline_id, wal_redo_manager)?;
+) -> Result<ZTenantId> {
+    let new_tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
+    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, new_tenant_id));
+    let repo = timelines::create_repo(conf, new_tenant_id, wal_redo_manager)?;
 
-    match access_tenants().entry(tenant_id) {
-        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenant_id),
+    match access_tenants().entry(new_tenant_id) {
+        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", new_tenant_id),
         hash_map::Entry::Vacant(v) => {
             v.insert(Tenant {
                 state: TenantState::Idle,
@@ -197,7 +195,7 @@ pub fn create_repository_for_tenant(
         }
     }
 
-    Ok(ZTenantTimelineId::new(tenant_id, initial_timeline_id))
+    Ok(new_tenant_id)
 }
 
 pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
