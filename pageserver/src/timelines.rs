@@ -2,7 +2,7 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -160,7 +160,7 @@ pub fn init_pageserver(
     conf: &'static PageServerConf,
     create_tenant: Option<ZTenantId>,
     initial_timeline_id: Option<ZTimelineId>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     // Initialize logger
     // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
     let _log_file = logging::init(LOG_FILE_NAME, true)?;
@@ -177,9 +177,13 @@ pub fn init_pageserver(
     // anymore, but I think that could still happen.
     let dummy_redo_mgr = Arc::new(crate::walredo::DummyRedoManager {});
 
+    crashsafe_dir::create_dir_all(conf.tenants_path())?;
+
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        let repo = create_repo(conf, tenant_id, dummy_redo_mgr).context("failed to create repo")?;
+        let repo = create_repo(conf, tenant_id, dummy_redo_mgr)
+            .context("failed to create repo")?
+            .ok_or_else(|| anyhow!("For newely created pageserver, found already existing repository for tenant {}", tenant_id))?;
         let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
         bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
             .context("failed to create initial timeline")?;
@@ -187,7 +191,6 @@ pub fn init_pageserver(
     } else if initial_timeline_id.is_some() {
         println!("Ignoring initial timeline parameter, due to no tenant id to create given");
     }
-    crashsafe_dir::create_dir_all(conf.tenants_path())?;
 
     println!("pageserver init succeeded");
     Ok(())
@@ -197,26 +200,25 @@ pub fn create_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-) -> Result<Arc<dyn Repository>> {
+) -> Result<Option<Arc<dyn Repository>>> {
     let repo_dir = conf.tenant_path(&tenant_id);
     if repo_dir.exists() {
-        bail!("repo for {} already exists", tenant_id)
+        debug!("repo for {} already exists", tenant_id);
+        return Ok(None);
     }
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&repo_dir)
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
-
     crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
-
     info!("created directory structure in {}", repo_dir.display());
 
-    Ok(Arc::new(LayeredRepository::new(
+    Ok(Some(Arc::new(LayeredRepository::new(
         conf,
         wal_redo_manager,
         tenant_id,
         conf.remote_storage_config.is_some(),
-    )))
+    ))))
 }
 
 // Returns checkpoint LSN from controlfile

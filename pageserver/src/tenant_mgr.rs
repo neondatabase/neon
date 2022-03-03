@@ -9,11 +9,11 @@ use crate::thread_mgr::ThreadKind;
 use crate::timelines;
 use crate::walredo::PostgresRedoManager;
 use crate::CheckpointConfig;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
@@ -183,16 +183,16 @@ pub fn create_repository_for_tenant(
 ) -> Result<ZTenantId> {
     let new_tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, new_tenant_id));
-    let repo = timelines::create_repo(conf, new_tenant_id, wal_redo_manager)?;
-
-    match access_tenants().entry(new_tenant_id) {
-        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", new_tenant_id),
-        hash_map::Entry::Vacant(v) => {
-            v.insert(Tenant {
-                state: TenantState::Idle,
-                repo,
-            });
+    match timelines::create_repo(conf, new_tenant_id, wal_redo_manager)? {
+        Some(repo) => {
+            access_tenants()
+                .entry(new_tenant_id)
+                .or_insert_with(|| Tenant {
+                    state: TenantState::Idle,
+                    repo,
+                });
         }
+        None => debug!("repository already exists for tenant {}", new_tenant_id),
     }
 
     Ok(new_tenant_id)
