@@ -14,7 +14,7 @@ from fixtures.log_helper import log
 # and new compute node contains all data.
 def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_pageserver_catchup_while_compute_down", "main")
     pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down')

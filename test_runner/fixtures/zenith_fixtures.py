@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 import pytest
 
@@ -434,6 +434,14 @@ class ZenithEnvBuilder:
         self.env = ZenithEnv(self)
         return self.env
 
+    def start(self):
+        self.env.start()
+
+    def init_start(self) -> ZenithEnv:
+        env = self.init()
+        self.start()
+        return env
+
     """
     Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.
     Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
@@ -549,6 +557,7 @@ class ZenithEnv:
 
         toml += textwrap.dedent(f"""
             [pageserver]
+            id=1
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
             auth_type = '{pageserver_auth_type}'
@@ -566,25 +575,22 @@ class ZenithEnv:
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-
-            if config.num_safekeepers == 1:
-                name = "single"
-            else:
-                name = f"sk{i}"
-            toml += f"""
-[[safekeepers]]
-name = '{name}'
-pg_port = {port.pg}
-http_port = {port.http}
-sync = false # Disable fsyncs to make the tests go faster
-            """
-            safekeeper = Safekeeper(env=self, name=name, port=port)
+            id = i  # assign ids sequentially
+            toml += textwrap.dedent(f"""
+                [[safekeepers]]
+                id = {id}
+                pg_port = {port.pg}
+                http_port = {port.http}
+                sync = false # Disable fsyncs to make the tests go faster
+            """)
+            safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
 
         self.zenith_cli.init(toml)
 
+    def start(self):
         # Start up the page server and all the safekeepers
         self.pageserver.start()
 
@@ -625,7 +631,7 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
 
     with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
 
-        env = builder.init()
+        env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
         env.zenith_cli.create_branch("empty", "main")
@@ -659,7 +665,7 @@ def zenith_env_builder(test_output_dir, port_distributor) -> Iterator[ZenithEnvB
     To use, define 'zenith_env_builder' fixture in your test to get access to the
     builder object. Set properties on it to describe the environment.
     Finally, initialize and start up the environment by calling
-    zenith_env_builder.init().
+    zenith_env_builder.init_start().
 
     After the initialization, you can launch compute nodes by calling
     the functions in the 'env.postgres' factory object, stop/start the
@@ -847,8 +853,8 @@ class ZenithCli:
 
             return self.raw_cli(cmd)
 
-    def pageserver_start(self) -> 'subprocess.CompletedProcess[str]':
-        start_args = ['pageserver', 'start']
+    def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
+        start_args = ['pageserver', 'start', *overrides]
         append_pageserver_param_overrides(start_args,
                                           self.env.pageserver.remote_storage,
                                           self.env.pageserver.config_override)
@@ -862,17 +868,17 @@ class ZenithCli:
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
-    def safekeeper_start(self, name: str) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['safekeeper', 'start', name])
+    def safekeeper_start(self, id: int) -> 'subprocess.CompletedProcess[str]':
+        return self.raw_cli(['safekeeper', 'start', str(id)])
 
     def safekeeper_stop(self,
-                        name: Optional[str] = None,
+                        id: Optional[int] = None,
                         immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
+        if id is not None:
+            args.extend(str(id))
         if immediate:
             args.extend(['-m', 'immediate'])
-        if name is not None:
-            args.append(name)
         return self.raw_cli(args)
 
     def pg_create(
@@ -1005,14 +1011,15 @@ class ZenithPageserver(PgProtocol):
         self.remote_storage = remote_storage
         self.config_override = config_override
 
-    def start(self) -> 'ZenithPageserver':
+    def start(self, overrides=()) -> 'ZenithPageserver':
         """
         Start the page server.
+        `overrides` allows to add some config to this pageserver start.
         Returns self.
         """
         assert self.running == False
 
-        self.env.zenith_cli.pageserver_start()
+        self.env.zenith_cli.pageserver_start(overrides=overrides)
         self.running = True
         return self
 
@@ -1466,12 +1473,14 @@ class Safekeeper:
     """ An object representing a running safekeeper daemon. """
     env: ZenithEnv
     port: SafekeeperPort
-    name: str  # identifier for logging
+    id: int
     auth_token: Optional[str] = None
+    running: bool = False
 
     def start(self) -> 'Safekeeper':
-        self.env.zenith_cli.safekeeper_start(self.name)
-
+        assert self.running == False
+        self.env.zenith_cli.safekeeper_start(self.id)
+        self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()
         while True:
@@ -1489,8 +1498,9 @@ class Safekeeper:
         return self
 
     def stop(self, immediate=False) -> 'Safekeeper':
-        log.info('Stopping safekeeper {}'.format(self.name))
-        self.env.zenith_cli.safekeeper_stop(self.name, immediate)
+        log.info('Stopping safekeeper {}'.format(self.id))
+        self.env.zenith_cli.safekeeper_stop(self.id, immediate)
+        self.running = False
         return self
 
     def append_logical_message(self,

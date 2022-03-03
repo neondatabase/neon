@@ -1,8 +1,15 @@
-import json
 from uuid import uuid4, UUID
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
-from typing import cast
-import pytest, psycopg2
+import pytest
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient, zenith_binpath
+
+
+# test that we cannot override node id
+def test_pageserver_init_node_id(zenith_env_builder: ZenithEnvBuilder):
+    env = zenith_env_builder.init()
+    with pytest.raises(
+            Exception,
+            match="node id can only be set during pageserver init and cannot be overridden"):
+        env.pageserver.start(overrides=['--pageserver-config-override=id=10'])
 
 
 def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
@@ -41,7 +48,7 @@ def test_pageserver_http_api_client(zenith_simple_env: ZenithEnv):
 
 def test_pageserver_http_api_client_auth_enabled(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.pageserver_auth_enabled = True
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     management_token = env.auth_keys.generate_management_token()
 

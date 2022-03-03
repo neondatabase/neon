@@ -18,32 +18,35 @@ use walkeeper::defaults::{
 };
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 use zenith_utils::GIT_VERSION;
 
 use pageserver::branches::BranchInfo;
 
-// Default name of a safekeeper node, if not specified on the command line.
-const DEFAULT_SAFEKEEPER_NAME: &str = "single";
+// Default id of a safekeeper node, if not specified on the command line.
+const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
+const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
 
 fn default_conf() -> String {
     format!(
         r#"
 # Default built-in configuration, defined in main.rs
 [pageserver]
+id = {pageserver_id}
 listen_pg_addr = '{pageserver_pg_addr}'
 listen_http_addr = '{pageserver_http_addr}'
 auth_type = '{pageserver_auth_type}'
 
 [[safekeepers]]
-name = '{safekeeper_name}'
+id = {safekeeper_id}
 pg_port = {safekeeper_pg_port}
 http_port = {safekeeper_http_port}
 "#,
+        pageserver_id = DEFAULT_PAGESERVER_ID,
         pageserver_pg_addr = DEFAULT_PAGESERVER_PG_ADDR,
         pageserver_http_addr = DEFAULT_PAGESERVER_HTTP_ADDR,
         pageserver_auth_type = AuthType::Trust,
-        safekeeper_name = DEFAULT_SAFEKEEPER_NAME,
+        safekeeper_id = DEFAULT_SAFEKEEPER_ID,
         safekeeper_pg_port = DEFAULT_SAFEKEEPER_PG_PORT,
         safekeeper_http_port = DEFAULT_SAFEKEEPER_HTTP_PORT,
     )
@@ -74,9 +77,9 @@ fn main() -> Result<()> {
         .required(true);
 
     #[rustfmt::skip]
-    let safekeeper_node_arg = Arg::new("node")
+    let safekeeper_id_arg = Arg::new("id")
         .index(1)
-        .help("Node name")
+        .help("safekeeper id")
         .required(false);
 
     let timeline_arg = Arg::new("timeline")
@@ -154,16 +157,16 @@ fn main() -> Result<()> {
                 .about("Manage safekeepers")
                 .subcommand(App::new("start")
                             .about("Start local safekeeper")
-                            .arg(safekeeper_node_arg.clone())
+                            .arg(safekeeper_id_arg.clone())
                 )
                 .subcommand(App::new("stop")
                             .about("Stop local safekeeper")
-                            .arg(safekeeper_node_arg.clone())
+                            .arg(safekeeper_id_arg.clone())
                             .arg(stop_mode_arg.clone())
                 )
                 .subcommand(App::new("restart")
                             .about("Restart local safekeeper")
-                            .arg(safekeeper_node_arg.clone())
+                            .arg(safekeeper_id_arg.clone())
                             .arg(stop_mode_arg.clone())
                 )
         )
@@ -628,11 +631,11 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn get_safekeeper(env: &local_env::LocalEnv, name: &str) -> Result<SafekeeperNode> {
-    if let Some(node) = env.safekeepers.iter().find(|node| node.name == name) {
+fn get_safekeeper(env: &local_env::LocalEnv, id: ZNodeId) -> Result<SafekeeperNode> {
+    if let Some(node) = env.safekeepers.iter().find(|node| node.id == id) {
         Ok(SafekeeperNode::from_env(env, node))
     } else {
-        bail!("could not find safekeeper '{}'", name)
+        bail!("could not find safekeeper '{}'", id)
     }
 }
 
@@ -643,8 +646,12 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     };
 
     // All the commands take an optional safekeeper name argument
-    let node_name = sub_args.value_of("node").unwrap_or(DEFAULT_SAFEKEEPER_NAME);
-    let safekeeper = get_safekeeper(env, node_name)?;
+    let sk_id = if let Some(id_str) = sub_args.value_of("id") {
+        ZNodeId(id_str.parse().context("while parsing safekeeper id")?)
+    } else {
+        DEFAULT_SAFEKEEPER_ID
+    };
+    let safekeeper = get_safekeeper(env, sk_id)?;
 
     match sub_name {
         "start" => {
@@ -697,7 +704,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start() {
-            eprintln!("safekeeper '{}' start failed: {}", safekeeper.name, e);
+            eprintln!("safekeeper '{}' start failed: {}", safekeeper.id, e);
             exit(1);
         }
     }
@@ -724,7 +731,7 @@ fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.stop(immediate) {
-            eprintln!("safekeeper '{}' stop failed: {}", safekeeper.name, e);
+            eprintln!("safekeeper '{}' stop failed: {}", safekeeper.id, e);
         }
     }
     Ok(())

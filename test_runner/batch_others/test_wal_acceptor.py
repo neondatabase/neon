@@ -22,7 +22,7 @@ from typing import List, Optional, Any
 # succeed and data is written
 def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_normal_work", "main")
 
@@ -51,7 +51,7 @@ class BranchMetrics:
 # against different timelines.
 def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     n_timelines = 3
 
@@ -181,7 +181,7 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     n_acceptors = 3
 
     zenith_env_builder.num_safekeepers = n_acceptors
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_restarts", "main")
     pg = env.postgres.create_start('test_wal_acceptors_restarts')
@@ -218,7 +218,7 @@ def delayed_wal_acceptor_start(wa):
 # When majority of acceptors is offline, commits are expected to be frozen
 def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_unavailability", "main")
     pg = env.postgres.create_start('test_wal_acceptors_unavailability')
@@ -289,7 +289,7 @@ def stop_value():
 def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_wal_acceptors_race_conditions", "main")
     pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
@@ -404,7 +404,7 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
     # We don't really need the full environment for this test, just the
     # safekeepers would be enough.
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     timeline_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -454,7 +454,7 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
 def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch("test_timeline_status", "main")
     pg = env.postgres.create_start('test_timeline_status')
@@ -521,12 +521,7 @@ class SafekeeperEnv:
             http=self.port_distributor.get_port(),
         )
 
-        if self.num_safekeepers == 1:
-            name = "single"
-        else:
-            name = f"sk{i}"
-
-        safekeeper_dir = os.path.join(self.repo_dir, name)
+        safekeeper_dir = os.path.join(self.repo_dir, f"sk{i}")
         mkdir_if_needed(safekeeper_dir)
 
         args = [
@@ -537,6 +532,8 @@ class SafekeeperEnv:
             f"127.0.0.1:{port.http}",
             "-D",
             safekeeper_dir,
+            "--id",
+            str(i),
             "--daemonize"
         ]
 
@@ -604,9 +601,8 @@ def test_safekeeper_without_pageserver(test_output_dir: str,
 
 
 def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
-    def safekeepers_guc(env: ZenithEnv, sk_names: List[str]) -> str:
-        return ','.join(
-            [f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.name in sk_names])
+    def safekeepers_guc(env: ZenithEnv, sk_names: List[int]) -> str:
+        return ','.join([f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.id in sk_names])
 
     def execute_payload(pg: Postgres):
         with closing(pg.connect()) as conn:
@@ -628,17 +624,17 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
             http_cli = sk.http_client()
             try:
                 status = http_cli.timeline_status(tenant_id, timeline_id)
-                log.info(f"Safekeeper {sk.name} status: {status}")
+                log.info(f"Safekeeper {sk.id} status: {status}")
             except Exception as e:
-                log.info(f"Safekeeper {sk.name} status error: {e}")
+                log.info(f"Safekeeper {sk.id} status error: {e}")
 
     zenith_env_builder.num_safekeepers = 4
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_replace_safekeeper", "main")
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
-    active_safekeepers = ['sk1', 'sk2', 'sk3']
+    active_safekeepers = [1, 2, 3]
     pg = env.postgres.create('test_replace_safekeeper')
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
     pg.start()
@@ -678,7 +674,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
     pg.stop_and_destroy().create('test_replace_safekeeper')
-    active_safekeepers = ['sk2', 'sk3', 'sk4']
+    active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
     pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
     pg.start()

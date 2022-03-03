@@ -19,7 +19,7 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     #
     # See https://github.com/zenithdb/zenith/issues/1068
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     # Branch at the point where only 100 rows were inserted
     env.zenith_cli.create_branch("test_branch_behind", "main")

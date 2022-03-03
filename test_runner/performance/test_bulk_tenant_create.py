@@ -23,7 +23,7 @@ def test_bulk_tenant_create(
     """Measure tenant creation time (with and without wal acceptors)"""
     if use_wal_acceptors == 'with_wa':
         zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     time_slices = []
 

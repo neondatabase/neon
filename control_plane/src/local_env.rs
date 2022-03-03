@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{opt_display_serde, ZTenantId};
+use zenith_utils::zid::{opt_display_serde, ZNodeId, ZTenantId};
+
+use crate::safekeeper::SafekeeperNode;
 
 //
 // This data structures represents zenith CLI config
@@ -62,6 +64,8 @@ pub struct LocalEnv {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct PageServerConf {
+    // node id
+    pub id: ZNodeId,
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -76,6 +80,7 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
+            id: ZNodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
@@ -87,7 +92,7 @@ impl Default for PageServerConf {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
-    pub name: String,
+    pub id: ZNodeId,
     pub pg_port: u16,
     pub http_port: u16,
     pub sync: bool,
@@ -96,7 +101,7 @@ pub struct SafekeeperConf {
 impl Default for SafekeeperConf {
     fn default() -> Self {
         Self {
-            name: String::new(),
+            id: ZNodeId(0),
             pg_port: 0,
             http_port: 0,
             sync: true,
@@ -136,8 +141,8 @@ impl LocalEnv {
         self.base_data_dir.clone()
     }
 
-    pub fn safekeeper_data_dir(&self, node_name: &str) -> PathBuf {
-        self.base_data_dir.join("safekeepers").join(node_name)
+    pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
+        self.base_data_dir.join("safekeepers").join(data_dir_name)
     }
 
     /// Create a LocalEnv from a config file.
@@ -285,7 +290,7 @@ impl LocalEnv {
         fs::create_dir_all(self.pg_data_dirs_path())?;
 
         for safekeeper in &self.safekeepers {
-            fs::create_dir_all(self.safekeeper_data_dir(&safekeeper.name))?;
+            fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
         }
 
         let mut conf_content = String::new();

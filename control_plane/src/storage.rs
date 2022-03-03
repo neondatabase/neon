@@ -103,6 +103,8 @@ impl PageServerNode {
     ) -> anyhow::Result<()> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
 
+        let id = format!("id={}", self.env.pageserver.id);
+
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let base_data_dir_param = self.env.base_data_dir.display().to_string();
         let pg_distrib_dir_param =
@@ -122,6 +124,7 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &id]);
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
