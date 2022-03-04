@@ -44,11 +44,14 @@ use zenith_utils::zid::ZTenantId;
 use crate::config::PageServerConf;
 use crate::relish::*;
 use crate::repository::ZenithWalRecord;
+use crate::walrecord::XlHeapInsert;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
 use postgres_ffi::pg_constants;
+use postgres_ffi::pg_page;
+use postgres_ffi::TransactionId;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -144,10 +147,7 @@ fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
     // Postgres WAL records. But everything else is handled in zenith.
     #[allow(clippy::match_like_matches_macro)]
     match rec {
-        ZenithWalRecord::Postgres {
-            will_init: _,
-            rec: _,
-        } => false,
+        ZenithWalRecord::Postgres { .. } => false,
         _ => true,
     }
 }
@@ -172,6 +172,53 @@ fn check_slru_segno(rel: &RelishTag, expected_slru: SlruKind, expected_segno: u3
     } else {
         false
     }
+}
+fn zenith_redo_handler(
+    _rel: RelishTag,
+    blknum: u32,
+    page: &mut BytesMut,
+    record_lsn: Lsn,
+    will_init: bool,
+    xl_info: u8,
+    xl_rmid: u8,
+    xl_xid: TransactionId,
+    xl_rec: &Bytes,
+    data: &Bytes,
+) -> Result<(), WalRedoError> {
+    if xl_rmid == pg_constants::RM_HEAP_ID
+        && (xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT
+    {
+        if will_init {
+            pg_page::init(page, record_lsn, 0);
+        }
+        let xlrec = XlHeapInsert::decode(&mut xl_rec.clone());
+        let offnum = if (xlrec.flags & pg_constants::XLH_INSERT_IS_SPECULATIVE) != 0 {
+            pg_constants::SPEC_TOKEN_OFFSET_NUMBER
+        } else {
+            xlrec.offnum
+        };
+        let mut rec = BytesMut::new();
+        rec.put_u32_le(xl_xid); // HeapTupleHeaderSetXmin(htup, xl_xmin);
+        rec.put_u32_le(0); // HeapTupleHeaderSetXmax(htup, 0)
+        rec.extend_from_slice(&data[0..4]); // HeapTupleHeaderSetCmin(htup, xlhdr.t_cid)
+        rec.put_u32_le(blknum); // ItemPointerSetBlockNumber(&htup->t_ctid, blknum)
+        rec.put_u16_le(offnum); // ItemPointerSetOffsetNumber(&htup->t_ctid, offnum)
+        rec.extend_from_slice(&data[4..]); // t_infomask2+t_infomask+t_hoff+...
+        pg_page::add_item(page, xlrec.offnum, &rec.freeze(), true);
+
+        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+            pg_page::clear_flags(page, pg_constants::PD_ALL_VISIBLE);
+        }
+
+        /* XLH_INSERT_ALL_FROZEN_SET implies that all tuples are visible */
+        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_FROZEN_SET) != 0 {
+            pg_page::set_flags(page, pg_constants::PD_ALL_VISIBLE);
+        }
+        pg_page::set_lsn(page, record_lsn);
+    } else {
+        panic!("Unsupported XLOG record type {}/{}", xl_rmid, xl_info);
+    }
+    Ok(())
 }
 
 /// An error happened in WAL redo
@@ -311,6 +358,7 @@ impl PostgresRedoManager {
             duration.as_micros(),
             lsn
         );
+        //info!("apply_record_postgres  at LSN {}", lsn);
 
         // If something went wrong, don't try to reuse the process. Kill it, and
         // next request will launch a new one.
@@ -338,10 +386,6 @@ impl PostgresRedoManager {
         if let Some(fpi) = base_img {
             // If full-page image is provided, then use it...
             page.extend_from_slice(&fpi[..]);
-        } else {
-            // All the current WAL record types that we can handle require a base image.
-            error!("invalid zenith WAL redo request with no base image");
-            return Err(WalRedoError::InvalidRequest);
         }
 
         // Apply all the WAL records in the batch
@@ -368,14 +412,27 @@ impl PostgresRedoManager {
         rel: RelishTag,
         blknum: u32,
         page: &mut BytesMut,
-        _record_lsn: Lsn,
+        record_lsn: Lsn,
         record: &ZenithWalRecord,
     ) -> Result<(), WalRedoError> {
         match record {
-            ZenithWalRecord::Postgres {
-                will_init: _,
-                rec: _,
-            } => panic!("tried to pass postgres wal record to zenith WAL redo"),
+            ZenithWalRecord::Postgres { .. } => {
+                panic!("tried to pass postgres wal record to zenith WAL redo")
+            }
+            ZenithWalRecord::Zenith {
+                will_init,
+                xl_info,
+                xl_rmid,
+                xl_xid,
+                rec,
+                data,
+            } => {
+                //info!("apply_record_zenith: lsn={}, will_init={} xl_info={} xl_rmid={} rec.len={} data.len={}", record_lsn, will_init, xl_info, xl_rmid, rec.len(), data.len());
+                zenith_redo_handler(
+                    rel, blknum, page, record_lsn, *will_init, *xl_info, *xl_rmid, *xl_xid, rec,
+                    data,
+                )?
+            }
             ZenithWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,

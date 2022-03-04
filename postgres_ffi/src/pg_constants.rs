@@ -7,7 +7,7 @@
 //! comments on them.
 //!
 
-use crate::PageHeaderData;
+use crate::{ItemIdData, PageHeaderData};
 
 //
 // From pg_tablespace_d.h
@@ -36,9 +36,11 @@ pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 //
 // From bufpage.h
 //
+pub const PD_ALL_VISIBLE: u16 = 0x0004;
 
 // Assumes 8 byte alignment
-const SIZEOF_PAGE_HEADER_DATA: usize = std::mem::size_of::<PageHeaderData>();
+pub const SIZEOF_PAGE_HEADER_DATA: usize = std::mem::size_of::<PageHeaderData>();
+pub const PG_PAGE_LAYOUT_VERSION: u16 = 4;
 pub const MAXALIGN_SIZE_OF_PAGE_HEADER_DATA: usize = (SIZEOF_PAGE_HEADER_DATA + 7) & !7;
 
 //
@@ -151,9 +153,27 @@ pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
+pub const XLH_INSERT_IS_SPECULATIVE: u8 = (1 << 2) as u8;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = (1 << 1) as u8;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
+
+// From itemptr.h
+pub const SPEC_TOKEN_OFFSET_NUMBER: u16 = 0xfffe;
+pub const INVALID_OFFSET_NUMBER: u16 = 0;
+pub const FIRST_OFFSET_NUMBER: u16 = 1;
+pub const ITEM_ID_DATA_SIZE: u16 = ::std::mem::size_of::<ItemIdData>() as u16;
+pub const MAX_OFFSET_NUMBER: u16 = BLCKSZ / ITEM_ID_DATA_SIZE;
+
+pub const LP_UNUSED: u32 = 0;
+pub const LP_NORMAL: u32 = 1;
+pub const LP_REDIRECT: u32 = 2;
+pub const LP_DEAD: u32 = 3;
+
+pub const MAX_HEAP_TUPLES_PER_PAGE: usize = (BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA)
+    / (SIZEOF_HEAP_TUPLE_HEADER_MAX_ALIGNED + ITEM_ID_DATA_SIZE as usize);
+pub const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
+pub const SIZEOF_HEAP_TUPLE_HEADER_MAX_ALIGNED: usize = (SIZEOF_HEAP_TUPLE_HEADER + 7) & !7;
 
 pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;

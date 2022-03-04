@@ -35,7 +35,7 @@ use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::TransactionId;
-use postgres_ffi::{pg_constants, CheckPoint};
+use postgres_ffi::{pg_constants, pg_page, CheckPoint};
 use zenith_utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
@@ -327,10 +327,22 @@ impl WalIngest {
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
-            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
-            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            pg_page::set_lsn(&mut image, lsn);
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
+        } else if decoded.has_redo_handler() {
+            let data_off = blk.data_offset as usize;
+            let data_len = blk.data_len as usize;
+            //info!("Zenith wal record xl_info {} xl_rmid {} data_off {} data_len {}",decoded.xl_info,decoded.xl_rmid,data_off, data_len);
+            let rec = ZenithWalRecord::Zenith {
+                will_init: blk.will_init || blk.apply_image,
+                xl_info: decoded.xl_info,
+                xl_rmid: decoded.xl_rmid,
+                xl_xid: decoded.xl_xid,
+                data: Bytes::copy_from_slice(&decoded.record[data_off..data_off + data_len]),
+                rec: Bytes::copy_from_slice(&decoded.record[decoded.main_data_offset..]),
+            };
+            timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
         } else {
             let rec = ZenithWalRecord::Postgres {
                 will_init: blk.will_init || blk.apply_image,
