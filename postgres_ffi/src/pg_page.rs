@@ -27,7 +27,7 @@ pub fn item_id_set_normal(item_id: &mut ItemIdData, offs: u16, len: usize) {
 }
 
 pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
-    let pg = unsafe { std::mem::transmute::<*mut u8, &mut PageHeaderData>(page[..].as_mut_ptr()) };
+    let pg = unsafe { &mut *(page[..].as_mut_ptr() as *mut PageHeaderData) };
     assert!(
         pg.pd_lower as usize >= pg_constants::SIZEOF_PAGE_HEADER_DATA
             && pg.pd_lower <= pg.pd_upper
@@ -37,7 +37,7 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
     assert!(offset_number_is_valid(offnum));
 
     let size = rec.len();
-    let limit = 1 + page_get_max_offset_number(&pg);
+    let limit = 1 + page_get_max_offset_number(pg);
     assert!(offnum <= limit);
     assert!(!is_heap || offnum as usize <= pg_constants::MAX_HEAP_TUPLES_PER_PAGE);
 
@@ -63,7 +63,7 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
 
     /* copy the item's data onto the page */
     let dst = upper as usize;
-    page[dst..dst + size].copy_from_slice(&rec);
+    page[dst..dst + size].copy_from_slice(rec);
 
     /* adjust page header */
     pg.pd_lower = lower;
@@ -72,8 +72,7 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
 
 pub fn init(page: &mut BytesMut, lsn: Lsn, special_size: u16) {
     let mut image = [0u8; pg_constants::BLCKSZ as usize];
-    let mut pg =
-        unsafe { std::mem::transmute::<*mut u8, &mut PageHeaderData>(&mut image as *mut u8) };
+    let pg = unsafe { &mut *(image[..].as_mut_ptr() as *mut PageHeaderData) };
     pg.pd_lsn.xlogid = (lsn.0 >> 32) as u32;
     pg.pd_lsn.xrecoff = lsn.0 as u32;
     pg.pd_flags = 0;
@@ -85,17 +84,17 @@ pub fn init(page: &mut BytesMut, lsn: Lsn, special_size: u16) {
 }
 
 pub fn set_flags(page: &mut BytesMut, flags: u16) {
-    let pg = unsafe { std::mem::transmute::<*mut u8, &mut PageHeaderData>(page[..].as_mut_ptr()) };
+    let pg = unsafe { &mut *(page[..].as_mut_ptr() as *mut PageHeaderData) };
     pg.pd_flags |= flags;
 }
 
 pub fn clear_flags(page: &mut BytesMut, flags: u16) {
-    let pg = unsafe { std::mem::transmute::<*mut u8, &mut PageHeaderData>(page[..].as_mut_ptr()) };
+    let pg = unsafe { &mut *(page[..].as_mut_ptr() as *mut PageHeaderData) };
     pg.pd_flags &= !flags;
 }
 
 pub fn set_lsn(page: &mut BytesMut, lsn: Lsn) {
-    let pg = unsafe { std::mem::transmute::<*mut u8, &mut PageHeaderData>(page[..].as_mut_ptr()) };
+    let pg = unsafe { &mut *(page[..].as_mut_ptr() as *mut PageHeaderData) };
     pg.pd_lsn.xlogid = (lsn.0 >> 32) as u32;
     pg.pd_lsn.xrecoff = lsn.0 as u32;
 }

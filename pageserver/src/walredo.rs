@@ -173,6 +173,8 @@ fn check_slru_segno(rel: &RelishTag, expected_slru: SlruKind, expected_segno: u3
         false
     }
 }
+
+#[allow(clippy::too_many_arguments)]
 fn zenith_redo_handler(
     _rel: RelishTag,
     blknum: u32,
