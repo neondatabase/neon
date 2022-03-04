@@ -16,11 +16,11 @@ use zenith_utils::http::{
     request::parse_request_param,
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::zid::{HexZTimelineId, ZTimelineId};
+use zenith_utils::zid::{HexZTenantId, ZTimelineId};
 
-use super::models::StatusResponse;
-use super::models::TenantCreateRequest;
-use super::models::TimelineCreateRequest;
+use super::models::{
+    StatusResponse, TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponse,
+};
 use crate::repository::RepositoryTimeline;
 use crate::timelines::TimelineInfo;
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
@@ -79,13 +79,13 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         timelines::create_timeline(
             get_config(&request),
             tenant_id,
-            request_data.new_timeline_id,
-            request_data.ancestor_timeline_id,
+            request_data.new_timeline_id.map(ZTimelineId::from),
+            request_data.ancestor_timeline_id.map(ZTimelineId::from),
             request_data.ancestor_start_lsn,
         )
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_err)?.map(TimelineInfoResponse::from)?;
     Ok(json_response(StatusCode::CREATED, response_data)?)
 }
 
@@ -93,12 +93,15 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
-    let response_data = tokio::task::spawn_blocking(move || {
+    let response_data: Vec<TimelineInfoResponse> = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
         crate::timelines::get_timelines(tenant_id, include_non_incremental_logical_size)
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_err)??
+    .into_iter()
+    .map(TimelineInfoResponse::from)
+    .collect();
     Ok(json_response(StatusCode::OK, response_data)?)
 }
 
@@ -137,7 +140,8 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         ))
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_err)?
+    .map(TimelineInfoResponse::from)?;
 
     Ok(json_response(StatusCode::OK, response_data)?)
 }
@@ -216,14 +220,16 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?request_data.new_tenant_id).entered();
-        // TODO kb this has to be changed to create tenant only
-        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.new_tenant_id)
+        tenant_mgr::create_repository_for_tenant(
+            get_config(&request),
+            request_data.new_tenant_id.map(ZTenantId::from),
+        )
     })
     .await
     .map_err(ApiError::from_err)??;
     Ok(json_response(
         StatusCode::CREATED,
-        new_tenant_id.to_string(),
+        HexZTenantId::from(new_tenant_id),
     )?)
 }
 

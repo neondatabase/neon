@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.zenith_fixtures import PgBin, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
-from fixtures.utils import lsn_to_hex, mkdir_if_needed
+from fixtures.utils import lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
@@ -91,7 +91,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
                 m = TimelineMetrics(
                     timeline_id=timeline_id,
-                    last_record_lsn=timeline_detail["last_record_lsn"],
+                    last_record_lsn=lsn_from_hex(timeline_detail["last_record_lsn"]),
                 )
                 for sk_m in sk_metrics:
                     m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])

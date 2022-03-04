@@ -39,7 +39,7 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
         timeline_id_str = str(timeline['timeline_id'])
         timeline_details = client.timeline_detail(tenant_id=tenant_id,
                                                   timeline_id=UUID(timeline_id_str))
-        assert timeline_details['type'] == 'Local'
+        assert timeline_details['kind'] == 'Local'
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str
 

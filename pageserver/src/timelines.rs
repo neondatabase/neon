@@ -4,7 +4,6 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use postgres_ffi::ControlFileData;
-use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::Path,
@@ -14,7 +13,7 @@ use std::{
 use tracing::*;
 
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{opt_display_serde, ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use zenith_utils::{crashsafe_dir, logging};
 
 use crate::{config::PageServerConf, repository::Repository};
@@ -23,17 +22,13 @@ use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 use crate::{repository::Timeline, CheckpointConfig};
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
+#[derive(Clone)]
 pub enum TimelineInfo {
     Local {
-        #[serde(with = "hex")]
         timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
         tenant_id: ZTenantId,
         last_record_lsn: Lsn,
         prev_record_lsn: Lsn,
-        #[serde(with = "opt_display_serde")]
         ancestor_timeline_id: Option<ZTimelineId>,
         ancestor_lsn: Option<Lsn>,
         disk_consistent_lsn: Lsn,
@@ -41,9 +36,7 @@ pub enum TimelineInfo {
         current_logical_size_non_incremental: Option<usize>,
     },
     Remote {
-        #[serde(with = "hex")]
         timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
         tenant_id: ZTenantId,
         disk_consistent_lsn: Lsn,
     },
