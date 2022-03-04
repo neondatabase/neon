@@ -56,16 +56,16 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
     let upper = pg.pd_upper - aligned_size;
     assert!(lower <= upper);
 
-	/* set the line pointer */
+    /* set the line pointer */
     let items = unsafe { pg.pd_linp.as_mut_slice(offnum as usize) };
     let item_id = &mut items[offnum as usize - 1];
     item_id_set_normal(item_id, upper, size);
 
-	/* copy the item's data onto the page */
+    /* copy the item's data onto the page */
     let dst = upper as usize;
     page[dst..dst + size].copy_from_slice(&rec);
 
-	/* adjust page header */
+    /* adjust page header */
     pg.pd_lower = lower;
     pg.pd_upper = upper;
 }
