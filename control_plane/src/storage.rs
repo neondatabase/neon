@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponse};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -18,7 +19,7 @@ use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{HexZTenantId, HexZTimelineId, ZTenantId, ZTimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
@@ -339,7 +340,9 @@ impl PageServerNode {
     pub fn tenant_create(&self, new_tenant_id: Option<ZTenantId>) -> anyhow::Result<ZTenantId> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest { new_tenant_id })
+            .json(&TenantCreateRequest {
+                new_tenant_id: new_tenant_id.map(HexZTenantId::from),
+            })
             .send()?
             .error_from_body()?
             .json::<String>()?;
@@ -351,15 +354,20 @@ impl PageServerNode {
         })
     }
 
-    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> Result<Vec<TimelineInfo>> {
-        Ok(self
+    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+        let timeline_infos: Vec<TimelineInfoResponse> = self
             .http_request(
                 Method::GET,
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .send()?
             .error_from_body()?
-            .json()?)
+            .json()?;
+
+        timeline_infos
+            .into_iter()
+            .map(TimelineInfo::try_from)
+            .collect()
     }
 
     pub fn timeline_create(
@@ -368,20 +376,22 @@ impl PageServerNode {
         new_timeline_id: Option<ZTimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<ZTimelineId>,
-    ) -> Result<TimelineInfo> {
-        Ok(self
+    ) -> anyhow::Result<TimelineInfo> {
+        let timeline_info_response = self
             .http_request(
                 Method::POST,
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .json(&TimelineCreateRequest {
-                new_timeline_id,
+                new_timeline_id: new_timeline_id.map(HexZTimelineId::from),
                 ancestor_start_lsn,
-                ancestor_timeline_id,
+                ancestor_timeline_id: ancestor_timeline_id.map(HexZTimelineId::from),
             })
             .send()?
             .error_from_body()?
-            .json()?)
+            .json::<TimelineInfoResponse>()?;
+
+        TimelineInfo::try_from(timeline_info_response)
     }
 }
 

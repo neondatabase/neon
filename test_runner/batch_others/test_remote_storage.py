@@ -85,7 +85,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
         timeline_details = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
         assert timeline_details['timeline_id'] == timeline_id
         assert timeline_details['tenant_id'] == tenant_id
-        if timeline_details['type'] == 'Local':
+        if timeline_details['kind'] == 'Local':
             log.info("timeline downloaded, checking its data")
             break
         attempts += 1

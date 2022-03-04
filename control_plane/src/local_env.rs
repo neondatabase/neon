@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantTimelineId;
-use zenith_utils::zid::ZTimelineId;
-use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
+use zenith_utils::zid::{
+    HexZTenantId, HexZTimelineId, ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId,
+};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -61,12 +61,12 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    /// Keep human-readable aliases in memory (and persist them to config), to hind ZId hex strings from the user.
+    /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
     // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    branch_name_mappings: HashMap<String, Vec<(ZTenantId, ZTimelineId)>>,
+    branch_name_mappings: HashMap<String, Vec<(HexZTenantId, HexZTimelineId)>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -164,6 +164,9 @@ impl LocalEnv {
             .entry(branch_name.clone())
             .or_default();
 
+        let tenant_id = HexZTenantId::from(tenant_id);
+        let timeline_id = HexZTimelineId::from(timeline_id);
+
         let existing_ids = existing_values
             .iter()
             .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
@@ -190,22 +193,29 @@ impl LocalEnv {
         branch_name: &str,
         tenant_id: ZTenantId,
     ) -> Option<ZTimelineId> {
+        let tenant_id = HexZTenantId::from(tenant_id);
         self.branch_name_mappings
             .get(branch_name)?
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
             .map(|&(_, timeline_id)| timeline_id)
+            .map(ZTimelineId::from)
     }
 
     pub fn timeline_name_mappings(&self) -> HashMap<ZTenantTimelineId, String> {
         self.branch_name_mappings
             .iter()
-            .map(|(name, tenant_timelines)| {
+            .flat_map(|(name, tenant_timelines)| {
                 tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
-                    (ZTenantTimelineId::new(tenant_id, timeline_id), name.clone())
+                    (
+                        ZTenantTimelineId::new(
+                            ZTenantId::from(tenant_id),
+                            ZTimelineId::from(timeline_id),
+                        ),
+                        name.clone(),
+                    )
                 })
             })
-            .flatten()
             .collect()
     }
 
