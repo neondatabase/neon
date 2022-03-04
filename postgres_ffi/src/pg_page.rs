@@ -26,7 +26,7 @@ pub fn item_id_set_normal(item_id: &mut ItemIdData, offs: u16, len: usize) {
     item_id.set_lp_len(len as u32);
 }
 
-pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
+pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) -> bool {
     let pg = unsafe { &mut *(page[..].as_mut_ptr() as *mut PageHeaderData) };
     assert!(
         pg.pd_lower as usize >= pg_constants::SIZEOF_PAGE_HEADER_DATA
@@ -44,7 +44,9 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
     if offnum < limit {
         let items = unsafe { pg.pd_linp.as_slice(offnum as usize) };
         let item_id = &items[offnum as usize - 1];
-        assert!(item_id.lp_flags() == pg_constants::LP_UNUSED && item_id.lp_len() == 0);
+        if item_id.lp_flags() != pg_constants::LP_UNUSED || item_id.lp_len() != 0 {
+            return false;
+        }
     }
 
     let aligned_size = max_align(size) as u16;
@@ -68,6 +70,7 @@ pub fn add_item(page: &mut BytesMut, offnum: u16, rec: &[u8], is_heap: bool) {
     /* adjust page header */
     pg.pd_lower = lower;
     pg.pd_upper = upper;
+    true
 }
 
 pub fn init(page: &mut BytesMut, lsn: Lsn, special_size: u16) {
