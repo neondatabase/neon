@@ -83,6 +83,7 @@ pub fn init(page: &mut BytesMut, lsn: Lsn, special_size: u16) {
     pg.pd_upper = pg_constants::BLCKSZ as u16 - special_size;
     pg.pd_special = pg_constants::BLCKSZ as u16 - special_size;
     pg.pd_pagesize_version = pg_constants::BLCKSZ | pg_constants::PG_PAGE_LAYOUT_VERSION;
+    page.clear();
     page.extend_from_slice(&image);
 }
 

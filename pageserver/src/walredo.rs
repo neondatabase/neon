@@ -206,7 +206,7 @@ fn zenith_redo_handler(
         rec.put_u32_le(blknum); // ItemPointerSetBlockNumber(&htup->t_ctid, blknum)
         rec.put_u16_le(offnum); // ItemPointerSetOffsetNumber(&htup->t_ctid, offnum)
         rec.extend_from_slice(&data[4..]); // t_infomask2+t_infomask+t_hoff+...
-        pg_page::add_item(page, xlrec.offnum, &rec.freeze(), true);
+        let _ok = pg_page::add_item(page, xlrec.offnum, &rec.freeze(), true);
 
         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
             pg_page::clear_flags(page, pg_constants::PD_ALL_VISIBLE);
