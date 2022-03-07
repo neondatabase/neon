@@ -275,7 +275,7 @@ class PgProtocol:
             res = f'{res} password={password}'
 
         if schema:
-            res = f"{res} options='-c search_path={self.schema}'"
+            res = f"{res} options='-c search_path={schema}'"
 
         return res
 
@@ -293,11 +293,13 @@ class PgProtocol:
         This method passes all extra params to connstr.
         """
 
-        conn = psycopg2.connect(self.connstr(
-            dbname=dbname,
-            username=username,
-            password=password,
-        ))
+        conn = psycopg2.connect(
+            self.connstr(
+                dbname=dbname,
+                schema=schema,
+                username=username,
+                password=password,
+            ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
