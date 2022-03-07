@@ -131,7 +131,9 @@ paths:
           type: string
           format: hex
     post:
-      description: Create timeline
+      description: |
+        Create a timeline. Returns new timeline id on success.\
+        If no new timeline id is specified in parameters, it would be generated. It's an error to recreate the same timeline.
       requestBody:
         content:
           application/json:
@@ -171,6 +173,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "409":
+          description: Timeline already exists, creation skipped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlreadyExistsError"
         "500":
           description: Generic operation error
           content:
@@ -208,7 +216,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
     post:
-      description: Create tenant
+      description: |
+        Create a tenant. Returns new tenant id on success.\
+        If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
       requestBody:
         content:
           application/json:
@@ -220,7 +230,7 @@ paths:
                   format: hex
       responses:
         "201":
-          description: Already exists or created
+          description: New tenant created successfully
           content:
             application/json:
               schema:
@@ -244,6 +254,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "409":
+          description: Tenant already exists, creation skipped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlreadyExistsError"
         "500":
           description: Generic operation error
           content:
@@ -305,6 +321,13 @@ components:
         msg:
           type: string
     UnauthorizedError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    AlreadyExistsError:
       type: object
       required:
         - msg

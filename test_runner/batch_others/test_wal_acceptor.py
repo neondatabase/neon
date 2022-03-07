@@ -57,6 +57,10 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     branch_names = [
         "test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
     ]
+    # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
+    # that's not really human readable, so the branch names are introduced in Zenith CLI.
+    # Zenith CLI stores its branch <-> timeline mapping in its internals,
+    # but we need this to collect metrics from other servers, related to the timeline.
     branch_names_to_timeline_ids = {}
 
     # start postgres on each timeline
@@ -75,7 +79,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
                     tenant_id=tenant_id, timeline_id=branch_names_to_timeline_ids[branch_name])
                 for branch_name in branch_names
             ]
-        # All changes visible to pageserver (latest_valid_lsn) should be
+        # All changes visible to pageserver (last_record_lsn) should be
         # confirmed by safekeepers first. As we cannot atomically get
         # state of both pageserver and safekeepers, we should start with
         # pageserver. Looking at outdated data from pageserver is ok.

@@ -74,7 +74,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     check_permission(&request, Some(tenant_id))?;
 
-    let response_data = tokio::task::spawn_blocking(move || {
+    let new_timeline_info = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
         timelines::create_timeline(
             get_config(&request),
@@ -85,8 +85,12 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         )
     })
     .await
-    .map_err(ApiError::from_err)?.map(TimelineInfoResponse::from)?;
-    Ok(json_response(StatusCode::CREATED, response_data)?)
+    .map_err(ApiError::from_err)??;
+
+    Ok(match new_timeline_info {
+        Some(info) => json_response(StatusCode::CREATED, TimelineInfoResponse::from(info))?,
+        None => json_response(StatusCode::CONFLICT, ())?,
+    })
 }
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -220,17 +224,18 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?request_data.new_tenant_id).entered();
-        tenant_mgr::create_repository_for_tenant(
+        tenant_mgr::create_tenant_repository(
             get_config(&request),
             request_data.new_tenant_id.map(ZTenantId::from),
         )
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(
-        StatusCode::CREATED,
-        HexZTenantId::from(new_tenant_id),
-    )?)
+
+    Ok(match new_tenant_id {
+        Some(id) => json_response(StatusCode::CREATED, HexZTenantId::from(id))?,
+        None => json_response(StatusCode::CONFLICT, ())?,
+    })
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
