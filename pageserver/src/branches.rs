@@ -20,12 +20,14 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use zenith_utils::{crashsafe_dir, logging};
 
+use crate::config::PageServerConf;
+use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::repository::{Repository, Timeline};
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{config::PageServerConf, repository::Repository};
+use crate::RepositoryImpl;
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
-use crate::repository::Timeline;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -40,10 +42,10 @@ pub struct BranchInfo {
 }
 
 impl BranchInfo {
-    pub fn from_path<R: Repository, P: AsRef<Path>>(
-        path: P,
+    pub fn from_path<R: Repository, T: AsRef<Path>>(
+        path: T,
         repo: &R,
-        include_non_incremental_logical_size: bool,
+        _include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -74,11 +76,17 @@ impl BranchInfo {
 
         // non incremental size calculation can be heavy, so let it be optional
         // needed for tests to check size calculation
+        //
+        // FIXME
+        /*
         let current_logical_size_non_incremental = include_non_incremental_logical_size
             .then(|| {
                 timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
             })
             .transpose()?;
+         */
+        let current_logical_size_non_incremental = Some(0);
+        let current_logical_size = 0;
 
         Ok(BranchInfo {
             name,
@@ -86,7 +94,7 @@ impl BranchInfo {
             latest_valid_lsn: timeline.get_last_record_lsn(),
             ancestor_id,
             ancestor_lsn,
-            current_logical_size: timeline.get_current_logical_size(),
+            current_logical_size, // : timeline.get_current_logical_size(),
             current_logical_size_non_incremental,
         })
     }
@@ -130,7 +138,7 @@ pub fn create_repo(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-) -> Result<Arc<crate::layered_repository::LayeredRepository>> {
+) -> Result<Arc<RepositoryImpl>> {
     let repo_dir = conf.tenant_path(&tenantid);
     if repo_dir.exists() {
         bail!("repo for {} already exists", tenantid)
@@ -152,19 +160,19 @@ pub fn create_repo(
 
     crashsafe_dir::create_dir(&timelinedir)?;
 
-    let repo = Arc::new(crate::layered_repository::LayeredRepository::new(
+    let repo = crate::layered_repository::LayeredRepository::new(
         conf,
         wal_redo_manager,
         tenantid,
         conf.remote_storage_config.is_some(),
-    ));
+    );
 
     // Load data into pageserver
     // TODO To implement zenith import we need to
     //      move data loading out of create_repo()
-    bootstrap_timeline(conf, tenantid, timeline_id, repo.as_ref())?;
+    bootstrap_timeline(conf, tenantid, timeline_id, &repo)?;
 
-    Ok(repo)
+    Ok(Arc::new(repo))
 }
 
 // Returns checkpoint LSN from controlfile
@@ -233,17 +241,16 @@ fn bootstrap_timeline<R: Repository>(
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    import_datadir::import_timeline_from_postgres_datadir(
-        &pgdata_path,
-        &*timeline,
-        lsn,
-    )?;
-    timeline.checkpoint(CheckpointConfig::Forced)?;
+
+    let page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline);
+
+    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &page_tline, lsn)?;
+    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",
         tli,
-        timeline.get_last_record_lsn()
+        page_tline.tline.get_last_record_lsn()
     );
 
     let data = tli.to_string();

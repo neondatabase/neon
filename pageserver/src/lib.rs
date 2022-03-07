@@ -6,6 +6,7 @@ pub mod import_datadir;
 pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
+pub mod pgdatadir_mapping;
 pub mod relish;
 pub mod remote_storage;
 pub mod repository;
@@ -22,7 +23,8 @@ use lazy_static::lazy_static;
 use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
-use layered_repository::{LayeredRepository, LayeredTimeline};
+use layered_repository::LayeredRepository;
+use pgdatadir_mapping::DatadirTimeline;
 
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
@@ -47,5 +49,5 @@ pub enum CheckpointConfig {
 }
 
 pub type RepositoryImpl = LayeredRepository;
-pub type TimelineImpl = LayeredTimeline;
 
+pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;

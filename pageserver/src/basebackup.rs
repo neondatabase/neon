@@ -22,6 +22,7 @@ use tar::{Builder, EntryType, Header};
 
 use crate::relish::*;
 use crate::repository::Timeline;
+use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
@@ -29,9 +30,9 @@ use zenith_utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a, T> {
+pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
-    timeline: &'a Arc<T>,
+    timeline: &'a Arc<DatadirTimelineImpl>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
@@ -43,14 +44,12 @@ pub struct Basebackup<'a, T> {
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a, T> Basebackup<'a, T>
-where T: Timeline,
-{
+impl<'a> Basebackup<'a> {
     pub fn new(
         write: &'a mut dyn Write,
-        timeline: &'a Arc<T>,
+        timeline: &'a Arc<DatadirTimelineImpl>,
         req_lsn: Option<Lsn>,
-    ) -> Result<Basebackup<'a, T>> {
+    ) -> Result<Basebackup<'a>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -66,7 +65,7 @@ where T: Timeline,
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
-            timeline.wait_lsn(req_lsn)?;
+            timeline.tline.wait_lsn(req_lsn)?;
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as
@@ -117,19 +116,20 @@ where T: Timeline,
         }
 
         // Gather non-relational files from object storage pages.
-        for obj in self.timeline.list_nonrels(self.lsn)? {
-            match obj {
-                RelishTag::Slru { slru, segno } => {
-                    self.add_slru_segment(slru, segno)?;
-                }
-                RelishTag::FileNodeMap { spcnode, dbnode } => {
-                    self.add_relmap_file(spcnode, dbnode)?;
-                }
-                RelishTag::TwoPhase { xid } => {
-                    self.add_twophase_file(xid)?;
-                }
-                _ => {}
+        for kind in [
+            SlruKind::Clog,
+            SlruKind::MultiXactOffsets,
+            SlruKind::MultiXactMembers,
+        ] {
+            for segno in self.timeline.list_slru_segments(kind, self.lsn)? {
+                self.add_slru_segment(kind, segno)?;
             }
+        }
+        for (spcnode, dbnode) in self.timeline.list_relmap_files(self.lsn)? {
+            self.add_relmap_file(spcnode, dbnode)?;
+        }
+        for xid in self.timeline.list_twophase_files(self.lsn)? {
+            self.add_twophase_file(xid)?;
         }
 
         // Generate pg_control and bootstrap WAL segment.
@@ -143,27 +143,14 @@ where T: Timeline,
     // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let seg_size = self
-            .timeline
-            .get_relish_size(RelishTag::Slru { slru, segno }, self.lsn)?;
-
-        if seg_size == None {
-            trace!(
-                "SLRU segment {}/{:>04X} was truncated",
-                slru.to_str(),
-                segno
-            );
-            return Ok(());
-        }
-
-        let nblocks = seg_size.unwrap();
+        let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
 
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img =
-                self.timeline
-                    .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
+            let img = self
+                .timeline
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
             assert!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
@@ -182,11 +169,7 @@ where T: Timeline,
     // Along with them also send PG_VERSION for each database.
     //
     fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(
-            RelishTag::FileNodeMap { spcnode, dbnode },
-            0,
-            self.lsn,
-        )?;
+        let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
         let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
@@ -222,9 +205,7 @@ where T: Timeline,
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self
-            .timeline
-            .get_page_at_lsn(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
+        let img = self.timeline.get_twophase_file(xid, self.lsn)?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -244,11 +225,11 @@ where T: Timeline,
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)
+            .get_checkpoint(self.lsn)
             .context("failed to get checkpoint bytes")?;
         let pg_control_bytes = self
             .timeline
-            .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)
+            .get_control_file(self.lsn)
             .context("failed get control bytes")?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
@@ -269,7 +250,7 @@ where T: Timeline,
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.get_ancestor_lsn() {
+            if self.lsn == self.timeline.tline.get_ancestor_lsn() {
                 write!(zenith_signal, "PREV LSN: none")?;
             } else {
                 write!(zenith_signal, "PREV LSN: invalid")?;

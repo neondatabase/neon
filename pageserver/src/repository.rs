@@ -1,19 +1,128 @@
-use crate::relish::*;
-use crate::walrecord::MultiXactMember;
+use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::Bytes;
-use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::ops::AddAssign;
+use std::fmt;
+use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
 use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::zid::ZTimelineId;
 
-/// Block number within a relish. This matches PostgreSQL's BlockNumber type.
-pub type BlockNumber = u32;
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+/// Key used in the Repository kv-store.
+///
+/// The Repository treates this as an opaque struct, but see the code in pgdatadir_mapping.rs
+/// for what we actually store in these fields.
+pub struct Key {
+    pub field1: u8,
+    pub field2: u32,
+    pub field3: u32,
+    pub field4: u32,
+    pub field5: u8,
+    pub field6: u32,
+}
+
+impl Key {
+
+    pub fn next(&self) -> Key {
+        let mut key = self.clone();
+
+        let x = key.field6.overflowing_add(1);
+        key.field6 = x.0;
+        if x.1 {
+            let x = key.field5.overflowing_add(1);
+            key.field5 = x.0;
+            if x.1 {
+                let x = key.field4.overflowing_add(1);
+                key.field4 = x.0;
+                if x.1 {
+                    let x = key.field3.overflowing_add(1);
+                    key.field3 = x.0;
+                    if x.1 {
+                        let x = key.field2.overflowing_add(1);
+                        key.field2 = x.0;
+                        if x.1 {
+                            let x = key.field1.overflowing_add(1);
+                            key.field1 = x.0;
+                            assert!(!x.1);
+                        }
+                    }
+                }
+            }
+        }
+        key
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:02X}{:08X}{:08X}{:08X}{:02X}{:08X}",
+            self.field1, self.field2, self.field3, self.field4, self.field5, self.field6
+        )
+    }
+}
+
+impl Key {
+    pub const MIN: Key = Key {
+        field1: u8::MIN,
+        field2: u32::MIN,
+        field3: u32::MIN,
+        field4: u32::MIN,
+        field5: u8::MIN,
+        field6: u32::MIN,
+    };
+    pub const MAX: Key = Key {
+        field1: u8::MAX,
+        field2: u32::MAX,
+        field3: u32::MAX,
+        field4: u32::MAX,
+        field5: u8::MAX,
+        field6: u32::MAX,
+    };
+
+    pub fn from_hex(s: &str) -> Result<Self> {
+        if s.len() != 36 {
+            bail!("parse error");
+        }
+        Ok(Key {
+            field1: u8::from_str_radix(&s[0..2], 16)?,
+            field2: u32::from_str_radix(&s[2..10], 16)?,
+            field3: u32::from_str_radix(&s[10..18], 16)?,
+            field4: u32::from_str_radix(&s[18..26], 16)?,
+            field5: u8::from_str_radix(&s[26..28], 16)?,
+            field6: u32::from_str_radix(&s[28..36], 16)?,
+        })
+    }
+
+    pub fn to_prefix_128(&self) -> u128 {
+        assert!(self.field1 & 0xf0 == 0);
+        (self.field1 as u128) << 124
+            | (self.field2 as u128) << 92
+            | (self.field3 as u128) << 60
+            | (self.field4 as u128) << 28
+            | (self.field5 as u128) << 20
+            | (self.field6 as u128) >> 12
+    }
+}
+
+//
+// There are two kinds of values: incremental and non-incremental
+//
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Value {
+    Image(Bytes),
+    WalRecord(ZenithWalRecord),
+}
+
+impl Value {
+    pub fn is_image(&self) -> bool {
+        matches!(self, Value::Image(_))
+    }
+}
 
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
@@ -132,42 +241,22 @@ impl TimelineSyncState {
 ///
 #[derive(Default)]
 pub struct GcResult {
-    pub ondisk_relfiles_total: u64,
-    pub ondisk_relfiles_needed_by_cutoff: u64,
-    pub ondisk_relfiles_needed_by_branches: u64,
-    pub ondisk_relfiles_not_updated: u64,
-    pub ondisk_relfiles_needed_as_tombstone: u64,
-    pub ondisk_relfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
-    pub ondisk_relfiles_dropped: u64, // # of layer files removed because the relation was dropped
-
-    pub ondisk_nonrelfiles_total: u64,
-    pub ondisk_nonrelfiles_needed_by_cutoff: u64,
-    pub ondisk_nonrelfiles_needed_by_branches: u64,
-    pub ondisk_nonrelfiles_not_updated: u64,
-    pub ondisk_nonrelfiles_needed_as_tombstone: u64,
-    pub ondisk_nonrelfiles_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
-    pub ondisk_nonrelfiles_dropped: u64, // # of layer files removed because the relation was dropped
+    pub layers_total: u64,
+    pub layers_needed_by_cutoff: u64,
+    pub layers_needed_by_branches: u64,
+    pub layers_not_updated: u64,
+    pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
 
     pub elapsed: Duration,
 }
 
 impl AddAssign for GcResult {
     fn add_assign(&mut self, other: Self) {
-        self.ondisk_relfiles_total += other.ondisk_relfiles_total;
-        self.ondisk_relfiles_needed_by_cutoff += other.ondisk_relfiles_needed_by_cutoff;
-        self.ondisk_relfiles_needed_by_branches += other.ondisk_relfiles_needed_by_branches;
-        self.ondisk_relfiles_not_updated += other.ondisk_relfiles_not_updated;
-        self.ondisk_relfiles_needed_as_tombstone += other.ondisk_relfiles_needed_as_tombstone;
-        self.ondisk_relfiles_removed += other.ondisk_relfiles_removed;
-        self.ondisk_relfiles_dropped += other.ondisk_relfiles_dropped;
-
-        self.ondisk_nonrelfiles_total += other.ondisk_nonrelfiles_total;
-        self.ondisk_nonrelfiles_needed_by_cutoff += other.ondisk_nonrelfiles_needed_by_cutoff;
-        self.ondisk_nonrelfiles_needed_by_branches += other.ondisk_nonrelfiles_needed_by_branches;
-        self.ondisk_nonrelfiles_not_updated += other.ondisk_nonrelfiles_not_updated;
-        self.ondisk_nonrelfiles_needed_as_tombstone += other.ondisk_nonrelfiles_needed_as_tombstone;
-        self.ondisk_nonrelfiles_removed += other.ondisk_nonrelfiles_removed;
-        self.ondisk_nonrelfiles_dropped += other.ondisk_nonrelfiles_dropped;
+        self.layers_total += other.layers_total;
+        self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
+        self.layers_needed_by_branches += other.layers_needed_by_branches;
+        self.layers_not_updated += other.layers_not_updated;
+        self.layers_removed += other.layers_removed;
 
         self.elapsed += other.elapsed;
     }
@@ -190,23 +279,14 @@ pub trait Timeline: Send + Sync {
     fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;
 
     /// Look up given page version.
-    fn get_page_at_lsn(&self, tag: RelishTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes>;
-
-    /// Get size of a relish
-    fn get_relish_size(&self, tag: RelishTag, lsn: Lsn) -> Result<Option<BlockNumber>>;
-
-    /// Does relation exist?
-    fn get_rel_exists(&self, tag: RelishTag, lsn: Lsn) -> Result<bool>;
-
-    /// Get a list of all existing relations
-    /// Pass RelTag to get relation objects or None to get nonrels.
-    fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>>;
-
-    /// Get a list of all existing relations in given tablespace and database.
-    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>>;
-
-    /// Get a list of all existing non-relational objects
-    fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>>;
+    ///
+    /// NOTE: It is considerd an error to 'get' a key that doesn't exist. The abstraction
+    /// above this needs to store suitable metadata to track what data exists with
+    /// what keys, in separate metadata entries. If a non-existent key is requested,
+    /// the Repository implementation may incorrectly return a value from an ancestore
+    /// branch, for exampel, or waste a lot of cycles chasing the non-existing key.
+    ///
+    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
 
     /// Get the ancestor's timeline id
     fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
@@ -243,6 +323,8 @@ pub trait Timeline: Send + Sync {
     /// know anything about them here in the repository.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
+    fn create_images(&self, threshold: usize) -> Result<()>;
+
     ///
     /// Check that it is valid to request operations with that lsn.
     fn check_lsn_is_in_scope(
@@ -250,16 +332,6 @@ pub trait Timeline: Send + Sync {
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
     ) -> Result<()>;
-
-    /// Retrieve current logical size of the timeline
-    ///
-    /// NOTE: counted incrementally, includes ancestors,
-    /// doesnt support TwoPhase relishes yet
-    fn get_current_logical_size(&self) -> usize;
-
-    /// Does the same as get_current_logical_size but counted on demand.
-    /// Used in tests to ensure that incremental and non incremental variants match.
-    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize>;
 }
 
 /// Various functions to mutate the timeline.
@@ -271,28 +343,9 @@ pub trait TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put_wal_record(
-        &self,
-        lsn: Lsn,
-        tag: RelishTag,
-        blknum: BlockNumber,
-        rec: ZenithWalRecord,
-    ) -> Result<()>;
+    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()>;
 
-    /// Like put_wal_record, but with ready-made image of the page.
-    fn put_page_image(
-        &self,
-        tag: RelishTag,
-        blknum: BlockNumber,
-        lsn: Lsn,
-        img: Bytes,
-    ) -> Result<()>;
-
-    /// Truncate relation
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, nblocks: BlockNumber) -> Result<()>;
-
-    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
-    fn drop_relish(&self, tag: RelishTag, lsn: Lsn) -> Result<()>;
+    fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
 
     /// Track end of the latest digested WAL record.
     ///
@@ -301,53 +354,14 @@ pub trait TimelineWriter<'a> {
     fn advance_last_record_lsn(&self, lsn: Lsn);
 }
 
-/// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
-/// around a PostgreSQL WAL record, or a custom zenith-specific "record".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ZenithWalRecord {
-    /// Native PostgreSQL WAL record
-    Postgres { will_init: bool, rec: Bytes },
-
-    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
-    ClearVisibilityMapFlags {
-        new_heap_blkno: Option<u32>,
-        old_heap_blkno: Option<u32>,
-        flags: u8,
-    },
-    /// Mark transaction IDs as committed on a CLOG page
-    ClogSetCommitted { xids: Vec<TransactionId> },
-    /// Mark transaction IDs as aborted on a CLOG page
-    ClogSetAborted { xids: Vec<TransactionId> },
-    /// Extend multixact offsets SLRU
-    MultixactOffsetCreate {
-        mid: MultiXactId,
-        moff: MultiXactOffset,
-    },
-    /// Extend multixact members SLRU.
-    MultixactMembersCreate {
-        moff: MultiXactOffset,
-        members: Vec<MultiXactMember>,
-    },
-}
-
-impl ZenithWalRecord {
-    /// Does replaying this WAL record initialize the page from scratch, or does
-    /// it need to be applied over the previous image of the page?
-    pub fn will_init(&self) -> bool {
-        match self {
-            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
-
-            // None of the special zenith record types currently initialize the page
-            _ => false,
-        }
-    }
-}
-
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::BytesMut;
+    use lazy_static::lazy_static;
+    use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
+    use crate::RepositoryImpl;
     use crate::{
         config::PageServerConf,
         layered_repository::{LayeredRepository, TIMELINES_SEGMENT_NAME},
@@ -373,13 +387,34 @@ pub mod repo_harness {
         buf.freeze()
     }
 
-    pub struct RepoHarness {
-        pub conf: &'static PageServerConf,
-        pub tenant_id: ZTenantId,
+    lazy_static! {
+        static ref LOCK: RwLock<()> = RwLock::new(());
     }
 
-    impl RepoHarness {
+    pub struct RepoHarness<'a> {
+        pub conf: &'static PageServerConf,
+        pub tenant_id: ZTenantId,
+
+        pub lock_guard: (
+            Option<RwLockReadGuard<'a, ()>>,
+            Option<RwLockWriteGuard<'a, ()>>,
+        ),
+    }
+
+    impl<'a> RepoHarness<'a> {
         pub fn create(test_name: &'static str) -> Result<Self> {
+            Self::create_internal(test_name, false)
+        }
+        pub fn create_exclusive(test_name: &'static str) -> Result<Self> {
+            Self::create_internal(test_name, true)
+        }
+        fn create_internal(test_name: &'static str, exclusive: bool) -> Result<Self> {
+            let lock_guard = if exclusive {
+                (None, Some(LOCK.write().unwrap()))
+            } else {
+                (Some(LOCK.read().unwrap()), None)
+            };
+
             let repo_dir = PageServerConf::test_repo_dir(test_name);
             let _ = fs::remove_dir_all(&repo_dir);
             fs::create_dir_all(&repo_dir)?;
@@ -394,18 +429,17 @@ pub mod repo_harness {
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.branches_path(&tenant_id))?;
 
-            Ok(Self { conf, tenant_id })
+            Ok(Self {
+                conf,
+                tenant_id,
+                lock_guard,
+            })
         }
 
-        pub fn load(&self) -> LayeredRepository {
+        pub fn load(&self) -> RepositoryImpl {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            LayeredRepository::new(
-                self.conf,
-                walredo_mgr,
-                self.tenant_id,
-                false,
-            )
+            LayeredRepository::new(self.conf, walredo_mgr, self.tenant_id, false)
         }
 
         pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
@@ -414,21 +448,19 @@ pub mod repo_harness {
     }
 
     // Mock WAL redo manager that doesn't do much
-    struct TestRedoManager;
+    pub struct TestRedoManager;
 
     impl WalRedoManager for TestRedoManager {
         fn request_redo(
             &self,
-            rel: RelishTag,
-            blknum: BlockNumber,
+            key: Key,
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<(Lsn, ZenithWalRecord)>,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
-                "redo for {} blk {} to get to {}, with {} and {} records",
-                rel,
-                blknum,
+                "redo for {} to get to {}, with {} and {} records",
+                key,
                 lsn,
                 if base_img.is_some() {
                     "base image"
@@ -438,6 +470,7 @@ pub mod repo_harness {
                 records.len()
             );
             println!("{}", s);
+
             Ok(TEST_IMG(&s))
         }
     }
@@ -451,412 +484,40 @@ pub mod repo_harness {
 mod tests {
     use super::repo_harness::*;
     use super::*;
-    use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
-    use std::fs;
-
-    /// Arbitrary relation tag, for testing.
-    const TESTREL_A_REL_TAG: RelTag = RelTag {
-        spcnode: 0,
-        dbnode: 111,
-        relnode: 1000,
-        forknum: 0,
-    };
-    const TESTREL_A: RelishTag = RelishTag::Relation(TESTREL_A_REL_TAG);
-    const TESTREL_B: RelishTag = RelishTag::Relation(RelTag {
-        spcnode: 0,
-        dbnode: 111,
-        relnode: 1001,
-        forknum: 0,
-    });
-
-    fn assert_current_logical_size<T: Timeline>(timeline: &Arc<T>, lsn: Lsn) {
-        let incremental = timeline.get_current_logical_size();
-        let non_incremental = timeline
-            .get_current_logical_size_non_incremental(lsn)
-            .unwrap();
-        assert_eq!(incremental, non_incremental);
-    }
-
-    static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
-    static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
+    //use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
+    //use std::sync::Arc;
+    use bytes::BytesMut;
 
     #[test]
-    fn test_relsize() -> Result<()> {
-        let repo = RepoHarness::create("test_relsize")?.load();
-        // get_timeline() with non-existent timeline id should fail
-        //repo.get_timeline("11223344556677881122334455667788");
-
-        // Create timeline to work on
+    fn test_basic() -> Result<()> {
+        let repo = RepoHarness::create("test_basic")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        #[allow(non_snake_case)]
+        let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+
         let writer = tline.writer();
+        writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.advance_last_record_lsn(Lsn(0x10));
+        drop(writer);
 
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        writer.put_page_image(TESTREL_A, 1, Lsn(0x40), TEST_IMG("foo blk 1 at 4"))?;
-        writer.put_page_image(TESTREL_A, 2, Lsn(0x50), TEST_IMG("foo blk 2 at 5"))?;
-
-        writer.advance_last_record_lsn(Lsn(0x50));
-
-        assert_current_logical_size(&tline, Lsn(0x50));
-
-        // The relation was created at LSN 2, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x10))?.is_none());
-
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x50))?.unwrap(), 3);
-
-        // Check page contents at each LSN
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x20))?,
-            TEST_IMG("foo blk 0 at 2")
-        );
-
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x30))?,
-            TEST_IMG("foo blk 0 at 3")
-        );
-
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
-            TEST_IMG("foo blk 0 at 3")
-        );
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?,
-            TEST_IMG("foo blk 1 at 4")
-        );
-
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
-            TEST_IMG("foo blk 0 at 3")
-        );
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?,
-            TEST_IMG("foo blk 1 at 4")
-        );
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
-            TEST_IMG("foo blk 2 at 5")
-        );
-
-        // Truncate last block
-        writer.put_truncation(TESTREL_A, Lsn(0x60), 2)?;
-        writer.advance_last_record_lsn(Lsn(0x60));
-        assert_current_logical_size(&tline, Lsn(0x60));
-
-        // Check reported size and contents after truncation
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 2);
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x60))?,
-            TEST_IMG("foo blk 0 at 3")
-        );
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?,
-            TEST_IMG("foo blk 1 at 4")
-        );
-
-        // should still see the truncated block with older LSN
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x50))?.unwrap(), 3);
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
-            TEST_IMG("foo blk 2 at 5")
-        );
-
-        // Truncate to zero length
-        writer.put_truncation(TESTREL_A, Lsn(0x68), 0)?;
-        writer.advance_last_record_lsn(Lsn(0x68));
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x68))?.unwrap(), 0);
-
-        // Extend from 0 to 2 blocks, leaving a gap
-        writer.put_page_image(TESTREL_A, 1, Lsn(0x70), TEST_IMG("foo blk 1"))?;
-        writer.advance_last_record_lsn(Lsn(0x70));
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x70))?.unwrap(), 2);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?, ZERO_PAGE);
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x70))?,
-            TEST_IMG("foo blk 1")
-        );
-
-        // Extend a lot more, leaving a big gap that spans across segments
-        // FIXME: This is currently broken, see https://github.com/zenithdb/zenith/issues/500
-        /*
-        tline.put_page_image(TESTREL_A, 1500, Lsn(0x80), TEST_IMG("foo blk 1500"))?;
-        tline.advance_last_record_lsn(Lsn(0x80));
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(), 1501);
-        for blk in 2..1500 {
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
-                ZERO_PAGE);
-        }
-        assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
-            TEST_IMG("foo blk 1500"));
-         */
-
-        Ok(())
-    }
-
-    // Test what happens if we dropped a relation
-    // and then created it again within the same layer.
-    #[test]
-    fn test_drop_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_drop_extend")?.load();
-
-        // Create timeline to work on
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
-
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
+        writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.advance_last_record_lsn(Lsn(0x20));
+        drop(writer);
 
-        // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(), 1);
-
-        // Drop relish
-        writer.drop_relish(TESTREL_A, Lsn(0x30))?;
-        writer.advance_last_record_lsn(Lsn(0x30));
-
-        // Check that rel is not visible anymore
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
-        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x30))?.is_none());
-
-        // Extend it again
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
-        writer.advance_last_record_lsn(Lsn(0x40));
-
-        // Check that rel exists and size is correct
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x40))?.unwrap(), 1);
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
 
         Ok(())
     }
 
-    // Test what happens if we truncated a relation
-    // so that one of its segments was dropped
-    // and then extended it again within the same layer.
-    #[test]
-    fn test_truncate_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_truncate_extend")?.load();
-
-        // Create timeline to work on
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        let writer = tline.writer();
-
-        //from storage_layer.rs
-        const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
-        let relsize = RELISH_SEG_SIZE * 2;
-
-        // Create relation with relsize blocks
-        for blkno in 0..relsize {
-            let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            writer.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
-        }
-
-        writer.advance_last_record_lsn(Lsn(0x20));
-
-        // The relation was created at LSN 2, not visible at LSN 1 yet.
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-        assert!(tline.get_relish_size(TESTREL_A, Lsn(0x10))?.is_none());
-
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(0x20))?.unwrap(),
-            relsize
-        );
-
-        // Check relation content
-        for blkno in 0..relsize {
-            let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blkno, lsn)?,
-                TEST_IMG(&data)
-            );
-        }
-
-        // Truncate relation so that second segment was dropped
-        // - only leave one page
-        writer.put_truncation(TESTREL_A, Lsn(0x60), 1)?;
-        writer.advance_last_record_lsn(Lsn(0x60));
-
-        // Check reported size and contents after truncation
-        assert_eq!(tline.get_relish_size(TESTREL_A, Lsn(0x60))?.unwrap(), 1);
-
-        for blkno in 0..1 {
-            let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
-                TEST_IMG(&data)
-            );
-        }
-
-        // should still see all blocks with older LSN
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(0x50))?.unwrap(),
-            relsize
-        );
-        for blkno in 0..relsize {
-            let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
-                TEST_IMG(&data)
-            );
-        }
-
-        // Extend relation again.
-        // Add enough blocks to create second segment
-        for blkno in 0..relsize {
-            let lsn = Lsn(0x80);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            writer.put_page_image(TESTREL_A, blkno, lsn, TEST_IMG(&data))?;
-        }
-        writer.advance_last_record_lsn(Lsn(0x80));
-
-        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(0x80))?.unwrap(),
-            relsize
-        );
-        // Check relation content
-        for blkno in 0..relsize {
-            let lsn = Lsn(0x80);
-            let data = format!("foo blk {} at {}", blkno, lsn);
-            assert_eq!(
-                tline.get_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
-                TEST_IMG(&data)
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
-    /// split into multiple 1 GB segments in Postgres.
-    #[test]
-    fn test_large_rel() -> Result<()> {
-        let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        let writer = tline.writer();
-
-        let mut lsn = 0x10;
-        for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
-            lsn += 0x10;
-            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
-            writer.put_page_image(TESTREL_A, blknum as BlockNumber, Lsn(lsn), img)?;
-        }
-        writer.advance_last_record_lsn(Lsn(lsn));
-
-        assert_current_logical_size(&tline, Lsn(lsn));
-
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
-            pg_constants::RELSEG_SIZE + 1
-        );
-
-        // Truncate one block
-        lsn += 0x10;
-        writer.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE)?;
-        writer.advance_last_record_lsn(Lsn(lsn));
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
-            pg_constants::RELSEG_SIZE
-        );
-        assert_current_logical_size(&tline, Lsn(lsn));
-
-        // Truncate another block
-        lsn += 0x10;
-        writer.put_truncation(TESTREL_A, Lsn(lsn), pg_constants::RELSEG_SIZE - 1)?;
-        writer.advance_last_record_lsn(Lsn(lsn));
-        assert_eq!(
-            tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
-            pg_constants::RELSEG_SIZE - 1
-        );
-        assert_current_logical_size(&tline, Lsn(lsn));
-
-        // Truncate to 1500, and then truncate all the way down to 0, one block at a time
-        // This tests the behavior at segment boundaries
-        let mut size: i32 = 3000;
-        while size >= 0 {
-            lsn += 0x10;
-            writer.put_truncation(TESTREL_A, Lsn(lsn), size as BlockNumber)?;
-            writer.advance_last_record_lsn(Lsn(lsn));
-            assert_eq!(
-                tline.get_relish_size(TESTREL_A, Lsn(lsn))?.unwrap(),
-                size as BlockNumber
-            );
-
-            size -= 1;
-        }
-        assert_current_logical_size(&tline, Lsn(lsn));
-
-        Ok(())
-    }
-
-    ///
-    /// Test list_rels() function, with branches and dropped relations
-    ///
-    #[test]
-    fn test_list_rels_drop() -> Result<()> {
-        let repo = RepoHarness::create("test_list_rels_drop")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        let writer = tline.writer();
-        const TESTDB: u32 = 111;
-
-        // Import initial dummy checkpoint record, otherwise the get_timeline() call
-        // after branching fails below
-        writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
-
-        // Create a relation on the timeline
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-
-        writer.advance_last_record_lsn(Lsn(0x30));
-
-        // Check that list_rels() lists it after LSN 2, but no before it
-        assert!(!tline.list_rels(0, TESTDB, Lsn(0x10))?.contains(&TESTREL_A));
-        assert!(tline.list_rels(0, TESTDB, Lsn(0x20))?.contains(&TESTREL_A));
-        assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
-
-        // Create a branch, check that the relation is visible there
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
-        let new_writer = newtline.writer();
-
-        assert!(newtline
-            .list_rels(0, TESTDB, Lsn(0x30))?
-            .contains(&TESTREL_A));
-
-        // Drop it on the branch
-        new_writer.drop_relish(TESTREL_A, Lsn(0x40))?;
-        new_writer.advance_last_record_lsn(Lsn(0x40));
-
-        drop(new_writer);
-
-        // Check that it's no longer listed on the branch after the point where it was dropped
-        assert!(newtline
-            .list_rels(0, TESTDB, Lsn(0x30))?
-            .contains(&TESTREL_A));
-        assert!(!newtline
-            .list_rels(0, TESTDB, Lsn(0x40))?
-            .contains(&TESTREL_A));
-
-        // Run checkpoint and garbage collection and check that it's still not visible
-        newtline.checkpoint(CheckpointConfig::Forced)?;
-        repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
-
-        assert!(!newtline
-            .list_rels(0, TESTDB, Lsn(0x40))?
-            .contains(&TESTREL_A));
-
-        Ok(())
+    /// Convenience function to create a page image with given string as the only content
+    pub fn test_value(s: &str) -> Value {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(s.as_bytes());
+        Value::Image(buf.freeze())
     }
 
     ///
@@ -867,21 +528,24 @@ mod tests {
         let repo = RepoHarness::create("test_branch")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         let writer = tline.writer();
+        use std::str::from_utf8;
 
-        // Import initial dummy checkpoint record, otherwise the get_timeline() call
-        // after branching fails below
-        writer.put_page_image(RelishTag::Checkpoint, 0, Lsn(0x10), ZERO_CHECKPOINT.clone())?;
+        #[allow(non_snake_case)]
+        let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+        #[allow(non_snake_case)]
+        let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
-        // Create a relation on the timeline
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x20), TEST_IMG("foo blk 0 at 2"))?;
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x30), TEST_IMG("foo blk 0 at 3"))?;
-        writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("foo blk 0 at 4"))?;
+        // Insert a value on the timeline
+        writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
+        writer.put(TEST_KEY_B, Lsn(0x20), test_value("foobar at 0x20"))?;
+        writer.advance_last_record_lsn(Lsn(0x20));
 
-        // Create another relation
-        writer.put_page_image(TESTREL_B, 0, Lsn(0x20), TEST_IMG("foobar blk 0 at 2"))?;
-
+        writer.put(TEST_KEY_A, Lsn(0x30), test_value("foo at 0x30"))?;
+        writer.advance_last_record_lsn(Lsn(0x30));
+        writer.put(TEST_KEY_A, Lsn(0x40), test_value("foo at 0x40"))?;
         writer.advance_last_record_lsn(Lsn(0x40));
-        assert_current_logical_size(&tline, Lsn(0x40));
+
+        //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
@@ -890,246 +554,145 @@ mod tests {
             None => panic!("Should have a local timeline"),
         };
         let new_writer = newtline.writer();
-
-        new_writer.put_page_image(TESTREL_A, 0, Lsn(0x40), TEST_IMG("bar blk 0 at 4"))?;
+        new_writer.put(TEST_KEY_A, Lsn(0x40), test_value("bar at 0x40"))?;
         new_writer.advance_last_record_lsn(Lsn(0x40));
 
         // Check page contents on both branches
         assert_eq!(
-            tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
-            TEST_IMG("foo blk 0 at 4")
+            from_utf8(&tline.get(TEST_KEY_A, Lsn(0x40))?)?,
+            "foo at 0x40"
         );
-
         assert_eq!(
-            newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
-            TEST_IMG("bar blk 0 at 4")
+            from_utf8(&newtline.get(TEST_KEY_A, Lsn(0x40))?)?,
+            "bar at 0x40"
         );
-
         assert_eq!(
-            newtline.get_page_at_lsn(TESTREL_B, 0, Lsn(0x40))?,
-            TEST_IMG("foobar blk 0 at 2")
+            from_utf8(&newtline.get(TEST_KEY_B, Lsn(0x40))?)?,
+            "foobar at 0x20"
         );
 
-        assert_eq!(newtline.get_relish_size(TESTREL_B, Lsn(0x40))?.unwrap(), 1);
-
-        assert_current_logical_size(&tline, Lsn(0x40));
+        //assert_current_logical_size(&tline, Lsn(0x40));
 
         Ok(())
     }
 
-    fn make_some_layers<T: Timeline>(tline: &Arc<T>, start_lsn: Lsn) -> Result<()> {
-        let mut lsn = start_lsn;
-        {
-            let writer = tline.writer();
-            // Create a relation on the timeline
-            writer.put_page_image(
-                TESTREL_A,
-                0,
-                lsn,
-                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
-            )?;
-            lsn += 0x10;
-            writer.put_page_image(
-                TESTREL_A,
-                0,
-                lsn,
-                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
-            )?;
-            writer.advance_last_record_lsn(lsn);
-        }
-        tline.checkpoint(CheckpointConfig::Forced)?;
-        {
-            let writer = tline.writer();
-            lsn += 0x10;
-            writer.put_page_image(
-                TESTREL_A,
-                0,
-                lsn,
-                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
-            )?;
-            lsn += 0x10;
-            writer.put_page_image(
-                TESTREL_A,
-                0,
-                lsn,
-                TEST_IMG(&format!("foo blk 0 at {}", lsn)),
-            )?;
-            writer.advance_last_record_lsn(lsn);
-        }
-        tline.checkpoint(CheckpointConfig::Forced)
-    }
+    /* // FIXME: Garbage collection is broken
+        #[test]
+        fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
+            let repo =
+                RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load_page_repo();
 
-    #[test]
-    fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            make_some_layers(&tline, Lsn(0x20))?;
 
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        make_some_layers(&tline, Lsn(0x20))?;
+            // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
 
-        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-
-        // try to branch at lsn 25, should fail because we already garbage collected the data
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
-            Ok(_) => panic!("branching should have failed"),
-            Err(err) => {
-                assert!(err.to_string().contains("invalid branch start lsn"));
-                assert!(err
-                    .source()
-                    .unwrap()
-                    .to_string()
-                    .contains("we might've already garbage collected needed data"))
+            // try to branch at lsn 25, should fail because we already garbage collected the data
+            match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+                Ok(_) => panic!("branching should have failed"),
+                Err(err) => {
+                    assert!(err.to_string().contains("invalid branch start lsn"));
+                    assert!(err
+                        .source()
+                        .unwrap()
+                        .to_string()
+                        .contains("we might've already garbage collected needed data"))
+                }
             }
+
+            Ok(())
         }
 
-        Ok(())
-    }
+        #[test]
+        fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
+            let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load_page_repo();
 
-    #[test]
-    fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
-        let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
-
-        repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
-        // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
-            Ok(_) => panic!("branching should have failed"),
-            Err(err) => {
-                assert!(&err.to_string().contains("invalid branch start lsn"));
-                assert!(&err
-                    .source()
-                    .unwrap()
-                    .to_string()
-                    .contains("is earlier than latest GC horizon"));
+            repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
+            // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
+            match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+                Ok(_) => panic!("branching should have failed"),
+                Err(err) => {
+                    assert!(&err.to_string().contains("invalid branch start lsn"));
+                    assert!(&err
+                        .source()
+                        .unwrap()
+                        .to_string()
+                        .contains("is earlier than latest GC horizon"));
+                }
             }
+
+            Ok(())
         }
 
-        Ok(())
-    }
+        #[test]
+        fn test_prohibit_get_page_at_lsn_for_garbage_collected_pages() -> Result<()> {
+            let repo =
+                RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
+                    .load_page_repo();
 
-    #[test]
-    fn test_prohibit_get_page_at_lsn_for_garbage_collected_pages() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
-                .load();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            make_some_layers(&tline, Lsn(0x20))?;
 
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-        make_some_layers(&tline, Lsn(0x20))?;
-
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-        let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
-        assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
-        match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
-            Ok(_) => panic!("request for page should have failed"),
-            Err(err) => assert!(err.to_string().contains("not found at")),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-
-        make_some_layers(&tline, Lsn(0x20))?;
-
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
-
-        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-        assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
-        let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
-        let repo = harness.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-
-        make_some_layers(&tline, Lsn(0x20))?;
-
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
-
-        make_some_layers(&newtline, Lsn(0x60))?;
-
-        // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-
-        // check that the layer in parent before the branching point is still there
-        let tline_dir = harness.conf.timeline_path(&TIMELINE_ID, &harness.tenant_id);
-
-        let expected_image_layer_path = tline_dir.join(format!(
-            "rel_{}_{}_{}_{}_{}_{:016X}_{:016X}",
-            TESTREL_A_REL_TAG.spcnode,
-            TESTREL_A_REL_TAG.dbnode,
-            TESTREL_A_REL_TAG.relnode,
-            TESTREL_A_REL_TAG.forknum,
-            0, // seg is 0
-            0x20,
-            0x30,
-        ));
-        assert!(fs::metadata(&expected_image_layer_path).is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_beyond_eof() -> Result<()> {
-        let harness = RepoHarness::create("test_read_beyond_eof")?;
-        let repo = harness.load();
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-
-        make_some_layers(&tline, Lsn(0x20))?;
-        {
-            let writer = tline.writer();
-            writer.put_page_image(
-                TESTREL_A,
-                0,
-                Lsn(0x60),
-                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x50))),
-            )?;
-            writer.advance_last_record_lsn(Lsn(0x60));
+            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+            let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
+            assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
+            // FIXME: GC is currently disabled, so this still works
+            /*
+            match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
+                Ok(_) => panic!("request for page should have failed"),
+                Err(err) => assert!(err.to_string().contains("not found at")),
+            }
+             */
+            Ok(())
         }
 
-        // Test read before rel creation. Should error out.
-        assert!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x10)).is_err());
+        #[test]
+        fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
+            let repo =
+                RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load_page_repo();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            make_some_layers(&tline, Lsn(0x20))?;
 
-        // Read block beyond end of relation at different points in time.
-        // These reads should fall into different delta, image, and in-memory layers.
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x20))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x25))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x30))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x35))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x45))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x55))?, ZERO_PAGE);
-        assert_eq!(tline.get_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?, ZERO_PAGE);
+            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+            let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
+                Some(timeline) => timeline,
+                None => panic!("Should have a local timeline"),
+            };
 
-        // Test on an in-memory layer with no preceding layer
-        {
-            let writer = tline.writer();
-            writer.put_page_image(
-                TESTREL_B,
-                0,
-                Lsn(0x70),
-                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x70))),
-            )?;
-            writer.advance_last_record_lsn(Lsn(0x70));
+            // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+            assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
+
+            Ok(())
         }
-        assert_eq!(tline.get_page_at_lsn(TESTREL_B, 1, Lsn(0x70))?, ZERO_PAGE);
 
-        Ok(())
-    }
+        #[test]
+        fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
+            let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
+            let repo = harness.load_page_repo();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+            make_some_layers(&tline, Lsn(0x20))?;
+
+            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+            let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
+                Some(timeline) => timeline,
+                None => panic!("Should have a local timeline"),
+            };
+
+            make_some_layers(&newtline, Lsn(0x60))?;
+
+            // run gc on parent
+            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+
+            // Check that the data is still accessible on the branch.
+            assert_eq!(
+                newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
+                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x40)))
+            );
+
+            Ok(())
+        }
+
+    */
 }

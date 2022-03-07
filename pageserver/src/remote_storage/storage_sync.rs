@@ -881,7 +881,7 @@ mod test_utils {
 
     #[track_caller]
     pub async fn ensure_correct_timeline_upload(
-        harness: &RepoHarness,
+        harness: &RepoHarness<'_>,
         remote_assets: Arc<(LocalFs, RwLock<RemoteTimelineIndex>)>,
         timeline_id: ZTimelineId,
         new_upload: NewCheckpoint,

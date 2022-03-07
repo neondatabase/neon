@@ -1307,6 +1307,7 @@ dependencies = [
  "hex-literal",
  "humantime",
  "hyper",
+ "itertools",
  "lazy_static",
  "log",
  "nix",

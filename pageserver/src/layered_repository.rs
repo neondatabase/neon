@@ -14,32 +14,31 @@
 use anyhow::{bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
+use fail::fail_point;
+use itertools::Itertools;
 use lazy_static::lazy_static;
-use postgres_ffi::pg_constants::BLCKSZ;
 use tracing::*;
 
-use std::cmp;
+use std::cmp::{min, max, Ordering};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::ops::{Bound::Included, Deref};
+use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicBool, AtomicUsize};
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
-use crate::page_cache;
-use crate::relish::*;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
-    BlockNumber, GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState,
-    TimelineWriter, ZenithWalRecord,
+    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
 };
+use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -47,9 +46,6 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{
-    register_histogram, register_int_gauge_vec, Histogram, IntGauge, IntGaugeVec,
-};
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -58,29 +54,24 @@ use zenith_utils::seqwait::SeqWait;
 mod delta_layer;
 mod ephemeral_file;
 mod filename;
-mod global_layer_map;
 mod image_layer;
 mod inmemory_layer;
-mod interval_tree;
 mod layer_map;
 pub mod metadata;
 mod par_fsync;
 mod storage_layer;
+mod utils;
 
-use delta_layer::DeltaLayer;
+use delta_layer::{DeltaLayer, DeltaLayerWriter};
 use ephemeral_file::is_ephemeral_file;
 use filename::{DeltaFileName, ImageFileName};
-use image_layer::ImageLayer;
+use image_layer::{ImageLayer, ImageLayerWriter};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
-use storage_layer::{
-    Layer, PageReconstructData, PageReconstructResult, SegmentBlk, SegmentTag, RELISH_SEG_SIZE,
-};
+use storage_layer::{Layer, ValueReconstructResult, ValueReconstructState, TARGET_FILE_SIZE,TARGET_FILE_SIZE_BYTES};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
-
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 // Metrics collected on operations on the storage repository.
 lazy_static! {
@@ -88,26 +79,6 @@ lazy_static! {
         "pageserver_storage_time",
         "Time spent on storage operations",
         &["operation"]
-    )
-    .expect("failed to define a metric");
-}
-
-// Metrics collected on operations on the storage repository.
-lazy_static! {
-    static ref RECONSTRUCT_TIME: Histogram = register_histogram!(
-        "pageserver_getpage_reconstruct_time",
-        "FIXME Time spent on storage operations"
-    )
-    .expect("failed to define a metric");
-}
-
-lazy_static! {
-    // NOTE: can be zero if pageserver was restarted and there hasn't been any
-    // activity yet.
-    static ref LOGICAL_TIMELINE_SIZE: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_logical_timeline_size",
-        "Logical timeline size (bytes)",
-        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
 }
@@ -174,9 +145,9 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            0,
             self.upload_relishes,
         );
+        timeline.layers.lock().unwrap().next_open_layer_at = Some(initdb_lsn);
 
         let timeline_rc = Arc::new(timeline);
         let r = timelines.insert(timelineid, LayeredTimelineEntry::Local(timeline_rc.clone()));
@@ -402,9 +373,9 @@ impl LayeredTimelineEntry {
     }
 
     /// Gets local timeline data, if it's present. Otherwise schedules a download fot the remote timeline and returns `None`.
-    fn local_or_schedule_download(&self, tenant_id: ZTenantId) -> Option<&LayeredTimeline> {
+    fn local_or_schedule_download(&self, tenant_id: ZTenantId) -> Option<Arc<LayeredTimeline>> {
         match self {
-            Self::Local(local) => Some(local.as_ref()),
+            Self::Local(local) => Some(Arc::clone(local)),
             Self::Remote {
                 id: timeline_id, ..
             } => {
@@ -471,20 +442,18 @@ impl LayeredRepository {
         let _enter =
             info_span!("loading timeline", timeline = %timelineid, tenant = %self.tenantid)
                 .entered();
-        let mut timeline = LayeredTimeline::new(
+        let timeline = LayeredTimeline::new(
             self.conf,
             metadata,
             ancestor,
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            0, // init with 0 and update after layers are loaded,
             self.upload_relishes,
         );
         timeline
             .load_layer_map(disk_consistent_lsn)
             .context("failed to load layermap")?;
-        timeline.init_current_logical_size()?;
 
         Ok(Arc::new(timeline))
     }
@@ -693,7 +662,8 @@ impl LayeredRepository {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
                     info!("timeline {} checkpoint_before_gc done", timelineid);
                 }
-                let result = timeline.gc_timeline(branchpoints, cutoff)?;
+                timeline.update_gc_info(branchpoints, cutoff);
+                let result = timeline.gc()?;
 
                 totals += result;
                 timelines = self.timelines.lock().unwrap();
@@ -745,25 +715,6 @@ pub struct LayeredTimeline {
     ancestor_timeline: Option<LayeredTimelineEntry>,
     ancestor_lsn: Lsn,
 
-    // this variable indicates how much space is used from user's point of view,
-    // e.g. we do not account here for multiple versions of data and so on.
-    // this is counted incrementally based on physical relishes (excluding FileNodeMap)
-    // current_logical_size is not stored no disk and initialized on timeline creation using
-    // get_current_logical_size_non_incremental in init_current_logical_size
-    // this is needed because when we save it in metadata it can become out of sync
-    // because current_logical_size is consistent on last_record_lsn, not ondisk_consistent_lsn
-    // NOTE: current_logical_size also includes size of the ancestor
-    current_logical_size: AtomicUsize, // bytes
-
-    // To avoid calling .with_label_values and formatting the tenant and timeline IDs to strings
-    // every time the logical size is updated, keep a direct reference to the Gauge here.
-    // unfortunately it doesnt forward atomic methods like .fetch_add
-    // so use two fields: actual size and metric
-    // see https://github.com/zenithdb/zenith/issues/622 for discussion
-    // TODO: it is possible to combine these two fields into single one using custom metric which uses SeqCst
-    // ordering for its operations, but involves private modules, and macro trickery
-    current_logical_size_gauge: IntGauge,
-
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_relishes: AtomicBool,
 
@@ -783,6 +734,10 @@ pub struct LayeredTimeline {
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     latest_gc_cutoff_lsn: RwLock<Lsn>,
 
+    // List of child timelines and their branch points. This is needed to avoid
+    // garbage collecting data that is still needed by the child timelines.
+    gc_info: RwLock<GcInfo>,
+
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
     // It is needed in checks when we want to error on some operations
@@ -790,6 +745,11 @@ pub struct LayeredTimeline {
     // It can be unified with latest_gc_cutoff_lsn under some "first_valid_lsn",
     // though lets keep them both for better error visibility.
     initdb_lsn: Lsn,
+}
+
+struct GcInfo {
+    retain_lsns: Vec<Lsn>,
+    cutoff: Lsn,
 }
 
 /// Public interface functions
@@ -829,163 +789,21 @@ impl Timeline for LayeredTimeline {
         self.latest_gc_cutoff_lsn.read().unwrap()
     }
 
-    /// Look up given page version.
-    fn get_page_at_lsn(&self, rel: RelishTag, rel_blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
-        if !rel.is_blocky() && rel_blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                rel_blknum,
-                rel
-            );
-        }
-        debug_assert!(lsn <= self.get_last_record_lsn());
-        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
-
-        if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            RECONSTRUCT_TIME
-                .observe_closure_duration(|| self.materialize_page(seg, seg_blknum, lsn, &*layer))
-        } else {
-            // FIXME: This can happen if PostgreSQL extends a relation but never writes
-            // the page. See https://github.com/zenithdb/zenith/issues/841
-            //
-            // Would be nice to detect that situation better.
-            if seg.segno > 0 && self.get_rel_exists(rel, lsn)? {
-                warn!("Page {} blk {} at {} not found", rel, rel_blknum, lsn);
-                return Ok(ZERO_PAGE.clone());
-            }
-
-            bail!("segment {} not found at {}", rel, lsn);
-        }
-    }
-
-    fn get_relish_size(&self, rel: RelishTag, lsn: Lsn) -> Result<Option<BlockNumber>> {
-        if !rel.is_blocky() {
-            bail!(
-                "invalid get_relish_size request for non-blocky relish {}",
-                rel
-            );
-        }
+    /// Look up the value with the given a key
+    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
         debug_assert!(lsn <= self.get_last_record_lsn());
 
-        let mut segno = 0;
-        loop {
-            let seg = SegmentTag { rel, segno };
-
-            let segsize;
-            if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-                segsize = layer.get_seg_size(lsn)?;
-                trace!("get_seg_size: {} at {} -> {}", seg, lsn, segsize);
-            } else {
-                if segno == 0 {
-                    return Ok(None);
-                }
-                segsize = 0;
-            }
-
-            if segsize != RELISH_SEG_SIZE {
-                let result = segno * RELISH_SEG_SIZE + segsize;
-                return Ok(Some(result));
-            }
-            segno += 1;
-        }
-    }
-
-    fn get_rel_exists(&self, rel: RelishTag, lsn: Lsn) -> Result<bool> {
-        debug_assert!(lsn <= self.get_last_record_lsn());
-
-        let seg = SegmentTag { rel, segno: 0 };
-
-        let result = if let Some((layer, lsn)) = self.get_layer_for_read(seg, lsn)? {
-            layer.get_seg_exists(lsn)?
-        } else {
-            false
+        let mut reconstruct_state = ValueReconstructState {
+            key,
+            lsn,
+            records: Vec::new(),
+            img: None, // FIXME: check page cache and put the img here
+            request_lsn: lsn,
         };
 
-        trace!("get_rel_exists: {} at {} -> {}", rel, lsn, result);
-        Ok(result)
-    }
+        self.get_reconstruct_data(&mut reconstruct_state)?;
 
-    fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelishTag>> {
-        let request_tag = RelTag {
-            spcnode,
-            dbnode,
-            relnode: 0,
-            forknum: 0,
-        };
-
-        self.list_relishes(Some(request_tag), lsn)
-    }
-
-    fn list_nonrels(&self, lsn: Lsn) -> Result<HashSet<RelishTag>> {
-        info!("list_nonrels called at {}", lsn);
-
-        self.list_relishes(None, lsn)
-    }
-
-    fn list_relishes(&self, tag: Option<RelTag>, lsn: Lsn) -> Result<HashSet<RelishTag>> {
-        trace!("list_relishes called at {}", lsn);
-        debug_assert!(lsn <= self.get_last_record_lsn());
-
-        // List of all relishes along with a flag that marks if they exist at the given lsn.
-        let mut all_relishes_map: HashMap<RelishTag, bool> = HashMap::new();
-        let mut result = HashSet::new();
-        let mut timeline = self;
-
-        // Iterate through layers back in time and find the most
-        // recent state of the relish. Don't add relish to the list
-        // if newer version is already there.
-        //
-        // This most recent version can represent dropped or existing relish.
-        // We will filter dropped relishes below.
-        //
-        loop {
-            let rels = timeline.layers.lock().unwrap().list_relishes(tag, lsn)?;
-
-            for (&new_relish, &new_relish_exists) in rels.iter() {
-                match all_relishes_map.entry(new_relish) {
-                    Entry::Occupied(o) => {
-                        trace!(
-                            "Newer version of the object {} is already found: exists {}",
-                            new_relish,
-                            o.get(),
-                        );
-                    }
-                    Entry::Vacant(v) => {
-                        v.insert(new_relish_exists);
-                        trace!(
-                            "Newer version of the object {} NOT found. Insert NEW: exists {}",
-                            new_relish,
-                            new_relish_exists
-                        );
-                    }
-                }
-            }
-
-            match &timeline.ancestor_timeline {
-                None => break,
-                Some(ancestor_entry) => {
-                    match ancestor_entry.local_or_schedule_download(self.tenantid) {
-                        Some(ancestor) => {
-                            timeline = ancestor;
-                            continue;
-                        }
-                        None => bail!("Cannot list relishes for timeline {} tenant {} due to its ancestor being remote only", self.timelineid, self.tenantid),
-                    }
-                }
-            }
-        }
-
-        // Filter out dropped relishes
-        for (&new_relish, &new_relish_exists) in all_relishes_map.iter() {
-            if new_relish_exists {
-                result.insert(new_relish);
-                trace!("List object {}", new_relish);
-            } else {
-                trace!("Filtered out dropped object {}", new_relish);
-            }
-        }
-
-        Ok(result)
+        self.reconstruct_value(key, lsn, reconstruct_state)
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private
@@ -1003,6 +821,11 @@ impl Timeline for LayeredTimeline {
                 .with_label_values(&["checkpoint"])
                 .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
+    }
+
+    // Entry point for forced image creation. Only used by tests at the moment.
+    fn create_images(&self, threshold: usize) -> Result<()> {
+        self.create_image_layers(threshold)
     }
 
     ///
@@ -1034,37 +857,6 @@ impl Timeline for LayeredTimeline {
         self.last_record_lsn.load()
     }
 
-    fn get_current_logical_size(&self) -> usize {
-        self.current_logical_size.load(atomic::Ordering::Acquire) as usize
-    }
-
-    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
-        let mut total_blocks: usize = 0;
-
-        let _enter = info_span!("calc logical size", %lsn).entered();
-
-        // list of all relations in this timeline, including ancestor timelines
-        let all_rels = self.list_rels(0, 0, lsn)?;
-
-        for rel in all_rels {
-            if let Some(size) = self.get_relish_size(rel, lsn)? {
-                total_blocks += size as usize;
-            }
-        }
-
-        let non_rels = self.list_nonrels(lsn)?;
-        for non_rel in non_rels {
-            // TODO support TwoPhase
-            if matches!(non_rel, RelishTag::Slru { slru: _, segno: _ }) {
-                if let Some(size) = self.get_relish_size(non_rel, lsn)? {
-                    total_blocks += size as usize;
-                }
-            }
-        }
-
-        Ok(total_blocks * BLCKSZ as usize)
-    }
-
     fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
     }
@@ -1089,12 +881,8 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        current_logical_size: usize,
         upload_relishes: bool,
     ) -> LayeredTimeline {
-        let current_logical_size_gauge = LOGICAL_TIMELINE_SIZE
-            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
-            .unwrap();
         LayeredTimeline {
             conf,
             timelineid,
@@ -1112,12 +900,15 @@ impl LayeredTimeline {
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
-            current_logical_size: AtomicUsize::new(current_logical_size),
-            current_logical_size_gauge,
             upload_relishes: AtomicBool::new(upload_relishes),
 
             write_lock: Mutex::new(()),
             checkpoint_cs: Mutex::new(()),
+
+            gc_info: RwLock::new(GcInfo {
+                retain_lsns: Vec::new(),
+                cutoff: Lsn(0),
+            }),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
@@ -1161,13 +952,12 @@ impl LayeredTimeline {
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
-                ensure!(deltafilename.start_lsn < deltafilename.end_lsn);
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
                 // OK for a delta layer to have end LSN 101, but if the end LSN
                 // is 102, then it might not have been fully flushed to disk
                 // before crash.
-                if deltafilename.end_lsn > disk_consistent_lsn + 1 {
+                if deltafilename.lsn_range.end > disk_consistent_lsn + 1 {
                     warn!(
                         "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
                         deltafilename, self.timelineid, disk_consistent_lsn
@@ -1194,41 +984,14 @@ impl LayeredTimeline {
             }
         }
 
-        info!("loaded layer map with {} layers", num_layers);
+        layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
 
-        Ok(())
-    }
-
-    ///
-    /// Used to init current logical size on startup
-    ///
-    fn init_current_logical_size(&mut self) -> Result<()> {
-        if self.current_logical_size.load(atomic::Ordering::Relaxed) != 0 {
-            bail!("cannot init already initialized current logical size")
-        };
-        let lsn = self.get_last_record_lsn();
-        self.current_logical_size =
-            AtomicUsize::new(self.get_current_logical_size_non_incremental(lsn)?);
-        trace!(
-            "current_logical_size initialized to {}",
-            self.current_logical_size.load(atomic::Ordering::Relaxed)
+        info!(
+            "loaded layer map with {} layers at {}",
+            num_layers, disk_consistent_lsn
         );
-        Ok(())
-    }
 
-    ///
-    /// Get a handle to a Layer for reading.
-    ///
-    /// The returned Layer might be from an ancestor timeline, if the
-    /// segment hasn't been updated on this timeline yet.
-    ///
-    fn get_layer_for_read(
-        &self,
-        seg: SegmentTag,
-        lsn: Lsn,
-    ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
-        let self_layers = self.layers.lock().unwrap();
-        self.get_layer_for_read_locked(seg, lsn, &self_layers)
+        Ok(())
     }
 
     ///
@@ -1239,97 +1002,115 @@ impl LayeredTimeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
-    fn get_layer_for_read_locked(
-        &self,
-        seg: SegmentTag,
-        lsn: Lsn,
-        self_layers: &MutexGuard<LayerMap>,
-    ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
-        trace!("get_layer_for_read called for {} at {}", seg, lsn);
-
-        // If you requested a page at an older LSN, before the branch point, dig into
-        // the right ancestor timeline. This can only happen if you launch a read-only
-        // node with an old LSN, a primary always uses a recent LSN in its requests.
+    fn get_reconstruct_data(&self, reconstruct_state: &mut ValueReconstructState) -> Result<()> {
+        // Start from the current timeline.
+        let mut timeline_owned;
         let mut timeline = self;
-        let mut lsn = lsn;
 
-        while lsn < timeline.ancestor_lsn {
-            trace!("going into ancestor {} ", timeline.ancestor_lsn);
-            timeline = match timeline
-                .ancestor_timeline
-                .as_ref()
-                .and_then(|ancestor_entry| ancestor_entry.local_or_schedule_download(self.tenantid))
-            {
-                Some(timeline) => timeline,
-                None => {
+        // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
+        // to check that each iteration make some progress, to break infinite
+        // looping if something goes wrong.
+        let mut prev_lsn = Lsn(u64::MAX);
+
+        let mut result = ValueReconstructResult::Continue;
+
+        loop {
+            // The function should have updated 'state'
+            //info!("CALLED for {} at {}: {:?} with {} records", reconstruct_state.key, reconstruct_state.lsn, result, reconstruct_state.records.len());
+            match result {
+                ValueReconstructResult::Complete => return Ok(()),
+                ValueReconstructResult::Continue => {
+                    if prev_lsn <= reconstruct_state.lsn {
+                        // Didn't make any progress in last iteration. Error out to avoid
+                        // getting stuck in the loop.
+                        bail!("could not find layer with more data for key {} at LSN {}, request LSN {}",
+                          reconstruct_state.key,
+                          reconstruct_state.lsn,
+                          reconstruct_state.request_lsn)
+                    }
+                    prev_lsn = reconstruct_state.lsn;
+                }
+                ValueReconstructResult::Missing => {
                     bail!(
-                        "Cannot get the whole layer for read locked: timeline {} is not present locally",
-                        self.timelineid
+                        "could not find data for key {} at LSN {}, for request at LSN {}",
+                        reconstruct_state.key,
+                        reconstruct_state.lsn,
+                        reconstruct_state.request_lsn
                     )
                 }
-            };
-        }
+            }
 
-        // Now we have the right starting timeline for our search.
-        loop {
-            let layers_owned: MutexGuard<LayerMap>;
-            let layers = if self as *const LayeredTimeline != timeline as *const LayeredTimeline {
-                layers_owned = timeline.layers.lock().unwrap();
-                &layers_owned
+            // Recurse into ancestor if needed
+            if reconstruct_state.lsn <= timeline.ancestor_lsn {
+                //info!("going into ancestor {}", timeline.ancestor_lsn);
+                let ancestor = timeline.get_ancestor_timeline()?;
+                timeline_owned = ancestor;
+                timeline = &*timeline_owned;
+                prev_lsn = Lsn(u64::MAX);
+                continue;
+            }
+
+            let layers = timeline.layers.lock().unwrap();
+
+            // Check the open and frozen in-memory layers first
+            if let Some(open_layer) = &layers.open_layer {
+                let start_lsn = open_layer.get_lsn_range().start;
+                if reconstruct_state.lsn >= start_lsn {
+                    //info!("CHECKING for {} at {} on open layer {}", reconstruct_state.key, reconstruct_state.lsn, open_layer.filename().display());
+                    result = open_layer.get_value_reconstruct_data(open_layer.get_lsn_range().start, reconstruct_state)?;
+                    continue;
+                }
+            }
+            if let Some(frozen_layer) = &layers.frozen_layer {
+                let start_lsn = frozen_layer.get_lsn_range().start;
+                if reconstruct_state.lsn >= start_lsn {
+                    //info!("CHECKING for {} at {} on frozen layer {}", reconstruct_state.key, reconstruct_state.lsn, frozen_layer.filename().display());
+                    result = frozen_layer.get_value_reconstruct_data(frozen_layer.get_lsn_range().start, reconstruct_state)?;
+                    continue;
+                }
+            }
+
+            if let Some(search_result) = layers
+                .search(reconstruct_state.key, reconstruct_state.lsn)?
+            {
+                //info!("CHECKING for {} at {} on historic layer {}", reconstruct_state.key, reconstruct_state.lsn, layer.filename().display());
+
+                result = search_result
+                    .layer
+                    .get_value_reconstruct_data(search_result.lsn_floor, reconstruct_state)?;
+            } else if self.ancestor_timeline.is_some() {
+                // Nothing on this timeline. Traverse to parent
+                result = ValueReconstructResult::Continue;
+                reconstruct_state.lsn = self.ancestor_lsn;
             } else {
-                self_layers
-            };
-
-            //
-            // FIXME: If the relation has been dropped, does this return the right
-            // thing? The compute node should not normally request dropped relations,
-            // but if OID wraparound happens the same relfilenode might get reused
-            // for an unrelated relation.
-            //
-
-            // Do we have a layer on this timeline?
-            if let Some(layer) = layers.get(&seg, lsn) {
-                trace!(
-                    "found layer in cache: {} {}-{}",
-                    timeline.timelineid,
-                    layer.get_start_lsn(),
-                    layer.get_end_lsn()
-                );
-
-                assert!(layer.get_start_lsn() <= lsn);
-
-                if layer.is_dropped() && layer.get_end_lsn() <= lsn {
-                    return Ok(None);
-                }
-
-                return Ok(Some((layer.clone(), lsn)));
-            }
-
-            // If not, check if there's a layer on the ancestor timeline
-            match &timeline.ancestor_timeline {
-                Some(ancestor_entry) => {
-                    match ancestor_entry.local_or_schedule_download(self.tenantid) {
-                        Some(ancestor) => {
-                            lsn = timeline.ancestor_lsn;
-                            timeline = ancestor;
-                            trace!("recursing into ancestor at {}/{}", timeline.timelineid, lsn);
-                            continue;
-                        }
-                        None => bail!(
-                            "Cannot get a layer for read from remote ancestor timeline {}",
-                            self.timelineid
-                        ),
-                    }
-                }
-                None => return Ok(None),
+                // Nothing found
+                result = ValueReconstructResult::Missing;
             }
         }
+    }
+
+    fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
+        let ancestor_entry = self
+            .ancestor_timeline
+            .as_ref()
+            .expect("get_ancestor_timeline() called on timeline with no parent");
+
+        let timeline = match ancestor_entry.local_or_schedule_download(self.tenantid) {
+            Some(timeline) => timeline,
+            None => {
+                bail!(
+                    "Cannot get the whole layer for read locked: ancestor of timeline {} is not present locally",
+                    self.timelineid
+                )
+            }
+        };
+        Ok(timeline)
     }
 
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
         assert!(lsn.is_aligned());
@@ -1344,96 +1125,47 @@ impl LayeredTimeline {
 
         // Do we have a layer open for writing already?
         let layer;
-        if let Some(open_layer) = layers.get_open(&seg) {
-            if open_layer.get_start_lsn() > lsn {
+        if let Some(open_layer) = &layers.open_layer {
+            if open_layer.get_lsn_range().start > lsn {
                 bail!("unexpected open layer in the future");
             }
 
-            // Open layer exists, but it is dropped, so create a new one.
-            if open_layer.is_dropped() {
-                assert!(!open_layer.is_writeable());
-                // Layer that is created after dropped one represents a new relish segment.
-                trace!(
-                    "creating layer for write for new relish segment after dropped layer {} at {}/{}",
-                    seg,
-                    self.timelineid,
-                    lsn
-                );
-
-                layer = InMemoryLayer::create(
-                    self.conf,
-                    self.timelineid,
-                    self.tenantid,
-                    seg,
-                    lsn,
-                    last_record_lsn,
-                )?;
-            } else {
-                return Ok(open_layer);
-            }
-        }
-        // No writeable layer for this relation. Create one.
-        //
-        // Is this a completely new relation? Or the first modification after branching?
-        //
-        else if let Some((prev_layer, _prev_lsn)) =
-            self.get_layer_for_read_locked(seg, lsn, &layers)?
-        {
-            // Create new entry after the previous one.
-            let start_lsn;
-            if prev_layer.get_timeline_id() != self.timelineid {
-                // First modification on this timeline
-                start_lsn = self.ancestor_lsn + 1;
-                trace!(
-                    "creating layer for write for {} at branch point {}",
-                    seg,
-                    start_lsn
-                );
-            } else {
-                start_lsn = prev_layer.get_end_lsn();
-                trace!(
-                    "creating layer for write for {} after previous layer {}",
-                    seg,
-                    start_lsn
-                );
-            }
-            trace!(
-                "prev layer is at {}/{} - {}",
-                prev_layer.get_timeline_id(),
-                prev_layer.get_start_lsn(),
-                prev_layer.get_end_lsn()
-            );
-            layer = InMemoryLayer::create_successor_layer(
-                self.conf,
-                prev_layer,
-                self.timelineid,
-                self.tenantid,
-                start_lsn,
-                last_record_lsn,
-            )?;
+            layer = Arc::clone(open_layer);
         } else {
-            // New relation.
+            // No writeable layer yet. Create one.
+            let start_lsn = layers.next_open_layer_at.unwrap();
+
             trace!(
-                "creating layer for write for new rel {} at {}/{}",
-                seg,
+                "creating layer for write at {}/{} for record at {}",
                 self.timelineid,
+                start_lsn,
                 lsn
             );
+            let new_layer =
+                InMemoryLayer::create(self.conf, self.timelineid, self.tenantid, start_lsn, lsn)?;
+            let layer_rc = Arc::new(new_layer);
 
-            layer = InMemoryLayer::create(
-                self.conf,
-                self.timelineid,
-                self.tenantid,
-                seg,
-                lsn,
-                last_record_lsn,
-            )?;
+            layers.open_layer = Some(Arc::clone(&layer_rc));
+            layers.next_open_layer_at = None;
+
+            layer = layer_rc;
         }
+        Ok(layer)
+    }
 
-        let layer_rc: Arc<InMemoryLayer> = Arc::new(layer);
-        layers.insert_open(Arc::clone(&layer_rc));
+    fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+        //info!("PUT: key {} at {}", key, lsn);
+        let layer = self.get_layer_for_write(lsn)?;
+        layer.put_value(key, lsn, val)?;
 
-        Ok(layer_rc)
+        Ok(())
+    }
+
+    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+        let layer = self.get_layer_for_write(lsn)?;
+        layer.put_tombstone(key_range, lsn)?;
+
+        Ok(())
     }
 
     ///
@@ -1441,126 +1173,108 @@ impl LayeredTimeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
     fn checkpoint_internal(&self, checkpoint_distance: u64, reconstruct_pages: bool) -> Result<()> {
+        info!("checkpoint starting");
         // Prevent concurrent checkpoints
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
 
-        let write_guard = self.write_lock.lock().unwrap();
-        let mut layers = self.layers.lock().unwrap();
-
-        // Bump the generation number in the layer map, so that we can distinguish
-        // entries inserted after the checkpoint started
-        let current_generation = layers.increment_generation();
-
-        let RecordLsn {
-            last: last_record_lsn,
-            prev: prev_record_lsn,
-        } = self.last_record_lsn.load();
-
-        trace!("checkpoint starting at {}", last_record_lsn);
-
-        // Take the in-memory layer with the oldest WAL record. If it's older
-        // than the threshold, write it out to disk as a new image and delta file.
-        // Repeat until all remaining in-memory layers are within the threshold.
+        // If the in-memory layer is larger than 'checkpoint_distance', write it
+        // to a delta file.  That's necessary to limit the amount of WAL that
+        // needs to be kept in the safekeepers, and that needs to be reprocessed
+        // on page server crash.
         //
-        // That's necessary to limit the amount of WAL that needs to be kept
-        // in the safekeepers, and that needs to be reprocessed on page server
-        // crash. TODO: It's not a great policy for keeping memory usage in
-        // check, though. We should also aim at flushing layers that consume
-        // a lot of memory and/or aren't receiving much updates anymore.
-        let mut disk_consistent_lsn = last_record_lsn;
+        // TODO: It's not a great policy for keeping memory usage in check,
+        // though. We should also aim at flushing layers that consume a lot of
+        // memory and/or aren't receiving much updates anymore.
+        loop {
+            // Do we have a frozen in-memory layer that we need to write out?
+            // If we do, write it out now. Otherwise, check if the current
+            // in-memory layer is old enough that we should freeze and write it out.
+            let write_guard = self.write_lock.lock().unwrap();
+            let mut layers = self.layers.lock().unwrap();
+            if let Some(frozen_layer) = &layers.frozen_layer {
+                // Write out the frozen in-memory layer to disk, as a delta file
+                let frozen_layer = Arc::clone(frozen_layer);
+                drop(write_guard);
+                drop(layers);
+                self.flush_frozen_layer(frozen_layer)?;
+            } else {
+                // Freeze the current open in-memory layer, if it's larger than
+                // 'checkpoint_distance'. It will be written to disk on next
+                // iteration.
+                if let Some(open_layer) = &layers.open_layer {
+                    // Does this layer need freezing?
+                    let RecordLsn {
+                        last: last_record_lsn,
+                        prev: _prev_record_lsn,
+                    } = self.last_record_lsn.load();
+                    let oldest_lsn = open_layer.get_oldest_lsn();
+                    let distance = last_record_lsn.widening_sub(oldest_lsn);
+                    if distance < 0 || distance < checkpoint_distance.into() {
+                        info!(
+                            "the oldest layer is now {} which is {} bytes behind last_record_lsn",
+                            open_layer.filename().display(),
+                            distance
+                        );
+                        break;
+                    }
+                    let end_lsn = Lsn(self.get_last_record_lsn().0 + 1);
+                    open_layer.freeze(end_lsn);
 
-        let mut layer_paths = Vec::new();
-        let mut freeze_end_lsn = Lsn(0);
-        let mut evicted_layers = Vec::new();
-
-        //
-        // Determine which layers we need to evict and calculate max(latest_lsn)
-        // among those layers.
-        //
-        while let Some((oldest_layer_id, oldest_layer, oldest_generation)) =
-            layers.peek_oldest_open()
-        {
-            let oldest_lsn = oldest_layer.get_oldest_lsn();
-            // Does this layer need freezing?
-            //
-            // Write out all in-memory layers that contain WAL older than CHECKPOINT_DISTANCE.
-            // If we reach a layer with the same
-            // generation number, we know that we have cycled through all layers that were open
-            // when we started. We don't want to process layers inserted after we started, to
-            // avoid getting into an infinite loop trying to process again entries that we
-            // inserted ourselves.
-            //
-            // Once we have decided to write out at least one layer, we must also write out
-            // any other layers that contain WAL older than the end LSN of the layers we have
-            // already decided to write out. In other words, we must write out all layers
-            // whose [oldest_lsn, latest_lsn) range overlaps with any of the other layers
-            // that we are writing out. Otherwise, when we advance 'disk_consistent_lsn', it's
-            // ambiguous whether those layers are already durable on disk or not. For example,
-            // imagine that there are two layers in memory that contain page versions in the
-            // following LSN ranges:
-            //
-            // A: 100-150
-            // B: 110-200
-            //
-            // If we flush layer A, we must also flush layer B, because they overlap. If we
-            // flushed only A, and advanced 'disk_consistent_lsn' to 150, we would break the
-            // rule that all WAL older than 'disk_consistent_lsn' are durable on disk, because
-            // B contains some WAL older than 150. On the other hand, if we flushed out A and
-            // advanced 'disk_consistent_lsn' only up to 110, after crash and restart we would
-            // delete the first layer because its end LSN is larger than 110. If we changed
-            // the deletion logic to not delete it, then we would start streaming at 110, and
-            // process again the WAL records in the range 110-150 that are already in layer A,
-            // and the WAL processing code does not cope with that. We solve that dilemma by
-            // insisting that if we write out the first layer, we also write out the second
-            // layer, and advance disk_consistent_lsn all the way up to 200.
-            //
-            let distance = last_record_lsn.widening_sub(oldest_lsn);
-            if (distance < 0
-                || distance < checkpoint_distance.into()
-                || oldest_generation == current_generation)
-                && oldest_lsn >= freeze_end_lsn
-            // this layer intersects with evicted layer and so also need to be evicted
-            {
-                info!(
-                    "the oldest layer is now {} which is {} bytes behind last_record_lsn",
-                    oldest_layer.filename().display(),
-                    distance
-                );
-                disk_consistent_lsn = oldest_lsn;
-                break;
+                    // The layer is no longer open, update the layer map to reflect this.
+                    // We will replace it with on-disk historics below.
+                    layers.frozen_layer = Some(Arc::clone(open_layer));
+                    layers.open_layer = None;
+                    layers.next_open_layer_at = Some(end_lsn);
+                } else {
+                    break;
+                }
+                // We will write the now-frozen layer to disk on next iteration.
+                // That could take a while, so release the lock while do it
+                drop(layers);
+                drop(write_guard);
             }
-            let latest_lsn = oldest_layer.get_latest_lsn();
-            if latest_lsn > freeze_end_lsn {
-                freeze_end_lsn = latest_lsn; // calculate max of latest_lsn of the layers we're about to evict
-            }
-            layers.remove_open(oldest_layer_id);
-            evicted_layers.push((oldest_layer_id, oldest_layer));
         }
 
-        // Freeze evicted layers
-        for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
-            // Mark the layer as no longer accepting writes and record the end_lsn.
-            // This happens in-place, no new layers are created now.
-            evicted_layer.freeze(freeze_end_lsn);
-            layers.insert_historic(evicted_layer.clone());
+        // Create new image layers to allow GC and to reduce read latency
+        if reconstruct_pages {
+            // TODO: the threshold for how often we create image layers is
+            // currently hard-coded at 3. It means, write out a new image layer,
+            // if there are at least three delta layers on top of it.
+            if false {
+                self.create_image_layers(3)?;
+            }
+            self.compact_level0()?;
         }
+
+        // TODO: We should also compact existing delta layers here.
 
         // Call unload() on all frozen layers, to release memory.
         // This shouldn't be much memory, as only metadata is slurped
         // into memory.
+        let layers = self.layers.lock().unwrap();
         for layer in layers.iter_historic_layers() {
             layer.unload()?;
         }
-
         drop(layers);
-        drop(write_guard);
 
-        // Create delta/image layers for evicted layers
-        for (_evicted_layer_id, evicted_layer) in evicted_layers.iter() {
-            let mut this_layer_paths =
-                self.evict_layer(evicted_layer.clone(), reconstruct_pages)?;
-            layer_paths.append(&mut this_layer_paths);
-        }
+        Ok(())
+    }
+
+    fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
+        // Do we have a frozen in-memory layer that we need to write out?
+        let new_delta = frozen_layer.write_to_disk()?;
+
+        // Finally, replace the frozen in-memory layer with the new on-disk layers
+        let write_guard = self.write_lock.lock().unwrap();
+        let mut layers = self.layers.lock().unwrap();
+        layers.frozen_layer = None;
+
+        // Add the new delta layer to the LayerMap
+        let mut layer_paths = vec![new_delta.path()];
+        layers.insert_historic(Arc::new(new_delta));
+
+        drop(write_guard);
+        drop(layers);
 
         // Sync layers
         if !layer_paths.is_empty() {
@@ -1575,6 +1289,10 @@ impl LayeredTimeline {
             layer_paths.pop().unwrap();
         }
 
+        // Compute new 'disk_consistent_lsn'
+        let disk_consistent_lsn;
+        disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
+
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
         let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
@@ -1587,6 +1305,10 @@ impl LayeredTimeline {
             // don't remember what the correct value that corresponds to some old
             // LSN is. But if we flush everything, then the value corresponding
             // current 'last_record_lsn' is correct and we can store it on disk.
+            let RecordLsn {
+                last: last_record_lsn,
+                prev: prev_record_lsn,
+            } = self.last_record_lsn.load();
             let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
                 Some(prev_record_lsn)
             } else {
@@ -1606,6 +1328,11 @@ impl LayeredTimeline {
                 *self.latest_gc_cutoff_lsn.read().unwrap(),
                 self.initdb_lsn,
             );
+
+            fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+                "{}",
+                x.unwrap()
+            ));
 
             LayeredRepository::save_metadata(
                 self.conf,
@@ -1630,30 +1357,321 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn evict_layer(
-        &self,
-        layer: Arc<InMemoryLayer>,
-        reconstruct_pages: bool,
-    ) -> Result<Vec<PathBuf>> {
-        let new_historics = layer.write_to_disk(self, reconstruct_pages)?;
+    fn compact(&self) -> Result<()> {
+        //
+        // High level strategy for compaction / image creation:
+        //
+        // 1. First, calculate the desired "partitioning" of the
+        // currently in-use key space. The goal is to partition the
+        // key space into TARGET_FILE_SIZE chunks, but also take into
+        // account any existing image layers, and try to align the
+        // chunk boundaries with the existing image layers to avoid
+        // too much churn. Also try to align chunk boundaries with
+        // relation boundaries.  In principle, we don't know about
+        // relation boundaries here, we just deal with key-value
+        // pairs, and the code in pgdatadir_mapping.rs knows how to
+        // map relations into key-value pairs. But in practice we know
+        // that 'field6' is the block number, and the fields 1-5
+        // identify a relation. This is just an optimization,
+        // though.
+        //
+        // 2. Once we know the partitioning, for each partition,
+        // decide if it's time to create a new image layer. The
+        // criteria is: there has been too much "churn" since the last
+        // image layer? The "churn" is fuzzy concept, it's a
+        // combination of too many delta files, or too much WAL in
+        // total in the delta file. Or perhaps: if creating an image
+        // file would allow to delete some older files.
+        //
+        // 3. After that, we compact all level0 delta files if there
+        // are too many of them.  While compacting, we also garbage
+        // collect any page versions that are no longer needed because
+        // of the new image layers we created in step 2.
+        //
+        // TODO: This hight level strategy hasn't been implemented yet.
+        // Below are functions compact_level0() and create_image_layers()
+        // but they are a bit ad hoc and don't quite work like it's explained
+        // above. Rewrite it.
+        todo!()
+    }
 
-        let mut layer_paths = Vec::new();
-        let _write_guard = self.write_lock.lock().unwrap();
+    fn compact_level0(&self) -> Result<()> {
         let mut layers = self.layers.lock().unwrap();
 
-        // Finally, replace the frozen in-memory layer with the new on-disk layers
-        layers.remove_historic(layer);
+        // We compact or "shuffle" the level-0 delta layers when 10 have
+        // accumulated.
+        static COMPACT_THRESHOLD: usize = 10;
 
-        // Add the historics to the LayerMap
-        for delta_layer in new_historics.delta_layers {
-            layer_paths.push(delta_layer.path());
-            layers.insert_historic(Arc::new(delta_layer));
+        let level0_deltas = layers.get_level0_deltas()?;
+
+        if level0_deltas.len() < COMPACT_THRESHOLD {
+            return Ok(());
         }
-        for image_layer in new_historics.image_layers {
-            layer_paths.push(image_layer.path());
+
+        // FIXME: this function probably won't work correctly if there's overlap
+        // in the deltas.
+        let lsn_range = level0_deltas.iter().map(|l| l.get_lsn_range()).reduce(|a, b| {
+            min(a.start, b.start)..max(a.end, b.end)
+        }).unwrap();
+
+        let all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
+            if let Ok((a_key, a_lsn, _)) = a {
+                if let Ok((b_key, b_lsn, _)) = b {
+                    match a_key.cmp(b_key) {
+                        Ordering::Less => true,
+                        Ordering::Equal => {
+                            a_lsn <= b_lsn
+                        }
+                        Ordering::Greater => false,
+                    }
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        });
+
+        // Merge the contents of all the input delta layers into a new set
+        // of delta layers. Each output layer is TARGET_FILE_SIZE_BYTES in
+        // size, i.e. we don't try to align the layer boundaries with the
+        // image layers or relation boundaries. TODO: we probably should,
+        // to allow garbage collection to happen earlier.
+        //
+        // TODO: we should also opportunistically garbage collect what we can.
+        let mut new_layers = Vec::new();
+        let mut prev_key: Option<Key> = None;
+        let mut writer: Option<DeltaLayerWriter> = None;
+        for x in all_values_iter {
+            let (key, lsn, value) = x?;
+
+            if let Some(prev_key) = prev_key {
+                if key != prev_key && writer.is_some() {
+                    let size = writer.as_mut().unwrap().size();
+                    info!("size is now {}", size);
+                    if size > TARGET_FILE_SIZE_BYTES as u64 {
+                        new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
+                        writer = None;
+                    }
+                }
+            }
+
+            if writer.is_none() {
+                writer = Some(DeltaLayerWriter::new(
+                    self.conf,
+                    self.timelineid,
+                    self.tenantid,
+                    key,
+                    lsn_range.clone(),
+                )?);
+            }
+
+            writer.as_mut().unwrap().put_value(key, lsn, value)?;
+            prev_key = Some(key);
+        }
+        if let Some(writer) = writer {
+            new_layers.push(writer.finish(prev_key.unwrap().next())?);
+        }
+
+        for l in new_layers {
+            layers.insert_historic(Arc::new(l));
+        }
+
+        // Now that we have reshuffled the data to set of new delta layers, we can
+        // delete the old ones
+        for l in level0_deltas {
+            l.delete()?;
+            layers.remove_historic(l.clone());
+        }
+
+        Ok(())
+    }
+
+    ///
+    /// Create new image layers, to allow garbage collection to remove old files.
+    ///
+    fn create_image_layers(&self, threshold: usize) -> Result<()> {
+        let layers = self.layers.lock().unwrap();
+        let lsn = self.last_record_lsn.load().last;
+        let image_coverage = layers.image_coverage(&(Key::MIN..Key::MAX), lsn)?;
+        drop(layers);
+
+        debug!(
+            "create_image_layers called with threshold {} at {}",
+            threshold, lsn
+        );
+
+        // For any range where there has been more than 'threshold'
+        // deltas on top of the last image, create new image.
+        //
+        // TODO: Invent a better heuristic.
+        //
+        //
+        // TODO: add heuristics to greedily include more segments in the
+        // image layer, if it's otherwise very small.
+        for (key_range, last_img) in image_coverage {
+            let img_lsn = if let Some(ref last_img) = last_img {
+                last_img.get_lsn_range().end
+            } else {
+                Lsn(0)
+            };
+
+            let layers = self.layers.lock().unwrap();
+            let num_deltas = layers.get_deltas(&key_range, &(img_lsn..lsn))?.len();
+            drop(layers);
+
+            info!(
+                "range {}-{} has {} deltas on this timeline",
+                key_range.start, key_range.end, num_deltas
+            );
+            if num_deltas >= threshold {
+                self.create_image_layers_for_range(&key_range, last_img, lsn)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // Get all distinct Keys present in the given key range.
+    //
+    // This is used to figure out which parts of the overall keyspace are in use, to
+    // divide the keyspace into image layers.
+    //
+    // TODO: For a large database, this set could be very large. Use ranges or prefixes
+    // instead of individual keys.
+    fn collect_keys(
+        &self,
+        key_range: &Range<Key>,
+        img: Option<Arc<dyn Layer>>,
+        lsn: Lsn,
+        base_keys: &mut HashSet<Key>,
+        delta_keys: &mut HashSet<Key>,
+    ) -> Result<()> {
+        info!(
+            "creating image layer for key range {}-{} at {}",
+            key_range.start, key_range.end, lsn
+        );
+
+        let baseline_lsn = if let Some(img) = img {
+            // This range is covered by an image layer on this timeline. Iterate over all the keys
+            img.collect_keys(key_range, base_keys)?;
+            img.get_lsn_range().end
+        } else if self.ancestor_timeline.is_some() {
+            // Need to look at the ancestor for this range.
+            let ancestor = self.get_ancestor_timeline()?;
+
+            ancestor.collect_keys_recurse(key_range, lsn, base_keys)?;
+            self.ancestor_lsn
+        } else {
+            self.initdb_lsn
+        };
+
+        // Ok, we have baseline list of keys from the images now
+        // Add all keys from all the deltas
+        let deltas = {
+            let layers = self.layers.lock().unwrap();
+            layers.get_deltas(key_range, &(baseline_lsn..lsn))?
+        };
+
+        for delta in deltas {
+            delta.collect_keys(key_range, delta_keys)?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_keys_recurse(
+        &self,
+        key_range: &Range<Key>,
+        lsn: Lsn,
+        keys: &mut HashSet<Key>,
+    ) -> Result<()> {
+        let layers = self.layers.lock().unwrap();
+        let image_coverage = layers.image_coverage(key_range, lsn)?;
+        drop(layers);
+
+        for (range, last_img) in image_coverage {
+            let mut tmp_keys = HashSet::new();
+            self.collect_keys(&range, last_img, lsn, keys, &mut tmp_keys)?;
+            keys.extend(tmp_keys);
+        }
+
+        Ok(())
+    }
+
+    /// Create a new set of image layers for the given key range.
+    fn create_image_layers_for_range(
+        &self,
+        key_range: &Range<Key>,
+        img: Option<Arc<dyn Layer>>,
+        lsn: Lsn,
+    ) -> Result<()> {
+        info!(
+            "creating image layer for {}-{} at {}",
+            key_range.start, key_range.end, lsn
+        );
+
+        // If this gets called multiple times in a row, it's possible that the
+        // image layer already exists.
+        let layers = self.layers.lock().unwrap();
+        if layers.image_exists(key_range, lsn) {
+            info!(
+                "skipping creation of image layer for {}-{} at {} because it already exists",
+                key_range.start, key_range.end, lsn
+            );
+            return Ok(());
+        }
+        drop(layers);
+
+        let mut base_keys: HashSet<Key> = HashSet::new();
+        let mut delta_keys: HashSet<Key> = HashSet::new();
+        self.collect_keys(key_range, img, lsn, &mut base_keys, &mut delta_keys)?;
+
+        if delta_keys.is_empty() {
+            // Important special case: even though there was delta layers on top of this
+            // key range, the delta layers didn't contain any updates within the range.
+            // In that case, if we wrote a new image, it would have identical contents,
+            // just stamped at a later LSN. Not much point in that.
+            return Ok(());
+        }
+
+        // Divide the key range into roughly TARGET_FILE_SIZE chunks
+        let mut all_keys_vec: Vec<Key> =
+            base_keys.iter().chain(delta_keys.iter()).cloned().collect();
+        all_keys_vec.sort();
+        all_keys_vec.dedup();
+
+        let mut start_idx = 0;
+        let mut start_key = key_range.start;
+        while start_idx < all_keys_vec.len() {
+            let end_idx = std::cmp::min(start_idx + TARGET_FILE_SIZE as usize, all_keys_vec.len());
+            let end_key = if end_idx >= all_keys_vec.len() {
+                key_range.end
+            } else {
+                all_keys_vec[end_idx]
+            };
+
+            let img_range = start_key..end_key;
+
+            let mut image_layer_writer =
+                ImageLayerWriter::new(self.conf, self.timelineid, self.tenantid, &img_range, lsn)?;
+
+            for key in all_keys_vec[start_idx..end_idx].iter() {
+                let img = self.get(*key, lsn)?;
+                image_layer_writer.put_image(*key, &img)?;
+            }
+            let image_layer = image_layer_writer.finish()?;
+
+            let mut layers = self.layers.lock().unwrap();
             layers.insert_historic(Arc::new(image_layer));
+            drop(layers);
+            // FIXME: need to fsync?
+
+            start_idx = end_idx;
+            start_key = end_key;
         }
-        Ok(layer_paths)
+
+        Ok(())
     }
 
     ///
@@ -1678,11 +1696,21 @@ impl LayeredTimeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc_timeline(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) -> Result<GcResult> {
+    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) {
+        let mut gc_info = self.gc_info.write().unwrap();
+        gc_info.retain_lsns = retain_lsns;
+        gc_info.cutoff = cutoff;
+    }
+
+    fn gc(&self) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
+
+        let gc_info = self.gc_info.read().unwrap();
+        let retain_lsns = &gc_info.retain_lsns;
+        let cutoff = gc_info.cutoff;
 
         let _enter = info_span!("garbage collection", timeline = %self.timelineid, tenant = %self.tenantid, cutoff = %cutoff).entered();
 
@@ -1701,8 +1729,7 @@ impl LayeredTimeline {
         // Garbage collect the layer if all conditions are satisfied:
         // 1. it is older than cutoff LSN;
         // 2. it doesn't need to be retained for 'retain_lsns';
-        // 3. newer on-disk layer exists (only for non-dropped segments);
-        // 4. this layer doesn't serve as a tombstone for some older layer;
+        // 3. newer on-disk image layers cover the layer's whole key range
         //
         let mut layers = self.layers.lock().unwrap();
         'outer: for l in layers.iter_historic_layers() {
@@ -1716,28 +1743,16 @@ impl LayeredTimeline {
                 continue;
             }
 
-            let seg = l.get_seg_tag();
-
-            if seg.rel.is_relation() {
-                result.ondisk_relfiles_total += 1;
-            } else {
-                result.ondisk_nonrelfiles_total += 1;
-            }
+            result.layers_total += 1;
 
             // 1. Is it newer than cutoff point?
-            if l.get_end_lsn() > cutoff {
+            if l.get_lsn_range().end > cutoff {
                 info!(
-                    "keeping {} {}-{} because it's newer than cutoff {}",
-                    seg,
-                    l.get_start_lsn(),
-                    l.get_end_lsn(),
+                    "keeping {} because it's newer than cutoff {}",
+                    l.filename().display(),
                     cutoff
                 );
-                if seg.rel.is_relation() {
-                    result.ondisk_relfiles_needed_by_cutoff += 1;
-                } else {
-                    result.ondisk_nonrelfiles_needed_by_cutoff += 1;
-                }
+                result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
 
@@ -1746,132 +1761,39 @@ impl LayeredTimeline {
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
-            for retain_lsn in &retain_lsns {
+            for retain_lsn in retain_lsns {
                 // start_lsn is inclusive
-                if &l.get_start_lsn() <= retain_lsn {
+                if &l.get_lsn_range().start <= retain_lsn {
                     info!(
-                        "keeping {} {}-{} because it's still might be referenced by child branch forked at {} is_dropped: {} is_incremental: {}",
-                        seg,
-                        l.get_start_lsn(),
-                        l.get_end_lsn(),
+                        "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
+                        l.filename().display(),
                         retain_lsn,
-                        l.is_dropped(),
+                        //is_dropped, // FIXME
                         l.is_incremental(),
                     );
-                    if seg.rel.is_relation() {
-                        result.ondisk_relfiles_needed_by_branches += 1;
-                    } else {
-                        result.ondisk_nonrelfiles_needed_by_branches += 1;
-                    }
+                    result.layers_needed_by_branches += 1;
                     continue 'outer;
                 }
             }
 
             // 3. Is there a later on-disk layer for this relation?
-            if !l.is_dropped()
-                && !layers.newer_image_layer_exists(
-                    l.get_seg_tag(),
-                    l.get_end_lsn(),
-                    disk_consistent_lsn,
-                )
+            //
+            // The end-LSN is exclusive, while disk_consistent_lsn is
+            // inclusive. For example, if disk_consistent_lsn is 100, it is
+            // OK for a delta layer to have end LSN 101, but if the end LSN
+            // is 102, then it might not have been fully flushed to disk
+            // before crash.
+            if !layers.newer_image_layer_exists(&l.get_key_range(), l.get_lsn_range().end, disk_consistent_lsn+1)?
             {
-                info!(
-                    "keeping {} {}-{} because it is the latest layer",
-                    seg,
-                    l.get_start_lsn(),
-                    l.get_end_lsn()
-                );
-                if seg.rel.is_relation() {
-                    result.ondisk_relfiles_not_updated += 1;
-                } else {
-                    result.ondisk_nonrelfiles_not_updated += 1;
-                }
+                info!("keeping {} because it is the latest layer", l.filename().display());
+                result.layers_not_updated += 1;
                 continue 'outer;
-            }
-
-            // 4. Does this layer serve as a tombstone for some older layer?
-            if l.is_dropped() {
-                let prior_lsn = l.get_start_lsn().checked_sub(1u64).unwrap();
-
-                // Check if this layer serves as a tombstone for this timeline
-                // We have to do this separately from timeline check below,
-                // because LayerMap of this timeline is already locked.
-                let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
-                if is_tombstone {
-                    info!(
-                        "earlier layer exists at {} in {}",
-                        prior_lsn, self.timelineid
-                    );
-                }
-                // Now check ancestor timelines, if any are present locally
-                else if let Some(ancestor) =
-                    self.ancestor_timeline.as_ref().and_then(|timeline_entry| {
-                        timeline_entry.local_or_schedule_download(self.tenantid)
-                    })
-                {
-                    let prior_lsn = ancestor.get_last_record_lsn();
-                    if seg.rel.is_blocky() {
-                        info!(
-                            "check blocky relish size {} at {} in {} for layer {}-{}",
-                            seg,
-                            prior_lsn,
-                            ancestor.timelineid,
-                            l.get_start_lsn(),
-                            l.get_end_lsn()
-                        );
-                        match ancestor.get_relish_size(seg.rel, prior_lsn).unwrap() {
-                            Some(size) => {
-                                let (last_live_seg, _rel_blknum) =
-                                    SegmentTag::from_blknum(seg.rel, size - 1);
-                                info!(
-                                    "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
-                                    size, last_live_seg.segno, seg.segno
-                                );
-                                if last_live_seg.segno >= seg.segno {
-                                    is_tombstone = true;
-                                }
-                            }
-                            _ => {
-                                info!("blocky rel doesn't exist");
-                            }
-                        }
-                    } else {
-                        info!(
-                            "check non-blocky relish existence {} at {} in {} for layer {}-{}",
-                            seg,
-                            prior_lsn,
-                            ancestor.timelineid,
-                            l.get_start_lsn(),
-                            l.get_end_lsn()
-                        );
-                        is_tombstone = ancestor.get_rel_exists(seg.rel, prior_lsn).unwrap_or(false);
-                    }
-                }
-
-                if is_tombstone {
-                    info!(
-                        "keeping {} {}-{} because this layer serves as a tombstone for older layer",
-                        seg,
-                        l.get_start_lsn(),
-                        l.get_end_lsn()
-                    );
-
-                    if seg.rel.is_relation() {
-                        result.ondisk_relfiles_needed_as_tombstone += 1;
-                    } else {
-                        result.ondisk_nonrelfiles_needed_as_tombstone += 1;
-                    }
-                    continue 'outer;
-                }
             }
 
             // We didn't find any reason to keep this file, so remove it.
             info!(
-                "garbage collecting {} {}-{} is_dropped: {} is_incremental: {}",
-                l.get_seg_tag(),
-                l.get_start_lsn(),
-                l.get_end_lsn(),
-                l.is_dropped(),
+                "garbage collecting {} is_dropped: xx is_incremental: {}",
+                l.filename().display(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -1884,270 +1806,97 @@ impl LayeredTimeline {
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer.clone());
 
-            match (
-                doomed_layer.is_dropped(),
-                doomed_layer.get_seg_tag().rel.is_relation(),
-            ) {
-                (true, true) => result.ondisk_relfiles_dropped += 1,
-                (true, false) => result.ondisk_nonrelfiles_dropped += 1,
-                (false, true) => result.ondisk_relfiles_removed += 1,
-                (false, false) => result.ondisk_nonrelfiles_removed += 1,
-            }
+            result.layers_removed += 1;
         }
 
         result.elapsed = now.elapsed();
         Ok(result)
     }
 
-    fn lookup_cached_page(
+    ///
+    /// Reconstruct a value, using the given base image and WAL records in 'data'.
+    ///
+    fn reconstruct_value(
         &self,
-        rel: &RelishTag,
-        rel_blknum: BlockNumber,
-        lsn: Lsn,
-    ) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-        if let RelishTag::Relation(rel_tag) = &rel {
-            let (lsn, read_guard) = cache.lookup_materialized_page(
-                self.tenantid,
-                self.timelineid,
-                *rel_tag,
-                rel_blknum,
-                lsn,
-            )?;
-            let img = Bytes::from(read_guard.to_vec());
-            Some((lsn, img))
-        } else {
-            None
-        }
-    }
-
-    ///
-    /// Reconstruct a page version from given Layer
-    ///
-    fn materialize_page(
-        &self,
-        seg: SegmentTag,
-        seg_blknum: SegmentBlk,
-        lsn: Lsn,
-        layer: &dyn Layer,
-    ) -> Result<Bytes> {
-        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
-        // The cached image can be returned directly if there is no WAL between the cached image
-        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
-        // for redo.
-        let rel = seg.rel;
-        let rel_blknum = seg.segno * RELISH_SEG_SIZE + seg_blknum;
-        let cached_page_img = match self.lookup_cached_page(&rel, rel_blknum, lsn) {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    cmp::Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    cmp::Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    cmp::Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
-
-        let mut data = PageReconstructData {
-            records: Vec::new(),
-            page_img: cached_page_img,
-        };
-
-        // Holds an Arc reference to 'layer_ref' when iterating in the loop below.
-        let mut layer_arc: Arc<dyn Layer>;
-
-        // Call the layer's get_page_reconstruct_data function to get the base image
-        // and WAL records needed to materialize the page. If it returns 'Continue',
-        // call it again on the predecessor layer until we have all the required data.
-        let mut layer_ref = layer;
-        let mut curr_lsn = lsn;
-        loop {
-            let result = layer_ref
-                .get_page_reconstruct_data(seg_blknum, curr_lsn, &mut data)
-                .with_context(|| {
-                    format!(
-                        "Failed to get reconstruct data {} {:?} {} {}",
-                        layer_ref.get_seg_tag(),
-                        layer_ref.filename(),
-                        seg_blknum,
-                        curr_lsn,
-                    )
-                })?;
-            match result {
-                PageReconstructResult::Complete => break,
-                PageReconstructResult::Continue(cont_lsn) => {
-                    // Fetch base image / more WAL from the returned predecessor layer
-                    if let Some((cont_layer, cont_lsn)) = self.get_layer_for_read(seg, cont_lsn)? {
-                        if cont_lsn == curr_lsn {
-                            // We landed on the same layer again. Shouldn't happen, but if it does,
-                            // don't get stuck in an infinite loop.
-                            bail!(
-                                "could not find predecessor of layer {} at {}, layer returned its own LSN",
-                                layer_ref.filename().display(),
-                                cont_lsn
-                            );
-                        }
-                        layer_arc = cont_layer;
-                        layer_ref = &*layer_arc;
-                        curr_lsn = cont_lsn;
-                        continue;
-                    } else {
-                        bail!(
-                            "could not find predecessor of layer {} at {}",
-                            layer_ref.filename().display(),
-                            cont_lsn
-                        );
-                    }
-                }
-                PageReconstructResult::Missing(lsn) => {
-                    // Oops, we could not reconstruct the page.
-                    if data.records.is_empty() {
-                        // no records, and no base image. This can happen if PostgreSQL extends a relation
-                        // but never writes the page.
-                        //
-                        // Would be nice to detect that situation better.
-                        warn!("Page {} blk {} at {} not found", rel, rel_blknum, lsn);
-                        return Ok(ZERO_PAGE.clone());
-                    }
-                    bail!(
-                        "No base image found for page {} blk {} at {}/{}",
-                        rel,
-                        rel_blknum,
-                        self.timelineid,
-                        lsn,
-                    );
-                }
-            }
-        }
-
-        self.reconstruct_page(rel, rel_blknum, lsn, data)
-    }
-
-    ///
-    /// Reconstruct a page version, using the given base image and WAL records in 'data'.
-    ///
-    fn reconstruct_page(
-        &self,
-        rel: RelishTag,
-        rel_blknum: BlockNumber,
+        key: Key,
         request_lsn: Lsn,
-        mut data: PageReconstructData,
+        mut data: ValueReconstructState,
     ) -> Result<Bytes> {
         // Perform WAL redo if needed
         data.records.reverse();
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {
-            if let Some((img_lsn, img)) = &data.page_img {
+            if let Some((img_lsn, img)) = &data.img {
                 trace!(
-                    "found page image for blk {} in {} at {}, no WAL redo required",
-                    rel_blknum,
-                    rel,
+                    "found page image for key {} at {}, no WAL redo required",
+                    key,
                     img_lsn
                 );
                 Ok(img.clone())
             } else {
-                // FIXME: this ought to be an error?
-                warn!(
-                    "Page {} blk {} at {} not found",
-                    rel, rel_blknum, request_lsn
-                );
-                Ok(ZERO_PAGE.clone())
+                bail!("base image for {} at {} not found", key, request_lsn);
             }
         } else {
             // We need to do WAL redo.
             //
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
-            if data.page_img.is_none() && !data.records.first().unwrap().1.will_init() {
-                // FIXME: this ought to be an error?
-                warn!(
-                    "Base image for page {}/{} at {} not found, but got {} WAL records",
-                    rel,
-                    rel_blknum,
+            if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
+                bail!(
+                    "Base image for {} at {} not found, but got {} WAL records",
+                    key,
                     request_lsn,
                     data.records.len()
                 );
-                Ok(ZERO_PAGE.clone())
             } else {
-                let base_img = if let Some((_lsn, img)) = data.page_img {
-                    trace!("found {} WAL records and a base image for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
+                let base_img = if let Some((_lsn, img)) = data.img {
+                    trace!(
+                        "found {} WAL records and a base image for {} at {}, performing WAL redo",
+                        data.records.len(),
+                        key,
+                        request_lsn
+                    );
                     Some(img)
                 } else {
-                    trace!("found {} WAL records that will init the page for blk {} in {} at {}, performing WAL redo", data.records.len(), rel_blknum, rel, request_lsn);
+                    trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                     None
                 };
 
-                let last_rec_lsn = data.records.last().unwrap().0;
+                //let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img = self.walredo_mgr.request_redo(
-                    rel,
-                    rel_blknum,
-                    request_lsn,
-                    base_img,
-                    data.records,
-                )?;
+                let img =
+                    self.walredo_mgr
+                        .request_redo(key, request_lsn, base_img, data.records)?;
 
-                if let RelishTag::Relation(rel_tag) = &rel {
-                    let cache = page_cache::get();
-                    cache.memorize_materialized_page(
-                        self.tenantid,
-                        self.timelineid,
-                        *rel_tag,
-                        rel_blknum,
-                        last_rec_lsn,
-                        &img,
-                    );
-                }
+                // FIXME
+                /*
+                                if let RelishTag::Relation(rel_tag) = &rel {
+                                    let cache = page_cache::get();
+                                    cache.memorize_materialized_page(
+                                        self.tenantid,
+                                        self.timelineid,
+                                        *rel_tag,
+                                        rel_blknum,
+                                        last_rec_lsn,
+                                        &img,
+                                    );
+                                }
+                */
 
                 Ok(img)
             }
         }
     }
-
-    ///
-    /// This is a helper function to increase current_total_relation_size
-    ///
-    fn increase_current_logical_size(&self, diff: u32) {
-        let val = self
-            .current_logical_size
-            .fetch_add(diff as usize, atomic::Ordering::SeqCst);
-        trace!(
-            "increase_current_logical_size: {} + {} = {}",
-            val,
-            diff,
-            val + diff as usize,
-        );
-        self.current_logical_size_gauge
-            .set(val as i64 + diff as i64);
-    }
-
-    ///
-    /// This is a helper function to decrease current_total_relation_size
-    ///
-    fn decrease_current_logical_size(&self, diff: u32) {
-        let val = self
-            .current_logical_size
-            .fetch_sub(diff as usize, atomic::Ordering::SeqCst);
-        trace!(
-            "decrease_current_logical_size: {} - {} = {}",
-            val,
-            diff,
-            val - diff as usize,
-        );
-        self.current_logical_size_gauge
-            .set(val as i64 - diff as i64);
-    }
 }
 
-pub struct LayeredTimelineWriter<'a> {
+struct LayeredTimelineWriter<'a> {
     tl: &'a LayeredTimeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
 impl Deref for LayeredTimelineWriter<'_> {
-    type Target = LayeredTimeline;
+    type Target = dyn Timeline;
 
     fn deref(&self) -> &Self::Target {
         self.tl
@@ -2155,149 +1904,12 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
-    fn put_wal_record(
-        &self,
-        lsn: Lsn,
-        rel: RelishTag,
-        rel_blknum: u32,
-        rec: ZenithWalRecord,
-    ) -> Result<()> {
-        if !rel.is_blocky() && rel_blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                rel_blknum,
-                rel
-            );
-        }
-        ensure!(lsn.is_aligned(), "unaligned record LSN");
-
-        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
-        let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_wal_record(lsn, seg_blknum, rec)?;
-        self.tl
-            .increase_current_logical_size(delta_size * BLCKSZ as u32);
-        Ok(())
+    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()> {
+        self.tl.put_value(key, lsn, value)
     }
 
-    fn put_page_image(
-        &self,
-        rel: RelishTag,
-        rel_blknum: BlockNumber,
-        lsn: Lsn,
-        img: Bytes,
-    ) -> Result<()> {
-        if !rel.is_blocky() && rel_blknum != 0 {
-            bail!(
-                "invalid request for block {} for non-blocky relish {}",
-                rel_blknum,
-                rel
-            );
-        }
-        ensure!(lsn.is_aligned(), "unaligned record LSN");
-
-        let (seg, seg_blknum) = SegmentTag::from_blknum(rel, rel_blknum);
-
-        let layer = self.tl.get_layer_for_write(seg, lsn)?;
-        let delta_size = layer.put_page_image(seg_blknum, lsn, img)?;
-
-        self.tl
-            .increase_current_logical_size(delta_size * BLCKSZ as u32);
-        Ok(())
-    }
-
-    fn put_truncation(&self, rel: RelishTag, lsn: Lsn, relsize: BlockNumber) -> Result<()> {
-        if !rel.is_blocky() {
-            bail!("invalid truncation for non-blocky relish {}", rel);
-        }
-        ensure!(lsn.is_aligned(), "unaligned record LSN");
-
-        debug!("put_truncation: {} to {} blocks at {}", rel, relsize, lsn);
-
-        let oldsize = self
-            .tl
-            .get_relish_size(rel, self.tl.get_last_record_lsn())?
-            .with_context(|| {
-                format!(
-                    "attempted to truncate non-existent relish {} at {}",
-                    rel, lsn
-                )
-            })?;
-
-        if oldsize <= relsize {
-            return Ok(());
-        }
-        let old_last_seg = (oldsize - 1) / RELISH_SEG_SIZE;
-
-        let last_remain_seg = if relsize == 0 {
-            0
-        } else {
-            (relsize - 1) / RELISH_SEG_SIZE
-        };
-
-        // Drop segments beyond the last remaining segment.
-        for remove_segno in (last_remain_seg + 1)..=old_last_seg {
-            let seg = SegmentTag {
-                rel,
-                segno: remove_segno,
-            };
-
-            let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn);
-        }
-
-        // Truncate the last remaining segment to the specified size
-        if relsize == 0 || relsize % RELISH_SEG_SIZE != 0 {
-            let seg = SegmentTag {
-                rel,
-                segno: last_remain_seg,
-            };
-            let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.put_truncation(lsn, relsize % RELISH_SEG_SIZE)
-        }
-        self.tl
-            .decrease_current_logical_size((oldsize - relsize) * BLCKSZ as u32);
-        Ok(())
-    }
-
-    fn drop_relish(&self, rel: RelishTag, lsn: Lsn) -> Result<()> {
-        trace!("drop_segment: {} at {}", rel, lsn);
-
-        if rel.is_blocky() {
-            if let Some(oldsize) = self
-                .tl
-                .get_relish_size(rel, self.tl.get_last_record_lsn())?
-            {
-                let old_last_seg = if oldsize == 0 {
-                    0
-                } else {
-                    (oldsize - 1) / RELISH_SEG_SIZE
-                };
-
-                // Drop all segments of the relish
-                for remove_segno in 0..=old_last_seg {
-                    let seg = SegmentTag {
-                        rel,
-                        segno: remove_segno,
-                    };
-                    let layer = self.tl.get_layer_for_write(seg, lsn)?;
-                    layer.drop_segment(lsn);
-                }
-                self.tl
-                    .decrease_current_logical_size(oldsize * BLCKSZ as u32);
-            } else {
-                warn!(
-                    "drop_segment called on non-existent relish {} at {}",
-                    rel, lsn
-                );
-            }
-        } else {
-            // TODO handle TwoPhase relishes
-            let (seg, _seg_blknum) = SegmentTag::from_blknum(rel, 0);
-            let layer = self.tl.get_layer_for_write(seg, lsn)?;
-            layer.drop_segment(lsn);
-        }
-
-        Ok(())
+    fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+        self.tl.put_tombstone(key_range, lsn)
     }
 
     ///
@@ -2356,6 +1968,8 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::repository::repo_harness::*;
+    use rand::thread_rng;
+    use rand::Rng;
 
     #[test]
     fn corrupt_metadata() -> Result<()> {
@@ -2386,113 +2000,133 @@ mod tests {
         Ok(())
     }
 
-    ///
-    /// Test the logic in 'load_layer_map' that removes layer files that are
-    /// newer than 'disk_consistent_lsn'.
-    ///
     #[test]
-    fn future_layerfiles() -> Result<()> {
-        const TEST_NAME: &str = "future_layerfiles";
-        let harness = RepoHarness::create(TEST_NAME)?;
-        let repo = harness.load();
+    fn test_images() -> Result<()> {
+        let repo = RepoHarness::create("test_images")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
-        // Create a timeline with disk_consistent_lsn = 8000
-        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
+        #[allow(non_snake_case)]
+        let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+
         let writer = tline.writer();
-        writer.advance_last_record_lsn(Lsn(0x8000));
+        writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.advance_last_record_lsn(Lsn(0x10));
         drop(writer);
-        repo.checkpoint_iteration(CheckpointConfig::Forced)?;
-        drop(repo);
 
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.create_images(1)?;
 
-        let make_empty_file = |filename: &str| -> std::io::Result<()> {
-            let path = timeline_path.join(filename);
+        let writer = tline.writer();
+        writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.advance_last_record_lsn(Lsn(0x20));
+        drop(writer);
 
-            assert!(!path.exists());
-            std::fs::write(&path, &[])?;
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.create_images(1)?;
 
-            Ok(())
-        };
+        let writer = tline.writer();
+        writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer.advance_last_record_lsn(Lsn(0x30));
+        drop(writer);
 
-        // Helper function to check that a relation file exists, and a corresponding
-        // <filename>.0.old file does not.
-        let assert_exists = |filename: &str| {
-            let path = timeline_path.join(filename);
-            assert!(path.exists(), "file {} was removed", filename);
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.create_images(1)?;
 
-            // Check that there is no .old file
-            let backup_path = timeline_path.join(format!("{}.0.old", filename));
-            assert!(
-                !backup_path.exists(),
-                "unexpected backup file {}",
-                backup_path.display()
-            );
-        };
+        let writer = tline.writer();
+        writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer.advance_last_record_lsn(Lsn(0x40));
+        drop(writer);
 
-        // Helper function to check that a relation file does *not* exists, and a corresponding
-        // <filename>.<num>.old file does.
-        let assert_is_renamed = |filename: &str, num: u32| {
-            let path = timeline_path.join(filename);
-            assert!(
-                !path.exists(),
-                "file {} was not removed as expected",
-                filename
-            );
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        tline.create_images(1)?;
 
-            let backup_path = timeline_path.join(format!("{}.{}.old", filename, num));
-            assert!(
-                backup_path.exists(),
-                "backup file {} was not created",
-                backup_path.display()
-            );
-        };
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x30))?, TEST_IMG("foo at 0x30"));
+        assert_eq!(tline.get(TEST_KEY, Lsn(0x40))?, TEST_IMG("foo at 0x40"));
 
-        // These files are considered to be in the future and will be renamed out
-        // of the way
-        let future_filenames = vec![
-            format!("pg_control_0_{:016X}", 0x8001),
-            format!("pg_control_0_{:016X}_{:016X}", 0x8001, 0x8008),
-        ];
-        // But these are not:
-        let past_filenames = vec![
-            format!("pg_control_0_{:016X}", 0x8000),
-            format!("pg_control_0_{:016X}_{:016X}", 0x7000, 0x8001),
-        ];
+        Ok(())
+    }
 
-        for filename in future_filenames.iter().chain(past_filenames.iter()) {
-            make_empty_file(filename)?;
+    #[test]
+    fn test_bulk_insert() -> Result<()> {
+        let repo = RepoHarness::create("test_bulk_insert")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        let mut lsn = Lsn(0x10);
+
+        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut blknum = 0;
+        for _ in 1..100 {
+            for _ in 1..10000 {
+                test_key.field6 = blknum;
+                let writer = tline.writer();
+                writer.put(
+                    test_key,
+                    lsn,
+                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )?;
+                writer.advance_last_record_lsn(lsn);
+                drop(writer);
+
+                lsn = Lsn(lsn.0 + 0x10);
+                blknum += 1;
+            }
+            tline.checkpoint(CheckpointConfig::Forced)?;
+            //tline.create_images(1)?;
         }
 
-        // Load the timeline. This will cause the files in the "future" to be renamed
-        // away.
-        let new_repo = harness.load();
-        new_repo.get_timeline(TIMELINE_ID).unwrap();
-        drop(new_repo);
+        Ok(())
+    }
 
-        for filename in future_filenames.iter() {
-            assert_is_renamed(filename, 0);
-        }
-        for filename in past_filenames.iter() {
-            assert_exists(filename);
+    #[test]
+    fn test_random_updates() -> Result<()> {
+        let repo = RepoHarness::create("test_random_updates")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        const NUM_KEYS: usize = 20000;
+
+        let mut lsn = Lsn(0x10);
+
+        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut blknum = 0;
+        for _ in 0..NUM_KEYS {
+            test_key.field6 = blknum;
+            let writer = tline.writer();
+            writer.put(
+                test_key,
+                lsn,
+                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+            )?;
+            writer.advance_last_record_lsn(lsn);
+            drop(writer);
+
+            lsn = Lsn(lsn.0 + 0x10);
+            blknum += 1;
         }
 
-        // Create the future files again, and load again. They should be renamed to
-        // *.1.old this time.
-        for filename in future_filenames.iter() {
-            make_empty_file(filename)?;
-        }
+        for _ in 0..100 {
+            for _ in 0..NUM_KEYS {
+                blknum = thread_rng().gen_range(0..10000);
+                test_key.field6 = blknum;
+                let writer = tline.writer();
+                writer.put(
+                    test_key,
+                    lsn,
+                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )?;
+                writer.advance_last_record_lsn(lsn);
+                drop(writer);
 
-        let new_repo = harness.load();
-        new_repo.get_timeline(TIMELINE_ID).unwrap();
-        drop(new_repo);
+                lsn = Lsn(lsn.0 + 0x10);
+            }
 
-        for filename in future_filenames.iter() {
-            assert_is_renamed(filename, 0);
-            assert_is_renamed(filename, 1);
-        }
-        for filename in past_filenames.iter() {
-            assert_exists(filename);
+            let cutoff = tline.get_last_record_lsn();
+            tline.update_gc_info(Vec::new(), cutoff);
+            tline.checkpoint(CheckpointConfig::Forced)?;
+            tline.create_images(3)?;
+            tline.gc()?;
         }
 
         Ok(())

@@ -26,8 +26,9 @@ use super::models::BranchCreateRequest;
 use super::models::StatusResponse;
 use super::models::TenantCreateRequest;
 use crate::branches::BranchInfo;
-use crate::repository::{Repository, RepositoryTimeline, Timeline};
+use crate::repository::RepositoryTimeline;
 use crate::repository::TimelineSyncState;
+use crate::repository::{Repository, Timeline};
 use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
 
 #[derive(Debug)]

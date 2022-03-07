@@ -2,14 +2,15 @@
 //! page server.
 
 use crate::branches;
-use crate::{RepositoryImpl, TimelineImpl};
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
-use crate::repository::{Repository, TimelineSyncState};
+use crate::repository::Repository;
+use crate::repository::TimelineSyncState;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
 use crate::CheckpointConfig;
+use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{bail, Context, Result};
 use lazy_static::lazy_static;
 use log::*;
@@ -26,6 +27,8 @@ lazy_static! {
 struct Tenant {
     state: TenantState,
     repo: Arc<RepositoryImpl>,
+
+    timelines: HashMap<ZTimelineId, Arc<DatadirTimelineImpl>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -79,15 +82,17 @@ pub fn set_timeline_states(
             let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
             // Set up an object repository, for actual data storage.
-            let repo: Arc<RepositoryImpl> = Arc::new(LayeredRepository::new(
+            let repo = LayeredRepository::new(
                 conf,
                 Arc::new(walredo_mgr),
                 tenant_id,
                 conf.remote_storage_config.is_some(),
-            ));
+            );
+
             Tenant {
                 state: TenantState::Idle,
-                repo,
+                repo: Arc::new(repo),
+                timelines: HashMap::new(),
             }
         });
         if let Err(e) = put_timelines_into_tenant(tenant, tenant_id, timeline_states) {
@@ -191,6 +196,7 @@ pub fn create_repository_for_tenant(
             v.insert(Tenant {
                 state: TenantState::Idle,
                 repo,
+                timelines: HashMap::new(),
             });
         }
     }
@@ -261,11 +267,25 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<RepositoryIm
 pub fn get_timeline_for_tenant(
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
-) -> Result<Arc<TimelineImpl>> {
-    get_repository_for_tenant(tenantid)?
+) -> Result<Arc<DatadirTimelineImpl>> {
+    let mut m = access_tenants();
+    let tenant = m
+        .get_mut(&tenantid)
+        .with_context(|| format!("Tenant not found for tenant {}", tenantid))?;
+
+    if let Some(page_tline) = tenant.timelines.get(&timelineid) {
+        return Ok(Arc::clone(page_tline));
+    }
+    // First access to this timeline. Create a DatadirTimeline wrapper for it
+    let tline = tenant
+        .repo
         .get_timeline(timelineid)?
         .local_timeline()
-        .with_context(|| format!("cannot fetch timeline {}", timelineid))
+        .with_context(|| format!("cannot fetch timeline {}", timelineid))?;
+
+    let page_tline = Arc::new(DatadirTimelineImpl::new(tline));
+    tenant.timelines.insert(timelineid, Arc::clone(&page_tline));
+    Ok(page_tline)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

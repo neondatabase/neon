@@ -7,7 +7,6 @@
 
 use crate::config::PageServerConf;
 use crate::repository::Repository;
-use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -255,8 +254,7 @@ fn walreceiver_main(
                     // at risk of hitting a deadlock.
                     assert!(lsn.is_aligned());
 
-                    let writer = timeline.writer();
-                    walingest.ingest_record(&*timeline, writer.as_ref(), recdata, lsn)?;
+                    walingest.ingest_record(&timeline, recdata, lsn)?;
 
                     fail_point!("walreceiver-after-ingest");
 

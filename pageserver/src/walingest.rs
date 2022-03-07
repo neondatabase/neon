@@ -23,14 +23,16 @@
 
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
-use std::cmp::min;
 
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
+use std::collections::HashMap;
+
+use crate::pgdatadir_mapping::*;
 use crate::relish::*;
-use crate::repository::*;
+use crate::repository::Repository;
 use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
@@ -40,22 +42,28 @@ use zenith_utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
-pub struct WalIngest {
+pub struct WalIngest<'a, R: Repository> {
+    timeline: &'a DatadirTimeline<R>,
+
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+
+    relsize_cache: HashMap<RelTag, BlockNumber>,
 }
 
-impl WalIngest {
-    pub fn new<T: Timeline>(timeline: &T, startpoint: Lsn) -> Result<WalIngest> {
+impl<'a, R: Repository> WalIngest<'a, R> {
+    pub fn new(timeline: &DatadirTimeline<R>, startpoint: Lsn) -> Result<WalIngest<R>> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
-        let checkpoint_bytes = timeline.get_page_at_lsn(RelishTag::Checkpoint, 0, startpoint)?;
+        let checkpoint_bytes = timeline.get_checkpoint(startpoint)?;
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
         Ok(WalIngest {
+            timeline,
             checkpoint,
             checkpoint_modified: false,
+            relsize_cache: HashMap::new(),
         })
     }
 
@@ -66,13 +74,14 @@ impl WalIngest {
     /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
     /// relations/pages that the record affects.
     ///
-    pub fn ingest_record<T: Timeline>(
+    pub fn ingest_record(
         &mut self,
-        timeline: &T,
-        writer: &dyn TimelineWriter,
+        timeline: &DatadirTimeline<R>,
         recdata: Bytes,
         lsn: Lsn,
     ) -> Result<()> {
+        let mut writer = timeline.begin_record(lsn);
+
         let mut decoded = decode_wal_record(recdata);
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -87,48 +96,34 @@ impl WalIngest {
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
             || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
         {
-            self.ingest_heapam_record(&mut buf, writer, lsn, &mut decoded)?;
+            self.ingest_heapam_record(&mut buf, &mut writer, &mut decoded)?;
         }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                == pg_constants::XLOG_SMGR_CREATE
+        {
+            let create = XlSmgrCreate::decode(&mut buf);
+            self.ingest_xlog_smgr_create(&mut writer, &create)?;
+        } else if decoded.xl_rmid == pg_constants::RM_SMGR_ID
+            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&mut buf);
-            self.ingest_xlog_smgr_truncate(writer, lsn, &truncate)?;
+            self.ingest_xlog_smgr_truncate(&mut writer, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
             if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_CREATE
             {
                 let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(timeline, writer, lsn, &createdb)?;
+                self.ingest_xlog_dbase_create(&mut writer, &createdb)?;
             } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_DROP
             {
                 let dropdb = XlDropDatabase::decode(&mut buf);
-
-                // To drop the database, we need to drop all the relations in it. Like in
-                // ingest_xlog_dbase_create(), use the previous record's LSN in the list_rels() call
-                let req_lsn = min(timeline.get_last_record_lsn(), lsn);
-
                 for tablespace_id in dropdb.tablespace_ids {
-                    let rels = timeline.list_rels(tablespace_id, dropdb.db_id, req_lsn)?;
-                    for rel in rels {
-                        writer.drop_relish(rel, lsn)?;
-                    }
-                    trace!(
-                        "Drop FileNodeMap {}, {} at lsn {}",
-                        tablespace_id,
-                        dropdb.db_id,
-                        lsn
-                    );
-                    writer.drop_relish(
-                        RelishTag::FileNodeMap {
-                            spcnode: tablespace_id,
-                            dbnode: dropdb.db_id,
-                        },
-                        lsn,
-                    )?;
+                    trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                    writer.drop_dbdir(tablespace_id, dropdb.db_id)?;
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
@@ -139,19 +134,17 @@ impl WalIngest {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                writer.put_page_image(
-                    RelishTag::Slru {
-                        slru: SlruKind::Clog,
-                        segno,
-                    },
+                self.put_slru_page_image(
+                    &mut writer,
+                    SlruKind::Clog,
+                    segno,
                     rpageno,
-                    lsn,
                     ZERO_PAGE.clone(),
                 )?;
             } else {
                 assert!(info == pg_constants::CLOG_TRUNCATE);
                 let xlrec = XlClogTruncate::decode(&mut buf);
-                self.ingest_clog_truncate_record(timeline, writer, lsn, &xlrec)?;
+                self.ingest_clog_truncate_record(&mut writer, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
             let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -159,8 +152,7 @@ impl WalIngest {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    writer,
-                    lsn,
+                    &mut writer,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT,
                 )?;
@@ -170,8 +162,7 @@ impl WalIngest {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    writer,
-                    lsn,
+                    &mut writer,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
                 )?;
@@ -180,23 +171,11 @@ impl WalIngest {
                     "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
                     decoded.xl_xid,
                     parsed_xact.xid,
-                    lsn
+                    lsn,
                 );
-                writer.drop_relish(
-                    RelishTag::TwoPhase {
-                        xid: parsed_xact.xid,
-                    },
-                    lsn,
-                )?;
+                writer.drop_twophase_file(parsed_xact.xid)?;
             } else if info == pg_constants::XLOG_XACT_PREPARE {
-                writer.put_page_image(
-                    RelishTag::TwoPhase {
-                        xid: decoded.xl_xid,
-                    },
-                    0,
-                    lsn,
-                    Bytes::copy_from_slice(&buf[..]),
-                )?;
+                writer.put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]))?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_MULTIXACT_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -205,38 +184,34 @@ impl WalIngest {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                writer.put_page_image(
-                    RelishTag::Slru {
-                        slru: SlruKind::MultiXactOffsets,
-                        segno,
-                    },
+                self.put_slru_page_image(
+                    &mut writer,
+                    SlruKind::MultiXactOffsets,
+                    segno,
                     rpageno,
-                    lsn,
                     ZERO_PAGE.clone(),
                 )?;
             } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
                 let pageno = buf.get_u32_le();
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                writer.put_page_image(
-                    RelishTag::Slru {
-                        slru: SlruKind::MultiXactMembers,
-                        segno,
-                    },
+                self.put_slru_page_image(
+                    &mut writer,
+                    SlruKind::MultiXactMembers,
+                    segno,
                     rpageno,
-                    lsn,
                     ZERO_PAGE.clone(),
                 )?;
             } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                 let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(writer, lsn, &xlrec)?;
+                self.ingest_multixact_create_record(&mut writer, &xlrec)?;
             } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                 let xlrec = XlMultiXactTruncate::decode(&mut buf);
-                self.ingest_multixact_truncate_record(writer, lsn, &xlrec)?;
+                self.ingest_multixact_truncate_record(&mut writer, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
             let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(writer, lsn, &xlrec, &decoded)?;
+            self.ingest_relmap_page(&mut writer, &xlrec, &decoded)?;
         } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_NEXTOID {
@@ -271,37 +246,37 @@ impl WalIngest {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
-            self.ingest_decoded_block(writer, lsn, &decoded, blk)?;
+            self.ingest_decoded_block(&mut writer, lsn, &decoded, blk)?;
         }
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
             let new_checkpoint_bytes = self.checkpoint.encode();
 
-            writer.put_page_image(RelishTag::Checkpoint, 0, lsn, new_checkpoint_bytes)?;
+            writer.put_checkpoint(new_checkpoint_bytes)?;
             self.checkpoint_modified = false;
         }
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        writer.advance_last_record_lsn(lsn);
+        writer.finish()?;
 
         Ok(())
     }
 
     fn ingest_decoded_block(
         &mut self,
-        timeline: &dyn TimelineWriter,
+        timeline: &mut DatadirTimelineWriter<R>,
         lsn: Lsn,
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
     ) -> Result<()> {
-        let tag = RelishTag::Relation(RelTag {
+        let rel = RelTag {
             spcnode: blk.rnode_spcnode,
             dbnode: blk.rnode_dbnode,
             relnode: blk.rnode_relnode,
             forknum: blk.forknum as u8,
-        });
+        };
 
         //
         // Instead of storing full-page-image WAL record,
@@ -331,13 +306,13 @@ impl WalIngest {
             image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
             image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
-            timeline.put_page_image(tag, blk.blkno, lsn, image.freeze())?;
+            self.put_rel_page_image(timeline, rel, blk.blkno, image.freeze())?;
         } else {
             let rec = ZenithWalRecord::Postgres {
                 will_init: blk.will_init || blk.apply_image,
                 rec: decoded.record.clone(),
             };
-            timeline.put_wal_record(lsn, tag, blk.blkno, rec)?;
+            self.put_rel_wal_record(timeline, rel, blk.blkno, rec)?;
         }
         Ok(())
     }
@@ -345,8 +320,7 @@ impl WalIngest {
     fn ingest_heapam_record(
         &mut self,
         buf: &mut Bytes,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -410,21 +384,21 @@ impl WalIngest {
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
-            let vm_relish = RelishTag::Relation(RelTag {
+            let vm_rel = RelTag {
                 forknum: pg_constants::VISIBILITYMAP_FORKNUM,
                 spcnode: decoded.blocks[0].rnode_spcnode,
                 dbnode: decoded.blocks[0].rnode_dbnode,
                 relnode: decoded.blocks[0].rnode_relnode,
-            });
+            };
 
             let new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
             let old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
             if new_vm_blk == old_vm_blk {
                 // An UPDATE record that needs to clear the bits for both old and the
                 // new page, both of which reside on the same VM page.
-                timeline.put_wal_record(
-                    lsn,
-                    vm_relish,
+                self.put_rel_wal_record(
+                    timeline,
+                    vm_rel,
                     new_vm_blk.unwrap(),
                     ZenithWalRecord::ClearVisibilityMapFlags {
                         new_heap_blkno,
@@ -436,9 +410,9 @@ impl WalIngest {
                 // Clear VM bits for one heap page, or for two pages that reside on
                 // different VM pages.
                 if let Some(new_vm_blk) = new_vm_blk {
-                    timeline.put_wal_record(
-                        lsn,
-                        vm_relish,
+                    self.put_rel_wal_record(
+                        timeline,
+                        vm_rel,
                         new_vm_blk,
                         ZenithWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
@@ -448,9 +422,9 @@ impl WalIngest {
                     )?;
                 }
                 if let Some(old_vm_blk) = old_vm_blk {
-                    timeline.put_wal_record(
-                        lsn,
-                        vm_relish,
+                    self.put_rel_wal_record(
+                        timeline,
+                        vm_rel,
                         old_vm_blk,
                         ZenithWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno: None,
@@ -466,11 +440,9 @@ impl WalIngest {
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_DBASE_CREATE record.
-    fn ingest_xlog_dbase_create<T: Timeline>(
+    fn ingest_xlog_dbase_create(
         &mut self,
-        timeline: &T,
-        writer: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         rec: &XlCreateDatabase,
     ) -> Result<()> {
         let db_id = rec.db_id;
@@ -483,66 +455,66 @@ impl WalIngest {
         // cannot pass 'lsn' to the Timeline.get_* functions, or they will block waiting for
         // the last valid LSN to advance up to it. So we use the previous record's LSN in the
         // get calls instead.
-        let req_lsn = min(timeline.get_last_record_lsn(), lsn);
+        let req_lsn = timeline.get_last_record_lsn();
 
         let rels = timeline.list_rels(src_tablespace_id, src_db_id, req_lsn)?;
 
-        trace!("ingest_xlog_dbase_create: {} rels", rels.len());
+        debug!("ingest_xlog_dbase_create: {} rels", rels.len());
+
+        timeline.put_dbdir_creation(tablespace_id, db_id)?;
 
         let mut num_rels_copied = 0;
         let mut num_blocks_copied = 0;
-        for rel in rels {
-            if let RelishTag::Relation(src_rel) = rel {
-                assert_eq!(src_rel.spcnode, src_tablespace_id);
-                assert_eq!(src_rel.dbnode, src_db_id);
+        for src_rel in rels {
+            assert_eq!(src_rel.spcnode, src_tablespace_id);
+            assert_eq!(src_rel.dbnode, src_db_id);
 
-                let nblocks = timeline.get_relish_size(rel, req_lsn)?.unwrap_or(0);
-                let dst_rel = RelTag {
-                    spcnode: tablespace_id,
-                    dbnode: db_id,
-                    relnode: src_rel.relnode,
-                    forknum: src_rel.forknum,
-                };
+            let nblocks = timeline.get_rel_size(src_rel, req_lsn)?;
+            let dst_rel = RelTag {
+                spcnode: tablespace_id,
+                dbnode: db_id,
+                relnode: src_rel.relnode,
+                forknum: src_rel.forknum,
+            };
 
-                // Copy content
-                for blknum in 0..nblocks {
-                    let content = timeline.get_page_at_lsn(rel, blknum, req_lsn)?;
+            timeline.put_rel_creation(dst_rel, nblocks)?;
 
-                    debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+            // Copy content
+            debug!("copying rel {} to {}, {} blocks", src_rel, dst_rel, nblocks);
+            for blknum in 0..nblocks {
+                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
 
-                    writer.put_page_image(RelishTag::Relation(dst_rel), blknum, lsn, content)?;
-                    num_blocks_copied += 1;
-                }
-
-                if nblocks == 0 {
-                    // make sure we have some trace of the relation, even if it's empty
-                    writer.put_truncation(RelishTag::Relation(dst_rel), lsn, 0)?;
-                }
-
-                num_rels_copied += 1;
+                let content = timeline.get_rel_page_at_lsn(src_rel, blknum, req_lsn)?;
+                timeline.put_rel_page_image(dst_rel, blknum, content)?;
+                num_blocks_copied += 1;
             }
+
+            num_rels_copied += 1;
         }
 
         // Copy relfilemap
-        // TODO This implementation is very inefficient -
-        // it scans all non-rels only to find FileNodeMaps
-        for tag in timeline.list_nonrels(req_lsn)? {
-            if let RelishTag::FileNodeMap { spcnode, dbnode } = tag {
-                if spcnode == src_tablespace_id && dbnode == src_db_id {
-                    let img = timeline.get_page_at_lsn(tag, 0, req_lsn)?;
-                    let new_tag = RelishTag::FileNodeMap {
-                        spcnode: tablespace_id,
-                        dbnode: db_id,
-                    };
-                    writer.put_page_image(new_tag, 0, lsn, img)?;
-                    break;
-                }
-            }
-        }
+        let filemap = timeline.get_relmap_file(src_tablespace_id, src_db_id, req_lsn)?;
+        timeline.put_relmap_file(tablespace_id, db_id, filemap)?;
+
         info!(
-            "Created database {}/{}, copied {} blocks in {} rels at {}",
-            tablespace_id, db_id, num_blocks_copied, num_rels_copied, lsn
+            "Created database {}/{}, copied {} blocks in {} rels",
+            tablespace_id, db_id, num_blocks_copied, num_rels_copied
         );
+        Ok(())
+    }
+
+    fn ingest_xlog_smgr_create(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rec: &XlSmgrCreate,
+    ) -> Result<()> {
+        let rel = RelTag {
+            spcnode: rec.rnode.spcnode,
+            dbnode: rec.rnode.dbnode,
+            relnode: rec.rnode.relnode,
+            forknum: rec.forknum,
+        };
+        writer.put_rel_creation(rel, 0)?;
         Ok(())
     }
 
@@ -551,8 +523,7 @@ impl WalIngest {
     /// This is the same logic as in PostgreSQL's smgr_redo() function.
     fn ingest_xlog_smgr_truncate(
         &mut self,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        writer: &mut DatadirTimelineWriter<R>,
         rec: &XlSmgrTruncate,
     ) -> Result<()> {
         let spcnode = rec.rnode.spcnode;
@@ -566,7 +537,7 @@ impl WalIngest {
                 relnode,
                 forknum: pg_constants::MAIN_FORKNUM,
             };
-            timeline.put_truncation(RelishTag::Relation(rel), lsn, rec.blkno)?;
+            self.put_rel_truncation(writer, rel, rec.blkno)?;
         }
         if (rec.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
             let rel = RelTag {
@@ -589,7 +560,7 @@ impl WalIngest {
                 info!("Partial truncation of FSM is not supported");
             }
             let num_fsm_blocks = 0;
-            timeline.put_truncation(RelishTag::Relation(rel), lsn, num_fsm_blocks)?;
+            self.put_rel_truncation(writer, rel, num_fsm_blocks)?;
         }
         if (rec.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
             let rel = RelTag {
@@ -608,7 +579,7 @@ impl WalIngest {
                 info!("Partial truncation of VM is not supported");
             }
             let num_vm_blocks = 0;
-            timeline.put_truncation(RelishTag::Relation(rel), lsn, num_vm_blocks)?;
+            self.put_rel_truncation(writer, rel, num_vm_blocks)?;
         }
         Ok(())
     }
@@ -617,8 +588,7 @@ impl WalIngest {
     ///
     fn ingest_xact_record(
         &mut self,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        writer: &mut DatadirTimelineWriter<R>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
     ) -> Result<()> {
@@ -634,12 +604,9 @@ impl WalIngest {
                 // This subxact goes to different page. Write the record
                 // for all the XIDs on the previous page, and continue
                 // accumulating XIDs on this new page.
-                timeline.put_wal_record(
-                    lsn,
-                    RelishTag::Slru {
-                        slru: SlruKind::Clog,
-                        segno,
-                    },
+                writer.put_slru_wal_record(
+                    SlruKind::Clog,
+                    segno,
                     rpageno,
                     if is_commit {
                         ZenithWalRecord::ClogSetCommitted { xids: page_xids }
@@ -654,12 +621,9 @@ impl WalIngest {
             rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             page_xids.push(*subxact);
         }
-        timeline.put_wal_record(
-            lsn,
-            RelishTag::Slru {
-                slru: SlruKind::Clog,
-                segno,
-            },
+        writer.put_slru_wal_record(
+            SlruKind::Clog,
+            segno,
             rpageno,
             if is_commit {
                 ZenithWalRecord::ClogSetCommitted { xids: page_xids }
@@ -676,22 +640,23 @@ impl WalIngest {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
-                timeline.drop_relish(RelishTag::Relation(rel), lsn)?;
+                let last_lsn = self.timeline.get_last_record_lsn();
+                if writer.get_rel_exists(rel, last_lsn)? {
+                    self.put_rel_drop(writer, rel)?;
+                }
             }
         }
         Ok(())
     }
 
-    fn ingest_clog_truncate_record<T: Timeline>(
+    fn ingest_clog_truncate_record(
         &mut self,
-        timeline: &T,
-        writer: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         xlrec: &XlClogTruncate,
     ) -> Result<()> {
         info!(
-            "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {} lsn {}",
-            xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db, lsn
+            "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
+            xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
         );
 
         // Here we treat oldestXid and oldestXidDB
@@ -722,23 +687,17 @@ impl WalIngest {
         }
 
         // Iterate via SLRU CLOG segments and drop segments that we're ready to truncate
-        // TODO This implementation is very inefficient -
-        // it scans all non-rels only to find Clog
         //
         // We cannot pass 'lsn' to the Timeline.list_nonrels(), or it
         // will block waiting for the last valid LSN to advance up to
         // it. So we use the previous record's LSN in the get calls
         // instead.
-        let req_lsn = min(timeline.get_last_record_lsn(), lsn);
-        for obj in timeline.list_nonrels(req_lsn)? {
-            if let RelishTag::Slru { slru, segno } = obj {
-                if slru == SlruKind::Clog {
-                    let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
-                    if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
-                        writer.drop_relish(RelishTag::Slru { slru, segno }, lsn)?;
-                        trace!("Drop CLOG segment {:>04X} at lsn {}", segno, lsn);
-                    }
-                }
+        let req_lsn = timeline.get_last_record_lsn();
+        for segno in timeline.list_slru_segments(SlruKind::Clog, req_lsn)? {
+            let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
+            if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
+                timeline.drop_slru_segment(SlruKind::Clog, segno)?;
+                trace!("Drop CLOG segment {:>04X}", segno);
             }
         }
 
@@ -747,8 +706,7 @@ impl WalIngest {
 
     fn ingest_multixact_create_record(
         &mut self,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         xlrec: &XlMultiXactCreate,
     ) -> Result<()> {
         // Create WAL record for updating the multixact-offsets page
@@ -756,12 +714,9 @@ impl WalIngest {
         let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
 
-        timeline.put_wal_record(
-            lsn,
-            RelishTag::Slru {
-                slru: SlruKind::MultiXactOffsets,
-                segno,
-            },
+        timeline.put_slru_wal_record(
+            SlruKind::MultiXactOffsets,
+            segno,
             rpageno,
             ZenithWalRecord::MultixactOffsetCreate {
                 mid: xlrec.mid,
@@ -793,12 +748,9 @@ impl WalIngest {
             }
             let n_this_page = this_page_members.len();
 
-            timeline.put_wal_record(
-                lsn,
-                RelishTag::Slru {
-                    slru: SlruKind::MultiXactMembers,
-                    segno: pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
-                },
+            timeline.put_slru_wal_record(
+                SlruKind::MultiXactMembers,
+                pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
                 pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
                 ZenithWalRecord::MultixactMembersCreate {
                     moff: offset,
@@ -833,8 +785,7 @@ impl WalIngest {
 
     fn ingest_multixact_truncate_record(
         &mut self,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         xlrec: &XlMultiXactTruncate,
     ) -> Result<()> {
         self.checkpoint.oldestMulti = xlrec.end_trunc_off;
@@ -850,13 +801,7 @@ impl WalIngest {
         // Delete all the segments except the last one. The last segment can still
         // contain, possibly partially, valid data.
         while segment != endsegment {
-            timeline.drop_relish(
-                RelishTag::Slru {
-                    slru: SlruKind::MultiXactMembers,
-                    segno: segment as u32,
-                },
-                lsn,
-            )?;
+            timeline.drop_slru_segment(SlruKind::MultiXactMembers, segment as u32)?;
 
             /* move to next segment, handling wraparound correctly */
             if segment == maxsegment {
@@ -874,22 +819,516 @@ impl WalIngest {
 
     fn ingest_relmap_page(
         &mut self,
-        timeline: &dyn TimelineWriter,
-        lsn: Lsn,
+        timeline: &mut DatadirTimelineWriter<R>,
         xlrec: &XlRelmapUpdate,
         decoded: &DecodedWALRecord,
     ) -> Result<()> {
-        let tag = RelishTag::FileNodeMap {
-            spcnode: xlrec.tsid,
-            dbnode: xlrec.dbid,
-        };
-
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
         // skip xl_relmap_update
         buf.advance(12);
 
-        timeline.put_page_image(tag, 0, lsn, Bytes::copy_from_slice(&buf[..]))?;
+        timeline.put_relmap_file(xlrec.tsid, xlrec.dbid, Bytes::copy_from_slice(&buf[..]))?;
+
+        Ok(())
+    }
+
+    fn put_rel_page_image(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rel: RelTag,
+        blknum: BlockNumber,
+        img: Bytes,
+    ) -> Result<()> {
+        self.handle_rel_extend(writer, rel, blknum)?;
+        writer.put_rel_page_image(rel, blknum, img)?;
+        Ok(())
+    }
+
+    fn put_rel_wal_record(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rel: RelTag,
+        blknum: BlockNumber,
+        rec: ZenithWalRecord,
+    ) -> Result<()> {
+        self.handle_rel_extend(writer, rel, blknum)?;
+        writer.put_rel_wal_record(rel, blknum, rec)?;
+        Ok(())
+    }
+
+    fn put_rel_truncation(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rel: RelTag,
+        nblocks: BlockNumber,
+    ) -> Result<()> {
+        writer.put_rel_truncation(rel, nblocks)?;
+        self.relsize_cache.insert(rel, nblocks);
+        Ok(())
+    }
+
+    fn put_rel_drop(&mut self, writer: &mut DatadirTimelineWriter<R>, rel: RelTag) -> Result<()> {
+        writer.put_rel_drop(rel)?;
+        self.relsize_cache.remove(&rel);
+        Ok(())
+    }
+
+    fn handle_rel_extend(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rel: RelTag,
+        blknum: BlockNumber,
+    ) -> Result<()> {
+        let new_nblocks = blknum + 1;
+        let old_nblocks = if let Some(nblocks) = self.relsize_cache.get(&rel) {
+            *nblocks
+        } else {
+            // Check if the relation exists. We implicitly create relations on first
+            // record.
+            // TODO: would be nice if to be more explicit about it
+            let last_lsn = self.timeline.get_last_record_lsn();
+            let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+                // create it with 0 size initially, the logic below will extend it
+                writer.put_rel_creation(rel, 0)?;
+                0
+            } else {
+                self.timeline.get_rel_size(rel, last_lsn)?
+            };
+            self.relsize_cache.insert(rel, nblocks);
+            nblocks
+        };
+
+        if new_nblocks > old_nblocks {
+            //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
+            writer.put_rel_extend(rel, new_nblocks)?;
+
+            // fill the gap with zeros
+            for gap_blknum in old_nblocks..blknum {
+                writer.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+            }
+            self.relsize_cache.insert(rel, new_nblocks);
+        }
+        Ok(())
+    }
+
+    fn put_slru_page_image(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+        img: Bytes,
+    ) -> Result<()> {
+        self.handle_slru_extend(writer, kind, segno, blknum)?;
+        writer.put_slru_page_image(kind, segno, blknum, img)?;
+        Ok(())
+    }
+
+    fn handle_slru_extend(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+    ) -> Result<()> {
+        // we don't use a cache for this like we do for relations. SLRUS are explcitly
+        // extended with ZEROPAGE records, not with commit records, so it happens
+        // a lot less frequently.
+
+        let new_nblocks = blknum + 1;
+        // Check if the relation exists. We implicitly create relations on first
+        // record.
+        // TODO: would be nice if to be more explicit about it
+        let last_lsn = self.timeline.get_last_record_lsn();
+        let old_nblocks = if !self
+            .timeline
+            .get_slru_segment_exists(kind, segno, last_lsn)?
+        {
+            // create it with 0 size initially, the logic below will extend it
+            writer.put_slru_segment_creation(kind, segno, 0)?;
+            0
+        } else {
+            self.timeline.get_slru_segment_size(kind, segno, last_lsn)?
+        };
+
+        if new_nblocks > old_nblocks {
+            trace!(
+                "extending SLRU {:?} seg {} from {} to {} blocks",
+                kind,
+                segno,
+                old_nblocks,
+                new_nblocks
+            );
+            writer.put_slru_extend(kind, segno, new_nblocks)?;
+
+            // fill the gap with zeros
+            for gap_blknum in old_nblocks..blknum {
+                writer.put_slru_page_image(kind, segno, gap_blknum, ZERO_PAGE.clone())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+///
+/// Tests that should work the same with any Repository/Timeline implementation.
+///
+#[allow(clippy::bool_assert_comparison)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pgdatadir_mapping::create_test_timeline;
+    use crate::repository::repo_harness::*;
+    use postgres_ffi::pg_constants;
+
+    /// Arbitrary relation tag, for testing.
+    const TESTREL_A: RelTag = RelTag {
+        spcnode: 0,
+        dbnode: 111,
+        relnode: 1000,
+        forknum: 0,
+    };
+
+    fn assert_current_logical_size<R: Repository>(_timeline: &DatadirTimeline<R>, _lsn: Lsn) {
+        // TODO
+    }
+
+    static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
+
+    fn init_walingest_test<'a, R: Repository>(
+        tline: &'a DatadirTimeline<R>,
+    ) -> Result<WalIngest<'a, R>> {
+        let mut writer = tline.begin_record(Lsn(0x10));
+        writer.put_checkpoint(ZERO_CHECKPOINT.clone())?;
+        writer.finish()?;
+        let walingest = WalIngest::new(tline, Lsn(0x10))?;
+
+        Ok(walingest)
+    }
+
+    #[test]
+    fn test_relsize() -> Result<()> {
+        let repo = RepoHarness::create("test_relsize")?.load();
+        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut walingest = init_walingest_test(&tline)?;
+
+        let mut writer = tline.begin_record(Lsn(0x20));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
+        writer.finish()?;
+        let mut writer = tline.begin_record(Lsn(0x30));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"))?;
+        writer.finish()?;
+        let mut writer = tline.begin_record(Lsn(0x40));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"))?;
+        writer.finish()?;
+        let mut writer = tline.begin_record(Lsn(0x50));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"))?;
+        writer.finish()?;
+
+        assert_current_logical_size(&tline, Lsn(0x50));
+
+        // The relation was created at LSN 2, not visible at LSN 1 yet.
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
+
+        // FIXME: should error out?
+        //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10))?.is_none());
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, 3);
+
+        // Check page contents at each LSN
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20))?,
+            TEST_IMG("foo blk 0 at 2")
+        );
+
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30))?,
+            TEST_IMG("foo blk 0 at 3")
+        );
+
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
+            TEST_IMG("foo blk 0 at 3")
+        );
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?,
+            TEST_IMG("foo blk 1 at 4")
+        );
+
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
+            TEST_IMG("foo blk 0 at 3")
+        );
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?,
+            TEST_IMG("foo blk 1 at 4")
+        );
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            TEST_IMG("foo blk 2 at 5")
+        );
+
+        // Truncate last block
+        let mut writer = tline.begin_record(Lsn(0x60));
+        walingest.put_rel_truncation(&mut writer, TESTREL_A, 2)?;
+        writer.finish()?;
+        assert_current_logical_size(&tline, Lsn(0x60));
+
+        // Check reported size and contents after truncation
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 2);
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60))?,
+            TEST_IMG("foo blk 0 at 3")
+        );
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?,
+            TEST_IMG("foo blk 1 at 4")
+        );
+
+        // should still see the truncated block with older LSN
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, 3);
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            TEST_IMG("foo blk 2 at 5")
+        );
+
+        // Truncate to zero length
+        let mut writer = tline.begin_record(Lsn(0x68));
+        walingest.put_rel_truncation(&mut writer, TESTREL_A, 0)?;
+        writer.finish()?;
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68))?, 0);
+
+        // Extend from 0 to 2 blocks, leaving a gap
+        let mut writer = tline.begin_record(Lsn(0x70));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
+        writer.finish()?;
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70))?, 2);
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?,
+            ZERO_PAGE
+        );
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70))?,
+            TEST_IMG("foo blk 1")
+        );
+
+        // Extend a lot more, leaving a big gap that spans across segments
+        let mut writer = tline.begin_record(Lsn(0x80));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
+        writer.finish()?;
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, 1501);
+        for blk in 2..1500 {
+            assert_eq!(
+                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
+                ZERO_PAGE
+            );
+        }
+        assert_eq!(
+            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
+            TEST_IMG("foo blk 1500")
+        );
+
+        Ok(())
+    }
+
+    // Test what happens if we dropped a relation
+    // and then created it again within the same layer.
+    #[test]
+    fn test_drop_extend() -> Result<()> {
+        let repo = RepoHarness::create("test_drop_extend")?.load();
+        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut walingest = init_walingest_test(&tline)?;
+
+        let mut writer = tline.begin_record(Lsn(0x20));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
+        writer.finish()?;
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
+
+        // Drop relish
+        let mut writer = tline.begin_record(Lsn(0x30));
+        walingest.put_rel_drop(&mut writer, TESTREL_A)?;
+        writer.finish()?;
+
+        // Check that rel is not visible anymore
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
+
+        // FIXME: should fail
+        //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30))?.is_none());
+
+        // Re-create it
+        let mut writer = tline.begin_record(Lsn(0x40));
+        walingest.put_rel_page_image(&mut writer, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"))?;
+        writer.finish()?;
+
+        // Check that rel exists and size is correct
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x40))?, 1);
+
+        Ok(())
+    }
+
+    // Test what happens if we truncated a relation
+    // so that one of its segments was dropped
+    // and then extended it again within the same layer.
+    #[test]
+    fn test_truncate_extend() -> Result<()> {
+        let repo = RepoHarness::create("test_truncate_extend")?.load();
+        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut walingest = init_walingest_test(&tline)?;
+
+        //from storage_layer.rs
+        const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
+        let relsize = RELISH_SEG_SIZE * 2;
+
+        // Create relation with relsize blocks
+        let mut writer = tline.begin_record(Lsn(0x20));
+        for blkno in 0..relsize {
+            let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
+            walingest.put_rel_page_image(&mut writer, TESTREL_A, blkno, TEST_IMG(&data))?;
+        }
+        writer.finish()?;
+
+        // The relation was created at LSN 20, not visible at LSN 1 yet.
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
+
+        // FIXME: should fail
+        // assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10))?.is_none());
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, relsize);
+
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Truncate relation so that second segment was dropped
+        // - only leave one page
+        let mut writer = tline.begin_record(Lsn(0x60));
+        walingest.put_rel_truncation(&mut writer, TESTREL_A, 1)?;
+        writer.finish()?;
+
+        // Check reported size and contents after truncation
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 1);
+
+        for blkno in 0..1 {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // should still see all blocks with older LSN
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, relsize);
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x20);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        // Extend relation again.
+        // Add enough blocks to create second segment
+        let lsn = Lsn(0x80);
+        let mut writer = tline.begin_record(lsn);
+        for blkno in 0..relsize {
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            walingest.put_rel_page_image(&mut writer, TESTREL_A, blkno, TEST_IMG(&data))?;
+        }
+        writer.finish()?;
+
+        assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, relsize);
+        // Check relation content
+        for blkno in 0..relsize {
+            let lsn = Lsn(0x80);
+            let data = format!("foo blk {} at {}", blkno, lsn);
+            assert_eq!(
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
+                TEST_IMG(&data)
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test get_relsize() and truncation with a file larger than 1 GB, so that it's
+    /// split into multiple 1 GB segments in Postgres.
+    #[test]
+    fn test_large_rel() -> Result<()> {
+        let repo = RepoHarness::create("test_large_rel")?.load();
+        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut walingest = init_walingest_test(&tline)?;
+
+        let mut lsn = 0x10;
+        for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
+            lsn += 0x10;
+            let mut writer = tline.begin_record(Lsn(lsn));
+            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
+            walingest.put_rel_page_image(&mut writer, TESTREL_A, blknum as BlockNumber, img)?;
+            writer.finish()?;
+        }
+
+        assert_current_logical_size(&tline, Lsn(lsn));
+
+        assert_eq!(
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE + 1
+        );
+
+        // Truncate one block
+        lsn += 0x10;
+        let mut writer = tline.begin_record(Lsn(lsn));
+        walingest.put_rel_truncation(&mut writer, TESTREL_A, pg_constants::RELSEG_SIZE)?;
+        writer.finish()?;
+        assert_eq!(
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE
+        );
+        assert_current_logical_size(&tline, Lsn(lsn));
+
+        // Truncate another block
+        lsn += 0x10;
+        let mut writer = tline.begin_record(Lsn(lsn));
+        walingest.put_rel_truncation(&mut writer, TESTREL_A, pg_constants::RELSEG_SIZE - 1)?;
+        writer.finish()?;
+        assert_eq!(
+            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+            pg_constants::RELSEG_SIZE - 1
+        );
+        assert_current_logical_size(&tline, Lsn(lsn));
+
+        // Truncate to 1500, and then truncate all the way down to 0, one block at a time
+        // This tests the behavior at segment boundaries
+        let mut size: i32 = 3000;
+        while size >= 0 {
+            lsn += 0x10;
+            let mut writer = tline.begin_record(Lsn(lsn));
+            walingest.put_rel_truncation(&mut writer, TESTREL_A, size as BlockNumber)?;
+            writer.finish()?;
+            assert_eq!(
+                tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
+                size as BlockNumber
+            );
+
+            size -= 1;
+        }
+        assert_current_logical_size(&tline, Lsn(lsn));
 
         Ok(())
     }

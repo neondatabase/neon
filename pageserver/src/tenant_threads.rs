@@ -14,6 +14,15 @@ use zenith_utils::zid::ZTenantId;
 /// Checkpointer thread's main loop
 ///
 pub fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+    if let Err(err) = checkpoint_loop_ext(tenantid, conf) {
+        error!("checkpoint loop terminated with error: {:?}", err);
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+fn checkpoint_loop_ext(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;

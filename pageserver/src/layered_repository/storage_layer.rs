@@ -2,75 +2,34 @@
 //! Common traits and structs for layers
 //!
 
-use crate::relish::RelishTag;
-use crate::repository::{BlockNumber, ZenithWalRecord};
+use crate::repository::{Key, Value};
+use crate::walrecord::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::collections::HashSet;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use zenith_utils::lsn::Lsn;
 
-// Size of one segment in pages (10 MB)
-pub const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
+// in # of key-value pairs
+// FIXME Size of one segment in pages (128 MB)
+pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024;
+pub const TARGET_FILE_SIZE: u32 = (TARGET_FILE_SIZE_BYTES / 8192) as u32;
 
-///
-/// Each relish stored in the repository is divided into fixed-sized "segments",
-/// with 10 MB of key-space, or 1280 8k pages each.
-///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
-pub struct SegmentTag {
-    pub rel: RelishTag,
-    pub segno: u32,
-}
-
-/// SegmentBlk represents a block number within a segment, or the size of segment.
-///
-/// This is separate from BlockNumber, which is used for block number within the
-/// whole relish. Since this is just a type alias, the compiler will let you mix
-/// them freely, but we use the type alias as documentation to make it clear
-/// which one we're dealing with.
-///
-/// (We could turn this into "struct SegmentBlk(u32)" to forbid accidentally
-/// assigning a BlockNumber to SegmentBlk or vice versa, but that makes
-/// operations more verbose).
-pub type SegmentBlk = u32;
-
-impl fmt::Display for SegmentTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.rel, self.segno)
+pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
+where
+    T: PartialOrd<T>,
+{
+    if a.start < b.start {
+        a.end > b.start
+    } else {
+        b.end > a.start
     }
 }
 
-impl SegmentTag {
-    /// Given a relish and block number, calculate the corresponding segment and
-    /// block number within the segment.
-    pub const fn from_blknum(rel: RelishTag, blknum: BlockNumber) -> (SegmentTag, SegmentBlk) {
-        (
-            SegmentTag {
-                rel,
-                segno: blknum / RELISH_SEG_SIZE,
-            },
-            blknum % RELISH_SEG_SIZE,
-        )
-    }
-}
-
-///
-/// Represents a version of a page at a specific LSN. The LSN is the key of the
-/// entry in the 'page_versions' hash, it is not duplicated here.
-///
-/// A page version can be stored as a full page image, or as WAL record that needs
-/// to be applied over the previous page version to reconstruct this version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PageVersion {
-    Page(Bytes),
-    Wal(ZenithWalRecord),
-}
-
-///
+/// FIXME
 /// Struct used to communicate across calls to 'get_page_reconstruct_data'.
 ///
 /// Before first call to get_page_reconstruct_data, you can fill in 'page_img'
@@ -88,25 +47,32 @@ pub enum PageVersion {
 /// the same PageReconstructData struct in the next 'get_page_reconstruct_data'
 /// call, to collect more records.
 ///
-pub struct PageReconstructData {
+#[derive(Debug)]
+pub struct ValueReconstructState {
+    pub key: Key,
+    pub lsn: Lsn,
     pub records: Vec<(Lsn, ZenithWalRecord)>,
-    pub page_img: Option<(Lsn, Bytes)>,
+    pub img: Option<(Lsn, Bytes)>,
+
+    pub request_lsn: Lsn, // original request's LSN, for debugging purposes
 }
 
 /// Return value from Layer::get_page_reconstruct_data
-pub enum PageReconstructResult {
+#[derive(Debug)]
+pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
     Complete,
     /// This layer didn't contain all the required data, the caller should look up
     /// the predecessor layer at the returned LSN and collect more data from there.
-    Continue(Lsn),
+    Continue,
+
     /// This layer didn't contain data needed to reconstruct the page version at
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
-    Missing(Lsn),
+    Missing,
 }
 
-///
+/// FIXME
 /// A Layer corresponds to one RELISH_SEG_SIZE slice of a relish in a range of LSNs.
 /// There are two kinds of layers, in-memory and on-disk layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access
@@ -120,21 +86,17 @@ pub trait Layer: Send + Sync {
     /// Identify the timeline this relish belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 
-    /// Identify the relish segment
-    fn get_seg_tag(&self) -> SegmentTag;
+    /// Range of segments that this layer covers
+    fn get_key_range(&self) -> Range<Key>;
 
+    /// FIXME
     /// Inclusive start bound of the LSN range that this layer holds
-    fn get_start_lsn(&self) -> Lsn;
-
     /// Exclusive end bound of the LSN range that this layer holds.
     ///
     /// - For an open in-memory layer, this is MAX_LSN.
     /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
-    fn get_end_lsn(&self) -> Lsn;
-
-    /// Is the segment represented by this layer dropped by PostgreSQL?
-    fn is_dropped(&self) -> bool;
+    fn get_lsn_range(&self) -> Range<Lsn>;
 
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for
@@ -153,18 +115,11 @@ pub trait Layer: Send + Sync {
     /// is available. If this returns PageReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    fn get_page_reconstruct_data(
+    fn get_value_reconstruct_data(
         &self,
-        blknum: SegmentBlk,
-        lsn: Lsn,
-        reconstruct_data: &mut PageReconstructData,
-    ) -> Result<PageReconstructResult>;
-
-    /// Return size of the segment at given LSN. (Only for blocky relations.)
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk>;
-
-    /// Does the segment exist at given LSN? Or was it dropped before it.
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool>;
+        lsn_floor: Lsn,
+        reconstruct_data: &mut ValueReconstructState,
+    ) -> Result<ValueReconstructResult>;
 
     /// Does this layer only contain some data for the segment (incremental),
     /// or does it contain a version of every page? This is important to know
@@ -174,6 +129,11 @@ pub trait Layer: Send + Sync {
 
     /// Returns true for layers that are represented in memory.
     fn is_in_memory(&self) -> bool;
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
+    
+    /// Return a set of all distinct Keys present in this layer
+    fn collect_keys(&self, key_range: &Range<Key>, keys: &mut HashSet<Key>) -> Result<()>;
 
     /// Release memory used by this layer. There is no corresponding 'load'
     /// function, that's done implicitly when you call one of the get-functions.
