@@ -52,6 +52,42 @@ class PgCompare(ABC):
         pass
 
 
+class RemoteCompare(PgCompare):
+    """PgCompare interface for testing against a remote zenith deployment."""
+    def __init__(self, zenbenchmark: ZenithBenchmarker, pg: PgProtocol, pg_bin: PgBin):
+        self._zenbenchmark = zenbenchmark
+        self._pg = pg
+        self._pg_bin = pg_bin
+
+    @property
+    def pg(self):
+        return self._pg
+
+    @property
+    def zenbenchmark(self):
+        return self._zenbenchmark
+
+    @property
+    def pg_bin(self):
+        return self._pg_bin
+
+    def flush(self):
+        # We can't flush because we don't have a direct connection to the pageserver
+        pass
+
+    def report_peak_memory_use(self) -> None:
+        pass
+
+    def report_size(self) -> None:
+        pass
+
+    def record_pageserver_writes(self, out_name):
+        pass
+
+    def record_duration(self, out_name):
+        return self.zenbenchmark.record_duration(out_name)
+
+
 class ZenithCompare(PgCompare):
     """PgCompare interface for the zenith stack."""
     def __init__(self,
@@ -167,11 +203,53 @@ def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCo
 
 
 @pytest.fixture(scope='function')
+def remote_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> Iterator[RemoteCompare]:
+    schema_name = "pytest_" + request.node.name.replace("[", "__").replace("]", "")
+    schema_identifier = f"\"{schema_name}\""
+
+    # NOTE password not specified, comes from pgpass file
+    stage_pg = PgProtocol(
+        host="start.stage.zenith.tech",
+        port=5432,
+        username="bojanserafimov@zenith",
+        dbname="main",
+        schema=schema_identifier,
+    )
+
+    # HACK for now testing with local zenith because proxy doesn't support schema option
+    # https://github.com/zenithdb/zenith/pull/1344
+    zenith_simple_env.zenith_cli.create_branch(schema_name, "empty")
+    zenith_pg = zenith_simple_env.postgres.create_start(schema_name)
+    pg = PgProtocol(
+        host=zenith_pg.host,
+        port=zenith_pg.port,
+        username=zenith_pg.username,
+        password=zenith_pg.password,
+        dbname=zenith_pg.dbname,
+        schema=schema_identifier,
+    )
+
+    pg.safe_psql(f"DROP SCHEMA IF EXISTS {schema_identifier} CASCADE;")
+    pg.safe_psql(f"CREATE SCHEMA {schema_identifier};")
+    yield RemoteCompare(zenbenchmark, pg, pg_bin)
+    pg.safe_psql(f"DROP SCHEMA IF EXISTS {schema_identifier} CASCADE;")
+
+
+@pytest.fixture(scope='function')
 def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
     return VanillaCompare(zenbenchmark, vanilla_pg)
 
 
-@pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
+@pytest.fixture(params=[
+    "vanilla_compare",
+    "zenith_compare",
+    "remote_compare",
+],
+                ids=[
+                    "vanilla",
+                    "zenith",
+                    "remote",
+                ])
 def zenith_with_baseline(request) -> PgCompare:
     """Parameterized fixture that helps compare zenith against vanilla postgres.
 
