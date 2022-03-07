@@ -331,17 +331,26 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     ancestor_start_lsn: Option<Lsn>,
-) -> Result<TimelineInfo> {
+) -> Result<Option<TimelineInfo>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
     if conf.timeline_path(&new_timeline_id, &tenant_id).exists() {
-        bail!("timeline {} already exists", new_timeline_id);
+        match repo.get_timeline(new_timeline_id)? {
+            RepositoryTimeline::Local { id, .. } => {
+                debug!("timeline {} already exists", id);
+                return Ok(None);
+            }
+            RepositoryTimeline::Remote { id, .. } => bail!(
+                "timeline {} already exists in pageserver's remote storage",
+                id
+            ),
+        }
     }
 
-    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
     let mut start_lsn = ancestor_start_lsn.unwrap_or(Lsn(0));
 
-    match ancestor_timeline_id {
+    let new_timeline_info = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline(ancestor_timeline_id)
@@ -383,20 +392,17 @@ pub(crate) fn create_timeline(
             repo.branch_timeline(ancestor_timeline_id, new_timeline_id, start_lsn)?;
             // load the timeline into memory
             let loaded_timeline = repo.get_timeline(new_timeline_id)?;
-            Ok(TimelineInfo::from_repo_timeline(
-                tenant_id,
-                loaded_timeline,
-                false,
-            ))
+            TimelineInfo::from_repo_timeline(tenant_id, loaded_timeline, false)
         }
         None => {
             let new_timeline = bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
-            Ok(TimelineInfo::from_dyn_timeline(
+            TimelineInfo::from_dyn_timeline(
                 tenant_id,
                 new_timeline_id,
                 new_timeline.as_ref(),
                 false,
-            ))
+            )
         }
-    }
+    };
+    Ok(Some(new_timeline_info))
 }

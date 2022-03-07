@@ -145,10 +145,9 @@ impl PageServerNode {
             args.extend(["--create-tenant", tenant_id])
         }
 
-        let initial_timeline_id_str = initial_timeline_id.map(|id| id.to_string());
-        if let Some(timeline_id) = initial_timeline_id_str.as_deref() {
-            args.extend(["--initial-timeline-id", timeline_id])
-        }
+        let initial_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
+        let initial_timeline_id_string = initial_timeline_id.to_string();
+        args.extend(["--initial-timeline-id", &initial_timeline_id_string]);
 
         let init_output = fill_rust_env_vars(cmd.args(args))
             .output()
@@ -158,11 +157,7 @@ impl PageServerNode {
             bail!("pageserver init failed");
         }
 
-        if let Some(initial_timeline_id) = initial_timeline_id {
-            Ok(initial_timeline_id)
-        } else {
-            extract_initial_timeline_id(init_output.stdout)
-        }
+        Ok(initial_timeline_id)
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -337,7 +332,10 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(&self, new_tenant_id: Option<ZTenantId>) -> anyhow::Result<ZTenantId> {
+    pub fn tenant_create(
+        &self,
+        new_tenant_id: Option<ZTenantId>,
+    ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&TenantCreateRequest {
@@ -345,13 +343,18 @@ impl PageServerNode {
             })
             .send()?
             .error_from_body()?
-            .json::<String>()?;
-        tenant_id_string.parse().with_context(|| {
-            format!(
-                "Failed to parse tennat creation response as tenant id: {}",
-                tenant_id_string
-            )
-        })
+            .json::<Option<String>>()?;
+
+        tenant_id_string
+            .map(|id| {
+                id.parse().with_context(|| {
+                    format!(
+                        "Failed to parse tennat creation response as tenant id: {}",
+                        id
+                    )
+                })
+            })
+            .transpose()
     }
 
     pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
@@ -376,7 +379,7 @@ impl PageServerNode {
         new_timeline_id: Option<ZTimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<ZTimelineId>,
-    ) -> anyhow::Result<TimelineInfo> {
+    ) -> anyhow::Result<Option<TimelineInfo>> {
         let timeline_info_response = self
             .http_request(
                 Method::POST,
@@ -389,36 +392,10 @@ impl PageServerNode {
             })
             .send()?
             .error_from_body()?
-            .json::<TimelineInfoResponse>()?;
+            .json::<Option<TimelineInfoResponse>>()?;
 
-        TimelineInfo::try_from(timeline_info_response)
+        timeline_info_response
+            .map(TimelineInfo::try_from)
+            .transpose()
     }
-}
-
-fn extract_initial_timeline_id(init_stdout: Vec<u8>) -> anyhow::Result<ZTimelineId> {
-    let output_string =
-        String::from_utf8(init_stdout).context("Init stdout is not a valid unicode")?;
-
-    let string_with_timeline_id = match output_string.split_once("created initial timeline ") {
-        Some((_, string_with_timeline_id)) => string_with_timeline_id,
-        None => bail!(
-            "Found no line with timeline id in the init output: '{}'",
-            output_string
-        ),
-    };
-
-    let timeline_id_str = match string_with_timeline_id.split_once(' ') {
-        Some((timeline_id_str, _)) => timeline_id_str,
-        None => bail!(
-            "Found no timeline id in the init output: '{}'",
-            output_string
-        ),
-    };
-
-    timeline_id_str.parse().with_context(|| {
-        format!(
-            "Failed to parse timeline id from string, extracted from the init output: '{}'",
-            timeline_id_str
-        )
-    })
 }

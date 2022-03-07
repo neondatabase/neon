@@ -522,7 +522,11 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
         }
         Some(("create", create_match)) => {
             let initial_tenant_id = parse_tenant_id(create_match)?;
-            let new_tenant_id = pageserver.tenant_create(initial_tenant_id)?;
+            let new_tenant_id = pageserver
+                .tenant_create(initial_tenant_id)?
+                .ok_or_else(|| {
+                    anyhow!("Tenant with id {:?} was already created", initial_tenant_id)
+                })?;
             println!(
                 "tenant {} successfully created on the pageserver",
                 new_tenant_id
@@ -548,7 +552,9 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let new_branch_name = create_match
                 .value_of("branch-name")
                 .ok_or(anyhow!("No branch name provided"))?;
-            let timeline = pageserver.timeline_create(tenant_id, None, None, None)?;
+            let timeline = pageserver
+                .timeline_create(tenant_id, None, None, None)?
+                .ok_or_else(|| anyhow!("Failed to create new timeline for tenant {}", tenant_id))?;
             let new_timeline_id = timeline.timeline_id();
 
             let last_record_lsn = match timeline {
@@ -593,12 +599,9 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .map(Lsn::from_str)
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
-            let timeline = pageserver.timeline_create(
-                tenant_id,
-                None,
-                start_lsn,
-                Some(ancestor_timeline_id),
-            )?;
+            let timeline = pageserver
+                .timeline_create(tenant_id, None, start_lsn, Some(ancestor_timeline_id))?
+                .ok_or_else(|| anyhow!("Failed to create new timeline for tenant {}", tenant_id))?;
             let new_timeline_id = timeline.timeline_id();
 
             let last_record_lsn = match timeline {

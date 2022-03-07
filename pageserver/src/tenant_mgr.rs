@@ -177,10 +177,10 @@ pub fn shutdown_all_tenants() {
     }
 }
 
-pub fn create_repository_for_tenant(
+pub fn create_tenant_repository(
     conf: &'static PageServerConf,
     new_tenant_id: Option<ZTenantId>,
-) -> Result<ZTenantId> {
+) -> Result<Option<ZTenantId>> {
     let new_tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
     let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, new_tenant_id));
     match timelines::create_repo(conf, new_tenant_id, wal_redo_manager)? {
@@ -191,11 +191,13 @@ pub fn create_repository_for_tenant(
                     state: TenantState::Idle,
                     repo,
                 });
+            Ok(Some(new_tenant_id))
         }
-        None => debug!("repository already exists for tenant {}", new_tenant_id),
+        None => {
+            debug!("repository already exists for tenant {}", new_tenant_id);
+            Ok(None)
+        }
     }
-
-    Ok(new_tenant_id)
 }
 
 pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {

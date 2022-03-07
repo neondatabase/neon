@@ -28,7 +28,7 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
 
     # create timeline
     timeline_id = uuid4()
-    client.timeline_create(tenant_id=tenant_id, timeline_id=timeline_id)
+    client.timeline_create(tenant_id=tenant_id, new_timeline_id=timeline_id)
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0

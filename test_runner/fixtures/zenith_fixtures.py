@@ -725,20 +725,23 @@ class ZenithPageserverHttpClient(requests.Session):
     def timeline_create(
         self,
         tenant_id: uuid.UUID,
-        timeline_id: Optional[uuid.UUID] = None,
+        new_timeline_id: Optional[uuid.UUID] = None,
         ancestor_timeline_id: Optional[uuid.UUID] = None,
         ancestor_start_lsn: Optional[str] = None,
     ) -> Dict[Any, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline",
                         json={
                             'new_timeline_id':
-                            timeline_id.hex if timeline_id else None,
+                            new_timeline_id.hex if new_timeline_id else None,
                             'ancestor_start_lsn':
                             ancestor_start_lsn,
                             'ancestor_timeline_id':
                             ancestor_timeline_id.hex if ancestor_timeline_id else None,
                         })
         self.verbose_error(res)
+        if res.status_code == 409:
+            raise Exception(f'could not create timeline: already exists for id {new_timeline_id}')
+
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
@@ -750,14 +753,16 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                'new_tenant_id': tenant_id.hex if tenant_id else None,
+                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
             },
         )
         self.verbose_error(res)
+        if res.status_code == 409:
+            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
         new_tenant_id = res.json()
         assert isinstance(new_tenant_id, str)
         return uuid.UUID(new_tenant_id)
@@ -806,6 +811,13 @@ class S3Storage:
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
 
+CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                          re.MULTILINE)
+CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                          re.MULTILINE)
+TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]",
+                                     re.MULTILINE)
+
 
 class ZenithCli:
     """
@@ -846,18 +858,13 @@ class ZenithCli:
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        create_timeline_id_extractor = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
-                                                  re.MULTILINE)
-        matches = create_timeline_id_extractor.search(res.stdout)
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
 
         created_timeline_id = None
         if matches is not None:
             created_timeline_id = matches.group('timeline_id')
 
-        if created_timeline_id is None:
-            raise Exception('could not find timeline id after `zenith timeline create` invocation')
-        else:
-            return uuid.UUID(created_timeline_id)
+        return uuid.UUID(created_timeline_id)
 
     def create_branch(self,
                       new_branch_name: str = DEFAULT_BRANCH_NAME,
@@ -880,9 +887,7 @@ class ZenithCli:
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        create_timeline_id_extractor = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
-                                                  re.MULTILINE)
-        matches = create_timeline_id_extractor.search(res.stdout)
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
 
         created_timeline_id = None
         if matches is not None:
@@ -900,13 +905,11 @@ class ZenithCli:
 
         # (L) main [b49f7954224a0ad25cc0013ea107b54b]
         # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
-        timeline_data_extractor = re.compile(
-            r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE)
         res = self.raw_cli(
             ['timeline', 'list', '--tenant-id', (tenant_id or self.env.initial_tenant).hex])
         timelines_cli = sorted(
             map(lambda branch_and_id: (branch_and_id[0], branch_and_id[1]),
-                timeline_data_extractor.findall(res.stdout)))
+                TIMELINE_DATA_EXTRACTOR.findall(res.stdout)))
         return timelines_cli
 
     def init(self,
