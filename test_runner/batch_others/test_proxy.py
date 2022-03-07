@@ -5,7 +5,6 @@ def test_proxy_select_1(static_proxy):
     static_proxy.safe_psql("select 1;")
 
 
-@pytest.mark.xfail  # Proxy eats the extra connection options
 def test_proxy_options(static_proxy):
     schema_name = "tmp_schema_1"
     with static_proxy.connect(schema=schema_name) as conn:

@@ -10,6 +10,7 @@ pub struct DatabaseInfo {
     pub dbname: String,
     pub user: String,
     pub password: Option<String>,
+    pub options: Option<String>,
 }
 
 impl DatabaseInfo {
@@ -32,6 +33,10 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
             .port(db_info.port)
             .dbname(&db_info.dbname)
             .user(&db_info.user);
+
+        if let Some(options) = db_info.options {
+            config.options(&options);
+        }
 
         if let Some(password) = db_info.password {
             config.password(password);

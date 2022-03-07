@@ -1,4 +1,4 @@
-use crate::{compute::DatabaseInfo, cplane_api};
+use crate::cplane_api;
 use anyhow::Context;
 use serde::Deserialize;
 use std::{
@@ -75,7 +75,7 @@ struct PsqlSessionResponse {
 
 #[derive(Deserialize)]
 enum PsqlSessionResult {
-    Success(DatabaseInfo),
+    Success(cplane_api::DatabaseInfoResponse),
     Failure(String),
 }
 

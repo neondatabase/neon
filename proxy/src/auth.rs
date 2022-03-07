@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage, FeMessage as Fe};
 
+// TODO rename the struct to ClientParams or something
 /// Various client credentials which we use for authentication.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
+    pub options: Option<String>,
 }
 
 impl TryFrom<HashMap<String, String>> for ClientCredentials {
@@ -25,9 +27,22 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         };
 
         let user = get_param("user")?;
-        let db = get_param("database")?;
+        let dbname = get_param("database")?;
 
-        Ok(Self { user, dbname: db })
+        // TODO see what other options should be recognized, possibly all.
+        let options = match get_param("search_path") {
+            Ok(path) => Some(format!("-c search_path={}", path)),
+            Err(_) => None,
+        };
+
+        // TODO investigate why "" is always a key
+        // TODO warn on unrecognized options?
+
+        Ok(Self {
+            user,
+            dbname,
+            options,
+        })
     }
 }
 
@@ -85,6 +100,7 @@ async fn handle_static(
         dbname: creds.dbname.clone(),
         user: creds.user.clone(),
         password: Some(cleartext_password.into()),
+        options: creds.options,
     };
 
     client
@@ -117,15 +133,22 @@ async fn handle_existing_user(
         .ok_or_else(|| anyhow!("unexpected password message"))?;
 
     let cplane = CPlaneApi::new(&config.auth_endpoint);
-    let db_info = cplane
-        .authenticate_proxy_request(creds, md5_response, &md5_salt, &psql_session_id)
+    let db_info_response = cplane
+        .authenticate_proxy_request(&creds, md5_response, &md5_salt, &psql_session_id)
         .await?;
 
     client
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
-    Ok(db_info)
+    Ok(DatabaseInfo {
+        host: db_info_response.host,
+        port: db_info_response.port,
+        dbname: db_info_response.dbname,
+        user: db_info_response.user,
+        password: db_info_response.password,
+        options: creds.options,
+    })
 }
 
 async fn handle_new_user(
@@ -135,7 +158,7 @@ async fn handle_new_user(
     let psql_session_id = new_psql_session_id();
     let greeting = hello_message(&config.redirect_uri, &psql_session_id);
 
-    let db_info = cplane_api::with_waiter(psql_session_id, |waiter| async {
+    let db_info_response = cplane_api::with_waiter(psql_session_id, |waiter| async {
         // Give user a URL to spawn a new database
         client
             .write_message_noflush(&Be::AuthenticationOk)?
@@ -150,7 +173,14 @@ async fn handle_new_user(
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database.".into()))?;
 
-    Ok(db_info)
+    Ok(DatabaseInfo {
+        host: db_info_response.host,
+        port: db_info_response.port,
+        dbname: db_info_response.dbname,
+        user: db_info_response.user,
+        password: db_info_response.password,
+        options: None,
+    })
 }
 
 fn hello_message(redirect_uri: &str, session_id: &str) -> String {

@@ -1,4 +1,4 @@
-use crate::auth;
+use crate::auth::{self, ClientCredentials};
 use crate::cancellation::{self, CancelClosure, CancelMap};
 use crate::compute::DatabaseInfo;
 use crate::config::{ProxyConfig, TlsConfig};
@@ -138,7 +138,6 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     stream.write_message(&Be::ErrorResponse(msg)).await?;
                     bail!(msg);
                 }
-
                 break Ok(Some((stream, params.try_into()?)));
             }
             CancelRequest(cancel_key_data) => {

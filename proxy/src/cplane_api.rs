@@ -1,25 +1,37 @@
 use crate::auth::ClientCredentials;
-use crate::compute::DatabaseInfo;
 use crate::waiters::{Waiter, Waiters};
 use anyhow::{anyhow, bail};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
+/// Part of the legacy cplane responses
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct DatabaseInfoResponse {
+    pub host: String,
+    pub port: u16,
+    pub dbname: String,
+    pub user: String,
+    pub password: Option<String>,
+}
+
 lazy_static! {
-    static ref CPLANE_WAITERS: Waiters<Result<DatabaseInfo, String>> = Default::default();
+    static ref CPLANE_WAITERS: Waiters<Result<DatabaseInfoResponse, String>> = Default::default();
 }
 
 /// Give caller an opportunity to wait for cplane's reply.
 pub async fn with_waiter<F, R, T>(psql_session_id: impl Into<String>, f: F) -> anyhow::Result<T>
 where
-    F: FnOnce(Waiter<'static, Result<DatabaseInfo, String>>) -> R,
+    F: FnOnce(Waiter<'static, Result<DatabaseInfoResponse, String>>) -> R,
     R: std::future::Future<Output = anyhow::Result<T>>,
 {
     let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
     f(waiter).await
 }
 
-pub fn notify(psql_session_id: &str, msg: Result<DatabaseInfo, String>) -> anyhow::Result<()> {
+pub fn notify(
+    psql_session_id: &str,
+    msg: Result<DatabaseInfoResponse, String>,
+) -> anyhow::Result<()> {
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
@@ -37,11 +49,11 @@ impl<'a> CPlaneApi<'a> {
 impl CPlaneApi<'_> {
     pub async fn authenticate_proxy_request(
         &self,
-        creds: ClientCredentials,
+        creds: &ClientCredentials,
         md5_response: &[u8],
         salt: &[u8; 4],
         psql_session_id: &str,
-    ) -> anyhow::Result<DatabaseInfo> {
+    ) -> anyhow::Result<DatabaseInfoResponse> {
         let mut url = reqwest::Url::parse(self.auth_endpoint)?;
         url.query_pairs_mut()
             .append_pair("login", &creds.user)
@@ -77,7 +89,7 @@ impl CPlaneApi<'_> {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 enum ProxyAuthResponse {
-    Ready { conn_info: DatabaseInfo },
+    Ready { conn_info: DatabaseInfoResponse },
     Error { error: String },
     NotReady { ready: bool }, // TODO: get rid of `ready`
 }
@@ -92,13 +104,13 @@ mod tests {
         // Ready
         let auth: ProxyAuthResponse = serde_json::from_value(json!({
             "ready": true,
-            "conn_info": DatabaseInfo::default(),
+            "conn_info": DatabaseInfoResponse::default(),
         }))
         .unwrap();
         assert!(matches!(
             auth,
             ProxyAuthResponse::Ready {
-                conn_info: DatabaseInfo { .. }
+                conn_info: DatabaseInfoResponse { .. }
             }
         ));
 
