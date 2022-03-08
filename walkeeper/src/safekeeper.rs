@@ -649,14 +649,16 @@ where
 
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
-        AppendResponse {
+        let ar = AppendResponse {
             term: self.s.acceptor_state.term,
             flush_lsn: self.wal_store.flush_lsn(),
             commit_lsn: self.s.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
             zenith_feedback: ZenithFeedback::empty(),
-        }
+        };
+        trace!("formed AppendResponse {:?}", ar);
+        ar
     }
 
     fn handle_elected(&mut self, msg: &ProposerElected) -> Result<Option<AcceptorProposerMessage>> {
@@ -757,20 +759,21 @@ where
             self.control_store.persist(&self.s)?;
         }
 
+        trace!(
+            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
+            msg.wal_data.len(),
+            msg.h.end_lsn,
+            msg.h.commit_lsn,
+            msg.h.truncate_lsn,
+            require_flush,
+        );
+
         // If flush_lsn hasn't updated, AppendResponse is not very useful.
         if !require_flush {
             return Ok(None);
         }
 
         let resp = self.append_response();
-        trace!(
-            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, resp {:?}",
-            msg.wal_data.len(),
-            msg.h.end_lsn,
-            msg.h.commit_lsn,
-            msg.h.truncate_lsn,
-            &resp,
-        );
         Ok(Some(AcceptorProposerMessage::AppendResponse(resp)))
     }
 
