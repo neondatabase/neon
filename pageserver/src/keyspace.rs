@@ -12,6 +12,7 @@ pub const TARGET_FILE_SIZE: usize = (TARGET_FILE_SIZE_BYTES / 8192) as usize;
 ///
 /// Represents a set of Keys, in a compact form.
 ///
+#[derive(Debug, Clone)]
 pub struct KeyPartitioning {
     accum: Option<Range<Key>>,
 

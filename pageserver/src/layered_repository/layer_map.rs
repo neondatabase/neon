@@ -10,7 +10,7 @@
 //! corresponding files are written to disk.
 //!
 
-use crate::layered_repository::storage_layer::range_overlaps;
+use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
@@ -331,12 +331,12 @@ impl LayerMap {
         Ok(ranges)
     }
 
-    pub fn get_deltas(
+    pub fn count_deltas(
         &self,
         key_range: &Range<Key>,
         lsn_range: &Range<Lsn>,
-    ) -> Result<Vec<Arc<dyn Layer>>> {
-        let mut deltas = Vec::new();
+    ) -> Result<usize> {
+        let mut result = 0;
         for l in self.historic_layers.iter() {
             if !l.is_incremental() {
                 continue;
@@ -347,9 +347,18 @@ impl LayerMap {
             if !range_overlaps(&l.get_key_range(), key_range) {
                 continue;
             }
-            deltas.push(Arc::clone(l));
+
+            // We ignore level0 delta layers. Unless the whole keyspace fits
+            // into one partition
+            if !range_eq(key_range, &(Key::MIN..Key::MAX)) &&
+                range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
+            {
+                continue;
+            }
+
+            result += 1;
         }
-        Ok(deltas)
+        Ok(result)
     }
 
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {

@@ -1433,7 +1433,7 @@ impl LayeredTimeline {
                     Lsn(0)
                 };
 
-                let num_deltas = layers.get_deltas(&img_range, &(img_lsn..lsn))?.len();
+                let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
 
                 info!(
                     "range {}-{}, has {} deltas on this timeline",
@@ -1889,6 +1889,10 @@ mod tests {
         Ok(())
     }
 
+    // Target file size in the unit tests. In production, the target
+    // file size is much larger, maybe 1 GB. But a small size makes it
+    // much faster to exercise all the logic for creating the files,
+    // garbage collection, compaction etc.
     const TEST_FILE_SIZE: usize = 4 * 1024 * 1024;
 
     #[test]
@@ -1940,6 +1944,10 @@ mod tests {
         Ok(())
     }
 
+    //
+    // Insert a bunch of key-value pairs with increasing keys, checkpoint,
+    // repeat 100 times.
+    //
     #[test]
     fn test_bulk_insert() -> Result<()> {
         let repo = RepoHarness::create("test_bulk_insert")?.load();
@@ -1947,10 +1955,12 @@ mod tests {
 
         let mut lsn = Lsn(0x10);
 
+        let mut parts = KeyPartitioning::new();
+
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
         let mut blknum = 0;
-        for _ in 1..100 {
-            for _ in 1..10000 {
+        for _ in 0..50 {
+            for _ in 0..1000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer();
                 writer.put(
@@ -1961,11 +1971,20 @@ mod tests {
                 writer.advance_last_record_lsn(lsn);
                 drop(writer);
 
+                parts.add_key(test_key);
+
                 lsn = Lsn(lsn.0 + 0x10);
                 blknum += 1;
             }
+
+            let cutoff = tline.get_last_record_lsn();
+            parts.repartition(TEST_FILE_SIZE as u64);
+            tline.hint_partitioning(parts.clone())?;
+
+            tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact(TEST_FILE_SIZE)?;
+            tline.gc()?;
         }
 
         Ok(())

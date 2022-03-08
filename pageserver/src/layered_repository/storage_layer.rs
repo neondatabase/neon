@@ -24,6 +24,13 @@ where
     }
 }
 
+pub fn range_eq<T>(a: &Range<T>, b: &Range<T>) -> bool
+where
+    T: PartialEq<T>,
+{
+    a.start == b.start && a.end == b.end
+}
+
 /// FIXME
 /// Struct used to communicate across calls to 'get_page_reconstruct_data'.
 ///

@@ -59,6 +59,17 @@ impl Key {
         }
         key
     }
+
+    pub fn from_array(b: [u8; 18]) -> Self {
+        Key {
+            field1: b[0],
+            field2: u32::from_be_bytes(b[1..5].try_into().unwrap()),
+            field3: u32::from_be_bytes(b[5..9].try_into().unwrap()),
+            field4: u32::from_be_bytes(b[9..13].try_into().unwrap()),
+            field5: b[13],
+            field6: u32::from_be_bytes(b[14..18].try_into().unwrap()),
+        }
+    }
 }
 
 
@@ -521,28 +532,31 @@ mod tests {
     //use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
     //use std::sync::Arc;
     use bytes::BytesMut;
+    use hex_literal::hex;
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref TEST_KEY: Key = Key::from_array(hex!("112222222233333333444444445500000001"));
+    }
 
     #[test]
     fn test_basic() -> Result<()> {
         let repo = RepoHarness::create("test_basic")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
-        #[allow(non_snake_case)]
-        let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
-
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(*TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.advance_last_record_lsn(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(*TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.advance_last_record_lsn(Lsn(0x20));
         drop(writer);
 
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
 
         Ok(())
     }
@@ -610,123 +624,146 @@ mod tests {
         Ok(())
     }
 
-    /* // FIXME: Garbage collection is broken
-        #[test]
-        fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
-            let repo =
-                RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load_page_repo();
+    fn make_some_layers<T: Timeline>(tline: &T, start_lsn: Lsn) -> Result<()> {
+        let mut lsn = start_lsn;
+        #[allow(non_snake_case)]
+        {
+            let writer = tline.writer();
+            // Create a relation on the timeline
+            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.advance_last_record_lsn(lsn);
+            lsn += 0x10;
+            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.advance_last_record_lsn(lsn);
+            lsn += 0x10;
+        }
+        tline.checkpoint(CheckpointConfig::Forced)?;
+        {
+            let writer = tline.writer();
+            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.advance_last_record_lsn(lsn);
+            lsn += 0x10;
+            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.advance_last_record_lsn(lsn);
+        }
+        tline.checkpoint(CheckpointConfig::Forced)
+    }
 
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-            make_some_layers(&tline, Lsn(0x20))?;
+    #[test]
+    fn test_prohibit_branch_creation_on_garbage_collected_data() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-            // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
+        // and compaction works. But it does set the 'cutoff' point so that the cross check
+        // below should fail.
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
 
-            // try to branch at lsn 25, should fail because we already garbage collected the data
-            match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
-                Ok(_) => panic!("branching should have failed"),
-                Err(err) => {
-                    assert!(err.to_string().contains("invalid branch start lsn"));
-                    assert!(err
+        // try to branch at lsn 25, should fail because we already garbage collected the data
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+            Ok(_) => panic!("branching should have failed"),
+            Err(err) => {
+                assert!(err.to_string().contains("invalid branch start lsn"));
+                assert!(err
                         .source()
                         .unwrap()
                         .to_string()
                         .contains("we might've already garbage collected needed data"))
-                }
             }
-
-            Ok(())
         }
 
-        #[test]
-        fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
-            let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load_page_repo();
+        Ok(())
+    }
 
-            repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
-            // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-            match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
-                Ok(_) => panic!("branching should have failed"),
-                Err(err) => {
-                    assert!(&err.to_string().contains("invalid branch start lsn"));
-                    assert!(&err
+    #[test]
+    fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> Result<()> {
+        let repo = RepoHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?.load();
+
+        repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
+        // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+            Ok(_) => panic!("branching should have failed"),
+            Err(err) => {
+                assert!(&err.to_string().contains("invalid branch start lsn"));
+                assert!(&err
                         .source()
                         .unwrap()
                         .to_string()
                         .contains("is earlier than latest GC horizon"));
-                }
             }
-
-            Ok(())
         }
 
-        #[test]
-        fn test_prohibit_get_page_at_lsn_for_garbage_collected_pages() -> Result<()> {
-            let repo =
-                RepoHarness::create("test_prohibit_get_page_at_lsn_for_garbage_collected_pages")?
-                    .load_page_repo();
+        Ok(())
+    }
 
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-            make_some_layers(&tline, Lsn(0x20))?;
+    /*
+    // FIXME: This currently fails to error out. Calling GC doesn't currently
+    // remove the old value, we'd need to work a little harder
+    #[test]
+    fn test_prohibit_get_for_garbage_collected_data() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_prohibit_get_for_garbage_collected_data")?
+            .load();
 
-            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-            let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
-            assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
-            // FIXME: GC is currently disabled, so this still works
-            /*
-            match tline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)) {
-                Ok(_) => panic!("request for page should have failed"),
-                Err(err) => assert!(err.to_string().contains("not found at")),
-            }
-             */
-            Ok(())
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20))?;
+
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
+        assert!(*latest_gc_cutoff_lsn > Lsn(0x25));
+        match tline.get(*TEST_KEY, Lsn(0x25)) {
+            Ok(_) => panic!("request for page should have failed"),
+            Err(err) => assert!(err.to_string().contains("not found at")),
         }
+        Ok(())
+    }
+     */
 
-        #[test]
-        fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
-            let repo =
-                RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load_page_repo();
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-            make_some_layers(&tline, Lsn(0x20))?;
+    #[test]
+    fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
+        let repo =
+            RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-            let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-                Some(timeline) => timeline,
-                None => panic!("Should have a local timeline"),
-            };
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
+            Some(timeline) => timeline,
+            None => panic!("Should have a local timeline"),
+        };
 
-            // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
-            assert!(newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x25)).is_ok());
+        // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
-            Ok(())
-        }
+        Ok(())
+    }
+    #[test]
+    fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
+        let repo = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
+        let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+        make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        #[test]
-        fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
-            let harness = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?;
-            let repo = harness.load_page_repo();
-            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
-            make_some_layers(&tline, Lsn(0x20))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
+            Some(timeline) => timeline,
+            None => panic!("Should have a local timeline"),
+        };
 
-            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-            let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-                Some(timeline) => timeline,
-                None => panic!("Should have a local timeline"),
-            };
+        make_some_layers(newtline.as_ref(), Lsn(0x60))?;
 
-            make_some_layers(&newtline, Lsn(0x60))?;
+        // run gc on parent
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
 
-            // run gc on parent
-            repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
+        // Check that the data is still accessible on the branch.
+        assert_eq!(
+            newtline.get(*TEST_KEY, Lsn(0x50))?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+        );
 
-            // Check that the data is still accessible on the branch.
-            assert_eq!(
-                newtline.get_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
-                TEST_IMG(&format!("foo blk 0 at {}", Lsn(0x40)))
-            );
-
-            Ok(())
-        }
-
-    */
+        Ok(())
+    }
 }
