@@ -427,7 +427,7 @@ jobs:
   # Build zenithdb/zenith:latest image and push it to Docker hub
   docker-image:
     docker:
-      - image: zimg/rust:1.56
+      - image: cimg/base:2021.04
     steps:
       - checkout
       - setup_remote_docker:
@@ -446,8 +446,8 @@ jobs:
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
               --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:latest .
-            #docker push zenithdb/zenith:${DOCKER_TAG}
-            #docker push zenithdb/zenith:latest
+            docker push zenithdb/zenith:${DOCKER_TAG}
+            docker push zenithdb/zenith:latest
 
   # Build zenithdb/compute-node:latest image and push it to Docker hub
   docker-image-compute:
@@ -480,7 +480,8 @@ jobs:
 
   # Build production zenithdb/zenith:release image and push it to Docker hub
   docker-image-release:
-    executor: zenith-xlarge-executor
+    docker:
+      - image: cimg/base:2021.04
     steps:
       - checkout
       - setup_remote_docker:
@@ -494,9 +495,10 @@ jobs:
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
             docker build \
+              --pull \
               --build-arg GIT_VERSION=${CIRCLE_SHA1} \
-              --build-arg AWS_ACCESS_KEY_ID=${CACHEPOT_AWS_ACCESS_KEY_ID} \
-              --build-arg AWS_SECRET_ACCESS_KEY=${CACHEPOT_AWS_SECRET_ACCESS_KEY} \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
               --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:release .
             docker push zenithdb/zenith:${DOCKER_TAG}
             docker push zenithdb/zenith:release
@@ -731,10 +733,9 @@ workflows:
             branches:
               only:
                 - main
-                - docker_improvement
-#          requires:
-#            - pg_regress-tests-release
-#            - other-tests-release
+          requires:
+            - pg_regress-tests-release
+            - other-tests-release
       - docker-image-compute:
           # Context gives an ability to login
           context: Docker Hub
