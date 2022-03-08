@@ -1,3 +1,4 @@
+use crate::keyspace::KeyPartitioning;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
@@ -27,26 +28,30 @@ pub struct Key {
 impl Key {
 
     pub fn next(&self) -> Key {
+        self.add(1)
+    }
+    
+    pub fn add(&self, x: u32) -> Key {
         let mut key = self.clone();
 
-        let x = key.field6.overflowing_add(1);
-        key.field6 = x.0;
-        if x.1 {
-            let x = key.field5.overflowing_add(1);
-            key.field5 = x.0;
-            if x.1 {
-                let x = key.field4.overflowing_add(1);
-                key.field4 = x.0;
-                if x.1 {
-                    let x = key.field3.overflowing_add(1);
-                    key.field3 = x.0;
-                    if x.1 {
-                        let x = key.field2.overflowing_add(1);
-                        key.field2 = x.0;
-                        if x.1 {
-                            let x = key.field1.overflowing_add(1);
-                            key.field1 = x.0;
-                            assert!(!x.1);
+        let r = key.field6.overflowing_add(x);
+        key.field6 = r.0;
+        if r.1 {
+            let r = key.field5.overflowing_add(1);
+            key.field5 = r.0;
+            if r.1 {
+                let r = key.field4.overflowing_add(1);
+                key.field4 = r.0;
+                if r.1 {
+                    let r = key.field3.overflowing_add(1);
+                    key.field3 = r.0;
+                    if r.1 {
+                        let r = key.field2.overflowing_add(1);
+                        key.field2 = r.0;
+                        if r.1 {
+                            let r = key.field1.overflowing_add(1);
+                            key.field1 = r.0;
+                            assert!(!r.1);
                         }
                     }
                 }
@@ -54,6 +59,35 @@ impl Key {
         }
         key
     }
+}
+
+
+
+pub fn key_range_size(key_range: &Range<Key>) -> u32 {
+    let start = key_range.start;
+    let end = key_range.end;
+
+    if end.field1 != start.field1 ||
+        end.field2 != start.field2 ||
+        end.field3 != start.field3 ||
+        end.field4 != start.field4
+    {
+        return u32::MAX;
+    }
+
+    let start = (start.field5 as u64) << 32 | start.field6 as u64;
+    let end = (end.field5 as u64) << 32 | end.field6 as u64;
+
+    let diff = end - start;
+    if diff > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        diff as u32
+    }
+}
+
+pub fn singleton_range(key: Key) -> Range<Key> {
+    key..key.next()
 }
 
 impl fmt::Display for Key {
@@ -323,7 +357,7 @@ pub trait Timeline: Send + Sync {
     /// know anything about them here in the repository.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
-    fn create_images(&self, threshold: usize) -> Result<()>;
+    fn hint_partitioning(&self, partitioning: KeyPartitioning) -> Result<()>;
 
     ///
     /// Check that it is valid to request operations with that lsn.

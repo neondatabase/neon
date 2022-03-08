@@ -130,13 +130,14 @@ impl Layer for ImageLayer {
     /// Look up given page in the file
     fn get_value_reconstruct_data(
         &self,
-        lsn_floor: Lsn,
+        key: Key,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult> {
-        assert!(lsn_floor <= self.lsn);
-        assert!(self.key_range.contains(&reconstruct_state.key));
-        assert!(reconstruct_state.lsn >= self.lsn);
+        assert!(self.key_range.contains(&key));
+        assert!(lsn_range.end >= self.lsn);
 
+        /* FIXME
         match reconstruct_state.img {
             Some((cached_lsn, _)) if self.lsn <= cached_lsn => {
                 reconstruct_state.lsn = cached_lsn;
@@ -144,10 +145,11 @@ impl Layer for ImageLayer {
             }
             _ => {}
         }
+         */
 
         let inner = self.load()?;
 
-        if let Some(offset) = inner.index.get(&reconstruct_state.key) {
+        if let Some(offset) = inner.index.get(&key) {
             let chapter = inner
                 .book
                 .as_ref()
@@ -164,10 +166,8 @@ impl Layer for ImageLayer {
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
-            reconstruct_state.lsn = self.lsn;
             Ok(ValueReconstructResult::Complete)
         } else {
-            reconstruct_state.lsn = self.lsn;
             Ok(ValueReconstructResult::Missing)
         }
     }

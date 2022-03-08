@@ -22,7 +22,7 @@ use tracing::*;
 use std::cmp::{min, max, Ordering};
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -34,6 +34,7 @@ use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
+use crate::keyspace::KeyPartitioning;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
@@ -68,7 +69,10 @@ use filename::{DeltaFileName, ImageFileName};
 use image_layer::{ImageLayer, ImageLayerWriter};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
-use storage_layer::{Layer, ValueReconstructResult, ValueReconstructState, TARGET_FILE_SIZE,TARGET_FILE_SIZE_BYTES};
+use layer_map::SearchResult;
+use storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+
+use crate::keyspace::TARGET_FILE_SIZE_BYTES;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -738,6 +742,8 @@ pub struct LayeredTimeline {
     // garbage collecting data that is still needed by the child timelines.
     gc_info: RwLock<GcInfo>,
 
+    partitioning: RwLock<Option<KeyPartitioning>>,
+
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
     // It is needed in checks when we want to error on some operations
@@ -794,14 +800,11 @@ impl Timeline for LayeredTimeline {
         debug_assert!(lsn <= self.get_last_record_lsn());
 
         let mut reconstruct_state = ValueReconstructState {
-            key,
-            lsn,
             records: Vec::new(),
             img: None, // FIXME: check page cache and put the img here
-            request_lsn: lsn,
         };
 
-        self.get_reconstruct_data(&mut reconstruct_state)?;
+        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
 
         self.reconstruct_value(key, lsn, reconstruct_state)
     }
@@ -821,11 +824,6 @@ impl Timeline for LayeredTimeline {
                 .with_label_values(&["checkpoint"])
                 .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
-    }
-
-    // Entry point for forced image creation. Only used by tests at the moment.
-    fn create_images(&self, threshold: usize) -> Result<()> {
-        self.create_image_layers(threshold)
     }
 
     ///
@@ -859,6 +857,11 @@ impl Timeline for LayeredTimeline {
 
     fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
+    }
+
+    fn hint_partitioning(&self, partitioning: KeyPartitioning) -> Result<()> {
+        self.partitioning.write().unwrap().replace(partitioning);
+        Ok(())
     }
 
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
@@ -909,6 +912,7 @@ impl LayeredTimeline {
                 retain_lsns: Vec::new(),
                 cutoff: Lsn(0),
             }),
+            partitioning: RwLock::new(None),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
@@ -1002,7 +1006,7 @@ impl LayeredTimeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
-    fn get_reconstruct_data(&self, reconstruct_state: &mut ValueReconstructState) -> Result<()> {
+    fn get_reconstruct_data(&self, key: Key, request_lsn: Lsn, reconstruct_state: &mut ValueReconstructState) -> Result<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1013,6 +1017,7 @@ impl LayeredTimeline {
         let mut prev_lsn = Lsn(u64::MAX);
 
         let mut result = ValueReconstructResult::Continue;
+        let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
         loop {
             // The function should have updated 'state'
@@ -1020,28 +1025,28 @@ impl LayeredTimeline {
             match result {
                 ValueReconstructResult::Complete => return Ok(()),
                 ValueReconstructResult::Continue => {
-                    if prev_lsn <= reconstruct_state.lsn {
+                    if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
                         bail!("could not find layer with more data for key {} at LSN {}, request LSN {}",
-                          reconstruct_state.key,
-                          reconstruct_state.lsn,
-                          reconstruct_state.request_lsn)
+                          key,
+                          Lsn(cont_lsn.0 - 1),
+                          request_lsn)
                     }
-                    prev_lsn = reconstruct_state.lsn;
+                    prev_lsn = cont_lsn;
                 }
                 ValueReconstructResult::Missing => {
                     bail!(
                         "could not find data for key {} at LSN {}, for request at LSN {}",
-                        reconstruct_state.key,
-                        reconstruct_state.lsn,
-                        reconstruct_state.request_lsn
+                        key,
+                        cont_lsn,
+                        request_lsn
                     )
                 }
             }
 
             // Recurse into ancestor if needed
-            if reconstruct_state.lsn <= timeline.ancestor_lsn {
+            if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                 //info!("going into ancestor {}", timeline.ancestor_lsn);
                 let ancestor = timeline.get_ancestor_timeline()?;
                 timeline_owned = ancestor;
@@ -1055,33 +1060,34 @@ impl LayeredTimeline {
             // Check the open and frozen in-memory layers first
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
-                if reconstruct_state.lsn >= start_lsn {
+                if cont_lsn >= start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", reconstruct_state.key, reconstruct_state.lsn, open_layer.filename().display());
-                    result = open_layer.get_value_reconstruct_data(open_layer.get_lsn_range().start, reconstruct_state)?;
+                    result = open_layer.get_value_reconstruct_data(key, open_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
+                    cont_lsn = open_layer.get_lsn_range().start;
                     continue;
                 }
             }
             if let Some(frozen_layer) = &layers.frozen_layer {
                 let start_lsn = frozen_layer.get_lsn_range().start;
-                if reconstruct_state.lsn >= start_lsn {
+                if cont_lsn >= start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", reconstruct_state.key, reconstruct_state.lsn, frozen_layer.filename().display());
-                    result = frozen_layer.get_value_reconstruct_data(frozen_layer.get_lsn_range().start, reconstruct_state)?;
+                    result = frozen_layer.get_value_reconstruct_data(key, frozen_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
+                    cont_lsn = frozen_layer.get_lsn_range().start;
                     continue;
                 }
             }
 
-            if let Some(search_result) = layers
-                .search(reconstruct_state.key, reconstruct_state.lsn)?
+            if let Some(SearchResult { lsn_floor, layer }) = layers
+                .search(key, cont_lsn)?
             {
                 //info!("CHECKING for {} at {} on historic layer {}", reconstruct_state.key, reconstruct_state.lsn, layer.filename().display());
 
-                result = search_result
-                    .layer
-                    .get_value_reconstruct_data(search_result.lsn_floor, reconstruct_state)?;
+                result = layer.get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)?;
+                cont_lsn = lsn_floor;
             } else if self.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
-                reconstruct_state.lsn = self.ancestor_lsn;
+                cont_lsn = Lsn(self.ancestor_lsn.0 + 1);
             } else {
                 // Nothing found
                 result = ValueReconstructResult::Missing;
@@ -1241,9 +1247,9 @@ impl LayeredTimeline {
             // currently hard-coded at 3. It means, write out a new image layer,
             // if there are at least three delta layers on top of it.
             if false {
-                self.create_image_layers(3)?;
+                self.compact(TARGET_FILE_SIZE_BYTES as usize)?;
             }
-            self.compact_level0()?;
+            //self.compact_level0()?;
         }
 
         // TODO: We should also compact existing delta layers here.
@@ -1357,7 +1363,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn compact(&self) -> Result<()> {
+    fn compact(&self, target_file_size: usize) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
         //
@@ -1392,10 +1398,80 @@ impl LayeredTimeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        todo!()
+
+        let lsn = self.last_record_lsn.load().last;
+
+        // 1. The partitioning was already done by the code in
+        // pgdatadir_mapping.rs. We just use it here.
+        let partitioning = self.partitioning.read().unwrap();
+        if let Some(partitioning) = partitioning.as_ref() {
+            // 2. Create new image layers for partitions that have been modified
+            // "enough".
+            for partition in &partitioning.partitions {
+                if self.time_for_new_image_layer(partition, lsn, 3)? {
+                    self.create_image_layer(partition, lsn)?;
+                }
+            }
+            // 3. Compact
+            self.compact_level0(target_file_size)?;
+        } else {
+            info!("Could not compact because no partitioning specified yet");
+        }
+        Ok(())
     }
 
-    fn compact_level0(&self) -> Result<()> {
+    // Is it time to create a new image layer for the given partition?
+    fn time_for_new_image_layer(&self, partition: &Vec<Range<Key>>, lsn: Lsn, threshold: usize) -> Result<bool> {
+        let layers = self.layers.lock().unwrap();
+
+        for part_range in partition {
+            let image_coverage = layers.image_coverage(&part_range, lsn)?;
+            for (img_range, last_img) in image_coverage {
+                let img_lsn = if let Some(ref last_img) = last_img {
+                    last_img.get_lsn_range().end
+                } else {
+                    Lsn(0)
+                };
+
+                let num_deltas = layers.get_deltas(&img_range, &(img_lsn..lsn))?.len();
+
+                info!(
+                    "range {}-{}, has {} deltas on this timeline",
+                    img_range.start, img_range.end, num_deltas
+                );
+                if num_deltas >= threshold {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn create_image_layer(&self, partition: &Vec<Range<Key>>, lsn: Lsn) -> Result<()> {
+        let img_range = partition.first().unwrap().start..partition.last().unwrap().end;
+        let mut image_layer_writer =
+            ImageLayerWriter::new(self.conf, self.timelineid, self.tenantid, &img_range, lsn)?;
+
+        for range in partition {
+            let mut key = range.start;
+            while key < range.end {
+                let img = self.get(key, lsn)?;
+                image_layer_writer.put_image(key, &img)?;
+                key = key.next();
+            }
+        }
+        let image_layer = image_layer_writer.finish()?;
+
+        let mut layers = self.layers.lock().unwrap();
+        layers.insert_historic(Arc::new(image_layer));
+        drop(layers);
+        // FIXME: need to fsync?
+
+        Ok(())
+    }
+
+    fn compact_level0(&self, target_file_size: usize) -> Result<()> {
         let mut layers = self.layers.lock().unwrap();
 
         // We compact or "shuffle" the level-0 delta layers when 10 have
@@ -1433,12 +1509,13 @@ impl LayeredTimeline {
         });
 
         // Merge the contents of all the input delta layers into a new set
-        // of delta layers. Each output layer is TARGET_FILE_SIZE_BYTES in
-        // size, i.e. we don't try to align the layer boundaries with the
-        // image layers or relation boundaries. TODO: we probably should,
-        // to allow garbage collection to happen earlier.
+        // of delta layers, based on the current partitioning.
         //
-        // TODO: we should also opportunistically garbage collect what we can.
+        // TODO: this actually divides the layers into fixed-size chunks, not
+        // based on the partitioning.
+        //
+        // TODO: we should also opportunistically materialize and
+        // garbage collect what we can.
         let mut new_layers = Vec::new();
         let mut prev_key: Option<Key> = None;
         let mut writer: Option<DeltaLayerWriter> = None;
@@ -1448,8 +1525,7 @@ impl LayeredTimeline {
             if let Some(prev_key) = prev_key {
                 if key != prev_key && writer.is_some() {
                     let size = writer.as_mut().unwrap().size();
-                    info!("size is now {}", size);
-                    if size > TARGET_FILE_SIZE_BYTES as u64 {
+                    if size > target_file_size as u64 {
                         new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
                         writer = None;
                     }
@@ -1482,193 +1558,6 @@ impl LayeredTimeline {
         for l in level0_deltas {
             l.delete()?;
             layers.remove_historic(l.clone());
-        }
-
-        Ok(())
-    }
-
-    ///
-    /// Create new image layers, to allow garbage collection to remove old files.
-    ///
-    fn create_image_layers(&self, threshold: usize) -> Result<()> {
-        let layers = self.layers.lock().unwrap();
-        let lsn = self.last_record_lsn.load().last;
-        let image_coverage = layers.image_coverage(&(Key::MIN..Key::MAX), lsn)?;
-        drop(layers);
-
-        debug!(
-            "create_image_layers called with threshold {} at {}",
-            threshold, lsn
-        );
-
-        // For any range where there has been more than 'threshold'
-        // deltas on top of the last image, create new image.
-        //
-        // TODO: Invent a better heuristic.
-        //
-        //
-        // TODO: add heuristics to greedily include more segments in the
-        // image layer, if it's otherwise very small.
-        for (key_range, last_img) in image_coverage {
-            let img_lsn = if let Some(ref last_img) = last_img {
-                last_img.get_lsn_range().end
-            } else {
-                Lsn(0)
-            };
-
-            let layers = self.layers.lock().unwrap();
-            let num_deltas = layers.get_deltas(&key_range, &(img_lsn..lsn))?.len();
-            drop(layers);
-
-            info!(
-                "range {}-{} has {} deltas on this timeline",
-                key_range.start, key_range.end, num_deltas
-            );
-            if num_deltas >= threshold {
-                self.create_image_layers_for_range(&key_range, last_img, lsn)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // Get all distinct Keys present in the given key range.
-    //
-    // This is used to figure out which parts of the overall keyspace are in use, to
-    // divide the keyspace into image layers.
-    //
-    // TODO: For a large database, this set could be very large. Use ranges or prefixes
-    // instead of individual keys.
-    fn collect_keys(
-        &self,
-        key_range: &Range<Key>,
-        img: Option<Arc<dyn Layer>>,
-        lsn: Lsn,
-        base_keys: &mut HashSet<Key>,
-        delta_keys: &mut HashSet<Key>,
-    ) -> Result<()> {
-        info!(
-            "creating image layer for key range {}-{} at {}",
-            key_range.start, key_range.end, lsn
-        );
-
-        let baseline_lsn = if let Some(img) = img {
-            // This range is covered by an image layer on this timeline. Iterate over all the keys
-            img.collect_keys(key_range, base_keys)?;
-            img.get_lsn_range().end
-        } else if self.ancestor_timeline.is_some() {
-            // Need to look at the ancestor for this range.
-            let ancestor = self.get_ancestor_timeline()?;
-
-            ancestor.collect_keys_recurse(key_range, lsn, base_keys)?;
-            self.ancestor_lsn
-        } else {
-            self.initdb_lsn
-        };
-
-        // Ok, we have baseline list of keys from the images now
-        // Add all keys from all the deltas
-        let deltas = {
-            let layers = self.layers.lock().unwrap();
-            layers.get_deltas(key_range, &(baseline_lsn..lsn))?
-        };
-
-        for delta in deltas {
-            delta.collect_keys(key_range, delta_keys)?;
-        }
-
-        Ok(())
-    }
-
-    fn collect_keys_recurse(
-        &self,
-        key_range: &Range<Key>,
-        lsn: Lsn,
-        keys: &mut HashSet<Key>,
-    ) -> Result<()> {
-        let layers = self.layers.lock().unwrap();
-        let image_coverage = layers.image_coverage(key_range, lsn)?;
-        drop(layers);
-
-        for (range, last_img) in image_coverage {
-            let mut tmp_keys = HashSet::new();
-            self.collect_keys(&range, last_img, lsn, keys, &mut tmp_keys)?;
-            keys.extend(tmp_keys);
-        }
-
-        Ok(())
-    }
-
-    /// Create a new set of image layers for the given key range.
-    fn create_image_layers_for_range(
-        &self,
-        key_range: &Range<Key>,
-        img: Option<Arc<dyn Layer>>,
-        lsn: Lsn,
-    ) -> Result<()> {
-        info!(
-            "creating image layer for {}-{} at {}",
-            key_range.start, key_range.end, lsn
-        );
-
-        // If this gets called multiple times in a row, it's possible that the
-        // image layer already exists.
-        let layers = self.layers.lock().unwrap();
-        if layers.image_exists(key_range, lsn) {
-            info!(
-                "skipping creation of image layer for {}-{} at {} because it already exists",
-                key_range.start, key_range.end, lsn
-            );
-            return Ok(());
-        }
-        drop(layers);
-
-        let mut base_keys: HashSet<Key> = HashSet::new();
-        let mut delta_keys: HashSet<Key> = HashSet::new();
-        self.collect_keys(key_range, img, lsn, &mut base_keys, &mut delta_keys)?;
-
-        if delta_keys.is_empty() {
-            // Important special case: even though there was delta layers on top of this
-            // key range, the delta layers didn't contain any updates within the range.
-            // In that case, if we wrote a new image, it would have identical contents,
-            // just stamped at a later LSN. Not much point in that.
-            return Ok(());
-        }
-
-        // Divide the key range into roughly TARGET_FILE_SIZE chunks
-        let mut all_keys_vec: Vec<Key> =
-            base_keys.iter().chain(delta_keys.iter()).cloned().collect();
-        all_keys_vec.sort();
-        all_keys_vec.dedup();
-
-        let mut start_idx = 0;
-        let mut start_key = key_range.start;
-        while start_idx < all_keys_vec.len() {
-            let end_idx = std::cmp::min(start_idx + TARGET_FILE_SIZE as usize, all_keys_vec.len());
-            let end_key = if end_idx >= all_keys_vec.len() {
-                key_range.end
-            } else {
-                all_keys_vec[end_idx]
-            };
-
-            let img_range = start_key..end_key;
-
-            let mut image_layer_writer =
-                ImageLayerWriter::new(self.conf, self.timelineid, self.tenantid, &img_range, lsn)?;
-
-            for key in all_keys_vec[start_idx..end_idx].iter() {
-                let img = self.get(*key, lsn)?;
-                image_layer_writer.put_image(*key, &img)?;
-            }
-            let image_layer = image_layer_writer.finish()?;
-
-            let mut layers = self.layers.lock().unwrap();
-            layers.insert_historic(Arc::new(image_layer));
-            drop(layers);
-            // FIXME: need to fsync?
-
-            start_idx = end_idx;
-            start_key = end_key;
         }
 
         Ok(())
@@ -2000,6 +1889,8 @@ mod tests {
         Ok(())
     }
 
+    const TEST_FILE_SIZE: usize = 4 * 1024 * 1024;
+
     #[test]
     fn test_images() -> Result<()> {
         let repo = RepoHarness::create("test_images")?.load();
@@ -2014,7 +1905,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.create_images(1)?;
+        tline.compact(TEST_FILE_SIZE)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -2022,7 +1913,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.create_images(1)?;
+        tline.compact(TEST_FILE_SIZE)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -2030,7 +1921,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.create_images(1)?;
+        tline.compact(TEST_FILE_SIZE)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -2038,7 +1929,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.create_images(1)?;
+        tline.compact(TEST_FILE_SIZE)?;
 
         assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -2074,7 +1965,7 @@ mod tests {
                 blknum += 1;
             }
             tline.checkpoint(CheckpointConfig::Forced)?;
-            //tline.create_images(1)?;
+            tline.compact(TEST_FILE_SIZE)?;
         }
 
         Ok(())
@@ -2085,12 +1976,15 @@ mod tests {
         let repo = RepoHarness::create("test_random_updates")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
-        const NUM_KEYS: usize = 20000;
+        const NUM_KEYS: usize = 1000;
 
         let mut lsn = Lsn(0x10);
 
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
         let mut blknum = 0;
+
+        let mut parts = KeyPartitioning::new();
+
         for _ in 0..NUM_KEYS {
             test_key.field6 = blknum;
             let writer = tline.writer();
@@ -2102,13 +1996,18 @@ mod tests {
             writer.advance_last_record_lsn(lsn);
             drop(writer);
 
+            parts.add_key(test_key);
+
             lsn = Lsn(lsn.0 + 0x10);
             blknum += 1;
         }
 
-        for _ in 0..100 {
+        parts.repartition(TEST_FILE_SIZE as u64);
+        tline.hint_partitioning(parts)?;
+
+        for _ in 0..50 {
             for _ in 0..NUM_KEYS {
-                blknum = thread_rng().gen_range(0..10000);
+                blknum = thread_rng().gen_range(0..NUM_KEYS) as u32;
                 test_key.field6 = blknum;
                 let writer = tline.writer();
                 writer.put(
@@ -2125,7 +2024,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.create_images(3)?;
+            tline.compact(TEST_FILE_SIZE)?;
             tline.gc()?;
         }
 

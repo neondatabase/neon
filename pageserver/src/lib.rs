@@ -3,6 +3,7 @@ pub mod branches;
 pub mod config;
 pub mod http;
 pub mod import_datadir;
+pub mod keyspace;
 pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;

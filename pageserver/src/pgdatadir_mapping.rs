@@ -7,6 +7,7 @@
 //! Clarify that)
 //!
 
+use crate::keyspace::{KeyPartitioning, TARGET_FILE_SIZE_BYTES};
 use crate::relish::*;
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
@@ -30,11 +31,12 @@ where
     R: Repository,
 {
     pub tline: Arc<R::Timeline>,
+    pub last_partitioning: Option<Lsn>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DbDirectory {
-    // (dbnode, spcnode)
+    // (spcnode, dbnode)
     dbs: HashSet<(Oid, Oid)>,
 }
 
@@ -67,7 +69,10 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 impl<R: Repository> DatadirTimeline<R> {
     pub fn new(tline: Arc<R::Timeline>) -> Self {
-        DatadirTimeline { tline }
+        DatadirTimeline {
+            tline,
+            last_partitioning: None,
+        }
     }
 
     //------------------------------------------------------------------------------
@@ -157,7 +162,7 @@ impl<R: Repository> DatadirTimeline<R> {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    pub fn list_rels(&self, spcnode: u32, dbnode: u32, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    pub fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = self.tline.get(key, lsn)?;
@@ -291,6 +296,65 @@ impl<R: Repository> DatadirTimeline<R> {
     pub fn get_current_logical_size_non_incremental(&self, _lsn: Lsn) -> Result<usize> {
         //todo!()
         Ok(0)
+    }
+
+    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeyPartitioning> {
+        // Iterate through key ranges, greedily packing them into partitions
+        let mut result = KeyPartitioning::new();
+
+        // Add dbdir
+        result.add_key(DBDIR_KEY);
+
+        // Fetch list of database dirs and iterate them
+        let buf = self.tline.get(DBDIR_KEY, lsn)?;
+        let dbdir = DbDirectory::des(&buf)?;
+
+        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbs.iter().cloned().collect();
+        dbs.sort();
+        for (spcnode, dbnode) in dbs {
+            result.add_key(relmap_file_key(spcnode, dbnode));
+            let mut rels: Vec<RelTag> = self.list_rels(spcnode, dbnode, lsn)?.iter().cloned().collect();
+            rels.sort();
+            for rel in rels {
+                let relsize_key = rel_size_to_key(rel);
+                let mut buf = self.tline.get(relsize_key, lsn)?;
+                let relsize = buf.get_u32_le();
+
+                result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
+                result.add_key(relsize_key);
+            }
+        }
+
+        // Iterate SLRUs next
+        for kind in [SlruKind::Clog, SlruKind:: MultiXactMembers, SlruKind::MultiXactOffsets] {
+            let slrudir_key = slru_dir_to_key(kind);
+            let buf = self.tline.get(slrudir_key, lsn)?;
+            let dir = SlruSegmentDirectory::des(&buf)?;
+            let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
+            segments.sort();
+            for segno in segments {
+                let segsize_key = slru_segment_size_to_key(kind, segno);
+                let mut buf = self.tline.get(segsize_key, lsn)?;
+                let segsize = buf.get_u32_le();
+
+                result.add_range(slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, segsize));
+                result.add_key(segsize_key);
+            }
+        }
+
+        // Then pg_twophase
+        let buf = self.tline.get(TWOPHASEDIR_KEY, lsn)?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
+        let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
+        xids.sort();
+        for xid in xids {
+            result.add_key(twophase_file_key(xid));
+        }
+
+        result.add_key(CONTROLFILE_KEY);
+        result.add_key(CHECKPOINT_KEY);
+
+        Ok(result)
     }
 }
 
@@ -628,6 +692,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn finish(self) -> Result<()> {
         let writer = self.tline.tline.writer();
 
+        let last_partitioning = self.last_partitioning.unwrap_or(Lsn(0));
+
         for (key, value) in self.pending_updates {
             writer.put(key, self.lsn, value)?;
         }
@@ -636,6 +702,12 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         }
 
         writer.advance_last_record_lsn(self.lsn);
+
+        if self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8 {
+            let mut partitioning = self.tline.collect_keyspace(self.lsn)?;
+            partitioning.repartition(TARGET_FILE_SIZE_BYTES);
+            self.tline.tline.hint_partitioning(partitioning)?;
+        }
 
         Ok(())
     }
@@ -968,40 +1040,6 @@ pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
             (kind, segno, blknum)
         }
         _ => bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
-
-pub fn key_to_relish_block(key: Key) -> Result<(RelishTag, BlockNumber)> {
-    // FIXME: there's got to be a bitfields crate or something out there to do this for us..
-
-    // This only works for keys for blocks that are handled by WalRedo manager.
-    // TODO: assert that the other fields are zero
-
-    Ok(match key.field1 {
-        0x00 => (
-            RelishTag::Relation(RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            }),
-            key.field6,
-        ),
-
-        0x01 => (
-            RelishTag::Slru {
-                slru: match key.field2 {
-                    0x00 => SlruKind::Clog,
-                    0x01 => SlruKind::MultiXactMembers,
-                    0x02 => SlruKind::MultiXactOffsets,
-                    _ => bail!("unrecognized slru kind 0x{:02x}", key.field2),
-                },
-                segno: key.field4,
-            },
-            key.field6,
-        ),
-
-        _ => bail!("unrecognized value kind 0x{:02x}", key.field1),
     })
 }
 

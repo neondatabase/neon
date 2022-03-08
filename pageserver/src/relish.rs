@@ -1,4 +1,6 @@
 //!
+//! FIXME: relishes are obsolete
+//!
 //! Zenith stores PostgreSQL relations, and some other files, in the
 //! repository.  The relations (i.e. tables and indexes) take up most
 //! of the space in a typical installation, while the other files are
@@ -27,107 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use postgres_ffi::relfile_utils::forknumber_to_name;
-use postgres_ffi::{Oid, TransactionId};
-
-///
-/// RelishTag identifies one relish.
-///
-#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RelishTag {
-    // Relations correspond to PostgreSQL relation forks. Each
-    // PostgreSQL relation fork is considered a separate relish.
-    Relation(RelTag),
-
-    // SLRUs include pg_clog, pg_multixact/members, and
-    // pg_multixact/offsets. There are other SLRUs in PostgreSQL, but
-    // they don't need to be stored permanently (e.g. pg_subtrans),
-    // or we do not support them in zenith yet (pg_commit_ts).
-    //
-    // These are currently never requested directly by the compute
-    // nodes, although in principle that would be possible. However,
-    // when a new compute node is created, these are included in the
-    // tarball that we send to the compute node to initialize the
-    // PostgreSQL data directory.
-    //
-    // Each SLRU segment in PostgreSQL is considered a separate
-    // relish. For example, pg_clog/0000, pg_clog/0001, and so forth.
-    //
-    // SLRU segments are divided into blocks, like relations.
-    Slru { slru: SlruKind, segno: u32 },
-
-    // Miscellaneous other files that need to be included in the
-    // tarball at compute node creation. These are non-blocky, and are
-    // expected to be small.
-
-    //
-    // FileNodeMap represents PostgreSQL's 'pg_filenode.map'
-    // files. They are needed to map catalog table OIDs to filenode
-    // numbers. Usually the mapping is done by looking up a relation's
-    // 'relfilenode' field in the 'pg_class' system table, but that
-    // doesn't work for 'pg_class' itself and a few other such system
-    // relations. See PostgreSQL relmapper.c for details.
-    //
-    // Each database has a map file for its local mapped catalogs,
-    // and there is a separate map file for shared catalogs.
-    //
-    // These files are always 512 bytes long (although we don't check
-    // or care about that in the page server).
-    //
-    FileNodeMap { spcnode: Oid, dbnode: Oid },
-
-    //
-    // State files for prepared transactions (e.g pg_twophase/1234)
-    //
-    TwoPhase { xid: TransactionId },
-
-    // The control file, stored in global/pg_control
-    ControlFile,
-
-    // Special entry that represents PostgreSQL checkpoint. It doesn't
-    // correspond to to any physical file in PostgreSQL, but we use it
-    // to track fields needed to restore the checkpoint data in the
-    // control file, when a compute node is created.
-    Checkpoint,
-}
-
-impl RelishTag {
-    pub const fn is_blocky(&self) -> bool {
-        match self {
-            // These relishes work with blocks
-            RelishTag::Relation(_) | RelishTag::Slru { slru: _, segno: _ } => true,
-
-            // and these don't
-            RelishTag::FileNodeMap {
-                spcnode: _,
-                dbnode: _,
-            }
-            | RelishTag::TwoPhase { xid: _ }
-            | RelishTag::ControlFile
-            | RelishTag::Checkpoint => false,
-        }
-    }
-
-    // Physical relishes represent files and use
-    // RelationSizeEntry to track existing and dropped files.
-    // They can be both blocky and non-blocky.
-    pub const fn is_physical(&self) -> bool {
-        match self {
-            // These relishes represent physical files
-            RelishTag::Relation(_)
-            | RelishTag::Slru { .. }
-            | RelishTag::FileNodeMap { .. }
-            | RelishTag::TwoPhase { .. } => true,
-
-            // and these don't
-            RelishTag::ControlFile | RelishTag::Checkpoint => false,
-        }
-    }
-
-    // convenience function to check if this relish is a normal relation.
-    pub const fn is_relation(&self) -> bool {
-        matches!(self, RelishTag::Relation(_))
-    }
-}
+use postgres_ffi::Oid;
 
 ///
 /// Relation data file segment id throughout the Postgres cluster.
@@ -166,34 +68,6 @@ impl fmt::Display for RelTag {
             )
         } else {
             write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
-        }
-    }
-}
-
-/// Display RelTag in the same format that's used in most PostgreSQL debug messages:
-///
-/// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
-///
-impl fmt::Display for RelishTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RelishTag::Relation(rel) => rel.fmt(f),
-            RelishTag::Slru { slru, segno } => {
-                // e.g. pg_clog/0001
-                write!(f, "{}/{:04X}", slru.to_str(), segno)
-            }
-            RelishTag::FileNodeMap { spcnode, dbnode } => {
-                write!(f, "relmapper file for spc {} db {}", spcnode, dbnode)
-            }
-            RelishTag::TwoPhase { xid } => {
-                write!(f, "pg_twophase/{:08X}", xid)
-            }
-            RelishTag::ControlFile => {
-                write!(f, "control file")
-            }
-            RelishTag::Checkpoint => {
-                write!(f, "checkpoint")
-            }
         }
     }
 }

@@ -66,7 +66,7 @@ pub struct SearchResult {
 }
 
 impl LayerMap {
-    pub fn search(&self, key: Key, lsn: Lsn) -> Result<Option<SearchResult>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<dyn Layer>> = None;
@@ -80,15 +80,15 @@ impl LayerMap {
             }
             let img_lsn = l.get_lsn_range().start;
 
-            if img_lsn > lsn {
+            if img_lsn >= end_lsn {
                 // too new
                 continue;
             }
-            if img_lsn == lsn {
+            if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
                 return Ok(Some(SearchResult {
                     layer: Arc::clone(l),
-                    lsn_floor: lsn,
+                    lsn_floor: img_lsn,
                 }));
             }
             if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
@@ -107,19 +107,19 @@ impl LayerMap {
                 continue;
             }
 
-            if l.get_lsn_range().start > lsn {
+            if l.get_lsn_range().start >= end_lsn {
                 // too new
                 continue;
             }
 
-            if l.get_lsn_range().end > lsn {
+            if l.get_lsn_range().end >= end_lsn {
                 // this layer contains the requested point in the key/lsn space.
                 // No need to search any further
-                info!(
+                trace!(
                     "found layer {} for request on {} at {}",
                     l.filename().display(),
                     key,
-                    lsn
+                    end_lsn
                 );
                 latest_delta.replace(Arc::clone(l));
                 break;
@@ -135,38 +135,31 @@ impl LayerMap {
             }
         }
         if let Some(l) = latest_delta {
-            info!(
+            trace!(
                 "found (old) layer {} for request on {} at {}",
                 l.filename().display(),
                 key,
-                lsn
+                end_lsn
             );
+            let lsn_floor = if let Some(latest_img_lsn) = latest_img_lsn {
+                Lsn(latest_img_lsn.0 + 1)
+            } else {
+                l.get_lsn_range().start
+            };
             Ok(Some(SearchResult {
-                lsn_floor: latest_img_lsn.unwrap_or(l.get_lsn_range().start),
+                lsn_floor,
                 layer: l,
             }))
         } else if let Some(l) = latest_img {
-            info!("found img layer and no deltas for request on {} at {}", key, lsn);
+            trace!("found img layer and no deltas for request on {} at {}", key, end_lsn);
             Ok(Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
             }))
         } else {
-            info!("no layer found for request on {} at {}", key, lsn);
+            trace!("no layer found for request on {} at {}", key, end_lsn);
             Ok(None)
         }
-    }
-
-    pub fn image_exists(&self, key_range: &Range<Key>, lsn: Lsn) -> bool {
-        for l in self.historic_layers.iter() {
-            if !l.is_incremental()
-                && l.get_key_range() == *key_range
-                && l.get_lsn_range().start == lsn
-            {
-                return true;
-            }
-        }
-        false
     }
 
     ///

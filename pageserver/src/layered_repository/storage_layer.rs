@@ -13,11 +13,6 @@ use std::path::PathBuf;
 
 use zenith_utils::lsn::Lsn;
 
-// in # of key-value pairs
-// FIXME Size of one segment in pages (128 MB)
-pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024;
-pub const TARGET_FILE_SIZE: u32 = (TARGET_FILE_SIZE_BYTES / 8192) as u32;
-
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -49,12 +44,8 @@ where
 ///
 #[derive(Debug)]
 pub struct ValueReconstructState {
-    pub key: Key,
-    pub lsn: Lsn,
     pub records: Vec<(Lsn, ZenithWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
-
-    pub request_lsn: Lsn, // original request's LSN, for debugging purposes
 }
 
 /// Return value from Layer::get_page_reconstruct_data
@@ -117,7 +108,8 @@ pub trait Layer: Send + Sync {
     /// collect more data.
     fn get_value_reconstruct_data(
         &self,
-        lsn_floor: Lsn,
+        key: Key,
+        lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 

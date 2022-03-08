@@ -150,13 +150,15 @@ impl Layer for DeltaLayer {
 
     fn get_value_reconstruct_data(
         &self,
-        lsn_floor: Lsn,
+        key: Key,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.key_range.contains(&reconstruct_state.key));
+        assert!(self.key_range.contains(&key));
 
+        /* FIXME
         match &reconstruct_state.img {
             Some((cached_lsn, _)) if &self.lsn_range.end <= cached_lsn => {
                 reconstruct_state.lsn = *cached_lsn;
@@ -164,6 +166,7 @@ impl Layer for DeltaLayer {
             }
             _ => {}
         }
+         */
 
         {
             // Open the file and lock the metadata in memory
@@ -175,16 +178,17 @@ impl Layer for DeltaLayer {
                 .chapter_reader(VALUES_CHAPTER)?;
 
             // Scan the page versions backwards, starting from `lsn`.
-            if let Some(vec_map) = inner.index.get(&reconstruct_state.key) {
-                let slice = vec_map.slice_range(lsn_floor..=reconstruct_state.lsn);
+            if let Some(vec_map) = inner.index.get(&key) {
+                let slice = vec_map.slice_range(lsn_range);
                 for (entry_lsn, pos) in slice.iter().rev() {
+                    /* FIXME
                     match &reconstruct_state.img {
                         Some((cached_lsn, _)) if entry_lsn <= cached_lsn => {
-                            reconstruct_state.lsn = *cached_lsn;
                             return Ok(ValueReconstructResult::Complete);
                         }
                         _ => {}
                     }
+                     */
 
                     let val = Value::des(&utils::read_blob_from_chapter(&values_reader, *pos)?)?;
                     match val {
@@ -211,7 +215,6 @@ impl Layer for DeltaLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            reconstruct_state.lsn = Lsn(self.lsn_range.start.0 - 1);
             Ok(ValueReconstructResult::Continue)
         } else {
             Ok(ValueReconstructResult::Complete)
