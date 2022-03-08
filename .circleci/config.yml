@@ -426,8 +426,7 @@ jobs:
 
   # Build zenithdb/zenith:latest image and push it to Docker hub
   docker-image:
-    docker:
-      - image: cimg/base:2021.04
+    executor: zenith-xlarge-executor
     steps:
       - checkout
       - setup_remote_docker:
@@ -440,8 +439,13 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
-            docker tag zenithdb/zenith:latest zenithdb/zenith:${DOCKER_TAG} && docker push zenithdb/zenith:${DOCKER_TAG}
+            docker build \
+              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
+              --build-arg AWS_ACCESS_KEY_ID=${CACHEPOT_AWS_ACCESS_KEY_ID} \
+              --build-arg AWS_SECRET_ACCESS_KEY=${CACHEPOT_AWS_SECRET_ACCESS_KEY} \
+              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:latest .
+            #docker push zenithdb/zenith:${DOCKER_TAG}
+            #docker push zenithdb/zenith:latest
 
   # Build zenithdb/compute-node:latest image and push it to Docker hub
   docker-image-compute:
@@ -468,13 +472,13 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build -t zenithdb/compute-node:latest vendor/postgres && docker push zenithdb/compute-node:latest
-            docker tag zenithdb/compute-node:latest zenithdb/compute-node:${DOCKER_TAG} && docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:latest vendor/postgres
+            docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker push zenithdb/compute-node:latest
 
   # Build production zenithdb/zenith:release image and push it to Docker hub
   docker-image-release:
-    docker:
-      - image: cimg/base:2021.04
+    executor: zenith-xlarge-executor
     steps:
       - checkout
       - setup_remote_docker:
@@ -487,8 +491,13 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:release . && docker push zenithdb/zenith:release
-            docker tag zenithdb/zenith:release zenithdb/zenith:${DOCKER_TAG} && docker push zenithdb/zenith:${DOCKER_TAG}
+            docker build \
+              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
+              --build-arg AWS_ACCESS_KEY_ID=${CACHEPOT_AWS_ACCESS_KEY_ID} \
+              --build-arg AWS_SECRET_ACCESS_KEY=${CACHEPOT_AWS_SECRET_ACCESS_KEY} \
+              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:release .
+            docker push zenithdb/zenith:${DOCKER_TAG}
+            docker push zenithdb/zenith:release
 
   # Build production zenithdb/compute-node:release image and push it to Docker hub
   docker-image-compute-release:
@@ -515,8 +524,9 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build -t zenithdb/compute-node:release vendor/postgres && docker push zenithdb/compute-node:release
-            docker tag zenithdb/compute-node:release zenithdb/compute-node:${DOCKER_TAG} && docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:release vendor/postgres
+            docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker push zenithdb/compute-node:release
 
   deploy-staging:
     docker:
@@ -719,6 +729,7 @@ workflows:
             branches:
               only:
                 - main
+                - docker_improvement
           requires:
             - pg_regress-tests-release
             - other-tests-release
