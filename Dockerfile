@@ -20,16 +20,14 @@ FROM zimg/rust:1.56 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
-ARG AWS_REGION
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
+ENV RUSTC_WRAPPER cachepot
 
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
-RUN set -e \
-    && if [ -n "${AWS_ACCESS_KEY_ID}" -a -n "${AWS_SECRET_ACCESS_KEY}" ]; then export RUSTC_WRAPPER=cachepot; fi \
-    && cargo build --release
+RUN cargo build --release
 
 # Build final image
 #

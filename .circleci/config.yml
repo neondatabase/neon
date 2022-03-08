@@ -426,7 +426,9 @@ jobs:
 
   # Build zenithdb/zenith:latest image and push it to Docker hub
   docker-image:
-    executor: zenith-xlarge-executor
+    docker:
+      - image: zimg/rust:1.56
+    resource_class: xlarge
     steps:
       - checkout
       - setup_remote_docker:
@@ -437,6 +439,8 @@ jobs:
       - run:
           name: Build and push Docker image
           command: |
+            nproc
+            free -h
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
             docker build \
@@ -741,9 +745,9 @@ workflows:
             branches:
               only:
                 - main
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
+#          requires:
+#            - pg_regress-tests-release
+#            - other-tests-release
       - deploy-staging:
           # Context gives an ability to login
           context: Docker Hub
