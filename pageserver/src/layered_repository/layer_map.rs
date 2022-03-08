@@ -141,11 +141,9 @@ impl LayerMap {
                 key,
                 end_lsn
             );
-            let lsn_floor = if let Some(latest_img_lsn) = latest_img_lsn {
-                Lsn(latest_img_lsn.0 + 1)
-            } else {
-                l.get_lsn_range().start
-            };
+            let lsn_floor = std::cmp::max(
+                Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
+                l.get_lsn_range().start);
             Ok(Some(SearchResult {
                 lsn_floor,
                 layer: l,

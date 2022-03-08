@@ -1011,6 +1011,8 @@ impl LayeredTimeline {
         let mut timeline_owned;
         let mut timeline = self;
 
+        let mut path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+
         // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
         // to check that each iteration make some progress, to break infinite
         // looping if something goes wrong.
@@ -1028,6 +1030,9 @@ impl LayeredTimeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
+                        for (r, c, l) in path {
+                            error!("PATH: result {:?}, cont_lsn {}, layer: {}", r, c, l.filename().display());
+                        }
                         bail!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                           key,
                           Lsn(cont_lsn.0 - 1),
@@ -1062,18 +1067,20 @@ impl LayeredTimeline {
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", reconstruct_state.key, reconstruct_state.lsn, open_layer.filename().display());
+                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
                     result = open_layer.get_value_reconstruct_data(key, open_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
-                    cont_lsn = open_layer.get_lsn_range().start;
+                    cont_lsn = start_lsn;
+                    path.push((result, cont_lsn, open_layer.clone()));
                     continue;
                 }
             }
             if let Some(frozen_layer) = &layers.frozen_layer {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on frozen layer {}", reconstruct_state.key, reconstruct_state.lsn, frozen_layer.filename().display());
+                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     result = frozen_layer.get_value_reconstruct_data(key, frozen_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
-                    cont_lsn = frozen_layer.get_lsn_range().start;
+                    cont_lsn = start_lsn;
+                    path.push((result, cont_lsn, frozen_layer.clone()));
                     continue;
                 }
             }
@@ -1081,10 +1088,11 @@ impl LayeredTimeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers
                 .search(key, cont_lsn)?
             {
-                //info!("CHECKING for {} at {} on historic layer {}", reconstruct_state.key, reconstruct_state.lsn, layer.filename().display());
+                //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 result = layer.get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)?;
                 cont_lsn = lsn_floor;
+                path.push((result, cont_lsn, layer));
             } else if self.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -1247,10 +1255,7 @@ impl LayeredTimeline {
             // TODO: the threshold for how often we create image layers is
             // currently hard-coded at 3. It means, write out a new image layer,
             // if there are at least three delta layers on top of it.
-            if false {
-                self.compact(TARGET_FILE_SIZE_BYTES as usize)?;
-            }
-            //self.compact_level0()?;
+            self.compact(TARGET_FILE_SIZE_BYTES as usize)?;
         }
 
         // TODO: We should also compact existing delta layers here.
@@ -1595,9 +1600,6 @@ impl LayeredTimeline {
     fn gc(&self) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
-        if true {
-            return Ok(result);
-        }
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
 
@@ -2001,15 +2003,16 @@ mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut lsn = Lsn(0x10);
-
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
-        let mut blknum = 0;
 
         let mut parts = KeyPartitioning::new();
 
-        for _ in 0..NUM_KEYS {
-            test_key.field6 = blknum;
+        let mut updated = [Lsn(0); NUM_KEYS];
+
+        let mut lsn = Lsn(0);
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = blknum as u32;
             let writer = tline.writer();
             writer.put(
                 test_key,
@@ -2017,12 +2020,10 @@ mod tests {
                 Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
             )?;
             writer.advance_last_record_lsn(lsn);
+            updated[blknum] = lsn;
             drop(writer);
 
             parts.add_key(test_key);
-
-            lsn = Lsn(lsn.0 + 0x10);
-            blknum += 1;
         }
 
         parts.repartition(TEST_FILE_SIZE as u64);
@@ -2030,19 +2031,26 @@ mod tests {
 
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {
-                blknum = thread_rng().gen_range(0..NUM_KEYS) as u32;
-                test_key.field6 = blknum;
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = blknum as u32;
                 let writer = tline.writer();
                 writer.put(
                     test_key,
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
+                println!("updating {} at {}", blknum, lsn);
                 writer.advance_last_record_lsn(lsn);
                 drop(writer);
-
-                lsn = Lsn(lsn.0 + 0x10);
+                updated[blknum] = lsn;
             }
+
+            for blknum in 0..NUM_KEYS {
+                test_key.field6 = blknum as u32;
+                assert_eq!(tline.get(test_key, lsn)?, TEST_IMG(&format!("{} at {}", blknum, updated[blknum])));
+            }
+            println!("checkpointing {}", lsn);
 
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);

@@ -56,7 +56,7 @@ pub struct ValueReconstructState {
 }
 
 /// Return value from Layer::get_page_reconstruct_data
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
     Complete,

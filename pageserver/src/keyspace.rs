@@ -41,6 +41,7 @@ impl KeyPartitioning {
                 if range.start == accum.end {
                     accum.end = range.end;
                 } else {
+                    assert!(range.start > accum.end);
                     self.ranges.push(accum.clone());
                     *accum = range;
                 }

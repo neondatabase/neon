@@ -427,7 +427,7 @@ pub mod repo_harness {
     pub fn TEST_IMG(s: &str) -> Bytes {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(s.as_bytes());
-        buf.resize(8192, 0);
+        buf.resize(64, 0);
 
         buf.freeze()
     }

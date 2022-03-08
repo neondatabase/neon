@@ -26,6 +26,7 @@
 //!
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fmt;
 
 use postgres_ffi::relfile_utils::forknumber_to_name;
@@ -46,13 +47,45 @@ use postgres_ffi::Oid;
 /// are used for the same purpose.
 /// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
 ///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Clone, Copy, Serialize, Deserialize)]
+// FIXME: should move 'forknum' as last field to keep this consistent with Postgres.
+// Then we could replace the custo Ord and PartialOrd implementations below with
+// deriving them.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: Oid,
     pub dbnode: Oid,
     pub relnode: Oid,
 }
+
+impl PartialOrd for RelTag {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RelTag {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let mut cmp;
+
+        cmp = self.spcnode.cmp(&other.spcnode);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        cmp = self.dbnode.cmp(&other.dbnode);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        cmp = self.relnode.cmp(&other.relnode);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        cmp = self.forknum.cmp(&other.forknum);
+
+        cmp
+    }
+}
+
 
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
