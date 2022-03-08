@@ -428,7 +428,6 @@ jobs:
   docker-image:
     docker:
       - image: zimg/rust:1.56
-    resource_class: xlarge
     steps:
       - checkout
       - setup_remote_docker:
@@ -439,14 +438,13 @@ jobs:
       - run:
           name: Build and push Docker image
           command: |
-            nproc
-            free -h
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
             docker build \
+              --pull \
               --build-arg GIT_VERSION=${CIRCLE_SHA1} \
-              --build-arg AWS_ACCESS_KEY_ID=${CACHEPOT_AWS_ACCESS_KEY_ID} \
-              --build-arg AWS_SECRET_ACCESS_KEY=${CACHEPOT_AWS_SECRET_ACCESS_KEY} \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
               --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:latest .
             #docker push zenithdb/zenith:${DOCKER_TAG}
             #docker push zenithdb/zenith:latest
@@ -734,9 +732,9 @@ workflows:
               only:
                 - main
                 - docker_improvement
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
+#          requires:
+#            - pg_regress-tests-release
+#            - other-tests-release
       - docker-image-compute:
           # Context gives an ability to login
           context: Docker Hub
@@ -745,9 +743,9 @@ workflows:
             branches:
               only:
                 - main
-#          requires:
-#            - pg_regress-tests-release
-#            - other-tests-release
+          requires:
+            - pg_regress-tests-release
+            - other-tests-release
       - deploy-staging:
           # Context gives an ability to login
           context: Docker Hub
