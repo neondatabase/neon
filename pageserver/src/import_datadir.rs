@@ -30,7 +30,7 @@ use zenith_utils::lsn::Lsn;
 /// cluster was not shut down cleanly.
 pub fn import_timeline_from_postgres_datadir<R: Repository>(
     path: &Path,
-    tline: &DatadirTimeline<R>,
+    tline: &mut DatadirTimeline<R>,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
@@ -335,7 +335,7 @@ fn import_slru_file<R: Repository>(
 /// 'startpoint' and 'endpoint' into the repository.
 fn import_wal<R: Repository>(
     walpath: &Path,
-    tline: &DatadirTimeline<R>,
+    tline: &mut DatadirTimeline<R>,
     startpoint: Lsn,
     endpoint: Lsn,
 ) -> Result<()> {

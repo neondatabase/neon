@@ -242,9 +242,9 @@ fn bootstrap_timeline<R: Repository>(
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
 
-    let page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline);
+    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline);
 
-    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &page_tline, lsn)?;
+    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
     page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
     println!(

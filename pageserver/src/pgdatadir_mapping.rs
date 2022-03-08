@@ -22,6 +22,7 @@ use std::sync::{Arc, RwLockReadGuard};
 use tracing::{debug, info, warn};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::{Lsn, RecordLsn};
+use zenith_utils::lsn::AtomicLsn;
 
 /// Block number within a relation or SRU. This matches PostgreSQL's BlockNumber type.
 pub type BlockNumber = u32;
@@ -31,7 +32,7 @@ where
     R: Repository,
 {
     pub tline: Arc<R::Timeline>,
-    pub last_partitioning: Option<Lsn>,
+    pub last_partitioning: AtomicLsn,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,7 +72,7 @@ impl<R: Repository> DatadirTimeline<R> {
     pub fn new(tline: Arc<R::Timeline>) -> Self {
         DatadirTimeline {
             tline,
-            last_partitioning: None,
+            last_partitioning: AtomicLsn::new(0),
         }
     }
 
@@ -692,7 +693,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn finish(self) -> Result<()> {
         let writer = self.tline.tline.writer();
 
-        let last_partitioning = self.last_partitioning.unwrap_or(Lsn(0));
+        let last_partitioning = self.last_partitioning.load();
 
         for (key, value) in self.pending_updates {
             writer.put(key, self.lsn, value)?;
@@ -707,6 +708,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
             let mut partitioning = self.tline.collect_keyspace(self.lsn)?;
             partitioning.repartition(TARGET_FILE_SIZE_BYTES);
             self.tline.tline.hint_partitioning(partitioning)?;
+            self.tline.last_partitioning.store(self.lsn);
         }
 
         Ok(())

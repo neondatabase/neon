@@ -242,7 +242,7 @@ fn walreceiver_main(
                 let startlsn = Lsn::from(xlog_data.wal_start());
                 let endlsn = startlsn + data.len() as u64;
 
-                trace!("received XLogData between {} and {}", startlsn, endlsn);
+                info!("received XLogData between {} and {}", startlsn, endlsn);
 
                 waldecoder.feed_bytes(data);
 

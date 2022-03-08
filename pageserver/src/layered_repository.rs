@@ -1028,10 +1028,11 @@ impl LayeredTimeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-                        bail!("could not find layer with more data for key {} at LSN {}, request LSN {}",
+                        bail!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                           key,
                           Lsn(cont_lsn.0 - 1),
-                          request_lsn)
+                              request_lsn,
+                        timeline.ancestor_lsn)
                     }
                     prev_lsn = cont_lsn;
                 }
@@ -1047,7 +1048,7 @@ impl LayeredTimeline {
 
             // Recurse into ancestor if needed
             if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                //info!("going into ancestor {}", timeline.ancestor_lsn);
+                info!("going into ancestor {}, cont_lsn is {}", timeline.ancestor_lsn, cont_lsn);
                 let ancestor = timeline.get_ancestor_timeline()?;
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
@@ -1060,7 +1061,7 @@ impl LayeredTimeline {
             // Check the open and frozen in-memory layers first
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
-                if cont_lsn >= start_lsn {
+                if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", reconstruct_state.key, reconstruct_state.lsn, open_layer.filename().display());
                     result = open_layer.get_value_reconstruct_data(key, open_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
                     cont_lsn = open_layer.get_lsn_range().start;
@@ -1069,7 +1070,7 @@ impl LayeredTimeline {
             }
             if let Some(frozen_layer) = &layers.frozen_layer {
                 let start_lsn = frozen_layer.get_lsn_range().start;
-                if cont_lsn >= start_lsn {
+                if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", reconstruct_state.key, reconstruct_state.lsn, frozen_layer.filename().display());
                     result = frozen_layer.get_value_reconstruct_data(key, frozen_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
                     cont_lsn = frozen_layer.get_lsn_range().start;
@@ -1594,6 +1595,9 @@ impl LayeredTimeline {
     fn gc(&self) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();
+        if true {
+            return Ok(result);
+        }
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
         let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
 
