@@ -1986,8 +1986,8 @@ mod tests {
     }
 
     //
-    // Insert a bunch of key-value pairs with increasing keys, checkpoint,
-    // repeat 100 times.
+    // Insert 1000 key-value pairs with increasing keys, checkpoint,
+    // repeat 50 times.
     //
     #[test]
     fn test_bulk_insert() -> Result<()> {
@@ -2042,6 +2042,8 @@ mod tests {
 
         let mut parts = KeyPartitioning::new();
 
+        // Track when each page was last modified. Used to assert that
+        // a read sees the latest page version.
         let mut updated = [Lsn(0); NUM_KEYS];
 
         let mut lsn = Lsn(0);
@@ -2081,6 +2083,7 @@ mod tests {
                 updated[blknum] = lsn;
             }
 
+            // Read all the blocks
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
@@ -2088,8 +2091,9 @@ mod tests {
                     TEST_IMG(&format!("{} at {}", blknum, last_lsn))
                 );
             }
-            println!("checkpointing {}", lsn);
 
+            // Perform a cycle of checkpoint, compaction, and GC
+            println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;

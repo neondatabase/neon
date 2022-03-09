@@ -139,16 +139,6 @@ impl Key {
             field6: u32::from_str_radix(&s[28..36], 16)?,
         })
     }
-
-    pub fn to_prefix_128(&self) -> u128 {
-        assert!(self.field1 & 0xf0 == 0);
-        (self.field1 as u128) << 124
-            | (self.field2 as u128) << 92
-            | (self.field3 as u128) << 60
-            | (self.field4 as u128) << 28
-            | (self.field5 as u128) << 20
-            | (self.field6 as u128) >> 12
-    }
 }
 
 //
@@ -365,6 +355,17 @@ pub trait Timeline: Send + Sync {
     /// know anything about them here in the repository.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
+    ///
+    /// Tell the implementation how the keyspace should be partitioned.
+    ///
+    /// FIXME: This is quite a hack. The code in pgdatadir_mapping.rs knows
+    /// which keys exist and what is the logical grouping of them. That's why
+    /// the code there (and in keyspace.rs) decides the partitioning, not the
+    /// layered_repository.rs implementation. That's a layering violation:
+    /// the Repository implementation ought to be responsible for the physical
+    /// layout, but currently it's more convenient to do it in pgdatadir_mapping.rs
+    /// rather than in layered_repository.rs.
+    ///
     fn hint_partitioning(&self, partitioning: KeyPartitioning) -> Result<()>;
 
     ///
