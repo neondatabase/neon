@@ -1,6 +1,6 @@
 //!
 //! This provides an abstraction to store PostgreSQL relations and other files
-//! in the key-value store
+//! in the key-value store that implements the Repository interface.
 //!
 //! (TODO: The line between PUT-functions here and walingest.rs is a bit blurry, as
 //! walingest.rs handles a few things like implicit relation creation and extension.
@@ -592,7 +592,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     // - update relish header with size
 
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        info!("CREAT: {}", rel);
         // Add it to the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let buf = self.get(dir_key)?;

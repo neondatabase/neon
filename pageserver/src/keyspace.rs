@@ -4,10 +4,8 @@ use crate::repository::{key_range_size, singleton_range, Key};
 
 use postgres_ffi::pg_constants;
 
-// in # of key-value pairs
-// FIXME Size of one segment in pages (128 MB)
-pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024;
-pub const TARGET_FILE_SIZE: usize = (TARGET_FILE_SIZE_BYTES / 8192) as usize;
+// Target file size, when creating iage and delta layers
+pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 
 ///
 /// Represents a set of Keys, in a compact form.

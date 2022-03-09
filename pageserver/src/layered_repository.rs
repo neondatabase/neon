@@ -1066,7 +1066,7 @@ impl LayeredTimeline {
 
             // Recurse into ancestor if needed
             if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                info!(
+                trace!(
                     "going into ancestor {}, cont_lsn is {}",
                     timeline.ancestor_lsn,
                     cont_lsn
@@ -1693,7 +1693,6 @@ impl LayeredTimeline {
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.filename().display(),
                         retain_lsn,
-                        //is_dropped, // FIXME
                         l.is_incremental(),
                     );
                     result.layers_needed_by_branches += 1;
@@ -1800,7 +1799,7 @@ impl LayeredTimeline {
                     self.walredo_mgr
                         .request_redo(key, request_lsn, base_img, data.records)?;
 
-                // FIXME
+                // FIXME: page caching
                 /*
                                 if let RelishTag::Relation(rel_tag) = &rel {
                                     let cache = page_cache::get();

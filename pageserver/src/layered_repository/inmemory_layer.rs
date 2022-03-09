@@ -15,7 +15,7 @@ use crate::repository::{Key, Value};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use log::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -169,13 +169,6 @@ impl Layer for InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
-    }
-
-    fn collect_keys(&self, key_range: &Range<Key>, keys: &mut HashSet<Key>) -> Result<()> {
-        let inner = self.inner.read().unwrap();
-
-        keys.extend(inner.index.keys().filter(|x| key_range.contains(x)));
-        Ok(())
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {

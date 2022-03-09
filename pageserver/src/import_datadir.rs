@@ -201,7 +201,7 @@ fn import_relfile<R: Repository>(
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
-                    // FIXME: maybe check that we read the full length of the file?
+                    ensure!(blknum == nblocks as u32, "unexpected EOF");
                     break;
                 }
                 _ => {
@@ -211,17 +211,11 @@ fn import_relfile<R: Repository>(
         };
         blknum += 1;
     }
-    ensure!(blknum == nblocks as u32);
 
     Ok(())
 }
 
-/// FIXME
-/// Import a "non-blocky" file into the repository
-///
-/// This is used for small files like the control file, twophase files etc. that
-/// are just slurped into the repository as one blob.
-///
+/// Import a relmapper (pg_filenode.map) file into the repository
 fn import_relmap_file<R: Repository>(
     timeline: &mut DatadirTimelineWriter<R>,
     spcnode: Oid,
@@ -239,6 +233,7 @@ fn import_relmap_file<R: Repository>(
     Ok(())
 }
 
+/// Import a twophase state file (pg_twophase/<xid>) into the repository
 fn import_twophase_file<R: Repository>(
     timeline: &mut DatadirTimelineWriter<R>,
     xid: TransactionId,
@@ -316,7 +311,7 @@ fn import_slru_file<R: Repository>(
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
-                    // FIXME: maybe check that we read the full length of the file?
+                    ensure!(rpageno == nblocks as u32, "unexpected EOF");
                     break;
                 }
                 _ => {
@@ -326,7 +321,6 @@ fn import_slru_file<R: Repository>(
         };
         rpageno += 1;
     }
-    ensure!(rpageno == nblocks as u32);
 
     Ok(())
 }

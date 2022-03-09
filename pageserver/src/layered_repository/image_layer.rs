@@ -28,7 +28,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::ops::Range;
@@ -137,16 +137,6 @@ impl Layer for ImageLayer {
         assert!(self.key_range.contains(&key));
         assert!(lsn_range.end >= self.lsn);
 
-        /* FIXME
-        match reconstruct_state.img {
-            Some((cached_lsn, _)) if self.lsn <= cached_lsn => {
-                reconstruct_state.lsn = cached_lsn;
-                return Ok(ValueReconstructResult::Complete);
-            }
-            _ => {}
-        }
-         */
-
         let inner = self.load()?;
 
         if let Some(offset) = inner.index.get(&key) {
@@ -170,15 +160,6 @@ impl Layer for ImageLayer {
         } else {
             Ok(ValueReconstructResult::Missing)
         }
-    }
-
-    fn collect_keys(&self, key_range: &Range<Key>, keys: &mut HashSet<Key>) -> Result<()> {
-        let inner = self.load()?;
-
-        let index = &inner.index;
-
-        keys.extend(index.keys().filter(|x| key_range.contains(x)));
-        Ok(())
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {

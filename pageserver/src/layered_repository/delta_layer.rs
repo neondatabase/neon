@@ -43,7 +43,7 @@ use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use zenith_utils::vec_map::VecMap;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
@@ -158,16 +158,6 @@ impl Layer for DeltaLayer {
 
         assert!(self.key_range.contains(&key));
 
-        /* FIXME
-        match &reconstruct_state.img {
-            Some((cached_lsn, _)) if &self.lsn_range.end <= cached_lsn => {
-                reconstruct_state.lsn = *cached_lsn;
-                return Ok(ValueReconstructResult::Complete);
-            }
-            _ => {}
-        }
-         */
-
         {
             // Open the file and lock the metadata in memory
             let inner = self.load()?;
@@ -181,15 +171,6 @@ impl Layer for DeltaLayer {
             if let Some(vec_map) = inner.index.get(&key) {
                 let slice = vec_map.slice_range(lsn_range);
                 for (entry_lsn, pos) in slice.iter().rev() {
-                    /* FIXME
-                    match &reconstruct_state.img {
-                        Some((cached_lsn, _)) if entry_lsn <= cached_lsn => {
-                            return Ok(ValueReconstructResult::Complete);
-                        }
-                        _ => {}
-                    }
-                     */
-
                     let val = Value::des(&utils::read_blob_from_chapter(&values_reader, *pos)?)?;
                     match val {
                         Value::Image(img) => {
@@ -219,14 +200,6 @@ impl Layer for DeltaLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
-    }
-
-    // Return a set of all distinct Keys present in this layer
-    fn collect_keys(&self, key_range: &Range<Key>, keys: &mut HashSet<Key>) -> Result<()> {
-        let inner = self.load()?;
-
-        keys.extend(inner.index.keys().filter(|x| key_range.contains(x)));
-        Ok(())
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
@@ -647,6 +620,13 @@ impl DeltaLayerWriter {
     }
 }
 
+///
+/// Iterator over all key-value pairse stored in a delta layer
+///
+/// FIXME: This creates a Vector to hold the offsets of all key value pairs.
+/// That takes up quite a lot of memory. Should do this in a more streaming
+/// fashion.
+///
 struct DeltaValueIter<'a> {
     all_offsets: Vec<(Key, Lsn, u64)>,
     next_idx: usize,
@@ -662,13 +642,6 @@ impl<'a> Iterator for DeltaValueIter<'a> {
     }
 }
 
-///
-/// Iterator over all key-value pairse stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold the offsets of all key value pairs.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
 impl<'a> DeltaValueIter<'a> {
     fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
         let mut index: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
