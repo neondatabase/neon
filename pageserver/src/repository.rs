@@ -366,7 +366,7 @@ pub trait Timeline: Send + Sync {
     /// layout, but currently it's more convenient to do it in pgdatadir_mapping.rs
     /// rather than in layered_repository.rs.
     ///
-    fn hint_partitioning(&self, partitioning: KeyPartitioning) -> Result<()>;
+    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()>;
 
     ///
     /// Check that it is valid to request operations with that lsn.

@@ -742,7 +742,7 @@ pub struct LayeredTimeline {
     // garbage collecting data that is still needed by the child timelines.
     gc_info: RwLock<GcInfo>,
 
-    partitioning: RwLock<Option<KeyPartitioning>>,
+    partitioning: RwLock<Option<(KeyPartitioning, Lsn)>>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -859,8 +859,8 @@ impl Timeline for LayeredTimeline {
         self.disk_consistent_lsn.load()
     }
 
-    fn hint_partitioning(&self, partitioning: KeyPartitioning) -> Result<()> {
-        self.partitioning.write().unwrap().replace(partitioning);
+    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()> {
+        self.partitioning.write().unwrap().replace((partitioning, lsn));
         Ok(())
     }
 
@@ -1429,17 +1429,15 @@ impl LayeredTimeline {
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
 
-        let lsn = self.last_record_lsn.load().last;
-
         // 1. The partitioning was already done by the code in
         // pgdatadir_mapping.rs. We just use it here.
         let partitioning = self.partitioning.read().unwrap();
-        if let Some(partitioning) = partitioning.as_ref() {
+        if let Some((partitioning, lsn)) = partitioning.as_ref() {
             // 2. Create new image layers for partitions that have been modified
             // "enough".
             for partition in &partitioning.partitions {
-                if self.time_for_new_image_layer(partition, lsn, 3)? {
-                    self.create_image_layer(partition, lsn)?;
+                if self.time_for_new_image_layer(partition, *lsn, 3)? {
+                    self.create_image_layer(partition, *lsn)?;
                 }
             }
             // 3. Compact
@@ -2020,7 +2018,7 @@ mod tests {
 
             let cutoff = tline.get_last_record_lsn();
             parts.repartition(TEST_FILE_SIZE as u64);
-            tline.hint_partitioning(parts.clone())?;
+            tline.hint_partitioning(parts.clone(), lsn)?;
 
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
@@ -2064,7 +2062,7 @@ mod tests {
         }
 
         parts.repartition(TEST_FILE_SIZE as u64);
-        tline.hint_partitioning(parts)?;
+        tline.hint_partitioning(parts, lsn)?;
 
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {

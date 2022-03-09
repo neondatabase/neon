@@ -714,10 +714,10 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
         writer.advance_last_record_lsn(self.lsn);
 
-        if self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8 {
+        if last_partitioning == Lsn(0) || self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8 {
             let mut partitioning = self.tline.collect_keyspace(self.lsn)?;
             partitioning.repartition(TARGET_FILE_SIZE_BYTES);
-            self.tline.tline.hint_partitioning(partitioning)?;
+            self.tline.tline.hint_partitioning(partitioning, self.lsn)?;
             self.tline.last_partitioning.store(self.lsn);
         }
 
