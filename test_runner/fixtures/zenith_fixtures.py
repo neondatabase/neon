@@ -242,15 +242,20 @@ class PgProtocol:
                  host: str,
                  port: int,
                  username: Optional[str] = None,
-                 password: Optional[str] = None):
+                 password: Optional[str] = None,
+                 dbname: Optional[str] = None,
+                 schema: Optional[str] = None):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.dbname = dbname
+        self.schema = schema
 
     def connstr(self,
                 *,
-                dbname: str = 'postgres',
+                dbname: Optional[str] = None,
+                schema: Optional[str] = None,
                 username: Optional[str] = None,
                 password: Optional[str] = None) -> str:
         """
@@ -259,6 +264,8 @@ class PgProtocol:
 
         username = username or self.username
         password = password or self.password
+        dbname = dbname or self.dbname or "postgres"
+        schema = schema or self.schema
         res = f'host={self.host} port={self.port} dbname={dbname}'
 
         if username:
@@ -267,13 +274,17 @@ class PgProtocol:
         if password:
             res = f'{res} password={password}'
 
+        if schema:
+            res = f"{res} options='-c search_path={schema}'"
+
         return res
 
     # autocommit=True here by default because that's what we need most of the time
     def connect(self,
                 *,
                 autocommit=True,
-                dbname: str = 'postgres',
+                dbname: Optional[str] = None,
+                schema: Optional[str] = None,
                 username: Optional[str] = None,
                 password: Optional[str] = None) -> PgConnection:
         """
@@ -282,11 +293,13 @@ class PgProtocol:
         This method passes all extra params to connstr.
         """
 
-        conn = psycopg2.connect(self.connstr(
-            dbname=dbname,
-            username=username,
-            password=password,
-        ))
+        conn = psycopg2.connect(
+            self.connstr(
+                dbname=dbname,
+                schema=schema,
+                username=username,
+                password=password,
+            ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
