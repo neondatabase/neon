@@ -1,6 +1,7 @@
 # Build Postgres
 #
-FROM zimg/rust:1.56 AS pg-build
+#FROM zimg/rust:1.56 AS pg-build
+FROM zenithdb/build:buster-20220309 AS pg-build
 WORKDIR /pg
 
 USER root
@@ -16,13 +17,15 @@ RUN set -e \
 
 # Build zenith binaries
 #
-FROM zimg/rust:1.56 AS build
+#FROM zimg/rust:1.56 AS build
+FROM zenithdb/build:buster-20220309 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
-ENV RUSTC_WRAPPER cachepot
+#ENV RUSTC_WRAPPER cachepot
+ENV RUSTC_WRAPPER /usr/local/cargo/bin/cachepot
 
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
