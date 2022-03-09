@@ -1434,15 +1434,22 @@ impl LayeredTimeline {
 
         // 1. The partitioning was already done by the code in
         // pgdatadir_mapping.rs. We just use it here.
-        let partitioning = self.partitioning.read().unwrap();
-        if let Some((partitioning, lsn)) = partitioning.as_ref() {
+        let partitioning_guard = self.partitioning.read().unwrap();
+        if let Some((partitioning, lsn)) = partitioning_guard.as_ref() {
+            // Make a copy of the partitioning, so that we can release
+            // the lock. Otherwise we could block the WAL receiver.
+            let lsn = *lsn;
+            let partitions = partitioning.partitions.clone();
+            drop(partitioning_guard);
+
             // 2. Create new image layers for partitions that have been modified
             // "enough".
-            for partition in &partitioning.partitions {
-                if self.time_for_new_image_layer(partition, *lsn, 3)? {
-                    self.create_image_layer(partition, *lsn)?;
+            for partition in partitions.iter() {
+                if self.time_for_new_image_layer(partition, lsn, 3)? {
+                    self.create_image_layer(partition, lsn)?;
                 }
             }
+
             // 3. Compact
             self.compact_level0(target_file_size)?;
         } else {
@@ -1508,7 +1515,7 @@ impl LayeredTimeline {
     }
 
     fn compact_level0(&self, target_file_size: usize) -> Result<()> {
-        let mut layers = self.layers.lock().unwrap();
+        let layers = self.layers.lock().unwrap();
 
         // We compact or "shuffle" the level-0 delta layers when 10 have
         // accumulated.
@@ -1519,6 +1526,7 @@ impl LayeredTimeline {
         if level0_deltas.len() < COMPACT_THRESHOLD {
             return Ok(());
         }
+        drop(layers);
 
         // FIXME: this function probably won't work correctly if there's overlap
         // in the deltas.
@@ -1585,6 +1593,7 @@ impl LayeredTimeline {
             new_layers.push(writer.finish(prev_key.unwrap().next())?);
         }
 
+        let mut layers = self.layers.lock().unwrap();
         for l in new_layers {
             layers.insert_historic(Arc::new(l));
         }
@@ -1595,6 +1604,7 @@ impl LayeredTimeline {
             l.delete()?;
             layers.remove_historic(l.clone());
         }
+        drop(layers);
 
         Ok(())
     }
