@@ -237,7 +237,7 @@ impl Layer for DeltaLayer {
 
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err)))
+            Err(err) => Box::new(std::iter::once(Err(err))),
         }
     }
 
@@ -507,12 +507,12 @@ impl DeltaLayerWriter {
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
 
-        let path = conf
-            .timeline_path(&timelineid, &tenantid)
-            .join(format!("{}-XXX__{:016X}-{:016X}.temp",
-                          key_start,
-                          u64::from(lsn_range.start),
-                          u64::from(lsn_range.end)));
+        let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
+            "{}-XXX__{:016X}-{:016X}.temp",
+            key_start,
+            u64::from(lsn_range.start),
+            u64::from(lsn_range.end)
+        ));
         info!("temp deltalayer path {}", path.display());
         let file = VirtualFile::create(&path)?;
         let buf_writer = BufWriter::new(file);
@@ -632,7 +632,7 @@ impl DeltaLayerWriter {
 
     pub fn abort(self) {
         match self.values_writer.close() {
-            Ok(book) =>  {
+            Ok(book) => {
                 if let Err(err) = book.close() {
                     error!("error while closing delta layer file: {}", err);
                 }
@@ -650,7 +650,7 @@ impl DeltaLayerWriter {
 struct DeltaValueIter<'a> {
     all_offsets: Vec<(Key, Lsn, u64)>,
     next_idx: usize,
-    
+
     inner: RwLockReadGuard<'a, DeltaLayerInner>,
 }
 
@@ -671,7 +671,6 @@ impl<'a> Iterator for DeltaValueIter<'a> {
 ///
 impl<'a> DeltaValueIter<'a> {
     fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
-
         let mut index: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         index.sort_by_key(|x| x.0);
 
@@ -693,12 +692,13 @@ impl<'a> DeltaValueIter<'a> {
         if self.next_idx < self.all_offsets.len() {
             let (key, lsn, off) = self.all_offsets[self.next_idx];
 
-            let values_reader = self.inner
+            let values_reader = self
+                .inner
                 .book
                 .as_ref()
                 .expect("should be loaded in load call above")
                 .chapter_reader(VALUES_CHAPTER)?;
-            
+
             let val = Value::des(&utils::read_blob_from_chapter(&values_reader, off)?)?;
 
             self.next_idx += 1;
@@ -708,4 +708,3 @@ impl<'a> DeltaValueIter<'a> {
         }
     }
 }
-

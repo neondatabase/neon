@@ -26,13 +26,12 @@ pub struct Key {
 }
 
 impl Key {
-
     pub fn next(&self) -> Key {
         self.add(1)
     }
-    
+
     pub fn add(&self, x: u32) -> Key {
-        let mut key = self.clone();
+        let mut key = *self;
 
         let r = key.field6.overflowing_add(x);
         key.field6 = r.0;
@@ -72,16 +71,14 @@ impl Key {
     }
 }
 
-
-
 pub fn key_range_size(key_range: &Range<Key>) -> u32 {
     let start = key_range.start;
     let end = key_range.end;
 
-    if end.field1 != start.field1 ||
-        end.field2 != start.field2 ||
-        end.field3 != start.field3 ||
-        end.field4 != start.field4
+    if end.field1 != start.field1
+        || end.field2 != start.field2
+        || end.field3 != start.field3
+        || end.field4 != start.field4
     {
         return u32::MAX;
     }
@@ -630,20 +627,36 @@ mod tests {
         {
             let writer = tline.writer();
             // Create a relation on the timeline
-            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.put(
+                *TEST_KEY,
+                lsn,
+                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+            )?;
             writer.advance_last_record_lsn(lsn);
             lsn += 0x10;
-            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.put(
+                *TEST_KEY,
+                lsn,
+                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+            )?;
             writer.advance_last_record_lsn(lsn);
             lsn += 0x10;
         }
         tline.checkpoint(CheckpointConfig::Forced)?;
         {
             let writer = tline.writer();
-            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.put(
+                *TEST_KEY,
+                lsn,
+                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+            )?;
             writer.advance_last_record_lsn(lsn);
             lsn += 0x10;
-            writer.put(*TEST_KEY, lsn, Value::Image(TEST_IMG(&format!("foo at {}", lsn))))?;
+            writer.put(
+                *TEST_KEY,
+                lsn,
+                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+            )?;
             writer.advance_last_record_lsn(lsn);
         }
         tline.checkpoint(CheckpointConfig::Forced)
@@ -668,10 +681,10 @@ mod tests {
             Err(err) => {
                 assert!(err.to_string().contains("invalid branch start lsn"));
                 assert!(err
-                        .source()
-                        .unwrap()
-                        .to_string()
-                        .contains("we might've already garbage collected needed data"))
+                    .source()
+                    .unwrap()
+                    .to_string()
+                    .contains("we might've already garbage collected needed data"))
             }
         }
 
@@ -689,10 +702,10 @@ mod tests {
             Err(err) => {
                 assert!(&err.to_string().contains("invalid branch start lsn"));
                 assert!(&err
-                        .source()
-                        .unwrap()
-                        .to_string()
-                        .contains("is earlier than latest GC horizon"));
+                    .source()
+                    .unwrap()
+                    .to_string()
+                    .contains("is earlier than latest GC horizon"));
             }
         }
 

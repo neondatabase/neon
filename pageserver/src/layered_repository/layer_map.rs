@@ -10,8 +10,8 @@
 //! corresponding files are written to disk.
 //!
 
-use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
 use crate::layered_repository::storage_layer::Layer;
+use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
 use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
@@ -143,13 +143,18 @@ impl LayerMap {
             );
             let lsn_floor = std::cmp::max(
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
-                l.get_lsn_range().start);
+                l.get_lsn_range().start,
+            );
             Ok(Some(SearchResult {
                 lsn_floor,
                 layer: l,
             }))
         } else if let Some(l) = latest_img {
-            trace!("found img layer and no deltas for request on {} at {}", key, end_lsn);
+            trace!(
+                "found img layer and no deltas for request on {} at {}",
+                key,
+                end_lsn
+            );
             Ok(Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
@@ -202,7 +207,6 @@ impl LayerMap {
         lsn: Lsn,
         disk_consistent_lsn: Lsn,
     ) -> Result<bool> {
-
         let mut range_remain = key_range.clone();
 
         loop {
@@ -212,10 +216,10 @@ impl LayerMap {
                     continue;
                 }
                 let img_lsn = l.get_lsn_range().start;
-                if !l.is_incremental() &&
-                    l.get_key_range().contains(&range_remain.start) &&
-                    img_lsn > lsn &&
-                    img_lsn < disk_consistent_lsn
+                if !l.is_incremental()
+                    && l.get_key_range().contains(&range_remain.start)
+                    && img_lsn > lsn
+                    && img_lsn < disk_consistent_lsn
                 {
                     made_progress = true;
                     let img_key_end = l.get_key_range().end;
@@ -329,11 +333,7 @@ impl LayerMap {
         Ok(ranges)
     }
 
-    pub fn count_deltas(
-        &self,
-        key_range: &Range<Key>,
-        lsn_range: &Range<Lsn>,
-    ) -> Result<usize> {
+    pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
         let mut result = 0;
         for l in self.historic_layers.iter() {
             if !l.is_incremental() {
@@ -348,8 +348,8 @@ impl LayerMap {
 
             // We ignore level0 delta layers. Unless the whole keyspace fits
             // into one partition
-            if !range_eq(key_range, &(Key::MIN..Key::MAX)) &&
-                range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
+            if !range_eq(key_range, &(Key::MIN..Key::MAX))
+                && range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
             {
                 continue;
             }

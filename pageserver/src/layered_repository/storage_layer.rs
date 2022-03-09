@@ -130,7 +130,7 @@ pub trait Layer: Send + Sync {
     fn is_in_memory(&self) -> bool;
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
-    
+
     /// Return a set of all distinct Keys present in this layer
     fn collect_keys(&self, key_range: &Range<Key>, keys: &mut HashSet<Key>) -> Result<()>;
 

@@ -86,7 +86,6 @@ impl Ord for RelTag {
     }
 }
 
-
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
 /// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]

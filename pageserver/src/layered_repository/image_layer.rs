@@ -184,7 +184,7 @@ impl Layer for ImageLayer {
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
         todo!();
     }
-    
+
     fn unload(&self) -> Result<()> {
         // TODO: unload 'segs'. Or even better, don't hold it in memory but
         // access it directly from the file (using the buffer cache)

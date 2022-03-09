@@ -19,7 +19,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use tracing::*;
 
-use std::cmp::{min, max, Ordering};
+use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -1006,7 +1006,12 @@ impl LayeredTimeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
-    fn get_reconstruct_data(&self, key: Key, request_lsn: Lsn, reconstruct_state: &mut ValueReconstructState) -> Result<()> {
+    fn get_reconstruct_data(
+        &self,
+        key: Key,
+        request_lsn: Lsn,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> Result<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1031,7 +1036,12 @@ impl LayeredTimeline {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
                         for (r, c, l) in path {
-                            error!("PATH: result {:?}, cont_lsn {}, layer: {}", r, c, l.filename().display());
+                            error!(
+                                "PATH: result {:?}, cont_lsn {}, layer: {}",
+                                r,
+                                c,
+                                l.filename().display()
+                            );
                         }
                         bail!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                           key,
@@ -1053,7 +1063,11 @@ impl LayeredTimeline {
 
             // Recurse into ancestor if needed
             if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                info!("going into ancestor {}, cont_lsn is {}", timeline.ancestor_lsn, cont_lsn);
+                info!(
+                    "going into ancestor {}, cont_lsn is {}",
+                    timeline.ancestor_lsn,
+                    cont_lsn
+                );
                 let ancestor = timeline.get_ancestor_timeline()?;
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
@@ -1068,7 +1082,11 @@ impl LayeredTimeline {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
-                    result = open_layer.get_value_reconstruct_data(key, open_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
+                    result = open_layer.get_value_reconstruct_data(
+                        key,
+                        open_layer.get_lsn_range().start..cont_lsn,
+                        reconstruct_state,
+                    )?;
                     cont_lsn = start_lsn;
                     path.push((result, cont_lsn, open_layer.clone()));
                     continue;
@@ -1078,19 +1096,25 @@ impl LayeredTimeline {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
-                    result = frozen_layer.get_value_reconstruct_data(key, frozen_layer.get_lsn_range().start..cont_lsn, reconstruct_state)?;
+                    result = frozen_layer.get_value_reconstruct_data(
+                        key,
+                        frozen_layer.get_lsn_range().start..cont_lsn,
+                        reconstruct_state,
+                    )?;
                     cont_lsn = start_lsn;
                     path.push((result, cont_lsn, frozen_layer.clone()));
                     continue;
                 }
             }
 
-            if let Some(SearchResult { lsn_floor, layer }) = layers
-                .search(key, cont_lsn)?
-            {
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
-                result = layer.get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state)?;
+                result = layer.get_value_reconstruct_data(
+                    key,
+                    lsn_floor..cont_lsn,
+                    reconstruct_state,
+                )?;
                 cont_lsn = lsn_floor;
                 path.push((result, cont_lsn, layer));
             } else if self.ancestor_timeline.is_some() {
@@ -1427,11 +1451,16 @@ impl LayeredTimeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(&self, partition: &Vec<Range<Key>>, lsn: Lsn, threshold: usize) -> Result<bool> {
+    fn time_for_new_image_layer(
+        &self,
+        partition: &[Range<Key>],
+        lsn: Lsn,
+        threshold: usize,
+    ) -> Result<bool> {
         let layers = self.layers.lock().unwrap();
 
         for part_range in partition {
-            let image_coverage = layers.image_coverage(&part_range, lsn)?;
+            let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
                 let img_lsn = if let Some(ref last_img) = last_img {
                     last_img.get_lsn_range().end
@@ -1454,7 +1483,7 @@ impl LayeredTimeline {
         Ok(false)
     }
 
-    fn create_image_layer(&self, partition: &Vec<Range<Key>>, lsn: Lsn) -> Result<()> {
+    fn create_image_layer(&self, partition: &[Range<Key>], lsn: Lsn) -> Result<()> {
         let img_range = partition.first().unwrap().start..partition.last().unwrap().end;
         let mut image_layer_writer =
             ImageLayerWriter::new(self.conf, self.timelineid, self.tenantid, &img_range, lsn)?;
@@ -1492,18 +1521,18 @@ impl LayeredTimeline {
 
         // FIXME: this function probably won't work correctly if there's overlap
         // in the deltas.
-        let lsn_range = level0_deltas.iter().map(|l| l.get_lsn_range()).reduce(|a, b| {
-            min(a.start, b.start)..max(a.end, b.end)
-        }).unwrap();
+        let lsn_range = level0_deltas
+            .iter()
+            .map(|l| l.get_lsn_range())
+            .reduce(|a, b| min(a.start, b.start)..max(a.end, b.end))
+            .unwrap();
 
         let all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
             if let Ok((a_key, a_lsn, _)) = a {
                 if let Ok((b_key, b_lsn, _)) = b {
                     match a_key.cmp(b_key) {
                         Ordering::Less => true,
-                        Ordering::Equal => {
-                            a_lsn <= b_lsn
-                        }
+                        Ordering::Equal => a_lsn <= b_lsn,
                         Ordering::Greater => false,
                     }
                 } else {
@@ -1678,9 +1707,15 @@ impl LayeredTimeline {
             // OK for a delta layer to have end LSN 101, but if the end LSN
             // is 102, then it might not have been fully flushed to disk
             // before crash.
-            if !layers.newer_image_layer_exists(&l.get_key_range(), l.get_lsn_range().end, disk_consistent_lsn+1)?
-            {
-                info!("keeping {} because it is the latest layer", l.filename().display());
+            if !layers.newer_image_layer_exists(
+                &l.get_key_range(),
+                l.get_lsn_range().end,
+                disk_consistent_lsn + 1,
+            )? {
+                info!(
+                    "keeping {} because it is the latest layer",
+                    l.filename().display()
+                );
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -1691,7 +1726,7 @@ impl LayeredTimeline {
                 l.filename().display(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(&l));
+            layers_to_remove.push(Arc::clone(l));
         }
 
         // Actually delete the layers from disk and remove them from the map.
@@ -2046,9 +2081,12 @@ mod tests {
                 updated[blknum] = lsn;
             }
 
-            for blknum in 0..NUM_KEYS {
+            for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = blknum as u32;
-                assert_eq!(tline.get(test_key, lsn)?, TEST_IMG(&format!("{} at {}", blknum, updated[blknum])));
+                assert_eq!(
+                    tline.get(test_key, lsn)?,
+                    TEST_IMG(&format!("{} at {}", blknum, last_lsn))
+                );
             }
             println!("checkpointing {}", lsn);
 

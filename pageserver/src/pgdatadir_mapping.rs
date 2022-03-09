@@ -21,8 +21,8 @@ use std::ops::Range;
 use std::sync::{Arc, RwLockReadGuard};
 use tracing::{debug, info, warn};
 use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::{Lsn, RecordLsn};
 use zenith_utils::lsn::AtomicLsn;
+use zenith_utils::lsn::{Lsn, RecordLsn};
 
 /// Block number within a relation or SRU. This matches PostgreSQL's BlockNumber type.
 pub type BlockNumber = u32;
@@ -311,11 +311,15 @@ impl<R: Repository> DatadirTimeline<R> {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbs.iter().cloned().collect();
-        dbs.sort();
+        dbs.sort_unstable();
         for (spcnode, dbnode) in dbs {
             result.add_key(relmap_file_key(spcnode, dbnode));
-            let mut rels: Vec<RelTag> = self.list_rels(spcnode, dbnode, lsn)?.iter().cloned().collect();
-            rels.sort();
+            let mut rels: Vec<RelTag> = self
+                .list_rels(spcnode, dbnode, lsn)?
+                .iter()
+                .cloned()
+                .collect();
+            rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self.tline.get(relsize_key, lsn)?;
@@ -327,18 +331,24 @@ impl<R: Repository> DatadirTimeline<R> {
         }
 
         // Iterate SLRUs next
-        for kind in [SlruKind::Clog, SlruKind:: MultiXactMembers, SlruKind::MultiXactOffsets] {
+        for kind in [
+            SlruKind::Clog,
+            SlruKind::MultiXactMembers,
+            SlruKind::MultiXactOffsets,
+        ] {
             let slrudir_key = slru_dir_to_key(kind);
             let buf = self.tline.get(slrudir_key, lsn)?;
             let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
-            segments.sort();
+            segments.sort_unstable();
             for segno in segments {
                 let segsize_key = slru_segment_size_to_key(kind, segno);
                 let mut buf = self.tline.get(segsize_key, lsn)?;
                 let segsize = buf.get_u32_le();
 
-                result.add_range(slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, segsize));
+                result.add_range(
+                    slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, segsize),
+                );
                 result.add_key(segsize_key);
             }
         }
@@ -347,7 +357,7 @@ impl<R: Repository> DatadirTimeline<R> {
         let buf = self.tline.get(TWOPHASEDIR_KEY, lsn)?;
         let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
-        xids.sort();
+        xids.sort_unstable();
         for xid in xids {
             result.add_key(twophase_file_key(xid));
         }

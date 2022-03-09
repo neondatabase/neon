@@ -996,9 +996,7 @@ mod tests {
 
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    fn init_walingest_test<'a, R: Repository>(
-        tline: &'a DatadirTimeline<R>,
-    ) -> Result<WalIngest<'a, R>> {
+    fn init_walingest_test<R: Repository>(tline: &DatadirTimeline<R>) -> Result<WalIngest<R>> {
         let mut writer = tline.begin_record(Lsn(0x10));
         writer.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         writer.finish()?;

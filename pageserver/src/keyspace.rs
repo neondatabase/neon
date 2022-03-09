@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::repository::{Key, key_range_size, singleton_range};
+use crate::repository::{key_range_size, singleton_range, Key};
 
 use postgres_ffi::pg_constants;
 
@@ -22,7 +22,6 @@ pub struct KeyPartitioning {
 }
 
 impl KeyPartitioning {
-
     pub fn new() -> Self {
         KeyPartitioning {
             accum: None,
@@ -45,7 +44,7 @@ impl KeyPartitioning {
                     self.ranges.push(accum.clone());
                     *accum = range;
                 }
-            },
+            }
             None => self.accum = Some(range),
         }
     }
@@ -61,11 +60,9 @@ impl KeyPartitioning {
         let mut current_part = Vec::new();
         let mut current_part_size: usize = 0;
         for range in &self.ranges {
-            let this_size = key_range_size(&range) as usize;
+            let this_size = key_range_size(range) as usize;
 
-            if current_part_size + this_size > target_nblocks &&
-                !current_part.is_empty()
-            {
+            if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
                 self.partitions.push(current_part);
                 current_part = Vec::new();
                 current_part_size = 0;
@@ -85,5 +82,11 @@ impl KeyPartitioning {
         if !current_part.is_empty() {
             self.partitions.push(current_part);
         }
+    }
+}
+
+impl Default for KeyPartitioning {
+    fn default() -> Self {
+        Self::new()
     }
 }
