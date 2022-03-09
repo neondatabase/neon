@@ -18,8 +18,9 @@ use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLockReadGuard};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::AtomicLsn;
 use zenith_utils::lsn::{Lsn, RecordLsn};
@@ -33,6 +34,7 @@ where
 {
     pub tline: Arc<R::Timeline>,
     pub last_partitioning: AtomicLsn,
+    pub current_logical_size: AtomicIsize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,7 +75,17 @@ impl<R: Repository> DatadirTimeline<R> {
         DatadirTimeline {
             tline,
             last_partitioning: AtomicLsn::new(0),
+            current_logical_size: AtomicIsize::new(0),
         }
+    }
+
+    pub fn init_logical_size(&self) -> Result<()> {
+        let last_lsn = self.tline.get_last_record_lsn();
+        self.current_logical_size.store(
+            self.get_current_logical_size_non_incremental(last_lsn)? as isize,
+            Ordering::SeqCst,
+        );
+        Ok(())
     }
 
     //------------------------------------------------------------------------------
@@ -270,6 +282,7 @@ impl<R: Repository> DatadirTimeline<R> {
             lsn,
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
+            pending_nblocks: 0,
         }
     }
 
@@ -286,17 +299,41 @@ impl<R: Repository> DatadirTimeline<R> {
     /// Retrieve current logical size of the timeline
     ///
     /// NOTE: counted incrementally, includes ancestors,
-    /// doesnt support TwoPhase relishes yet
     pub fn get_current_logical_size(&self) -> usize {
-        //todo!()
-        0
+        let current_logical_size = self.current_logical_size.load(Ordering::Acquire);
+        match usize::try_from(current_logical_size) {
+            Ok(sz) => sz,
+            Err(_) => {
+                error!(
+                    "current_logical_size is out of range: {}",
+                    current_logical_size
+                );
+                0
+            }
+        }
     }
 
     /// Does the same as get_current_logical_size but counted on demand.
-    /// Used in tests to ensure that incremental and non incremental variants match.
-    pub fn get_current_logical_size_non_incremental(&self, _lsn: Lsn) -> Result<usize> {
-        //todo!()
-        Ok(0)
+    /// Used to initialize the logical size tracking on startup.
+    ///
+    /// Only relation blocks are counted currently. That excludes metadata,
+    /// SLRUs, twophase files etc.
+    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
+        // Fetch list of database dirs and iterate them
+        let buf = self.tline.get(DBDIR_KEY, lsn)?;
+        let dbdir = DbDirectory::des(&buf)?;
+
+        let mut total_size: usize = 0;
+        for (spcnode, dbnode) in dbdir.dbs {
+            for rel in self.list_rels(spcnode, dbnode, lsn)? {
+                let relsize_key = rel_size_to_key(rel);
+                let mut buf = self.tline.get(relsize_key, lsn)?;
+                let relsize = buf.get_u32_le();
+
+                total_size += relsize as usize;
+            }
+        }
+        Ok(total_size * pg_constants::BLCKSZ as usize)
     }
 
     fn collect_keyspace(&self, lsn: Lsn) -> Result<KeyPartitioning> {
@@ -375,6 +412,7 @@ pub struct DatadirTimelineWriter<'a, R: Repository> {
     lsn: Lsn,
     pending_updates: HashMap<Key, Value>,
     pending_deletions: Vec<Range<Key>>,
+    pending_nblocks: isize,
 }
 
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
@@ -534,6 +572,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
             );
         }
 
+        // FIXME: update pending_nblocks
+
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
         Ok(())
@@ -568,6 +608,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
+        self.pending_nblocks += nblocks as isize;
+
         // even if nblocks > 0, we don't insert any actual blocks here
 
         Ok(())
@@ -577,8 +619,13 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         // Put size
         let size_key = rel_size_to_key(rel);
+
+        let old_size = self.get(size_key)?.get_u32_le();
+
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+        self.pending_nblocks -= old_size as isize - nblocks as isize;
         Ok(())
     }
 
@@ -629,8 +676,13 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         // Put size
         let size_key = rel_size_to_key(rel);
+
+        let old_size = self.get(size_key)?.get_u32_le();
+
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+        self.pending_nblocks += nblocks as isize - old_size as isize;
         Ok(())
     }
 
@@ -646,6 +698,11 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         } else {
             warn!("dropped rel {} did not exist in rel directory", rel);
         }
+
+        // update logical size
+        let size_key = rel_size_to_key(rel);
+        let old_size = self.get(size_key)?.get_u32_le();
+        self.pending_nblocks -= old_size as isize;
 
         // Delete size entry, as well as all blocks
         self.delete(rel_key_range(rel));
@@ -704,21 +761,31 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         let writer = self.tline.tline.writer();
 
         let last_partitioning = self.last_partitioning.load();
+        let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
             writer.put(key, self.lsn, value)?;
         }
         for key_range in self.pending_deletions {
-            writer.delete(key_range, self.lsn)?;
+            writer.delete(key_range.clone(), self.lsn)?;
         }
 
         writer.advance_last_record_lsn(self.lsn);
 
-        if last_partitioning == Lsn(0) || self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8 {
+        if last_partitioning == Lsn(0)
+            || self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8
+        {
             let mut partitioning = self.tline.collect_keyspace(self.lsn)?;
             partitioning.repartition(TARGET_FILE_SIZE_BYTES);
             self.tline.tline.hint_partitioning(partitioning, self.lsn)?;
             self.tline.last_partitioning.store(self.lsn);
+        }
+
+        if pending_nblocks != 0 {
+            self.tline.current_logical_size.fetch_add(
+                pending_nblocks * pg_constants::BLCKSZ as isize,
+                Ordering::SeqCst,
+            );
         }
 
         Ok(())

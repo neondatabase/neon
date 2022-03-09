@@ -23,11 +23,11 @@ use zenith_utils::{crashsafe_dir, logging};
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::{Repository, Timeline};
+use crate::tenant_mgr;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::RepositoryImpl;
 use crate::{import_datadir, LOG_FILE_NAME};
-use crate::{repository::RepositoryTimeline, tenant_mgr};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BranchInfo {
@@ -42,10 +42,10 @@ pub struct BranchInfo {
 }
 
 impl BranchInfo {
-    pub fn from_path<R: Repository, T: AsRef<Path>>(
+    pub fn from_path<T: AsRef<Path>>(
         path: T,
-        repo: &R,
-        _include_non_incremental_logical_size: bool,
+        tenantid: ZTenantId,
+        include_non_incremental_logical_size: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -58,35 +58,35 @@ impl BranchInfo {
             })?
             .parse::<ZTimelineId>()?;
 
-        let timeline = match repo.get_timeline(timeline_id)? {
-            RepositoryTimeline::Local(local_entry) => local_entry,
-            RepositoryTimeline::Remote { .. } => {
-                bail!("Timeline {} is remote, no branches to display", timeline_id)
+        let timeline = match tenant_mgr::get_timeline_for_tenant(tenantid, timeline_id) {
+            Ok(timeline) => timeline,
+            Err(err) => {
+                // FIXME: this was:
+                // bail!("Timeline {} is remote, no branches to display", timeline_id)
+                //
+                // but we cannot distinguish that from other errors now. Have
+                // get_timeline_for_tenant() return a more specific error
+                return Err(err);
             }
         };
 
         // we use ancestor lsn zero if we don't have an ancestor, so turn this into an option based on timeline id
-        let (ancestor_id, ancestor_lsn) = match timeline.get_ancestor_timeline_id() {
+        let (ancestor_id, ancestor_lsn) = match timeline.tline.get_ancestor_timeline_id() {
             Some(ancestor_id) => (
                 Some(ancestor_id.to_string()),
-                Some(timeline.get_ancestor_lsn().to_string()),
+                Some(timeline.tline.get_ancestor_lsn().to_string()),
             ),
             None => (None, None),
         };
 
         // non incremental size calculation can be heavy, so let it be optional
         // needed for tests to check size calculation
-        //
-        // FIXME
-        /*
         let current_logical_size_non_incremental = include_non_incremental_logical_size
             .then(|| {
                 timeline.get_current_logical_size_non_incremental(timeline.get_last_record_lsn())
             })
             .transpose()?;
-         */
-        let current_logical_size_non_incremental = Some(0);
-        let current_logical_size = 0;
+        let current_logical_size = timeline.get_current_logical_size();
 
         Ok(BranchInfo {
             name,
@@ -94,7 +94,7 @@ impl BranchInfo {
             latest_valid_lsn: timeline.get_last_record_lsn(),
             ancestor_id,
             ancestor_lsn,
-            current_logical_size, // : timeline.get_current_logical_size(),
+            current_logical_size,
             current_logical_size_non_incremental,
         })
     }
@@ -268,8 +268,6 @@ pub(crate) fn get_branches(
     tenantid: &ZTenantId,
     include_non_incremental_logical_size: bool,
 ) -> Result<Vec<BranchInfo>> {
-    let repo = tenant_mgr::get_repository_for_tenant(*tenantid)?;
-
     // Each branch has a corresponding record (text file) in the refs/branches
     // with timeline_id.
     let branches_dir = conf.branches_path(tenantid);
@@ -292,7 +290,7 @@ pub(crate) fn get_branches(
             })?;
             BranchInfo::from_path(
                 dir_entry.path(),
-                repo.as_ref(),
+                *tenantid,
                 include_non_incremental_logical_size,
             )
         })

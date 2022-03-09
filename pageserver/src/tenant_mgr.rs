@@ -284,6 +284,7 @@ pub fn get_timeline_for_tenant(
         .with_context(|| format!("cannot fetch timeline {}", timelineid))?;
 
     let page_tline = Arc::new(DatadirTimelineImpl::new(tline));
+    page_tline.init_logical_size()?;
     tenant.timelines.insert(timelineid, Arc::clone(&page_tline));
     Ok(page_tline)
 }

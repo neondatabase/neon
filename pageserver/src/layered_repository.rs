@@ -860,7 +860,10 @@ impl Timeline for LayeredTimeline {
     }
 
     fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()> {
-        self.partitioning.write().unwrap().replace((partitioning, lsn));
+        self.partitioning
+            .write()
+            .unwrap()
+            .replace((partitioning, lsn));
         Ok(())
     }
 
