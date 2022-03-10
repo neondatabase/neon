@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
 
-        // Drop relish
+        // Drop rel
         let mut writer = tline.begin_record(Lsn(0x30));
         walingest.put_rel_drop(&mut writer, TESTREL_A)?;
         writer.finish()?;
