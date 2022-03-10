@@ -2057,6 +2057,7 @@ mod tests {
         let mut updated = [Lsn(0); NUM_KEYS];
 
         let mut lsn = Lsn(0);
+        #[allow(clippy::needless_range_loop)]
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
