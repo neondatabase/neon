@@ -673,6 +673,29 @@ impl postgres_backend::Handler for PageServerHandler {
                 }
             }
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("show ") {
+            // show <tenant_id>
+            let (_, params_raw) = query_string.split_at("show ".len());
+            let params = params_raw.split(' ').collect::<Vec<_>>();
+            ensure!(params.len() == 1, "invalid param number for config command");
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            let conf = repo.get_tenant_conf();
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"checkpoint_period"),
+                RowDescriptor::int8_col(b"gc_horizon"),
+                RowDescriptor::int8_col(b"gc_period"),
+                RowDescriptor::int8_col(b"pitr_interval"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(conf.checkpoint_distance.to_string().as_bytes()),
+                Some(conf.checkpoint_period.as_secs().to_string().as_bytes()),
+                Some(conf.gc_horizon.to_string().as_bytes()),
+                Some(conf.gc_period.as_secs().to_string().as_bytes()),
+                Some(conf.pitr_interval.as_secs().to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
