@@ -853,13 +853,16 @@ class ZenithCli:
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None, conf: Optional[Dict[str,str]] = None) -> uuid.UUID:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
-        res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        if conf is None:
+            res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        else:
+            res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex] + sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
         res.check_returncode()
         return tenant_id
 
