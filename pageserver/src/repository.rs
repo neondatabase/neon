@@ -326,6 +326,14 @@ pub enum ZenithWalRecord {
         moff: MultiXactOffset,
         members: Vec<MultiXactMember>,
     },
+    Zenith {
+        will_init: bool,
+        xl_info: u8,
+        xl_rmid: u8,
+        xl_xid: TransactionId,
+        rec: Bytes,
+        data: Bytes,
+    },
 }
 
 impl ZenithWalRecord {
@@ -333,7 +341,8 @@ impl ZenithWalRecord {
     /// it need to be applied over the previous image of the page?
     pub fn will_init(&self) -> bool {
         match self {
-            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+            ZenithWalRecord::Postgres { will_init, .. } => *will_init,
+            ZenithWalRecord::Zenith { will_init, .. } => *will_init,
 
             // None of the special zenith record types currently initialize the page
             _ => false,

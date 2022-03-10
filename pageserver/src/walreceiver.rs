@@ -246,7 +246,7 @@ fn walreceiver_main(
                 waldecoder.feed_bytes(data);
 
                 while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+                    //let _enter = info_span!("processing record").entered();
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are

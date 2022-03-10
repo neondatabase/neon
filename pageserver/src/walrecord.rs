@@ -41,8 +41,9 @@ pub struct DecodedBkpBlock {
     pub bimg_info: u8,
 
     /* Buffer holding the rmgr-specific data associated with this block */
-    has_data: bool,
-    data_len: u16,
+    pub has_data: bool,
+    pub data_len: u16,
+    pub data_offset: u32,
 }
 
 impl DecodedBkpBlock {
@@ -59,6 +60,14 @@ pub struct DecodedWALRecord {
 
     pub blocks: Vec<DecodedBkpBlock>,
     pub main_data_offset: usize,
+}
+
+impl DecodedWALRecord {
+    pub fn has_redo_handler(&self) -> bool {
+        self.xl_rmid == pg_constants::RM_HEAP_ID
+            && (self.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP_INSERT
+            && !self.blocks[0].has_image
+    }
 }
 
 #[repr(C)]
@@ -663,6 +672,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             ptr += blk.bimg_len as usize;
         }
         if blk.has_data {
+            blk.data_offset = ptr as u32;
             ptr += blk.data_len as usize;
         }
     }
