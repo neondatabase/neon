@@ -202,7 +202,24 @@ impl<'a> Basebackup<'a> {
                 warn!("global/pg_filenode.map is missing");
             }
         } else {
-            // User defined tablespaces are not supported
+            // User defined tablespaces are not supported. However, as
+            // a special case, if a tablespace/db directory is
+            // completely empty, we can leave it out altogether. This
+            // makes taking a base backup after the 'tablespace'
+            // regression test pass, because the test drops the
+            // created tablespaces after the tests.
+            //
+            // FIXME: this wouldn't be necessary, if we handled
+            // XLOG_TBLSPC_DROP records. But we probably should just
+            // throw an error on CREATE TABLESPACE in the first place.
+            if !has_relmap_file
+                && self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn)?
+                    .is_empty()
+            {
+                return Ok(());
+            }
             assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
