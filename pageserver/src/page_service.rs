@@ -45,6 +45,7 @@ enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
+    GetSlruPage(PagestreamGetSlruPageRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -52,6 +53,7 @@ enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
+    GetSlruPage(PagestreamGetSlruPageResponse),
     Error(PagestreamErrorResponse),
 }
 
@@ -78,6 +80,16 @@ struct PagestreamGetPageRequest {
 }
 
 #[derive(Debug)]
+struct PagestreamGetSlruPageRequest {
+    latest: bool,
+    lsn: Lsn,
+    kind: SlruKind,
+    segno: u32,
+    blkno: u32,
+    check_exists_only: bool,
+}
+
+#[derive(Debug)]
 struct PagestreamExistsResponse {
     exists: bool,
 }
@@ -90,6 +102,12 @@ struct PagestreamNblocksResponse {
 #[derive(Debug)]
 struct PagestreamGetPageResponse {
     page: Bytes,
+}
+
+#[derive(Debug)]
+struct PagestreamGetSlruPageResponse {
+    seg_exists: bool,
+    page: Option<Bytes>,
 }
 
 #[derive(Debug)]
@@ -138,6 +156,16 @@ impl PagestreamFeMessage {
                 },
                 blkno: body.get_u32(),
             })),
+            3 => Ok(PagestreamFeMessage::GetSlruPage(
+                PagestreamGetSlruPageRequest {
+                    latest: body.get_u8() != 0,
+                    lsn: Lsn::from(body.get_u64()),
+                    kind: SlruKind::try_from(body.get_u8())?,
+                    segno: body.get_u32(),
+                    blkno: body.get_u32(),
+                    check_exists_only: body.get_u8() != 0,
+                },
+            )),
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
         }
     }
@@ -163,8 +191,19 @@ impl PagestreamBeMessage {
                 bytes.put(&resp.page[..]);
             }
 
-            Self::Error(resp) => {
+            Self::GetSlruPage(resp) => {
                 bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(resp.seg_exists as u8);
+                if let Some(page) = &resp.page {
+                    bytes.put_u8(1); // page exists
+                    bytes.put(&page[..]);
+                } else {
+                    bytes.put_u8(0); // page does not exist
+                }
+            }
+
+            Self::Error(resp) => {
+                bytes.put_u8(104); /* tag from pagestore_client.h */
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
@@ -357,6 +396,14 @@ impl PageServerHandler {
                                 .observe_closure_duration(|| {
                                     self.handle_get_page_at_lsn_request(timeline.as_ref(), &req)
                                 }),
+                            PagestreamFeMessage::GetSlruPage(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_slru_page_at_lsn"])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_slru_page_at_lsn_request(
+                                        timeline.as_ref(),
+                                        &req,
+                                    )
+                                }),
                         };
 
                         let response = response.unwrap_or_else(|e| {
@@ -505,6 +552,44 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    fn handle_get_slru_page_at_lsn_request(
+        &self,
+        timeline: &dyn Timeline,
+        req: &PagestreamGetSlruPageRequest,
+    ) -> Result<PagestreamBeMessage> {
+        let _enter =
+            info_span!("get_slru_page", slru_kind = %req.kind.to_str(), segno = %req.segno,
+                       check_blkno = &req.blkno, req_lsn = %req.lsn, check_exists_only = %req.check_exists_only)
+            .entered();
+        let tag = RelishTag::Slru {
+            slru: req.kind,
+            segno: req.segno,
+        };
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+
+        let seg_exists = timeline.get_rel_exists(tag, lsn)?;
+        let mut page = None;
+
+        /*
+         * During recovery, postgres treats non-existent segment files as truncated files and
+         * returns an empty SLRU page instead of error (see notes in SlruPhysicalWritePage in slru.c).
+         * Hence, we don't return error here when the segment file does not exist.
+         */
+        if seg_exists {
+            let page_res = timeline.get_page_at_lsn(tag, req.blkno, lsn);
+            if req.check_exists_only {
+                page = page_res.ok();
+            } else {
+                page = Some(page_res?);
+            }
+        }
+
+        Ok(PagestreamBeMessage::GetSlruPage(
+            PagestreamGetSlruPageResponse { seg_exists, page },
+        ))
     }
 
     fn handle_basebackup_request(
