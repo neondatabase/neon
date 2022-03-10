@@ -125,8 +125,10 @@ impl<'a> Basebackup<'a> {
                 self.add_slru_segment(kind, segno)?;
             }
         }
-        for (spcnode, dbnode) in self.timeline.list_relmap_files(self.lsn)? {
-            self.add_relmap_file(spcnode, dbnode)?;
+
+        // Create tablespace directories
+        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
+            self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
         }
         for xid in self.timeline.list_twophase_files(self.lsn)? {
             self.add_twophase_file(xid)?;
@@ -165,12 +167,26 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Extract pg_filenode.map files from repository
-    // Along with them also send PG_VERSION for each database.
+    // Include database/tablespace directories.
     //
-    fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
-        let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
+    // Each directory contains a PG_VERSION file, and the default database
+    // directories also contain pg_filenode.map files.
+    //
+    fn add_dbdir(
+        &mut self,
+        spcnode: u32,
+        dbnode: u32,
+        has_relmap_file: bool,
+    ) -> anyhow::Result<()> {
+        let relmap_img = if has_relmap_file {
+            let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
+            assert!(img.len() == 512);
+            Some(img)
+        } else {
+            None
+        };
+
+        if spcnode == pg_constants::GLOBALTABLESPACE_OID {
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
@@ -178,7 +194,13 @@ impl<'a> Basebackup<'a> {
             let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
 
-            String::from("global/pg_filenode.map") // filenode map for global tablespace
+            if let Some(img) = relmap_img {
+                // filenode map for global tablespace
+                let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            } else {
+                warn!("global/pg_filenode.map is missing");
+            }
         } else {
             // User defined tablespaces are not supported
             assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
@@ -188,16 +210,17 @@ impl<'a> Basebackup<'a> {
             let header = new_tar_header_dir(&path)?;
             self.ar.append(&header, &mut io::empty())?;
 
-            let dst_path = format!("base/{}/PG_VERSION", dbnode);
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
+            if let Some(img) = relmap_img {
+                let dst_path = format!("base/{}/PG_VERSION", dbnode);
+                let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+                let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
+                self.ar.append(&header, version_bytes)?;
 
-            format!("base/{}/pg_filenode.map", dbnode)
+                let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
+                let header = new_tar_header(&relmap_path, img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            }
         };
-        assert!(img.len() == 512);
-        let header = new_tar_header(&path, img.len() as u64)?;
-        self.ar.append(&header, &img[..])?;
         Ok(())
     }
 

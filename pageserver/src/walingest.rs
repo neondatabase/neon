@@ -461,7 +461,9 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
 
-        timeline.put_dbdir_creation(tablespace_id, db_id)?;
+        // Copy relfilemap
+        let filemap = timeline.get_relmap_file(src_tablespace_id, src_db_id, req_lsn)?;
+        timeline.put_relmap_file(tablespace_id, db_id, filemap)?;
 
         let mut num_rels_copied = 0;
         let mut num_blocks_copied = 0;
@@ -492,10 +494,6 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             num_rels_copied += 1;
         }
 
-        // Copy relfilemap
-        let filemap = timeline.get_relmap_file(src_tablespace_id, src_db_id, req_lsn)?;
-        timeline.put_relmap_file(tablespace_id, db_id, filemap)?;
-
         info!(
             "Created database {}/{}, copied {} blocks in {} rels",
             tablespace_id, db_id, num_blocks_copied, num_rels_copied
@@ -514,7 +512,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             relnode: rec.rnode.relnode,
             forknum: rec.forknum,
         };
-        writer.put_rel_creation(rel, 0)?;
+        self.put_rel_creation(writer, rel)?;
         Ok(())
     }
 
@@ -833,6 +831,16 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         Ok(())
     }
 
+    fn put_rel_creation(
+        &mut self,
+        writer: &mut DatadirTimelineWriter<R>,
+        rel: RelTag,
+    ) -> Result<()> {
+        self.relsize_cache.insert(rel, 0);
+        writer.put_rel_creation(rel, 0)?;
+        Ok(())
+    }
+
     fn put_rel_page_image(
         &mut self,
         writer: &mut DatadirTimelineWriter<R>,
@@ -999,6 +1007,7 @@ mod tests {
     fn init_walingest_test<R: Repository>(tline: &DatadirTimeline<R>) -> Result<WalIngest<R>> {
         let mut writer = tline.begin_record(Lsn(0x10));
         writer.put_checkpoint(ZERO_CHECKPOINT.clone())?;
+        writer.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
         writer.finish()?;
         let walingest = WalIngest::new(tline, Lsn(0x10))?;
 
@@ -1012,6 +1021,7 @@ mod tests {
         let mut walingest = init_walingest_test(&tline)?;
 
         let mut writer = tline.begin_record(Lsn(0x20));
+        walingest.put_rel_creation(&mut writer, TESTREL_A)?;
         walingest.put_rel_page_image(&mut writer, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
         writer.finish()?;
         let mut writer = tline.begin_record(Lsn(0x30));

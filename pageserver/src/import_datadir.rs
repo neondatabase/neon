@@ -40,7 +40,6 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     // Scan 'global'
     let mut relfiles: Vec<PathBuf> = Vec::new();
-    writer.put_dbdir_creation(pg_constants::GLOBALTABLESPACE_OID, 0)?;
     for direntry in fs::read_dir(path.join("global"))? {
         let direntry = direntry?;
         match direntry.file_name().to_str() {
@@ -85,7 +84,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
                 None => continue,
 
                 Some("PG_VERSION") => {
-                    writer.put_dbdir_creation(pg_constants::DEFAULTTABLESPACE_OID, dboid)?;
+                    //writer.put_dbdir_creation(pg_constants::DEFAULTTABLESPACE_OID, dboid)?;
                 }
                 Some("pg_filenode.map") => import_relmap_file(
                     &mut writer,

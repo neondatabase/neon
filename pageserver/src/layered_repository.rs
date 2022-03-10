@@ -1071,7 +1071,8 @@ impl LayeredTimeline {
             if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                 trace!(
                     "going into ancestor {}, cont_lsn is {}",
-                    timeline.ancestor_lsn, cont_lsn
+                    timeline.ancestor_lsn,
+                    cont_lsn
                 );
                 let ancestor = timeline.get_ancestor_timeline()?;
                 timeline_owned = ancestor;

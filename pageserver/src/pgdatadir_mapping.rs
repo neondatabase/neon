@@ -39,8 +39,8 @@ where
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DbDirectory {
-    // (spcnode, dbnode)
-    dbs: HashSet<(Oid, Oid)>,
+    // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
+    dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -210,12 +210,12 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(buf)
     }
 
-    pub fn list_relmap_files(&self, lsn: Lsn) -> Result<HashSet<(Oid, Oid)>> {
+    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
         // fetch directory entry
         let buf = self.tline.get(DBDIR_KEY, lsn)?;
         let dir = DbDirectory::des(&buf)?;
 
-        Ok(dir.dbs)
+        Ok(dir.dbdirs)
     }
 
     pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
@@ -324,8 +324,8 @@ impl<R: Repository> DatadirTimeline<R> {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: usize = 0;
-        for (spcnode, dbnode) in dbdir.dbs {
-            for rel in self.list_rels(spcnode, dbnode, lsn)? {
+        for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+            for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self.tline.get(relsize_key, lsn)?;
                 let relsize = buf.get_u32_le();
@@ -347,7 +347,7 @@ impl<R: Repository> DatadirTimeline<R> {
         let buf = self.tline.get(DBDIR_KEY, lsn)?;
         let dbdir = DbDirectory::des(&buf)?;
 
-        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbs.iter().cloned().collect();
+        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
         for (spcnode, dbnode) in dbs {
             result.add_key(relmap_file_key(spcnode, dbnode));
@@ -432,7 +432,7 @@ impl<'a, R: Repository> std::ops::Deref for DatadirTimelineWriter<'a, R> {
 impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn init_empty(&mut self) -> Result<()> {
         let buf = DbDirectory::ser(&DbDirectory {
-            dbs: HashSet::new(),
+            dbdirs: HashMap::new(),
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
@@ -512,10 +512,25 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> Result<()> {
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY)?;
-        let mut dir = DbDirectory::des(&buf)?;
-        if dir.dbs.insert((spcnode, dbnode)) {
-            let buf = DbDirectory::ser(&dir)?;
+        let mut dbdir = DbDirectory::des(&buf)?;
+
+        let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
+        if r == None || r == Some(false) {
+            // The dbdir entry didn't exist, or it contained a
+            // 'false'. The 'insert' call already updated it with
+            // 'true', now write the updated 'dbdirs' map back.
+            let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+        }
+        if r == None {
+            // Create RelDirectory
+            let buf = RelDirectory::ser(&RelDirectory {
+                rels: HashSet::new(),
+            })?;
+            self.put(
+                rel_dir_to_key(spcnode, dbnode),
+                Value::Image(Bytes::from(buf)),
+            );
         }
 
         self.put(relmap_file_key(spcnode, dbnode), Value::Image(img));
@@ -548,23 +563,11 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    pub fn put_dbdir_creation(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
-        // Create RelDirectory
-        let dir_key = rel_dir_to_key(spcnode, dbnode);
-
-        let dir = RelDirectory {
-            rels: HashSet::new(),
-        };
-        let buf: Bytes = RelDirectory::ser(&dir)?.into();
-        self.put(dir_key, Value::Image(buf));
-        Ok(())
-    }
-
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
         // Remove entry from dbdir
         let buf = self.get(DBDIR_KEY)?;
         let mut dir = DbDirectory::des(&buf)?;
-        if dir.dbs.remove(&(spcnode, dbnode)) {
+        if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
@@ -594,15 +597,36 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     // - update relish header with size
 
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        // Add it to the directory entry
-        let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key)?;
-        let mut dir = RelDirectory::des(&buf)?;
+        // It's possible that this is the first rel for this db in this tablespace.
+        // Create the reldir entry for it if so.
+        let buf = self.get(DBDIR_KEY)?;
+        let mut dbdir = DbDirectory::des(&buf)?;
 
-        if !dir.rels.insert((rel.relnode, rel.forknum)) {
+        let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
+        let mut rel_dir;
+        if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
+            // update dbdir
+            dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
+            let buf = DbDirectory::ser(&dbdir)?;
+            self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create RelDirectory
+            rel_dir = RelDirectory {
+                rels: HashSet::new(),
+            };
+        } else {
+            let buf = self.get(rel_dir_key)?;
+            rel_dir = RelDirectory::des(&buf)?;
+        }
+
+        // Add it to the directory entry
+        if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
             bail!("rel {} already exists", rel);
         }
-        self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
+        self.put(
+            rel_dir_key,
+            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+        );
 
         // Put size
         let size_key = rel_size_to_key(rel);
@@ -611,7 +635,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
         self.pending_nblocks += nblocks as isize;
 
-        // even if nblocks > 0, we don't insert any actual blocks here
+        // Even if nblocks > 0, we don't insert any actual blocks here. That's up to the
+        // caller.
 
         Ok(())
     }
@@ -1154,8 +1179,6 @@ pub fn create_test_timeline<R: Repository>(
     let tline = DatadirTimeline::new(tline);
     let mut writer = tline.begin_record(Lsn(8));
     writer.init_empty()?;
-
-    writer.put_dbdir_creation(0, 111)?;
 
     writer.finish()?;
     Ok(Arc::new(tline))
