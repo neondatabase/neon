@@ -114,6 +114,9 @@ lazy_static! {
     static ref WAL_REDO_TIME: Histogram =
         register_histogram!("pageserver_wal_redo_time", "Time spent on WAL redo")
             .expect("failed to define a metric");
+    static ref ZENITH_WAL_REDO_TIME: Histogram =
+        register_histogram!("zenith_wal_redo_time", "Time spent on zenith WAL redo")
+            .expect("failed to define a metric");
     static ref WAL_REDO_WAIT_TIME: Histogram = register_histogram!(
         "pageserver_wal_redo_wait_time",
         "Time spent waiting for access to the WAL redo process"
@@ -397,7 +400,7 @@ impl PostgresRedoManager {
         // Success!
         let end_time = Instant::now();
         let duration = end_time.duration_since(start_time);
-        WAL_REDO_TIME.observe(duration.as_secs_f64());
+        ZENITH_WAL_REDO_TIME.observe(duration.as_secs_f64());
 
         debug!(
             "zenith applied {} WAL records in {} ms to reconstruct page image at LSN {}",
