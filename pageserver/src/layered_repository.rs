@@ -1038,6 +1038,9 @@ impl LayeredTimeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
+
+                        // For debugging purposes, print the path of layers that we traversed
+                        // through.
                         for (r, c, l) in path {
                             error!(
                                 "PATH: result {:?}, cont_lsn {}, layer: {}",
@@ -2078,6 +2081,90 @@ mod tests {
         tline.hint_partitioning(parts, lsn)?;
 
         for _ in 0..50 {
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = blknum as u32;
+                let writer = tline.writer();
+                writer.put(
+                    test_key,
+                    lsn,
+                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )?;
+                println!("updating {} at {}", blknum, lsn);
+                writer.advance_last_record_lsn(lsn);
+                drop(writer);
+                updated[blknum] = lsn;
+            }
+
+            // Read all the blocks
+            for (blknum, last_lsn) in updated.iter().enumerate() {
+                test_key.field6 = blknum as u32;
+                assert_eq!(
+                    tline.get(test_key, lsn)?,
+                    TEST_IMG(&format!("{} at {}", blknum, last_lsn))
+                );
+            }
+
+            // Perform a cycle of checkpoint, compaction, and GC
+            println!("checkpointing {}", lsn);
+            let cutoff = tline.get_last_record_lsn();
+            tline.update_gc_info(Vec::new(), cutoff);
+            tline.checkpoint(CheckpointConfig::Forced)?;
+            tline.compact(TEST_FILE_SIZE)?;
+            tline.gc()?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_traverse_branches() -> Result<()> {
+        let repo = RepoHarness::create("test_traverse_branches")?.load();
+        let mut tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        const NUM_KEYS: usize = 1000;
+
+        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+
+        let mut parts = KeyPartitioning::new();
+
+        // Track when each page was last modified. Used to assert that
+        // a read sees the latest page version.
+        let mut updated = [Lsn(0); NUM_KEYS];
+
+        let mut lsn = Lsn(0);
+        #[allow(clippy::needless_range_loop)]
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = blknum as u32;
+            let writer = tline.writer();
+            writer.put(
+                test_key,
+                lsn,
+                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+            )?;
+            writer.advance_last_record_lsn(lsn);
+            updated[blknum] = lsn;
+            drop(writer);
+
+            parts.add_key(test_key);
+        }
+
+        parts.repartition(TEST_FILE_SIZE as u64);
+        tline.hint_partitioning(parts, lsn)?;
+
+        let mut tline_id = TIMELINE_ID;
+        for _ in 0..50 {
+            let new_tline_id = ZTimelineId::generate();
+            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            tline = if let RepositoryTimeline::Local(local) = repo.get_timeline(new_tline_id)? {
+                local
+            } else {
+                panic!("unexpected timeline state");
+            };
+            tline_id = new_tline_id;
+
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
