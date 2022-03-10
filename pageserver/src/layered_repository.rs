@@ -1069,7 +1069,7 @@ impl LayeredTimeline {
 
             // Recurse into ancestor if needed
             if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                info!(
+                trace!(
                     "going into ancestor {}, cont_lsn is {}",
                     timeline.ancestor_lsn, cont_lsn
                 );

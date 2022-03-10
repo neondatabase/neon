@@ -594,7 +594,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     // - update relish header with size
 
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        info!("CREATE REL: {}, {} blocks at {}", rel, nblocks, self.lsn);
         // Add it to the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let buf = self.get(dir_key)?;

@@ -598,7 +598,7 @@ impl DeltaLayerWriter {
         );
         std::fs::rename(self.path, &final_path)?;
 
-        info!("created delta layer {}", final_path.display());
+        trace!("created delta layer {}", final_path.display());
 
         Ok(layer)
     }
