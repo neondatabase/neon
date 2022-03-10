@@ -351,6 +351,8 @@ impl<R: Repository> DatadirTimeline<R> {
         dbs.sort_unstable();
         for (spcnode, dbnode) in dbs {
             result.add_key(relmap_file_key(spcnode, dbnode));
+            result.add_key(rel_dir_to_key(spcnode, dbnode));
+
             let mut rels: Vec<RelTag> = self
                 .list_rels(spcnode, dbnode, lsn)?
                 .iter()
