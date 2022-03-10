@@ -583,8 +583,6 @@ impl DeltaLayerWriter {
             }),
         };
 
-        trace!("created delta layer {}", &layer.path().display());
-
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.
@@ -598,7 +596,9 @@ impl DeltaLayerWriter {
                 lsn_range: self.lsn_range,
             },
         );
-        std::fs::rename(self.path, final_path)?;
+        std::fs::rename(self.path, &final_path)?;
+
+        info!("created delta layer {}", final_path.display());
 
         Ok(layer)
     }

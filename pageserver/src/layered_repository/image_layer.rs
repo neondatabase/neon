@@ -481,7 +481,7 @@ impl ImageLayerWriter {
                 index: HashMap::new(),
             }),
         };
-        trace!("created image layer {}", layer.path().display());
+        info!("created image layer {}", layer.path().display());
 
         self.finished = true;
 
