@@ -525,7 +525,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
             let tenant_conf: HashMap<_, _> = create_match
                 .values_of("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
-                .unwrap_or(HashMap::new());
+                .unwrap_or_default();
             let new_tenant_id = pageserver
                 .tenant_create(initial_tenant_id, tenant_conf)?
                 .ok_or_else(|| {

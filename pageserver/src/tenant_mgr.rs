@@ -1,7 +1,6 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::branches;
 use crate::config::{PageServerConf, TenantConf};
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteIndex;
@@ -76,9 +75,19 @@ pub fn load_local_repo(
         // Set up a WAL redo manager, for applying WAL records.
         let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
+        // Try to load config file
+        let tenant_conf = match TenantConf::load(conf, tenant_id) {
+            Ok(tenant_conf) => tenant_conf,
+            Err(e) => {
+                error!("Failed to load tenant state: {:?}", e);
+                TenantConf::from(conf)
+            }
+        };
+
         // Set up an object repository, for actual data storage.
         let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(
             conf,
+            tenant_conf,
             Arc::new(walredo_mgr),
             tenant_id,
             remote_index.clone(),
@@ -179,9 +188,6 @@ pub fn create_tenant_repository(
     tenantid: ZTenantId,
     remote_index: RemoteIndex,
 ) -> Result<Option<ZTenantId>> {
-    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = branches::create_repo(conf, tenant_conf, tenantid, wal_redo_manager)?;
-
     match access_tenants().entry(tenantid) {
         Entry::Occupied(_) => {
             debug!("tenant {} already exists", tenantid);
@@ -189,10 +195,9 @@ pub fn create_tenant_repository(
         }
         Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-			let tenant_conf = match TenantConf::load(conf, tenant_id)?;
             let repo = timelines::create_repo(
                 conf,
-				tenant_conf,
+                tenant_conf,
                 tenantid,
                 CreateRepo::Real {
                     wal_redo_manager,
@@ -217,7 +222,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 /// Change the state of a tenant to Active and launch its compactor and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
-pub fn activate_tenant(tenantid: ZTenantId) -> Result<()> {
+pub fn activate_tenant(tenant_id: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
     let tenant = m
         .get_mut(&tenant_id)

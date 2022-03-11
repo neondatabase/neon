@@ -1,7 +1,7 @@
+use crate::config::TenantConf;
 use crate::layered_repository::metadata::TimelineMetadata;
 use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
-use crate::config::TenantConf;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
 use bytes::Bytes;
@@ -715,7 +715,7 @@ mod tests {
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10,  Duration::ZERO, false)?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
