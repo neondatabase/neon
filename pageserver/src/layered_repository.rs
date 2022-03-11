@@ -1910,6 +1910,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyspace::KeySpaceAccum;
     use crate::repository::repo_harness::*;
     use rand::thread_rng;
     use rand::Rng;
@@ -2009,7 +2010,7 @@ mod tests {
 
         let mut lsn = Lsn(0x10);
 
-        let mut parts = KeyPartitioning::new();
+        let mut keyspace = KeySpaceAccum::new();
 
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
         let mut blknum = 0;
@@ -2025,14 +2026,17 @@ mod tests {
                 writer.advance_last_record_lsn(lsn);
                 drop(writer);
 
-                parts.add_key(test_key);
+                keyspace.add_key(test_key);
 
                 lsn = Lsn(lsn.0 + 0x10);
                 blknum += 1;
             }
 
             let cutoff = tline.get_last_record_lsn();
-            parts.repartition(TEST_FILE_SIZE as u64);
+            let parts = keyspace
+                .clone()
+                .to_keyspace()
+                .partition(TEST_FILE_SIZE as u64);
             tline.hint_partitioning(parts.clone(), lsn)?;
 
             tline.update_gc_info(Vec::new(), cutoff);
@@ -2053,7 +2057,7 @@ mod tests {
 
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
 
-        let mut parts = KeyPartitioning::new();
+        let mut keyspace = KeySpaceAccum::new();
 
         // Track when each page was last modified. Used to assert that
         // a read sees the latest page version.
@@ -2074,10 +2078,10 @@ mod tests {
             updated[blknum] = lsn;
             drop(writer);
 
-            parts.add_key(test_key);
+            keyspace.add_key(test_key);
         }
 
-        parts.repartition(TEST_FILE_SIZE as u64);
+        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
         tline.hint_partitioning(parts, lsn)?;
 
         for _ in 0..50 {
@@ -2127,7 +2131,7 @@ mod tests {
 
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
 
-        let mut parts = KeyPartitioning::new();
+        let mut keyspace = KeySpaceAccum::new();
 
         // Track when each page was last modified. Used to assert that
         // a read sees the latest page version.
@@ -2148,10 +2152,10 @@ mod tests {
             updated[blknum] = lsn;
             drop(writer);
 
-            parts.add_key(test_key);
+            keyspace.add_key(test_key);
         }
 
-        parts.repartition(TEST_FILE_SIZE as u64);
+        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
         tline.hint_partitioning(parts, lsn)?;
 
         let mut tline_id = TIMELINE_ID;

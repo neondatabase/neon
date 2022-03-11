@@ -1,30 +1,101 @@
+use crate::repository::{key_range_size, singleton_range, Key};
+use postgres_ffi::pg_constants;
 use std::ops::Range;
 
-use crate::repository::{key_range_size, singleton_range, Key};
-
-use postgres_ffi::pg_constants;
-
-// Target file size, when creating iage and delta layers
+// Target file size, when creating image and delta layers
 pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 
 ///
 /// Represents a set of Keys, in a compact form.
 ///
-#[derive(Debug, Clone)]
-pub struct KeyPartitioning {
-    accum: Option<Range<Key>>,
-
+pub struct KeySpace {
+    // Contiguous ranges of keys that belong to the key space. In key order, and
+    // with no overlap.
     ranges: Vec<Range<Key>>,
+}
 
+impl KeySpace {
+    ///
+    /// Partition a key space into roughly chunks of roughly 'target_size' bytes in
+    /// each patition.
+    ///
+    pub fn partition(&self, target_size: u64) -> KeyPartitioning {
+        // Assume that each value is 8k in size.
+        let target_nblocks = (target_size / pg_constants::BLCKSZ as u64) as usize;
+
+        let mut partitions = Vec::new();
+        let mut current_part = Vec::new();
+        let mut current_part_size: usize = 0;
+        for range in &self.ranges {
+            // If appending the next contiguous range in the keyspace to the current
+            // partition would cause it to be too large, start a new partition.
+            let this_size = key_range_size(range) as usize;
+            if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
+                partitions.push(current_part);
+                current_part = Vec::new();
+                current_part_size = 0;
+            }
+
+            // If the next range is larger than 'target_size', split it into
+            // 'target_size' chunks.
+            let mut remain_size = this_size;
+            let mut start = range.start;
+            while remain_size > target_nblocks {
+                let next = start.add(target_nblocks as u32);
+                partitions.push(vec![start..next]);
+                start = next;
+                remain_size -= target_nblocks
+            }
+            current_part.push(start..range.end);
+            current_part_size += remain_size;
+        }
+
+        // add last partition that wasn't full yet.
+        if !current_part.is_empty() {
+            partitions.push(current_part);
+        }
+
+        KeyPartitioning { partitions }
+    }
+}
+
+///
+/// Represents a partitioning of the key space.
+///
+/// The only kind of partitioning we do is to partition the key space into
+/// partitions that are roughly equal in physical size (see KeySpace::partition).
+/// But this data structure could represent any partitioning.
+///
+#[derive(Clone, Debug, Default)]
+pub struct KeyPartitioning {
     pub partitions: Vec<Vec<Range<Key>>>,
 }
 
 impl KeyPartitioning {
     pub fn new() -> Self {
         KeyPartitioning {
+            partitions: Vec::new(),
+        }
+    }
+}
+
+///
+/// A helper object, to collect a set of keys and key ranges into a KeySpace
+/// object. This takes care of merging adjacent keys and key ranges into
+/// contiguous ranges.
+///
+#[derive(Clone, Debug, Default)]
+pub struct KeySpaceAccum {
+    accum: Option<Range<Key>>,
+
+    ranges: Vec<Range<Key>>,
+}
+
+impl KeySpaceAccum {
+    pub fn new() -> Self {
+        Self {
             accum: None,
             ranges: Vec::new(),
-            partitions: Vec::new(),
         }
     }
 
@@ -47,44 +118,12 @@ impl KeyPartitioning {
         }
     }
 
-    pub fn repartition(&mut self, target_size: u64) {
-        let target_nblocks = (target_size / pg_constants::BLCKSZ as u64) as usize;
+    pub fn to_keyspace(mut self) -> KeySpace {
         if let Some(accum) = self.accum.take() {
             self.ranges.push(accum);
         }
-
-        self.partitions = Vec::new();
-
-        let mut current_part = Vec::new();
-        let mut current_part_size: usize = 0;
-        for range in &self.ranges {
-            let this_size = key_range_size(range) as usize;
-
-            if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
-                self.partitions.push(current_part);
-                current_part = Vec::new();
-                current_part_size = 0;
-            }
-
-            let mut remain_size = this_size;
-            let mut start = range.start;
-            while remain_size > target_nblocks {
-                let next = start.add(target_nblocks as u32);
-                self.partitions.push(vec![start..next]);
-                start = next;
-                remain_size -= target_nblocks
-            }
-            current_part.push(start..range.end);
-            current_part_size += remain_size;
+        KeySpace {
+            ranges: self.ranges,
         }
-        if !current_part.is_empty() {
-            self.partitions.push(current_part);
-        }
-    }
-}
-
-impl Default for KeyPartitioning {
-    fn default() -> Self {
-        Self::new()
     }
 }

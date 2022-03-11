@@ -7,7 +7,7 @@
 //! Clarify that)
 //!
 
-use crate::keyspace::{KeyPartitioning, TARGET_FILE_SIZE_BYTES};
+use crate::keyspace::{KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
 use crate::relish::*;
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
@@ -336,9 +336,9 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(total_size * pg_constants::BLCKSZ as usize)
     }
 
-    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeyPartitioning> {
+    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
         // Iterate through key ranges, greedily packing them into partitions
-        let mut result = KeyPartitioning::new();
+        let mut result = KeySpaceAccum::new();
 
         // Add dbdir
         result.add_key(DBDIR_KEY);
@@ -404,7 +404,7 @@ impl<R: Repository> DatadirTimeline<R> {
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
 
-        Ok(result)
+        Ok(result.to_keyspace())
     }
 }
 
@@ -801,8 +801,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         if last_partitioning == Lsn(0)
             || self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8
         {
-            let mut partitioning = self.tline.collect_keyspace(self.lsn)?;
-            partitioning.repartition(TARGET_FILE_SIZE_BYTES);
+            let keyspace = self.tline.collect_keyspace(self.lsn)?;
+            let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
             self.tline.tline.hint_partitioning(partitioning, self.lsn)?;
             self.tline.last_partitioning.store(self.lsn);
         }
