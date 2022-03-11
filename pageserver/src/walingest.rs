@@ -286,9 +286,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         //
         if blk.apply_image
             && blk.has_image
-            && decoded.xl_rmid == pg_constants::RM_XLOG_ID
-            && (decoded.xl_info == pg_constants::XLOG_FPI
-                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+            && ((decoded.xl_rmid == pg_constants::RM_XLOG_ID
+				 && (decoded.xl_info == pg_constants::XLOG_FPI
+					 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)) ||
+				(decoded.xl_rmid == pg_constants::RM_HEAP2_ID
+				 && (decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK) == pg_constants::XLOG_HEAP2_PRUNE))
         // compression of WAL is not yet supported: fall back to storing the original WAL record
             && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
         {
