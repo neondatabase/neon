@@ -1,8 +1,11 @@
-//! An ImageLayer represents an image or a snapshot of a segment at one particular LSN.
-//! It is stored in a file on disk.
+//! An ImageLayer represents an image or a snapshot of a key-range at
+//! one particular LSN. It contains an image of all key-value pairs
+//! in its key-range. Any key that falls into the image layer's range
+//! but does not exist in the layer, does not exist.
 //!
-//! On disk, the image files are stored in timelines/<timelineid> directory.
-//! Currently, there are no subdirectories, and each image layer file is named like this:
+//! An image layer is stored in a file on disk. The file is stored in
+//! timelines/<timelineid> directory.  Currently, there are no
+//! subdirectories, and each image layer file is named like this:
 //!
 //!    <key start>-<key end>__<LSN>
 //!
