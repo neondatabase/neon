@@ -28,7 +28,7 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
         let tenant_conf = repo.get_tenant_conf();
 
-        std::thread::sleep(tenant_conf.checkpoint_period);
+        std::thread::sleep(tenant_conf.compaction_period);
         trace!("compaction thread for tenant {} waking up", tenantid);
 
         // Compact timelines

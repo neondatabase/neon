@@ -164,25 +164,8 @@ impl TenantConf {
             pitr_interval: conf.pitr_interval,
             checkpoint_distance: conf.checkpoint_distance,
             compaction_period: conf.compaction_period,
-		}
-	}
-}
-
-// use dedicated enum for builder to better indicate the intention
-// and avoid possible confusion with nested options
-pub enum BuilderValue<T> {
-    Set(T),
-    NotSet,
-}
-
-impl<T> BuilderValue<T> {
-    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
-        match self {
-            Self::Set(v) => Ok(v),
-            Self::NotSet => Err(err),
         }
     }
-
     pub fn save(&self, conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
         let _enter = info_span!("saving tenant config").entered();
         let path = conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME);
@@ -210,6 +193,22 @@ impl<T> BuilderValue<T> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::from(conf)),
             Ok(config_bytes) => Ok(TenantConf::des(&config_bytes)?),
             Err(err) => bail!(err),
+        }
+    }
+}
+
+// use dedicated enum for builder to better indicate the intention
+// and avoid possible confusion with nested options
+pub enum BuilderValue<T> {
+    Set(T),
+    NotSet,
+}
+
+impl<T> BuilderValue<T> {
+    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
+        match self {
+            Self::Set(v) => Ok(v),
+            Self::NotSet => Err(err),
         }
     }
 }
@@ -314,7 +313,7 @@ impl PageServerConfigBuilder {
         self.gc_period = BuilderValue::Set(gc_period)
     }
 
-    pub fn pitr_interval(&mut self, gc_period: Duration) {
+    pub fn pitr_interval(&mut self, pitr_interval: Duration) {
         self.pitr_interval = BuilderValue::Set(pitr_interval)
     }
 
@@ -386,7 +385,9 @@ impl PageServerConfigBuilder {
                 .gc_horizon
                 .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
             gc_period: self.gc_period.ok_or(anyhow::anyhow!("missing gc_period"))?,
-            pitr_interval: self.pitr_interval.ok_or(anyhow::anyhow!("missing pitr_interval"))?,
+            pitr_interval: self
+                .pitr_interval
+                .ok_or(anyhow::anyhow!("missing pitr_interval"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,

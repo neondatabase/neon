@@ -43,7 +43,7 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: ZTenantId) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: Option<ZTenantId>) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
             checkpoint_distance: None,

@@ -343,7 +343,7 @@ impl PageServerNode {
     pub fn tenant_create(
         &self,
         new_tenant_id: Option<ZTenantId>,
-		settings: HashMap<&str, &str>
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))

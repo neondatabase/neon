@@ -318,7 +318,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
 
-        tenant_mgr::create_tenant_repository(conf, tenant_conf,target_tenant_id, remote_index)
+        tenant_mgr::create_tenant_repository(conf, tenant_conf, target_tenant_id, remote_index)
     })
     .await
     .map_err(ApiError::from_err)??;

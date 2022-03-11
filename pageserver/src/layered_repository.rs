@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::{PageServerConf, TenantConf};
-use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::keyspace::KeySpace;
 
 use crate::page_cache;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
@@ -834,6 +834,11 @@ struct GcInfo {
     ///
     /// FIXME: is this inclusive or exclusive?
     cutoff: Lsn,
+
+    /// In addition to 'retain_lsns', keep everything newer than 'SystemTime::now()'
+    /// minus 'pitr_interval'
+    ///
+    pitr: Duration,
 }
 
 /// Public interface functions
@@ -1039,6 +1044,7 @@ impl LayeredTimeline {
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
                 cutoff: Lsn(0),
+                pitr: Duration::ZERO,
             }),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
@@ -1821,10 +1827,11 @@ impl LayeredTimeline {
     /// the latest LSN subtracted by a constant, and doesn't do anything smart
     /// to figure out what read-only nodes might actually need.)
     ///
-    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) {
+    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn, pitr: Duration) {
         let mut gc_info = self.gc_info.write().unwrap();
         gc_info.retain_lsns = retain_lsns;
         gc_info.cutoff = cutoff;
+        gc_info.pitr = pitr;
     }
 
     ///
@@ -1900,19 +1907,13 @@ impl LayeredTimeline {
             if let Ok(metadata) = fs::metadata(&l.filename()) {
                 let last_modified = metadata.modified()?;
                 if now.duration_since(last_modified)? < pitr {
-                    info!(
-						"keeping {} {}-{} because it's modification time {:?} is newer than PiTR {:?}",
-						seg,
-						l.get_start_lsn(),
-						l.get_end_lsn(),
-						last_modified,
-						pitr
-					);
-                    if seg.rel.is_relation() {
-                        result.ondisk_relfiles_needed_by_pitr += 1;
-                    } else {
-                        result.ondisk_nonrelfiles_needed_by_pitr += 1;
-                    }
+                    debug!(
+                        "keeping {} because it's modification time {:?} is newer than PITR {:?}",
+                        l.filename().display(),
+                        last_modified,
+                        pitr
+                    );
+                    result.layers_needed_by_pitr += 1;
                     continue 'outer;
                 }
             }
@@ -2253,7 +2254,12 @@ pub mod tests {
             }
 
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+            let parts = keyspace
+                .clone()
+                .to_keyspace()
+                .partition(TEST_FILE_SIZE as u64);
+
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -2323,7 +2329,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -2400,7 +2406,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
