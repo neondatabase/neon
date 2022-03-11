@@ -26,7 +26,7 @@ def test_random_writes(zenith_with_baseline: PgCompare):
     # but it will take a very long time to run. From what I've seen so far,
     # increasing n_rows doesn't have impact on the (zenith_runtime / vanilla_runtime)
     # performance ratio.
-    n_rows = 1 * 1000 * 1000  # around 36 MB table
+    n_rows = 10 * 1000 * 1000  # around 360 MB table
 
     # Number of writes per 3 segments. A value of 1 should produce a random
     # workload where we almost never write to the same segment twice. Larger
@@ -37,7 +37,7 @@ def test_random_writes(zenith_with_baseline: PgCompare):
 
     # Not sure why but this matters in a weird way (up to 2x difference in perf).
     # TODO look into it
-    n_iterations = 1
+    n_iterations = 1000
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
