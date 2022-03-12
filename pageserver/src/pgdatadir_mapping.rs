@@ -376,6 +376,7 @@ impl<R: Repository> DatadirTimeline<R> {
             SlruKind::MultiXactOffsets,
         ] {
             let slrudir_key = slru_dir_to_key(kind);
+            result.add_key(slrudir_key);
             let buf = self.tline.get(slrudir_key, lsn)?;
             let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
@@ -393,6 +394,7 @@ impl<R: Repository> DatadirTimeline<R> {
         }
 
         // Then pg_twophase
+        result.add_key(TWOPHASEDIR_KEY);
         let buf = self.tline.get(TWOPHASEDIR_KEY, lsn)?;
         let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
