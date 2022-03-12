@@ -340,7 +340,7 @@ impl Timeline {
             let replica_state = shared_state.replicas[replica_id].unwrap();
             let deactivate = shared_state.notified_commit_lsn == Lsn(0) || // no data at all yet
             (replica_state.last_received_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
-             replica_state.last_received_lsn >= shared_state.sk.commit_lsn);
+             replica_state.last_received_lsn >= shared_state.sk.inmem.commit_lsn);
             if deactivate {
                 shared_state.deactivate(&self.zttid, callmemaybe_tx)?;
                 return Ok(true);
@@ -394,7 +394,7 @@ impl Timeline {
             rmsg = shared_state.sk.process_msg(msg)?;
             // locally available commit lsn. flush_lsn can be smaller than
             // commit_lsn if we are catching up safekeeper.
-            commit_lsn = shared_state.sk.commit_lsn;
+            commit_lsn = shared_state.sk.inmem.commit_lsn;
 
             // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
