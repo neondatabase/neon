@@ -391,47 +391,69 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 relnode: decoded.blocks[0].rnode_relnode,
             };
 
-            let new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-            let old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-            if new_vm_blk == old_vm_blk {
-                // An UPDATE record that needs to clear the bits for both old and the
-                // new page, both of which reside on the same VM page.
-                self.put_rel_wal_record(
-                    timeline,
-                    vm_rel,
-                    new_vm_blk.unwrap(),
-                    ZenithWalRecord::ClearVisibilityMapFlags {
-                        new_heap_blkno,
-                        old_heap_blkno,
-                        flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                    },
-                )?;
-            } else {
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                if let Some(new_vm_blk) = new_vm_blk {
+            let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+
+            // Sometimes, Postgres seems to create heap WAL records with the
+            // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
+            // not set. In fact, it's possible that the VM page does not exist at all.
+            // In that case, we don't want to store a record to clear the VM bit;
+            // replaying it would fail to find the previous image of the page, because
+            // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
+            // record if it doesn't.
+            let vm_size = self.get_relsize(vm_rel)?;
+            if let Some(blknum) = new_vm_blk {
+                if blknum >= vm_size {
+                    new_vm_blk = None;
+                }
+            }
+            if let Some(blknum) = old_vm_blk {
+                if blknum >= vm_size {
+                    old_vm_blk = None;
+                }
+            }
+
+            if new_vm_blk.is_some() || old_vm_blk.is_some() {
+                if new_vm_blk == old_vm_blk {
+                    // An UPDATE record that needs to clear the bits for both old and the
+                    // new page, both of which reside on the same VM page.
                     self.put_rel_wal_record(
                         timeline,
                         vm_rel,
-                        new_vm_blk,
+                        new_vm_blk.unwrap(),
                         ZenithWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
-                    )?;
-                }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        timeline,
-                        vm_rel,
-                        old_vm_blk,
-                        ZenithWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
                             old_heap_blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
                         },
                     )?;
+                } else {
+                    // Clear VM bits for one heap page, or for two pages that reside on
+                    // different VM pages.
+                    if let Some(new_vm_blk) = new_vm_blk {
+                        self.put_rel_wal_record(
+                            timeline,
+                            vm_rel,
+                            new_vm_blk,
+                            ZenithWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno,
+                                old_heap_blkno: None,
+                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            },
+                        )?;
+                    }
+                    if let Some(old_vm_blk) = old_vm_blk {
+                        self.put_rel_wal_record(
+                            timeline,
+                            vm_rel,
+                            old_vm_blk,
+                            ZenithWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno: None,
+                                old_heap_blkno,
+                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            },
+                        )?;
+                    }
                 }
             }
         }
@@ -880,6 +902,21 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         writer.put_rel_drop(rel)?;
         self.relsize_cache.remove(&rel);
         Ok(())
+    }
+
+    fn get_relsize(&mut self, rel: RelTag) -> Result<BlockNumber> {
+        if let Some(nblocks) = self.relsize_cache.get(&rel) {
+            Ok(*nblocks)
+        } else {
+            let last_lsn = self.timeline.get_last_record_lsn();
+            let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+                0
+            } else {
+                self.timeline.get_rel_size(rel, last_lsn)?
+            };
+            self.relsize_cache.insert(rel, nblocks);
+            Ok(nblocks)
+        }
     }
 
     fn handle_rel_extend(
