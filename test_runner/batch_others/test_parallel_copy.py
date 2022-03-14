@@ -1,7 +1,5 @@
 from io import BytesIO
 import asyncio
-import asyncpg
-import subprocess
 from fixtures.zenith_fixtures import ZenithEnv, Postgres
 from fixtures.log_helper import log
 

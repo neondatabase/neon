@@ -7,52 +7,46 @@ from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserv
 from typing import cast
 
 
-def helper_compare_branch_list(pageserver_http_client: ZenithPageserverHttpClient,
-                               env: ZenithEnv,
-                               initial_tenant: uuid.UUID):
+def helper_compare_timeline_list(pageserver_http_client: ZenithPageserverHttpClient,
+                                 env: ZenithEnv,
+                                 initial_tenant: uuid.UUID):
     """
-    Compare branches list returned by CLI and directly via API.
-    Filters out branches created by other tests.
+    Compare timelines list returned by CLI and directly via API.
+    Filters out timelines created by other tests.
     """
-    branches = pageserver_http_client.branch_list(initial_tenant)
-    branches_api = sorted(map(lambda b: cast(str, b['name']), branches))
-    branches_api = [b for b in branches_api if b.startswith('test_cli_') or b in ('empty', 'main')]
 
-    res = env.zenith_cli.list_branches()
-    branches_cli = sorted(map(lambda b: b.split(':')[-1].strip(), res.stdout.strip().split("\n")))
-    branches_cli = [b for b in branches_cli if b.startswith('test_cli_') or b in ('empty', 'main')]
+    timelines_api = sorted(
+        map(lambda t: cast(str, t['timeline_id']),
+            pageserver_http_client.timeline_list(initial_tenant)))
 
-    res = env.zenith_cli.list_branches(tenant_id=initial_tenant)
-    branches_cli_with_tenant_arg = sorted(
-        map(lambda b: b.split(':')[-1].strip(), res.stdout.strip().split("\n")))
-    branches_cli_with_tenant_arg = [
-        b for b in branches_cli if b.startswith('test_cli_') or b in ('empty', 'main')
-    ]
+    timelines_cli = env.zenith_cli.list_timelines()
+    assert timelines_cli == env.zenith_cli.list_timelines(initial_tenant)
 
-    assert branches_api == branches_cli == branches_cli_with_tenant_arg
+    cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
+    assert timelines_api == cli_timeline_ids
 
 
-def test_cli_branch_list(zenith_simple_env: ZenithEnv):
+def test_cli_timeline_list(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
     # Initial sanity check
-    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
-    env.zenith_cli.create_branch("test_cli_branch_list_main", "empty")
-    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
+    helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
+
+    # Create a branch for us
+    main_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_main')
+    helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
-    res = env.zenith_cli.create_branch("test_cli_branch_list_nested", "test_cli_branch_list_main")
-    assert res.stderr == ''
-    helper_compare_branch_list(pageserver_http_client, env, env.initial_tenant)
+    nested_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_nested',
+                                                      'test_cli_branch_list_main')
+    helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
-    res = env.zenith_cli.list_branches()
-    assert res.stderr == ''
-    branches_cli = sorted(map(lambda b: b.split(':')[-1].strip(), res.stdout.strip().split("\n")))
+    timelines_cli = [timeline_id for (_, timeline_id) in env.zenith_cli.list_timelines()]
 
-    assert 'test_cli_branch_list_main' in branches_cli
-    assert 'test_cli_branch_list_nested' in branches_cli
+    assert main_timeline_id.hex in timelines_cli
+    assert nested_timeline_id.hex in timelines_cli
 
 
 def helper_compare_tenant_list(pageserver_http_client: ZenithPageserverHttpClient, env: ZenithEnv):
@@ -60,7 +54,6 @@ def helper_compare_tenant_list(pageserver_http_client: ZenithPageserverHttpClien
     tenants_api = sorted(map(lambda t: cast(str, t['id']), tenants))
 
     res = env.zenith_cli.list_tenants()
-    assert res.stderr == ''
     tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert tenants_api == tenants_cli
@@ -73,15 +66,13 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1 = uuid.uuid4()
-    env.zenith_cli.create_tenant(tenant1)
+    tenant1 = env.zenith_cli.create_tenant()
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2 = uuid.uuid4()
-    env.zenith_cli.create_tenant(tenant2)
+    tenant2 = env.zenith_cli.create_tenant()
 
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)

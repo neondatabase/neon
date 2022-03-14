@@ -1,13 +1,10 @@
 //! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
-//! Currently, tenant branch files are also uploaded, but this does not appear final.
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use anyhow::{ensure, Context};
-use futures::{stream::FuturesUnordered, StreamExt};
-use tokio::{fs, sync::RwLock};
+use anyhow::ensure;
+use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
-use zenith_utils::zid::ZTenantId;
 
 use crate::{
     config::PageServerConf,
@@ -15,7 +12,7 @@ use crate::{
         storage_sync::{
             compression,
             index::{RemoteTimeline, TimelineIndexEntry},
-            sync_queue, tenant_branch_files, update_index_description, SyncKind, SyncTask,
+            sync_queue, update_index_description, SyncKind, SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
@@ -25,8 +22,6 @@ use super::{compression::ArchiveHeader, index::RemoteTimelineIndex, NewCheckpoin
 
 /// Attempts to compress and upload given checkpoint files.
 /// No extra checks for overlapping files is made: download takes care of that, ensuring no non-metadata local timeline files are overwritten.
-///
-/// Before the checkpoint files are uploaded, branch files are uploaded, if any local ones are missing remotely.
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
 /// On success, populates index data with new downloads.
@@ -41,19 +36,6 @@ pub(super) async fn upload_timeline_checkpoint<
     retries: u32,
 ) -> Option<bool> {
     debug!("Uploading checkpoint for sync id {}", sync_id);
-    if let Err(e) = upload_missing_branches(config, remote_assets.as_ref(), sync_id.tenant_id).await
-    {
-        error!(
-            "Failed to upload missing branches for sync id {}: {:?}",
-            sync_id, e
-        );
-        sync_queue::push(SyncTask::new(
-            sync_id,
-            retries,
-            SyncKind::Upload(new_checkpoint),
-        ));
-        return Some(false);
-    }
     let new_upload_lsn = new_checkpoint.metadata.disk_consistent_lsn();
 
     let index = &remote_assets.1;
@@ -199,76 +181,6 @@ async fn try_upload_checkpoint<
     )
     .await
     .map(|(header, header_size, _)| (header, header_size))
-}
-
-async fn upload_missing_branches<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
-    tenant_id: ZTenantId,
-) -> anyhow::Result<()> {
-    let local_branches = tenant_branch_files(config, tenant_id)
-        .await
-        .context("Failed to list local branch files for the tenant")?;
-    let index_read = index.read().await;
-    let remote_branches = index_read
-        .branch_files(tenant_id)
-        .cloned()
-        .unwrap_or_default();
-    drop(index_read);
-
-    let mut branch_uploads = local_branches
-        .difference(&remote_branches)
-        .map(|local_only_branch| async move {
-            let local_branch_path = local_only_branch.as_path(&config.branches_path(&tenant_id));
-            let storage_path = storage.storage_path(&local_branch_path).with_context(|| {
-                format!(
-                    "Failed to derive a storage path for branch with local path '{}'",
-                    local_branch_path.display()
-                )
-            })?;
-            let local_branch_file = fs::OpenOptions::new()
-                .read(true)
-                .open(&local_branch_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to open local branch file {} for reading",
-                        local_branch_path.display()
-                    )
-                })?;
-            storage
-                .upload(local_branch_file, &storage_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to upload branch file to the remote path {:?}",
-                        storage_path
-                    )
-                })?;
-            Ok::<_, anyhow::Error>(local_only_branch)
-        })
-        .collect::<FuturesUnordered<_>>();
-
-    let mut branch_uploads_failed = false;
-    while let Some(upload_result) = branch_uploads.next().await {
-        match upload_result {
-            Ok(local_only_branch) => index
-                .write()
-                .await
-                .add_branch_file(tenant_id, local_only_branch.clone()),
-            Err(e) => {
-                error!("Failed to upload branch file: {:?}", e);
-                branch_uploads_failed = true;
-            }
-        }
-    }
-
-    ensure!(!branch_uploads_failed, "Failed to upload all branch files");
-
-    Ok(())
 }
 
 #[cfg(test)]

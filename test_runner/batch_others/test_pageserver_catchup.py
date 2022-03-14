@@ -16,7 +16,7 @@ def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuil
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_pageserver_catchup_while_compute_down", "main")
+    env.zenith_cli.create_branch('test_pageserver_catchup_while_compute_down')
     pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down')
 
     pg_conn = pg.connect()

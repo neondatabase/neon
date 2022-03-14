@@ -47,7 +47,7 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram_vec, HistogramVec};
+use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
@@ -82,7 +82,17 @@ lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_storage_time",
         "Time spent on storage operations",
-        &["operation"]
+        &["operation", "tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+// Metrics collected on operations on the storage repository.
+lazy_static! {
+    static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
+        "pageserver_getpage_reconstruct_time",
+        "Time spent on storage operations",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
 }
@@ -113,20 +123,21 @@ pub struct LayeredRepository {
 impl Repository for LayeredRepository {
     type Timeline = LayeredTimeline;
 
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<LayeredTimeline>> {
-        let mut timelines = self.timelines.lock().unwrap();
-        Ok(
-            match self.get_or_init_timeline(timelineid, &mut timelines)? {
-                LayeredTimelineEntry::Local(local) => RepositoryTimeline::Local(local),
-                LayeredTimelineEntry::Remote {
-                    id,
-                    disk_consistent_lsn,
-                } => RepositoryTimeline::Remote {
-                    id,
-                    disk_consistent_lsn,
-                },
-            },
-        )
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<Self::Timeline>> {
+        Ok(RepositoryTimeline::from(self.get_or_init_timeline(
+            timelineid,
+            &mut self.timelines.lock().unwrap(),
+        )?))
+    }
+
+    fn list_timelines(&self) -> Result<Vec<RepositoryTimeline<Self::Timeline>>> {
+        Ok(self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|timeline_entry| RepositoryTimeline::from(timeline_entry.clone()))
+            .collect())
     }
 
     fn create_empty_timeline(
@@ -224,8 +235,12 @@ impl Repository for LayeredRepository {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
+        let timeline_str = target_timelineid
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
         STORAGE_TIME
-            .with_label_values(&["gc"])
+            .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_str])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timelineid, horizon, checkpoint_before_gc)
             })
@@ -401,6 +416,24 @@ impl LayeredTimelineEntry {
                 disk_consistent_lsn,
                 ..
             } => *disk_consistent_lsn,
+        }
+    }
+}
+
+impl From<LayeredTimelineEntry> for RepositoryTimeline<LayeredTimeline> {
+    fn from(layered_timeline: LayeredTimelineEntry) -> Self {
+        match layered_timeline {
+            LayeredTimelineEntry::Local(timeline) => RepositoryTimeline::Local {
+                id: timeline.timelineid,
+                timeline,
+            },
+            LayeredTimelineEntry::Remote {
+                id,
+                disk_consistent_lsn,
+            } => RepositoryTimeline::Remote {
+                id,
+                disk_consistent_lsn,
+            },
         }
     }
 }
@@ -719,6 +752,12 @@ pub struct LayeredTimeline {
     ancestor_timeline: Option<LayeredTimelineEntry>,
     ancestor_lsn: Lsn,
 
+    // Metrics histograms
+    reconstruct_time_histo: Histogram,
+    checkpoint_time_histo: Histogram,
+    flush_checkpoint_time_histo: Histogram,
+    forced_checkpoint_time_histo: Histogram,
+
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_relishes: AtomicBool,
 
@@ -806,7 +845,8 @@ impl Timeline for LayeredTimeline {
 
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
 
-        self.reconstruct_value(key, lsn, reconstruct_state)
+        self.reconstruct_time_histo
+            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private
@@ -814,14 +854,14 @@ impl Timeline for LayeredTimeline {
     /// metrics collection.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
         match cconf {
-            CheckpointConfig::Flush => STORAGE_TIME
-                .with_label_values(&["flush checkpoint"])
+            CheckpointConfig::Flush => self
+                .flush_checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(0, false)),
-            CheckpointConfig::Forced => STORAGE_TIME
-                .with_label_values(&["forced checkpoint"])
+            CheckpointConfig::Forced => self
+                .forced_checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(0, true)),
-            CheckpointConfig::Distance(distance) => STORAGE_TIME
-                .with_label_values(&["checkpoint"])
+            CheckpointConfig::Distance(distance) => self
+                .checkpoint_time_histo
                 .observe_closure_duration(|| self.checkpoint_internal(distance, true)),
         }
     }
@@ -889,6 +929,31 @@ impl LayeredTimeline {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_relishes: bool,
     ) -> LayeredTimeline {
+        let reconstruct_time_histo = RECONSTRUCT_TIME
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
+        let checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+        let flush_checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "flush checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+        let forced_checkpoint_time_histo = STORAGE_TIME
+            .get_metric_with_label_values(&[
+                "forced checkpoint",
+                &tenantid.to_string(),
+                &timelineid.to_string(),
+            ])
+            .unwrap();
+
         LayeredTimeline {
             conf,
             timelineid,
@@ -906,6 +971,12 @@ impl LayeredTimeline {
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
+
+            reconstruct_time_histo,
+            checkpoint_time_histo,
+            flush_checkpoint_time_histo,
+            forced_checkpoint_time_histo,
+
             upload_relishes: AtomicBool::new(upload_relishes),
 
             write_lock: Mutex::new(()),
@@ -2162,8 +2233,10 @@ mod tests {
         for _ in 0..50 {
             let new_tline_id = ZTimelineId::generate();
             repo.branch_timeline(tline_id, new_tline_id, lsn)?;
-            tline = if let RepositoryTimeline::Local(local) = repo.get_timeline(new_tline_id)? {
-                local
+            tline = if let RepositoryTimeline::Local { id: _, timeline } =
+                repo.get_timeline(new_tline_id)?
+            {
+                timeline
             } else {
                 panic!("unexpected timeline state");
             };

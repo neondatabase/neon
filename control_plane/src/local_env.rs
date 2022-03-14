@@ -3,16 +3,18 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{HexZTenantId, ZNodeId, ZTenantId};
+use zenith_utils::zid::{
+    HexZTenantId, HexZTimelineId, ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId,
+};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -23,7 +25,7 @@ use crate::safekeeper::SafekeeperNode;
 // to 'zenith init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
     // compute nodes).
@@ -48,7 +50,7 @@ pub struct LocalEnv {
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
     #[serde(default)]
-    pub default_tenantid: Option<HexZTenantId>,
+    pub default_tenant_id: Option<HexZTenantId>,
 
     // used to issue tokens during e.g pg start
     #[serde(default)]
@@ -58,9 +60,16 @@ pub struct LocalEnv {
 
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
+
+    /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
+    #[serde(default)]
+    // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
+    // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
+    // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
+    branch_name_mappings: HashMap<String, Vec<(HexZTenantId, HexZTimelineId)>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct PageServerConf {
     // node id
@@ -88,7 +97,7 @@ impl Default for PageServerConf {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
     pub id: ZNodeId,
@@ -144,6 +153,72 @@ impl LocalEnv {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
     }
 
+    pub fn register_branch_mapping(
+        &mut self,
+        branch_name: String,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+    ) -> anyhow::Result<()> {
+        let existing_values = self
+            .branch_name_mappings
+            .entry(branch_name.clone())
+            .or_default();
+
+        let tenant_id = HexZTenantId::from(tenant_id);
+        let timeline_id = HexZTimelineId::from(timeline_id);
+
+        let existing_ids = existing_values
+            .iter()
+            .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
+
+        if let Some((_, old_timeline_id)) = existing_ids {
+            if old_timeline_id == &timeline_id {
+                Ok(())
+            } else {
+                bail!(
+                    "branch '{}' is already mapped to timeline {}, cannot map to another timeline {}",
+                    branch_name,
+                    old_timeline_id,
+                    timeline_id
+                );
+            }
+        } else {
+            existing_values.push((tenant_id, timeline_id));
+            Ok(())
+        }
+    }
+
+    pub fn get_branch_timeline_id(
+        &self,
+        branch_name: &str,
+        tenant_id: ZTenantId,
+    ) -> Option<ZTimelineId> {
+        let tenant_id = HexZTenantId::from(tenant_id);
+        self.branch_name_mappings
+            .get(branch_name)?
+            .iter()
+            .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
+            .map(|&(_, timeline_id)| timeline_id)
+            .map(ZTimelineId::from)
+    }
+
+    pub fn timeline_name_mappings(&self) -> HashMap<ZTenantTimelineId, String> {
+        self.branch_name_mappings
+            .iter()
+            .flat_map(|(name, tenant_timelines)| {
+                tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
+                    (
+                        ZTenantTimelineId::new(
+                            ZTenantId::from(tenant_id),
+                            ZTimelineId::from(timeline_id),
+                        ),
+                        name.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Create a LocalEnv from a config file.
     ///
     /// Unlike 'load_config', this function fills in any defaults that are missing
@@ -183,8 +258,8 @@ impl LocalEnv {
         }
 
         // If no initial tenant ID was given, generate it.
-        if env.default_tenantid.is_none() {
-            env.default_tenantid = Some(HexZTenantId::from(ZTenantId::generate()));
+        if env.default_tenant_id.is_none() {
+            env.default_tenant_id = Some(HexZTenantId::from(ZTenantId::generate()));
         }
 
         env.base_data_dir = base_path();
@@ -214,6 +289,39 @@ impl LocalEnv {
         Ok(env)
     }
 
+    pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
+        // Currently, the user first passes a config file with 'zenith init --config=<path>'
+        // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
+        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
+        // a bit sad.
+        let mut conf_content = r#"# This file describes a locale deployment of the page server
+# and safekeeeper node. It is read by the 'zenith' command-line
+# utility.
+"#
+        .to_string();
+
+        // Convert the LocalEnv to a toml file.
+        //
+        // This could be as simple as this:
+        //
+        // conf_content += &toml::to_string_pretty(env)?;
+        //
+        // But it results in a "values must be emitted before tables". I'm not sure
+        // why, AFAICS the table, i.e. 'safekeepers: Vec<SafekeeperConf>' is last.
+        // Maybe rust reorders the fields to squeeze avoid padding or something?
+        // In any case, converting to toml::Value first, and serializing that, works.
+        // See https://github.com/alexcrichton/toml-rs/issues/142
+        conf_content += &toml::to_string_pretty(&toml::Value::try_from(self)?)?;
+
+        let target_config_path = base_path.join("config");
+        fs::write(&target_config_path, conf_content).with_context(|| {
+            format!(
+                "Failed to write config file into path '{}'",
+                target_config_path.display()
+            )
+        })
+    }
+
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
         let private_key_path = if self.private_key_path.is_absolute() {
@@ -232,15 +340,15 @@ impl LocalEnv {
     pub fn init(&mut self) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
-        if base_path == Path::new("") {
-            bail!("repository base path is missing");
-        }
-        if base_path.exists() {
-            bail!(
-                "directory '{}' already exists. Perhaps already initialized?",
-                base_path.to_str().unwrap()
-            );
-        }
+        ensure!(
+            base_path != Path::new(""),
+            "repository base path is missing"
+        );
+        ensure!(
+            !base_path.exists(),
+            "directory '{}' already exists. Perhaps already initialized?",
+            base_path.display()
+        );
 
         fs::create_dir(&base_path)?;
 
@@ -292,36 +400,7 @@ impl LocalEnv {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
         }
 
-        let mut conf_content = String::new();
-
-        // Currently, the user first passes a config file with 'zenith init --config=<path>'
-        // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
-        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
-        // a bit sad.
-        write!(
-            &mut conf_content,
-            r#"# This file describes a locale deployment of the page server
-# and safekeeeper node. It is read by the 'zenith' command-line
-# utility.
-"#
-        )?;
-
-        // Convert the LocalEnv to a toml file.
-        //
-        // This could be as simple as this:
-        //
-        // conf_content += &toml::to_string_pretty(env)?;
-        //
-        // But it results in a "values must be emitted before tables". I'm not sure
-        // why, AFAICS the table, i.e. 'safekeepers: Vec<SafekeeperConf>' is last.
-        // Maybe rust reorders the fields to squeeze avoid padding or something?
-        // In any case, converting to toml::Value first, and serializing that, works.
-        // See https://github.com/alexcrichton/toml-rs/issues/142
-        conf_content += &toml::to_string_pretty(&toml::Value::try_from(&self)?)?;
-
-        fs::write(base_path.join("config"), conf_content)?;
-
-        Ok(())
+        self.persist_config(base_path)
     }
 }
 

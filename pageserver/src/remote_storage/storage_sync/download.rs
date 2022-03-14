@@ -1,10 +1,8 @@
 //! Timeline synchrnonization logic to put files from archives on remote storage into pageserver's local directory.
-//! Currently, tenant branch files are also downloaded, but this does not appear final.
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use anyhow::{ensure, Context};
-use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{fs, sync::RwLock};
 use tracing::{debug, error, trace, warn};
 use zenith_utils::{lsn::Lsn, zid::ZTenantId};
@@ -14,8 +12,8 @@ use crate::{
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     remote_storage::{
         storage_sync::{
-            compression, index::TimelineIndexEntry, sync_queue, tenant_branch_files,
-            update_index_description, SyncKind, SyncTask,
+            compression, index::TimelineIndexEntry, sync_queue, update_index_description, SyncKind,
+            SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
@@ -41,8 +39,6 @@ pub(super) enum DownloadedTimeline {
 /// Attempts to download and uncompress files from all remote archives for the timeline given.
 /// Timeline files that already exist locally are skipped during the download, but the local metadata file is
 /// updated in the end of every checkpoint archive extraction.
-///
-/// Before any archives are considered, the branch files are checked locally and remotely, all remote-only files are downloaded.
 ///
 /// On an error, bumps the retries count and reschedules the download, with updated archive skip list
 /// (for any new successful archive downloads and extractions).
@@ -112,22 +108,6 @@ pub(super) async fn download_timeline<
             return DownloadedTimeline::Abort;
         }
     };
-
-    if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.tenant_id).await
-    {
-        error!(
-            "Failed to download missing branches for sync id {}: {:?}",
-            sync_id, e
-        );
-        sync_queue::push(SyncTask::new(
-            sync_id,
-            retries,
-            SyncKind::Download(download),
-        ));
-        return DownloadedTimeline::FailedAndRescheduled {
-            disk_consistent_lsn,
-        };
-    }
 
     debug!("Downloading timeline archives");
     let archives_to_download = remote_timeline
@@ -248,82 +228,6 @@ async fn read_local_metadata(
         .context("Failed to read local metadata file bytes")?;
     Ok(TimelineMetadata::from_bytes(&local_metadata_bytes)
         .context("Failed to read local metadata files bytes")?)
-}
-
-async fn download_missing_branches<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    conf: &'static PageServerConf,
-    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
-    tenant_id: ZTenantId,
-) -> anyhow::Result<()> {
-    let local_branches = tenant_branch_files(conf, tenant_id)
-        .await
-        .context("Failed to list local branch files for the tenant")?;
-    let local_branches_dir = conf.branches_path(&tenant_id);
-    if !local_branches_dir.exists() {
-        fs::create_dir_all(&local_branches_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to create local branches directory at path '{}'",
-                    local_branches_dir.display()
-                )
-            })?;
-    }
-
-    if let Some(remote_branches) = index.read().await.branch_files(tenant_id) {
-        let mut remote_only_branches_downloads = remote_branches
-            .difference(&local_branches)
-            .map(|remote_only_branch| async move {
-                let branches_dir = conf.branches_path(&tenant_id);
-                let remote_branch_path = remote_only_branch.as_path(&branches_dir);
-                let storage_path =
-                    storage.storage_path(&remote_branch_path).with_context(|| {
-                        format!(
-                            "Failed to derive a storage path for branch with local path '{}'",
-                            remote_branch_path.display()
-                        )
-                    })?;
-                let mut target_file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&remote_branch_path)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to create local branch file at '{}'",
-                            remote_branch_path.display()
-                        )
-                    })?;
-                storage
-                    .download(&storage_path, &mut target_file)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to download branch file from the remote path {:?}",
-                            storage_path
-                        )
-                    })?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        let mut branch_downloads_failed = false;
-        while let Some(download_result) = remote_only_branches_downloads.next().await {
-            if let Err(e) = download_result {
-                branch_downloads_failed = true;
-                error!("Failed to download a branch file: {:?}", e);
-            }
-        }
-        ensure!(
-            !branch_downloads_failed,
-            "Failed to download all branch files"
-        );
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

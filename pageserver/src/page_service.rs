@@ -300,7 +300,7 @@ lazy_static! {
     static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_smgr_query_time",
         "Time spent on smgr query handling",
-        &["smgr_query_type"],
+        &["smgr_query_type", "tenant_id", "timeline_id"],
         TIME_BUCKETS.into()
     )
     .expect("failed to define a metric");
@@ -342,20 +342,22 @@ impl PageServerHandler {
                         };
 
                         let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+                        let tenant_id = tenantid.to_string();
+                        let timeline_id = timelineid.to_string();
 
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_exists"])
+                                .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_rel_exists_request(timeline.as_ref(), &req)
                                 }),
                             PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_size"])
+                                .with_label_values(&["get_rel_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_nblocks_request(timeline.as_ref(), &req)
                                 }),
                             PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_page_at_lsn"])
+                                .with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_page_at_lsn_request(timeline.as_ref(), &req)
                                 }),

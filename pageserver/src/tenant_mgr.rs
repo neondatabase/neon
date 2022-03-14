@@ -1,21 +1,21 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::branches;
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::repository::Repository;
 use crate::repository::TimelineSyncState;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
+use crate::timelines;
 use crate::walredo::PostgresRedoManager;
 use crate::CheckpointConfig;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
@@ -183,25 +183,28 @@ pub fn shutdown_all_tenants() {
     }
 }
 
-pub fn create_repository_for_tenant(
+pub fn create_tenant_repository(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-) -> Result<()> {
-    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
-    let repo = branches::create_repo(conf, tenantid, wal_redo_manager)?;
-
-    match access_tenants().entry(tenantid) {
-        hash_map::Entry::Occupied(_) => bail!("tenant {} already exists", tenantid),
-        hash_map::Entry::Vacant(v) => {
-            v.insert(Tenant {
-                state: TenantState::Idle,
-                repo,
-                timelines: HashMap::new(),
-            });
+    new_tenant_id: Option<ZTenantId>,
+) -> Result<Option<ZTenantId>> {
+    let new_tenant_id = new_tenant_id.unwrap_or_else(ZTenantId::generate);
+    let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, new_tenant_id));
+    match timelines::create_repo(conf, new_tenant_id, wal_redo_manager)? {
+        Some(repo) => {
+            access_tenants()
+                .entry(new_tenant_id)
+                .or_insert_with(|| Tenant {
+                    state: TenantState::Idle,
+                    repo,
+                    timelines: HashMap::new(),
+                });
+            Ok(Some(new_tenant_id))
+        }
+        None => {
+            debug!("repository already exists for tenant {}", new_tenant_id);
+            Ok(None)
         }
     }
-
-    Ok(())
 }
 
 pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
