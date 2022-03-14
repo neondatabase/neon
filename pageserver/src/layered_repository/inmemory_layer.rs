@@ -34,21 +34,6 @@ pub struct InMemoryLayer {
     ///
     start_lsn: Lsn,
 
-    ///
-    /// LSN of the oldest value stored in this layer.
-    ///
-    /// This is different from 'start_lsn' in that we enforce that the 'start_lsn'
-    /// of a layer always matches the 'end_lsn' of its predecessor, even if there
-    /// are no page versions until at a later LSN. That way you can detect any
-    /// missing layer files more easily. 'oldest_lsn' is the first page version
-    /// actually stored in this layer. In the range between 'start_lsn' and
-    /// 'oldest_lsn', there are no changes to the segment.
-    /// 'oldest_lsn' is used to adjust 'disk_consistent_lsn' and that is why it should
-    /// point to the beginning of WAL record. This is the other difference with 'start_lsn'
-    /// which points to end of WAL record. This is why 'oldest_lsn' can be smaller than 'start_lsn'.
-    ///
-    oldest_lsn: Lsn,
-
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
     inner: RwLock<InMemoryLayerInner>,
@@ -236,11 +221,6 @@ impl Layer for InMemoryLayer {
 }
 
 impl InMemoryLayer {
-    /// Return the oldest page version that's stored in this layer
-    pub fn get_oldest_lsn(&self) -> Lsn {
-        self.oldest_lsn
-    }
-
     ///
     /// Create a new, empty, in-memory layer
     ///
@@ -249,7 +229,6 @@ impl InMemoryLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         start_lsn: Lsn,
-        oldest_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(
             "initializing new empty InMemoryLayer for writing on timeline {} at {}",
@@ -264,7 +243,6 @@ impl InMemoryLayer {
             timelineid,
             tenantid,
             start_lsn,
-            oldest_lsn,
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 index: HashMap::new(),

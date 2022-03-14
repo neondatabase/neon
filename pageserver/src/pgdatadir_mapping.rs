@@ -798,7 +798,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
             writer.delete(key_range.clone(), self.lsn)?;
         }
 
-        writer.advance_last_record_lsn(self.lsn);
+        writer.finish_write(self.lsn);
 
         if last_partitioning == Lsn(0)
             || self.lsn.0 - last_partitioning.0 > TARGET_FILE_SIZE_BYTES / 8

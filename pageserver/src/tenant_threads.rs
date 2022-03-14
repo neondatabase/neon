@@ -34,7 +34,7 @@ fn checkpoint_loop_ext(tenantid: ZTenantId, conf: &'static PageServerConf) -> Re
         // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
         // bytes of WAL since last checkpoint.
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        repo.checkpoint_iteration(CheckpointConfig::Distance(conf.checkpoint_distance))?;
+        repo.checkpoint_iteration(CheckpointConfig::Distance)?;
     }
 
     trace!(

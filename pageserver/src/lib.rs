@@ -42,7 +42,7 @@ pub const LOG_FILE_NAME: &str = "pageserver.log";
 #[derive(Debug, Clone, Copy)]
 pub enum CheckpointConfig {
     // Flush in-memory data that is older than this
-    Distance(u64),
+    Distance,
     // Flush all in-memory data
     Flush,
     // Flush all in-memory data and reconstruct all page images

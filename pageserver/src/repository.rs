@@ -401,11 +401,14 @@ pub trait TimelineWriter<'a> {
 
     fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
 
-    /// Track end of the latest digested WAL record.
+    /// Track the end of the latest digested WAL record.
     ///
-    /// Advance requires aligned LSN as an argument and would wake wait_lsn() callers.
-    /// Previous last record LSN is stored alongside the latest and can be read.
-    fn advance_last_record_lsn(&self, lsn: Lsn);
+    /// Call this after you have finished writing all the WAL up to 'lsn'.
+    ///
+    /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
+    /// the 'lsn' or anything older. The previous last record LSN is stored alongside
+    /// the latest and can be read.
+    fn finish_write(&self, lsn: Lsn);
 }
 
 #[cfg(test)]
@@ -554,12 +557,12 @@ mod tests {
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
-        writer.advance_last_record_lsn(Lsn(0x10));
+        writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
-        writer.advance_last_record_lsn(Lsn(0x20));
+        writer.finish_write(Lsn(0x20));
         drop(writer);
 
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
@@ -594,12 +597,12 @@ mod tests {
         // Insert a value on the timeline
         writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
         writer.put(TEST_KEY_B, Lsn(0x20), test_value("foobar at 0x20"))?;
-        writer.advance_last_record_lsn(Lsn(0x20));
+        writer.finish_write(Lsn(0x20));
 
         writer.put(TEST_KEY_A, Lsn(0x30), test_value("foo at 0x30"))?;
-        writer.advance_last_record_lsn(Lsn(0x30));
+        writer.finish_write(Lsn(0x30));
         writer.put(TEST_KEY_A, Lsn(0x40), test_value("foo at 0x40"))?;
-        writer.advance_last_record_lsn(Lsn(0x40));
+        writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
 
@@ -611,7 +614,7 @@ mod tests {
         };
         let new_writer = newtline.writer();
         new_writer.put(TEST_KEY_A, Lsn(0x40), test_value("bar at 0x40"))?;
-        new_writer.advance_last_record_lsn(Lsn(0x40));
+        new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
         assert_eq!(
@@ -643,14 +646,14 @@ mod tests {
                 lsn,
                 Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
-            writer.advance_last_record_lsn(lsn);
+            writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
                 Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
-            writer.advance_last_record_lsn(lsn);
+            writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.checkpoint(CheckpointConfig::Forced)?;
@@ -661,14 +664,14 @@ mod tests {
                 lsn,
                 Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
-            writer.advance_last_record_lsn(lsn);
+            writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
                 Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
-            writer.advance_last_record_lsn(lsn);
+            writer.finish_write(lsn);
         }
         tline.checkpoint(CheckpointConfig::Forced)
     }

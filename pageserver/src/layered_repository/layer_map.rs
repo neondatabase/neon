@@ -16,6 +16,7 @@ use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
 use lazy_static::lazy_static;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use tracing::*;
@@ -47,7 +48,7 @@ pub struct LayerMap {
     /// layer is during checkpointing, when an InMemoryLayer is being written out
     /// to disk.
     ///
-    pub frozen_layer: Option<Arc<InMemoryLayer>>,
+    pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
 

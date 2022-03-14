@@ -266,6 +266,8 @@ fn walreceiver_main(
                     caught_up = true;
                 }
 
+                timeline.tline.check_checkpoint_distance()?;
+
                 Some(endlsn)
             }
 
