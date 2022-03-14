@@ -520,6 +520,7 @@ struct PostgresRedoProcess {
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    pollfds: [PollFd; 3],
 }
 
 impl PostgresRedoProcess {
@@ -591,11 +592,17 @@ impl PostgresRedoProcess {
         set_nonblock(stdout.as_raw_fd())?;
         set_nonblock(stderr.as_raw_fd())?;
 
+        let pollfds = [
+            PollFd::new(stdout.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(stderr.as_raw_fd(), PollFlags::POLLIN),
+            PollFd::new(stdin.as_raw_fd(), PollFlags::POLLOUT),
+        ];
         Ok(PostgresRedoProcess {
             child,
             stdin,
             stdout,
             stderr,
+            pollfds,
         })
     }
 
@@ -653,13 +660,6 @@ impl PostgresRedoProcess {
         let mut resultbuf = vec![0; pg_constants::BLCKSZ.into()];
         let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
 
-        // Prepare for calling poll()
-        let mut pollfds = [
-            PollFd::new(self.stdout.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stderr.as_raw_fd(), PollFlags::POLLIN),
-            PollFd::new(self.stdin.as_raw_fd(), PollFlags::POLLOUT),
-        ];
-
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging
         // information that the child writes to its stderr to the page server's log.
@@ -667,14 +667,17 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
+            let n = nix::poll::poll(
+                &mut self.pollfds[0..nfds],
+                wal_redo_timeout.as_millis() as i32,
+            )?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
             }
 
             // If we have some messages in stderr, forward them to the log.
-            let err_revents = pollfds[1].revents().unwrap();
+            let err_revents = self.pollfds[1].revents().unwrap();
             if err_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                 let mut errbuf: [u8; 16384] = [0; 16384];
                 let n = self.stderr.read(&mut errbuf)?;
@@ -700,7 +703,7 @@ impl PostgresRedoProcess {
 
             // If we have more data to write and 'stdin' is writeable, do write.
             if nwrite < writebuf.len() {
-                let in_revents = pollfds[2].revents().unwrap();
+                let in_revents = self.pollfds[2].revents().unwrap();
                 if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
                     nwrite += self.stdin.write(&writebuf[nwrite..])?;
                 } else if in_revents.contains(PollFlags::POLLHUP) {
@@ -713,7 +716,7 @@ impl PostgresRedoProcess {
             }
 
             // If we have some data in stdout, read it to the result buffer.
-            let out_revents = pollfds[0].revents().unwrap();
+            let out_revents = self.pollfds[0].revents().unwrap();
             if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                 nresult += self.stdout.read(&mut resultbuf[nresult..])?;
             } else if out_revents.contains(PollFlags::POLLHUP) {
