@@ -335,11 +335,13 @@ impl InMemoryLayer {
             self.start_lsn..inner.end_lsn.unwrap(),
         )?;
 
+        let mut buf = Vec::new();
         let mut do_steps = || -> Result<()> {
             for (key, vec_map) in inner.index.iter() {
                 // Write all page versions
                 for (lsn, pos) in vec_map.as_slice() {
-                    let val = Value::des(&utils::read_blob(&inner.file, *pos)?)?;
+                    let len = utils::read_blob_buf(&inner.file, *pos, &mut buf)?;
+                    let val = Value::des(&buf[0..len])?;
                     delta_layer_writer.put_value(*key, *lsn, val)?;
                 }
             }

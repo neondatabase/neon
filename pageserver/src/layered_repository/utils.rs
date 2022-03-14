@@ -4,17 +4,22 @@ use std::os::unix::fs::FileExt;
 
 use bookfile::BoundedReader;
 
-pub fn read_blob<F: FileExt>(file: &F, off: u64) -> Result<Vec<u8>, Error> {
+pub fn read_blob_buf<F: FileExt>(file: &F, off: u64, buf: &mut Vec<u8>) -> Result<usize, Error> {
     // read length
     let mut len_buf = [0u8; 4];
     file.read_exact_at(&mut len_buf, off)?;
 
-    let len = u32::from_ne_bytes(len_buf);
+    let len = u32::from_ne_bytes(len_buf) as usize;
 
-    let mut buf: Vec<u8> = Vec::new();
-    buf.resize(len as usize, 0);
+    buf.resize(len, 0);
     file.read_exact_at(&mut buf.as_mut_slice(), off + 4)?;
 
+    Ok(len)
+}
+
+pub fn read_blob<F: FileExt>(file: &F, off: u64) -> Result<Vec<u8>, Error> {
+    let mut buf: Vec<u8> = Vec::new();
+    let _ = read_blob_buf(file, off, &mut buf);
     Ok(buf)
 }
 
