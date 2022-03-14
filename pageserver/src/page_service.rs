@@ -729,6 +729,13 @@ impl postgres_backend::Handler for PageServerHandler {
                 .context("Failed to fetch local timeline for checkpoint request")?;
 
             timeline.tline.checkpoint(CheckpointConfig::Forced)?;
+
+            // Also compact it.
+            //
+            // FIXME: This probably shouldn't be part of a "checkpoint" command, but a
+            // separate operation. Update the tests if you change this.
+            timeline.tline.compact()?;
+
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {

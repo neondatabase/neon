@@ -41,8 +41,6 @@ pub const LOG_FILE_NAME: &str = "pageserver.log";
 /// Config for the Repository checkpointer
 #[derive(Debug, Clone, Copy)]
 pub enum CheckpointConfig {
-    // Flush in-memory data that is older than this
-    Distance,
     // Flush all in-memory data
     Flush,
     // Flush all in-memory data and reconstruct all page images

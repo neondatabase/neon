@@ -194,6 +194,11 @@ pub trait Repository: Send + Sync {
     /// Branch a timeline
     fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
 
+    /// Flush all data to disk.
+    ///
+    /// this is used at graceful shutdown.
+    fn checkpoint(&self) -> Result<()>;
+
     /// perform one garbage collection iteration, removing old data files from disk.
     /// this function is periodically called by gc thread.
     /// also it can be explicitly requested through page server api 'do_gc' command.
@@ -210,9 +215,9 @@ pub trait Repository: Send + Sync {
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 
-    /// perform one checkpoint iteration, flushing in-memory data on disk.
-    /// this function is periodically called by checkponter thread.
-    fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()>;
+    /// perform one compaction iteration.
+    /// this function is periodically called by compactor thread.
+    fn compaction_iteration(&self) -> Result<()>;
 }
 
 /// A timeline, that belongs to the current repository.

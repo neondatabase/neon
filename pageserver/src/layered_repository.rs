@@ -72,8 +72,6 @@ use layer_map::LayerMap;
 use layer_map::SearchResult;
 use storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 
-use crate::keyspace::TARGET_FILE_SIZE_BYTES;
-
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
@@ -104,7 +102,7 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
 pub struct LayeredRepository {
-    conf: &'static PageServerConf,
+    pub conf: &'static PageServerConf,
     tenantid: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
@@ -246,23 +244,58 @@ impl Repository for LayeredRepository {
             })
     }
 
-    fn checkpoint_iteration(&self, cconf: CheckpointConfig) -> Result<()> {
+    fn compaction_iteration(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
-        // checkpoints.  We don't want to block everything else while the
-        // checkpoint runs.
+        // compactions.  We don't want to block everything else while the
+        // compaction runs.
         let timelines = self.timelines.lock().unwrap();
-        let timelines_to_checkpoint = timelines
+        let timelines_to_compact = timelines
             .iter()
             .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_checkpoint {
+        for (timelineid, timeline) in &timelines_to_compact {
+            let _entered =
+                info_span!("compact", timeline = %timelineid, tenant = %self.tenantid).entered();
+            match timeline {
+                LayeredTimelineEntry::Local(timeline) => {
+                    timeline.compact()?;
+                }
+                LayeredTimelineEntry::Remote { .. } => {
+                    debug!("Cannot compact remote timeline {}", timelineid)
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    ///
+    /// Flush all in-memory data to disk.
+    ///
+    /// Used at shutdown.
+    ///
+    fn checkpoint(&self) -> Result<()> {
+        // Scan through the hashmap and collect a list of all the timelines,
+        // while holding the lock. Then drop the lock and actually perform the
+        // checkpoints.  We don't want to block everything else while the
+        // checkpoint runs.
+        let timelines = self.timelines.lock().unwrap();
+        let timelines_to_compact = timelines
+            .iter()
+            .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
+            .collect::<Vec<_>>();
+        drop(timelines);
+
+        for (timelineid, timeline) in &timelines_to_compact {
             let _entered =
                 info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
             match timeline {
-                LayeredTimelineEntry::Local(timeline) => timeline.checkpoint(cconf)?,
+                LayeredTimelineEntry::Local(timeline) => {
+                    timeline.checkpoint(CheckpointConfig::Flush)?;
+                }
                 LayeredTimelineEntry::Remote { .. } => debug!(
                     "Cannot run the checkpoint for remote timeline {}",
                     timelineid
@@ -756,9 +789,9 @@ pub struct LayeredTimeline {
 
     // Metrics histograms
     reconstruct_time_histo: Histogram,
-    checkpoint_time_histo: Histogram,
-    flush_checkpoint_time_histo: Histogram,
-    forced_checkpoint_time_histo: Histogram,
+    flush_time_histo: Histogram,
+    compact_time_histo: Histogram,
+    create_images_time_histo: Histogram,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_relishes: AtomicBool,
@@ -860,23 +893,14 @@ impl Timeline for LayeredTimeline {
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
-                self.flush_checkpoint_time_histo
-                    .observe_closure_duration(|| {
-                        self.freeze_inmem_layer(false);
-                        self.flush_frozen_layers(true)
-                    })
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)
             }
             CheckpointConfig::Forced => {
-                self.forced_checkpoint_time_histo
-                    .observe_closure_duration(|| {
-                        self.freeze_inmem_layer(false);
-                        self.flush_frozen_layers(true)?;
-                        self.checkpoint_internal()
-                    })
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)?;
+                self.compact()
             }
-            CheckpointConfig::Distance => self
-                .checkpoint_time_histo
-                .observe_closure_duration(|| self.checkpoint_internal()),
         }
     }
 
@@ -946,23 +970,23 @@ impl LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
-        let checkpoint_time_histo = STORAGE_TIME
+        let flush_time_histo = STORAGE_TIME
             .get_metric_with_label_values(&[
-                "checkpoint",
+                "layer flush",
                 &tenantid.to_string(),
                 &timelineid.to_string(),
             ])
             .unwrap();
-        let flush_checkpoint_time_histo = STORAGE_TIME
+        let compact_time_histo = STORAGE_TIME
             .get_metric_with_label_values(&[
-                "flush checkpoint",
+                "compact",
                 &tenantid.to_string(),
                 &timelineid.to_string(),
             ])
             .unwrap();
-        let forced_checkpoint_time_histo = STORAGE_TIME
+        let create_images_time_histo = STORAGE_TIME
             .get_metric_with_label_values(&[
-                "forced checkpoint",
+                "create images",
                 &tenantid.to_string(),
                 &timelineid.to_string(),
             ])
@@ -989,9 +1013,9 @@ impl LayeredTimeline {
             ancestor_lsn: metadata.ancestor_lsn(),
 
             reconstruct_time_histo,
-            checkpoint_time_histo,
-            flush_checkpoint_time_histo,
-            forced_checkpoint_time_histo,
+            flush_time_histo,
+            compact_time_histo,
+            create_images_time_histo,
 
             upload_relishes: AtomicBool::new(upload_relishes),
 
@@ -1331,37 +1355,6 @@ impl LayeredTimeline {
         drop(layers);
     }
 
-    ///
-    /// Flush to disk all data that was written with the put_* functions
-    ///
-    /// NOTE: This has nothing to do with checkpoint in PostgreSQL.
-    fn checkpoint_internal(&self) -> Result<()> {
-        info!("checkpoint starting");
-        // Prevent concurrent checkpoints
-        // FIXME: This does compaction now, not the flushing of layers.
-        // Is this lock still needed?
-        let _checkpoint_cs = self.checkpoint_cs.lock().unwrap();
-
-        // Create new image layers to allow GC and to reduce read latency
-        // TODO: the threshold for how often we create image layers is
-        // currently hard-coded at 3. It means, write out a new image layer,
-        // if there are at least three delta layers on top of it.
-        self.compact(TARGET_FILE_SIZE_BYTES as usize)?;
-
-        // TODO: We should also compact existing delta layers here.
-
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
-
-        Ok(())
-    }
-
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
 
@@ -1402,6 +1395,8 @@ impl LayeredTimeline {
             }
         };
 
+        let timer = self.flush_time_histo.start_timer();
+
         loop {
             let layers = self.layers.lock().unwrap();
             if let Some(frozen_layer) = layers.frozen_layers.front() {
@@ -1421,6 +1416,8 @@ impl LayeredTimeline {
                 break;
             }
         }
+
+        timer.stop_and_record();
 
         Ok(())
     }
@@ -1525,13 +1522,13 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn compact(&self, target_file_size: usize) -> Result<()> {
+    pub fn compact(&self) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
         //
         // 1. First, calculate the desired "partitioning" of the
         // currently in-use key space. The goal is to partition the
-        // key space into TARGET_FILE_SIZE chunks, but also take into
+        // key space into roughly fixed-size chunks, but also take into
         // account any existing image layers, and try to align the
         // chunk boundaries with the existing image layers to avoid
         // too much churn. Also try to align chunk boundaries with
@@ -1561,10 +1558,13 @@ impl LayeredTimeline {
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
 
+        let target_file_size = self.conf.checkpoint_distance;
+
         // 1. The partitioning was already done by the code in
         // pgdatadir_mapping.rs. We just use it here.
         let partitioning_guard = self.partitioning.read().unwrap();
         if let Some((partitioning, lsn)) = partitioning_guard.as_ref() {
+            let timer = self.create_images_time_histo.start_timer();
             // Make a copy of the partitioning, so that we can release
             // the lock. Otherwise we could block the WAL receiver.
             let lsn = *lsn;
@@ -1578,12 +1578,25 @@ impl LayeredTimeline {
                     self.create_image_layer(partition, lsn)?;
                 }
             }
+            timer.stop_and_record();
 
             // 3. Compact
+            let timer = self.compact_time_histo.start_timer();
             self.compact_level0(target_file_size)?;
+            timer.stop_and_record();
         } else {
             info!("Could not compact because no partitioning specified yet");
         }
+
+        // Call unload() on all frozen layers, to release memory.
+        // This shouldn't be much memory, as only metadata is slurped
+        // into memory.
+        let layers = self.layers.lock().unwrap();
+        for layer in layers.iter_historic_layers() {
+            layer.unload()?;
+        }
+        drop(layers);
+
         Ok(())
     }
 
@@ -1643,7 +1656,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    fn compact_level0(&self, target_file_size: usize) -> Result<()> {
+    fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.lock().unwrap();
 
         // We compact or "shuffle" the level-0 delta layers when 10 have
@@ -1698,7 +1711,7 @@ impl LayeredTimeline {
             if let Some(prev_key) = prev_key {
                 if key != prev_key && writer.is_some() {
                     let size = writer.as_mut().unwrap().size();
-                    if size > target_file_size as u64 {
+                    if size > target_file_size {
                         new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
                         writer = None;
                     }
@@ -2032,7 +2045,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
 /// file format and directory layout. The test here are more low level.
 ///
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::repo_harness::*;
@@ -2072,7 +2085,7 @@ mod tests {
     // file size is much larger, maybe 1 GB. But a small size makes it
     // much faster to exercise all the logic for creating the files,
     // garbage collection, compaction etc.
-    const TEST_FILE_SIZE: usize = 4 * 1024 * 1024;
+    pub const TEST_FILE_SIZE: u64 = 4 * 1024 * 1024;
 
     #[test]
     fn test_images() -> Result<()> {
@@ -2088,7 +2101,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact(TEST_FILE_SIZE)?;
+        tline.compact()?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -2096,7 +2109,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact(TEST_FILE_SIZE)?;
+        tline.compact()?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -2104,7 +2117,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact(TEST_FILE_SIZE)?;
+        tline.compact()?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -2112,7 +2125,7 @@ mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact(TEST_FILE_SIZE)?;
+        tline.compact()?;
 
         assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -2165,7 +2178,7 @@ mod tests {
 
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact(TEST_FILE_SIZE)?;
+            tline.compact()?;
             tline.gc()?;
         }
 
@@ -2239,7 +2252,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact(TEST_FILE_SIZE)?;
+            tline.compact()?;
             tline.gc()?;
         }
 
@@ -2325,7 +2338,7 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact(TEST_FILE_SIZE)?;
+            tline.compact()?;
             tline.gc()?;
         }
 

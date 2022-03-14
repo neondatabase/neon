@@ -9,7 +9,6 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
 use crate::walredo::PostgresRedoManager;
-use crate::CheckpointConfig;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -152,7 +151,7 @@ pub fn shutdown_all_tenants() {
 
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -166,7 +165,7 @@ pub fn shutdown_all_tenants() {
         debug!("shutdown tenant {}", tenantid);
         match get_repository_for_tenant(tenantid) {
             Ok(repo) => {
-                if let Err(err) = repo.checkpoint_iteration(CheckpointConfig::Flush) {
+                if let Err(err) = repo.checkpoint() {
                     error!(
                         "Could not checkpoint tenant {} during shutdown: {:?}",
                         tenantid, err
@@ -212,7 +211,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 }
 
 ///
-/// Change the state of a tenant to Active and launch its checkpointer and GC
+/// Change the state of a tenant to Active and launch its compactor and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
 pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
@@ -227,18 +226,18 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
         // If the tenant is already active, nothing to do.
         TenantState::Active => {}
 
-        // If it's Idle, launch the checkpointer and GC threads
+        // If it's Idle, launch the compactor and GC threads
         TenantState::Idle => {
             thread_mgr::spawn(
-                ThreadKind::Checkpointer,
+                ThreadKind::Compactor,
                 Some(tenantid),
                 None,
-                "Checkpointer thread",
-                move || crate::tenant_threads::checkpoint_loop(tenantid, conf),
+                "Compactor thread",
+                move || crate::tenant_threads::compact_loop(tenantid, conf),
             )?;
 
             // FIXME: if we fail to launch the GC thread, but already launched the
-            // checkpointer, we're in a strange state.
+            // compactor, we're in a strange state.
 
             thread_mgr::spawn(
                 ThreadKind::GarbageCollector,
@@ -286,7 +285,9 @@ pub fn get_timeline_for_tenant(
         .local_timeline()
         .with_context(|| format!("cannot fetch timeline {}", timelineid))?;
 
-    let page_tline = Arc::new(DatadirTimelineImpl::new(tline));
+    let repartition_distance = tenant.repo.conf.checkpoint_distance / 10;
+
+    let page_tline = Arc::new(DatadirTimelineImpl::new(tline, repartition_distance));
     page_tline.init_logical_size()?;
     tenant.timelines.insert(timelineid, Arc::clone(&page_tline));
     Ok(page_tline)

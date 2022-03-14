@@ -259,7 +259,7 @@ fn bootstrap_timeline<R: Repository>(
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline);
+    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
     page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 

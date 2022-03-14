@@ -35,6 +35,8 @@ where
     pub tline: Arc<R::Timeline>,
     pub last_partitioning: AtomicLsn,
     pub current_logical_size: AtomicIsize,
+
+    pub repartition_threshold: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,11 +73,12 @@ pub struct SlruSegmentDirectory {
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
 impl<R: Repository> DatadirTimeline<R> {
-    pub fn new(tline: Arc<R::Timeline>) -> Self {
+    pub fn new(tline: Arc<R::Timeline>, repartition_threshold: u64) -> Self {
         DatadirTimeline {
             tline,
             last_partitioning: AtomicLsn::new(0),
             current_logical_size: AtomicIsize::new(0),
+            repartition_threshold,
         }
     }
 
@@ -1178,7 +1181,7 @@ pub fn create_test_timeline<R: Repository>(
     timeline_id: zenith_utils::zid::ZTimelineId,
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let tline = DatadirTimeline::new(tline);
+    let tline = DatadirTimeline::new(tline, crate::layered_repository::tests::TEST_FILE_SIZE / 10);
     let mut writer = tline.begin_record(Lsn(8));
     writer.init_empty()?;
 

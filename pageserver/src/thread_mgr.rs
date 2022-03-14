@@ -92,8 +92,8 @@ pub enum ThreadKind {
     // Thread that connects to a safekeeper to fetch WAL for one timeline.
     WalReceiver,
 
-    // Thread that handles checkpointing of all timelines for a tenant.
-    Checkpointer,
+    // Thread that handles compaction of all timelines for a tenant.
+    Compactor,
 
     // Thread that handles GC of a tenant
     GarbageCollector,
