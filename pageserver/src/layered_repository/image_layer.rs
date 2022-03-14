@@ -170,8 +170,21 @@ impl Layer for ImageLayer {
     }
 
     fn unload(&self) -> Result<()> {
-        // TODO: unload 'segs'. Or even better, don't hold it in memory but
-        // access it directly from the file (using the buffer cache)
+        // Unload the index.
+        //
+        // TODO: we should access the index directly from pages on the disk,
+        // using the buffer cache. This load/unload mechanism is really ad hoc.
+
+        // FIXME: In debug mode, loading and unloading the index slows
+        // things down so much that you get timeout errors. At least
+        // with the test_parallel_copy test. So as an even more ad hoc
+        // stopgap fix for that, only unload every on average 10
+        // checkpoint cycles.
+        use rand::RngCore;
+        if rand::thread_rng().next_u32() > (u32::MAX / 10) {
+            return Ok(());
+        }
+
         let mut inner = self.inner.lock().unwrap();
         inner.index = HashMap::default();
         inner.loaded = false;

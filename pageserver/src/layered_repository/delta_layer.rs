@@ -219,6 +219,16 @@ impl Layer for DeltaLayer {
     /// it will need to be loaded back.
     ///
     fn unload(&self) -> Result<()> {
+        // FIXME: In debug mode, loading and unloading the index slows
+        // things down so much that you get timeout errors. At least
+        // with the test_parallel_copy test. So as an even more ad hoc
+        // stopgap fix for that, only unload every on average 10
+        // checkpoint cycles.
+        use rand::RngCore;
+        if rand::thread_rng().next_u32() > (u32::MAX / 10) {
+            return Ok(());
+        }
+
         if let Ok(mut inner) = self.inner.try_write() {
             inner.index = HashMap::default();
             inner.loaded = false;
