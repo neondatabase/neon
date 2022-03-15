@@ -13,7 +13,7 @@ jobs:
         # If we want to duplicate this job for different
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
         rust_toolchain: [stable]
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
     timeout-minutes: 30
     name: run regression test suite
     runs-on: ${{ matrix.os }}
@@ -32,10 +32,16 @@ jobs:
           toolchain: ${{ matrix.rust_toolchain }}
           override: true
 
-      - name: Install postgres dependencies
+      - name: Install Ubuntu postgres dependencies
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt update
           sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev
+
+      - name: Install macOs postgres dependencies
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install flex bison
 
       - name: Set pg revision for caching
         id: pg_ver
