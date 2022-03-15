@@ -11,7 +11,7 @@ use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 /// Common authentication error.
 #[derive(Debug, Error)]
-pub enum AuthError {
+pub enum AuthErrorImpl {
     /// Authentication error reported by the console.
     #[error(transparent)]
     Console(#[from] cplane_api::AuthError),
@@ -25,30 +25,43 @@ pub enum AuthError {
     Io(#[from] std::io::Error),
 }
 
-impl AuthError {
-    /// Smart constructor for authentication error reported by `mgmt`.
-    fn auth_failed(msg: impl Into<String>) -> Self {
-        AuthError::Console(cplane_api::AuthError::AuthFailed(msg.into()))
+impl AuthErrorImpl {
+    pub fn auth_failed(msg: impl Into<String>) -> Self {
+        AuthErrorImpl::Console(cplane_api::AuthError::auth_failed(msg))
     }
 }
 
-impl From<waiters::RegisterError> for AuthError {
+impl From<waiters::RegisterError> for AuthErrorImpl {
     fn from(e: waiters::RegisterError) -> Self {
-        AuthError::Console(cplane_api::AuthError::from(e))
+        AuthErrorImpl::Console(cplane_api::AuthError::from(e))
     }
 }
 
-impl From<waiters::WaitError> for AuthError {
+impl From<waiters::WaitError> for AuthErrorImpl {
     fn from(e: waiters::WaitError) -> Self {
-        AuthError::Console(cplane_api::AuthError::from(e))
+        AuthErrorImpl::Console(cplane_api::AuthError::from(e))
+    }
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct AuthError(Box<AuthErrorImpl>);
+
+impl<T> From<T> for AuthError
+where
+    AuthErrorImpl: From<T>,
+{
+    fn from(e: T) -> Self {
+        AuthError(Box::new(e.into()))
     }
 }
 
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
-        match self {
-            Self::Console(e) => e.to_string_client(),
-            Self::MalformedPassword => self.to_string(),
+        use AuthErrorImpl::*;
+        match self.0.as_ref() {
+            Console(e) => e.to_string_client(),
+            MalformedPassword => self.to_string(),
             _ => "Internal error".to_string(),
         }
     }
@@ -130,7 +143,7 @@ async fn handle_static(
 
     // Read client's password bytes
     let msg = client.read_password_message().await?;
-    let cleartext_password = parse_password(&msg).ok_or(AuthError::MalformedPassword)?;
+    let cleartext_password = parse_password(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
 
     let db_info = DatabaseInfo {
         host,
@@ -161,7 +174,7 @@ async fn handle_existing_user(
 
     // Read client's password hash
     let msg = client.read_password_message().await?;
-    let md5_response = parse_password(&msg).ok_or(AuthError::MalformedPassword)?;
+    let md5_response = parse_password(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
 
     let cplane = CPlaneApi::new(config.auth_endpoint.clone());
     let db_info = cplane
@@ -191,7 +204,7 @@ async fn handle_new_user(
             .await?;
 
         // Wait for web console response (see `mgmt`)
-        waiter.await?.map_err(AuthError::auth_failed)
+        waiter.await?.map_err(AuthErrorImpl::auth_failed)
     })
     .await?;
 
