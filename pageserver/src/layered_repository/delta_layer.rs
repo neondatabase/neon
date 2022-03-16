@@ -567,7 +567,7 @@ impl DeltaLayerWriter {
         // Remember the offset and size metadata. The metadata is written
         // to a separate chapter, in `finish`.
         let off = self.end_offset;
-        let buf = &Value::ser(&val)?;
+        let buf = Value::ser(&val)?;
         let len = buf.len();
         self.values_writer.write_all(&buf)?;
         self.end_offset += len as u64;
