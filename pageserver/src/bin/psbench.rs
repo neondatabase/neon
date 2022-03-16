@@ -66,10 +66,10 @@ pub async fn get_page(
     Ok(page)
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Lsn(pub u64);
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Page {
     spcnode: u32,
     dbnode: u32,
@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
     let tenant_hex = arg_matches.value_of("tenant_hex").unwrap();
     let timeline = arg_matches.value_of("timeline").unwrap();
 
+    // Parse log lines
     let relevant = read_lines_buffered(log_file) .filter_map(|line| line.strip_prefix("wal-at-lsn-modified-page ").map(|x| x.to_string()));
     let mut lsn_page_pairs = Vec::<(Lsn, Page)>::new();
     for line in relevant {
@@ -153,6 +154,18 @@ async fn main() -> Result<()> {
 
         lsn_page_pairs.push((lsn, page))
     }
+
+    // Organize write info
+    let mut writes_per_entry = HashMap::<Lsn, Vec<Page>>::new();
+    for (lsn, page) in lsn_page_pairs.clone() {
+        writes_per_entry.entry(lsn).or_insert(vec![]).push(page);
+    }
+
+    // Print some stats
+    let mut num_writes_per_entry: Vec<(usize, &Lsn)> = writes_per_entry
+        .iter().map(|(k, v)| (v.len(), k)).collect();
+    num_writes_per_entry.sort();
+    dbg!(num_writes_per_entry[0..5].to_vec());
 
     // Get raw TCP connection to the pageserver postgres protocol port
     let mut socket = tokio::net::TcpStream::connect("localhost:15000").await?;
@@ -175,9 +188,8 @@ async fn main() -> Result<()> {
     let _page = get_page(&mut socket, &some_lsn, &some_page).await?;
 
     // TODO
-    // 1. print writes per page
-    // 2. Generate high writes per page
-    // 3. Test runtime
+    // 1. Generate high writes per page
+    // 2. Test runtime
 
     Ok(())
 }
