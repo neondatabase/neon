@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
-use crate::keyspace::KeyPartitioning;
+use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
@@ -1569,14 +1569,14 @@ impl LayeredTimeline {
             // Make a copy of the partitioning, so that we can release
             // the lock. Otherwise we could block the WAL receiver.
             let lsn = *lsn;
-            let partitions = partitioning.partitions.clone();
+            let parts = partitioning.parts.clone();
             drop(partitioning_guard);
 
             // 2. Create new image layers for partitions that have been modified
             // "enough".
-            for partition in partitions.iter() {
-                if self.time_for_new_image_layer(partition, lsn, 3)? {
-                    self.create_image_layer(partition, lsn)?;
+            for part in parts.iter() {
+                if self.time_for_new_image_layer(part, lsn, 3)? {
+                    self.create_image_layer(part, lsn)?;
                 }
             }
             timer.stop_and_record();
@@ -1604,13 +1604,13 @@ impl LayeredTimeline {
     // Is it time to create a new image layer for the given partition?
     fn time_for_new_image_layer(
         &self,
-        partition: &[Range<Key>],
+        partition: &KeySpace,
         lsn: Lsn,
         threshold: usize,
     ) -> Result<bool> {
         let layers = self.layers.lock().unwrap();
 
-        for part_range in partition {
+        for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
                 let img_lsn = if let Some(ref last_img) = last_img {
@@ -1634,12 +1634,13 @@ impl LayeredTimeline {
         Ok(false)
     }
 
-    fn create_image_layer(&self, partition: &[Range<Key>], lsn: Lsn) -> Result<()> {
-        let img_range = partition.first().unwrap().start..partition.last().unwrap().end;
+    fn create_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<()> {
+        let img_range =
+            partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
         let mut image_layer_writer =
             ImageLayerWriter::new(self.conf, self.timelineid, self.tenantid, &img_range, lsn)?;
 
-        for range in partition {
+        for range in &partition.ranges {
             let mut key = range.start;
             while key < range.end {
                 let img = self.get(key, lsn)?;

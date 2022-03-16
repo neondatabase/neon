@@ -8,10 +8,11 @@ pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 ///
 /// Represents a set of Keys, in a compact form.
 ///
+#[derive(Clone, Debug)]
 pub struct KeySpace {
     // Contiguous ranges of keys that belong to the key space. In key order, and
     // with no overlap.
-    ranges: Vec<Range<Key>>,
+    pub ranges: Vec<Range<Key>>,
 }
 
 impl KeySpace {
@@ -23,7 +24,7 @@ impl KeySpace {
         // Assume that each value is 8k in size.
         let target_nblocks = (target_size / pg_constants::BLCKSZ as u64) as usize;
 
-        let mut partitions = Vec::new();
+        let mut parts = Vec::new();
         let mut current_part = Vec::new();
         let mut current_part_size: usize = 0;
         for range in &self.ranges {
@@ -31,7 +32,9 @@ impl KeySpace {
             // partition would cause it to be too large, start a new partition.
             let this_size = key_range_size(range) as usize;
             if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
-                partitions.push(current_part);
+                parts.push(KeySpace {
+                    ranges: current_part,
+                });
                 current_part = Vec::new();
                 current_part_size = 0;
             }
@@ -42,7 +45,9 @@ impl KeySpace {
             let mut start = range.start;
             while remain_size > target_nblocks {
                 let next = start.add(target_nblocks as u32);
-                partitions.push(vec![start..next]);
+                parts.push(KeySpace {
+                    ranges: vec![start..next],
+                });
                 start = next;
                 remain_size -= target_nblocks
             }
@@ -52,10 +57,12 @@ impl KeySpace {
 
         // add last partition that wasn't full yet.
         if !current_part.is_empty() {
-            partitions.push(current_part);
+            parts.push(KeySpace {
+                ranges: current_part,
+            });
         }
 
-        KeyPartitioning { partitions }
+        KeyPartitioning { parts }
     }
 }
 
@@ -68,14 +75,12 @@ impl KeySpace {
 ///
 #[derive(Clone, Debug, Default)]
 pub struct KeyPartitioning {
-    pub partitions: Vec<Vec<Range<Key>>>,
+    pub parts: Vec<KeySpace>,
 }
 
 impl KeyPartitioning {
     pub fn new() -> Self {
-        KeyPartitioning {
-            partitions: Vec::new(),
-        }
+        KeyPartitioning { parts: Vec::new() }
     }
 }
 
