@@ -13,13 +13,14 @@ def test_get_page(zenith_simple_env: ZenithEnv, zenbenchmark: ZenithBenchmarker)
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('create table t (i integer);')
-            cur.execute('insert into t values (generate_series(1,3));')
+            cur.execute('insert into t values (0);')
+
+            for i in range(10000):
+                cur.execute(f'update t set i = {i};')
 
             cur.execute("select * from t;")
             res = cur.fetchall()
-
-            cur.execute("select pg_relation_filepath('t');")
-            res = cur.fetchall()
+            print("AAAA")
             print(res)
 
     env.run_psbench(timeline)

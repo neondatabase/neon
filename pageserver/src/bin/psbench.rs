@@ -2,7 +2,7 @@
 //!
 //! Usually it's easier to write python perf tests, but here the performance
 //! of the tester matters, and the API is easier to work with from rust.
-use std::{collections::HashMap, io::{BufRead, BufReader, Cursor}, net::SocketAddr};
+use std::{collections::HashMap, io::{BufRead, BufReader, Cursor}, net::SocketAddr, ops::AddAssign};
 use byteorder::ReadBytesExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -162,10 +162,14 @@ async fn main() -> Result<()> {
     }
 
     // Print some stats
-    let mut num_writes_per_entry: Vec<(usize, &Lsn)> = writes_per_entry
-        .iter().map(|(k, v)| (v.len(), k)).collect();
-    num_writes_per_entry.sort();
-    dbg!(num_writes_per_entry[0..5].to_vec());
+    let mut updates_per_page = HashMap::<Page, usize>::new();
+    for (_, page) in lsn_page_pairs.clone() {
+        updates_per_page.entry(page).or_insert(0).add_assign(1);
+    }
+    let mut updates_per_page: Vec<(&usize, &Page)> = updates_per_page
+        .iter().map(|(k, v)| (v, k)).collect();
+    updates_per_page.sort();
+    dbg!(updates_per_page);
 
     // Get raw TCP connection to the pageserver postgres protocol port
     let mut socket = tokio::net::TcpStream::connect("localhost:15000").await?;
@@ -187,9 +191,7 @@ async fn main() -> Result<()> {
     let (some_lsn, some_page) = lsn_page_pairs[0].clone();
     let _page = get_page(&mut socket, &some_lsn, &some_page).await?;
 
-    // TODO
-    // 1. Generate high writes per page
-    // 2. Test runtime
+    // TODO write tests
 
     Ok(())
 }
