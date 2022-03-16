@@ -154,6 +154,13 @@ impl Value {
     pub fn is_image(&self) -> bool {
         matches!(self, Value::Image(_))
     }
+
+    pub fn will_init(&self) -> bool {
+        match self {
+            Value::Image(_) => true,
+            Value::WalRecord(rec) => rec.will_init(),
+        }
+    }
 }
 
 ///
