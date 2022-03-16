@@ -119,7 +119,7 @@
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-          curl -sfS -d '{"version": {{ current_version }} }' -X POST {{ console_mgmt_base_url }}/api/v1/pageservers/$INSTANCE_ID
+          curl -sfS -d '{"version": {{ current_version }} }' -X PATCH {{ console_mgmt_base_url }}/api/v1/pageservers/$INSTANCE_ID
       tags:
       - pageserver
 
@@ -169,6 +169,6 @@
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-          curl -sfS -d '{"version": {{ current_version }} }' -X POST {{ console_mgmt_base_url }}/api/v1/safekeepers/$INSTANCE_ID
+          curl -sfS -d '{"version": {{ current_version }} }' -X PATCH {{ console_mgmt_base_url }}/api/v1/safekeepers/$INSTANCE_ID
       tags:
       - safekeeper
