@@ -61,7 +61,6 @@ mod layer_map;
 pub mod metadata;
 mod par_fsync;
 mod storage_layer;
-mod utils;
 
 use delta_layer::{DeltaLayer, DeltaLayerWriter};
 use ephemeral_file::is_ephemeral_file;

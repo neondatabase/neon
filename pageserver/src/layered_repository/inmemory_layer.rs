@@ -8,15 +8,16 @@ use crate::config::PageServerConf;
 use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
+    BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
 };
-use crate::layered_repository::utils;
 use crate::repository::{Key, Value};
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use log::*;
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use zenith_utils::bin_ser::BeSer;
@@ -49,7 +50,7 @@ pub struct InMemoryLayerInner {
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
     ///
-    index: HashMap<Key, VecMap<Lsn, u64>>,
+    index: HashMap<Key, VecMap<Lsn, BlobRef>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -118,7 +119,7 @@ impl Layer for InMemoryLayer {
         // Scan the page versions backwards, starting from `lsn`.
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
-            for (entry_lsn, pos) in slice.iter().rev() {
+            for (entry_lsn, blob_ref) in slice.iter().rev() {
                 match &reconstruct_state.img {
                     Some((cached_lsn, _)) if entry_lsn <= cached_lsn => {
                         return Ok(ValueReconstructResult::Complete)
@@ -126,7 +127,9 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let value = Value::des(&utils::read_blob(&inner.file, *pos)?)?;
+                let mut buf = vec![0u8; blob_ref.size()];
+                inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
+                let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((*entry_lsn, img));
@@ -263,11 +266,14 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         let off = inner.end_offset;
-        let len = utils::write_blob(&mut inner.file, &Value::ser(&val)?)?;
-        inner.end_offset += len;
+        let buf = Value::ser(&val)?;
+        let len = buf.len();
+        inner.file.write_all(&buf)?;
+        inner.end_offset += len as u64;
 
         let vec_map = inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+        let blob_ref = BlobRef::new(off, len, val.will_init());
+        let old = vec_map.append_or_update_last(lsn, blob_ref).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
             warn!("Key {} at {} already exists", key, lsn);
@@ -335,13 +341,13 @@ impl InMemoryLayer {
             self.start_lsn..inner.end_lsn.unwrap(),
         )?;
 
-        let mut buf = Vec::new();
         let mut do_steps = || -> Result<()> {
             for (key, vec_map) in inner.index.iter() {
                 // Write all page versions
-                for (lsn, pos) in vec_map.as_slice() {
-                    let len = utils::read_blob_buf(&inner.file, *pos, &mut buf)?;
-                    let val = Value::des(&buf[0..len])?;
+                for (lsn, blob_ref) in vec_map.as_slice() {
+                    let mut buf = vec![0u8; blob_ref.size()];
+                    inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
+                    let val = Value::des(&buf)?;
                     delta_layer_writer.put_value(*key, *lsn, val)?;
                 }
             }

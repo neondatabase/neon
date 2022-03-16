@@ -21,9 +21,8 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
+    BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
 };
-use crate::layered_repository::utils;
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
 use crate::{ZTenantId, ZTimelineId};
@@ -105,7 +104,7 @@ pub struct ImageLayerInner {
     book: Option<Book<VirtualFile>>,
 
     /// offset of each value
-    index: HashMap<Key, u64>,
+    index: HashMap<Key, BlobRef>,
 }
 
 impl Layer for ImageLayer {
@@ -142,20 +141,24 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
-        if let Some(offset) = inner.index.get(&key) {
+        if let Some(blob_ref) = inner.index.get(&key) {
             let chapter = inner
                 .book
                 .as_ref()
                 .unwrap()
                 .chapter_reader(VALUES_CHAPTER)?;
 
-            let blob = utils::read_blob_from_chapter(&chapter, *offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.filename().display(),
-                    offset
-                )
-            })?;
+            let mut blob = vec![0; blob_ref.size()];
+            chapter
+                .read_exact_at(&mut blob, blob_ref.pos())
+                .with_context(|| {
+                    format!(
+                        "failed to read {} bytes from data file {} at offset {}",
+                        blob_ref.size(),
+                        self.filename().display(),
+                        blob_ref.pos()
+                    )
+                })?;
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
@@ -215,11 +218,16 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
-        let mut index_vec: Vec<(&Key, &u64)> = inner.index.iter().collect();
-        index_vec.sort_by_key(|x| x.1);
+        let mut index_vec: Vec<(&Key, &BlobRef)> = inner.index.iter().collect();
+        index_vec.sort_by_key(|x| x.1.pos());
 
-        for (key, offset) in index_vec {
-            println!("key: {} offset {}", key, offset);
+        for (key, blob_ref) in index_vec {
+            println!(
+                "key: {} size {} offset {}",
+                key,
+                blob_ref.size(),
+                blob_ref.pos()
+            );
         }
 
         Ok(())
@@ -385,7 +393,7 @@ pub struct ImageLayerWriter {
     values_writer: Option<ChapterWriter<BufWriter<VirtualFile>>>,
     end_offset: u64,
 
-    index: HashMap<Key, u64>,
+    index: HashMap<Key, BlobRef>,
 
     finished: bool,
 }
@@ -446,10 +454,11 @@ impl ImageLayerWriter {
         let off = self.end_offset;
 
         if let Some(writer) = &mut self.values_writer {
-            let len = utils::write_blob(writer, img)?;
-            self.end_offset += len;
+            let len = img.len();
+            writer.write_all(img)?;
+            self.end_offset += len as u64;
 
-            let old = self.index.insert(key, off);
+            let old = self.index.insert(key, BlobRef::new(off, len, true));
             assert!(old.is_none());
         } else {
             panic!()

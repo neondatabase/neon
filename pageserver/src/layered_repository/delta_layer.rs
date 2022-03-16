@@ -33,7 +33,7 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
+    BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
@@ -112,34 +112,6 @@ pub struct DeltaLayer {
     inner: RwLock<DeltaLayerInner>,
 }
 
-// Flag indicatig that this version initialize the page
-const WILL_INIT: u64 = 1;
-
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-struct BlobRef(u64);
-
-impl BlobRef {
-    fn will_init(&self) -> bool {
-        (self.0 & WILL_INIT) != 0
-    }
-
-    fn get_pos(&self) -> u64 {
-        self.0 >> 32
-    }
-
-    fn get_size(&self) -> usize {
-        ((self.0 & 0xFFFFFFFF) >> 1) as usize
-    }
-
-    fn new(pos: u64, size: usize, will_init: bool) -> BlobRef {
-        let mut blob_ref = (pos << 32) | ((size as u64) << 1);
-        if will_init {
-            blob_ref |= WILL_INIT;
-        }
-        BlobRef(blob_ref)
-    }
-}
-
 pub struct DeltaLayerInner {
     /// If false, the 'index' has not been loaded into memory yet.
     loaded: bool,
@@ -200,8 +172,8 @@ impl Layer for DeltaLayer {
                 let mut size = 0usize;
                 let mut first_pos = 0u64;
                 for (_entry_lsn, blob_ref) in slice.iter().rev() {
-                    size += blob_ref.get_size();
-                    first_pos = blob_ref.get_pos();
+                    size += blob_ref.size();
+                    first_pos = blob_ref.pos();
                     if blob_ref.will_init() {
                         break;
                     }
@@ -210,8 +182,8 @@ impl Layer for DeltaLayer {
                     let mut buf = vec![0u8; size];
                     values_reader.read_exact_at(&mut buf, first_pos)?;
                     for (entry_lsn, blob_ref) in slice.iter().rev() {
-                        let offs = (blob_ref.get_pos() - first_pos) as usize;
-                        let val = Value::des(&buf[offs..offs + blob_ref.get_size()])?;
+                        let offs = (blob_ref.pos() - first_pos) as usize;
+                        let val = Value::des(&buf[offs..offs + blob_ref.size()])?;
                         match val {
                             Value::Image(img) => {
                                 reconstruct_state.img = Some((*entry_lsn, img));
@@ -318,8 +290,8 @@ impl Layer for DeltaLayer {
         for (key, versions) in values {
             for (lsn, blob_ref) in versions.as_slice() {
                 let mut desc = String::new();
-                let mut buf = vec![0u8; blob_ref.get_size()];
-                chapter.read_exact_at(&mut buf, blob_ref.get_pos())?;
+                let mut buf = vec![0u8; blob_ref.size()];
+                chapter.read_exact_at(&mut buf, blob_ref.pos())?;
                 let val = Value::des(&buf);
 
                 match val {
@@ -723,8 +695,8 @@ impl DeltaValueIter {
     fn next_res(&mut self) -> Result<Option<(Key, Lsn, Value)>> {
         if self.next_idx < self.all_offsets.len() {
             let (key, lsn, blob_ref) = self.all_offsets[self.next_idx];
-            let offs = blob_ref.get_pos() as usize;
-            let size = blob_ref.get_size();
+            let offs = blob_ref.pos() as usize;
+            let size = blob_ref.size();
             let val = Value::des(&self.data[offs..offs + size])?;
             self.next_idx += 1;
             Ok(Some((key, lsn, val)))
