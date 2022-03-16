@@ -36,6 +36,10 @@ pub trait Repository: Send + Sync {
     /// Get Timeline handle for given zenith timeline ID.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline>;
 
+    /// Lists timelines the repository contains.
+    /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
+    fn list_timelines(&self) -> Result<Vec<RepositoryTimeline>>;
+
     /// Create a new, empty timeline. The caller is responsible for loading data into it
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     fn create_empty_timeline(
@@ -72,7 +76,10 @@ pub trait Repository: Send + Sync {
 pub enum RepositoryTimeline {
     /// Timeline, with its files present locally in pageserver's working directory.
     /// Loaded into pageserver's memory and ready to be used.
-    Local(Arc<dyn Timeline>),
+    Local {
+        id: ZTimelineId,
+        timeline: Arc<dyn Timeline>,
+    },
     /// Timeline, found on the pageserver's remote storage, but not yet downloaded locally.
     Remote {
         id: ZTimelineId,
@@ -83,17 +90,24 @@ pub enum RepositoryTimeline {
 
 impl RepositoryTimeline {
     pub fn local_timeline(&self) -> Option<Arc<dyn Timeline>> {
-        if let Self::Local(local_timeline) = self {
-            Some(Arc::clone(local_timeline))
+        if let Self::Local { timeline, .. } = self {
+            Some(Arc::clone(timeline))
         } else {
             None
+        }
+    }
+
+    pub fn id(&self) -> ZTimelineId {
+        match self {
+            Self::Local { id, .. } => *id,
+            Self::Remote { id, .. } => *id,
         }
     }
 }
 
 /// A state of the timeline synchronization with the remote storage.
 /// Contains `disk_consistent_lsn` of the corresponding remote timeline (latest checkpoint's disk_consistent_lsn).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimelineSyncState {
     /// No further downloads from the remote storage are needed.
     /// The timeline state is up-to-date or ahead of the remote storage one,
@@ -390,7 +404,6 @@ pub mod repo_harness {
 
             let tenant_id = ZTenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
-            fs::create_dir_all(conf.branches_path(&tenant_id))?;
 
             Ok(Self { conf, tenant_id })
         }

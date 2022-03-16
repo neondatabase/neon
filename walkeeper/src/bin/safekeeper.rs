@@ -1,17 +1,19 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
-use std::fs::File;
+use std::fs::{self, File};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
-use walkeeper::control_file::{self, CreateControlFile};
+use walkeeper::control_file::{self};
 use zenith_utils::http::endpoint;
+use zenith_utils::zid::ZNodeId;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 use tokio::sync::mpsc;
@@ -25,6 +27,7 @@ use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
+const ID_FILE_NAME: &str = "safekeeper.id";
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
@@ -37,6 +40,12 @@ fn main() -> Result<()> {
                 .long("dir")
                 .takes_value(true)
                 .help("Path to the safekeeper data directory"),
+        )
+        .arg(
+            Arg::new("init")
+                .long("init")
+                .takes_value(false)
+                .help("Initialize safekeeper with ID"),
         )
         .arg(
             Arg::new("listen-pg")
@@ -93,13 +102,13 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .help("Dump control file at path specifed by this argument and exit"),
         )
+        .arg(
+            Arg::new("id").long("id").takes_value(true).help("safekeeper node id: integer")
+        )
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
-        let state = control_file::FileStorage::load_control_file(
-            Path::new(addr),
-            CreateControlFile::False,
-        )?;
+        let state = control_file::FileStorage::load_control_file(Path::new(addr))?;
         let json = serde_json::to_string(&state)?;
         print!("{}", json);
         return Ok(());
@@ -136,10 +145,19 @@ fn main() -> Result<()> {
         conf.recall_period = humantime::parse_duration(recall)?;
     }
 
-    start_safekeeper(conf)
+    let mut given_id = None;
+    if let Some(given_id_str) = arg_matches.value_of("id") {
+        given_id = Some(ZNodeId(
+            given_id_str
+                .parse()
+                .context("failed to parse safekeeper id")?,
+        ));
+    }
+
+    start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
 
-fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
     info!("version: {}", GIT_VERSION);
@@ -153,6 +171,12 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
             lock_file_path.display()
         )
     })?;
+
+    // Set or read our ID.
+    set_id(&mut conf, given_id)?;
+    if init {
+        return Ok(());
+    }
 
     let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
@@ -259,4 +283,50 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         );
         std::process::exit(111);
     })
+}
+
+/// Determine safekeeper id and set it in config.
+fn set_id(conf: &mut SafeKeeperConf, given_id: Option<ZNodeId>) -> Result<()> {
+    let id_file_path = conf.workdir.join(ID_FILE_NAME);
+
+    let my_id: ZNodeId;
+    // If ID exists, read it in; otherwise set one passed
+    match fs::read(&id_file_path) {
+        Ok(id_serialized) => {
+            my_id = ZNodeId(
+                std::str::from_utf8(&id_serialized)
+                    .context("failed to parse safekeeper id")?
+                    .parse()
+                    .context("failed to parse safekeeper id")?,
+            );
+            if let Some(given_id) = given_id {
+                if given_id != my_id {
+                    bail!(
+                        "safekeeper already initialized with id {}, can't set {}",
+                        my_id,
+                        given_id
+                    );
+                }
+            }
+            info!("safekeeper ID {}", my_id);
+        }
+        Err(error) => match error.kind() {
+            ErrorKind::NotFound => {
+                my_id = if let Some(given_id) = given_id {
+                    given_id
+                } else {
+                    bail!("safekeeper id is not specified");
+                };
+                let mut f = File::create(&id_file_path)?;
+                f.write_all(my_id.to_string().as_bytes())?;
+                f.sync_all()?;
+                info!("initialized safekeeper ID {}", my_id);
+            }
+            _ => {
+                return Err(error.into());
+            }
+        },
+    }
+    conf.my_id = my_id;
+    Ok(())
 }

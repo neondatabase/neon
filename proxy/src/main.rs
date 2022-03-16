@@ -20,13 +20,14 @@ mod cancellation;
 mod compute;
 mod config;
 mod cplane_api;
+mod error;
 mod http;
 mod mgmt;
 mod proxy;
 mod stream;
 mod waiters;
 
-/// Flattens Result<Result<T>> into Result<T>.
+/// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
     f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
 ) -> anyhow::Result<()> {
@@ -122,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
         None => RouterConfig::Dynamic(auth_method),
         Some(addr) => {
             if let ClientAuthMethod::Password = auth_method {
-                let (host, port) = addr.split_once(":").unwrap();
+                let (host, port) = addr.split_once(':').unwrap();
                 RouterConfig::Static {
                     host: host.to_string(),
                     port: port.parse().unwrap(),

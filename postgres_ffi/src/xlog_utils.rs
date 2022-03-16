@@ -132,6 +132,8 @@ pub fn get_current_timestamp() -> TimestampTz {
     }
 }
 
+/// Return offset of the last valid record in the segment segno, starting
+/// looking at start_offset. Returns start_offset if no records found.
 fn find_end_of_wal_segment(
     data_dir: &Path,
     segno: XLogSegNo,
@@ -147,7 +149,7 @@ fn find_end_of_wal_segment(
     let mut rec_offs: usize = 0;
     let mut buf = [0u8; XLOG_BLCKSZ];
     let file_name = XLogFileName(tli, segno, wal_seg_size);
-    let mut last_valid_rec_pos: usize = 0;
+    let mut last_valid_rec_pos: usize = start_offset; // assume at given start_offset begins new record
     let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
     file.seek(SeekFrom::Start(offs as u64))?;
     let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];

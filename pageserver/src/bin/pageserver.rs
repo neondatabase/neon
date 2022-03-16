@@ -2,7 +2,14 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
+use zenith_utils::{
+    auth::JwtAuth,
+    logging,
+    postgres_backend::AuthType,
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
 
 use anyhow::{bail, Context, Result};
 
@@ -10,11 +17,10 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches,
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
-    virtual_file, LOG_FILE_NAME,
+    timelines, virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -37,7 +43,7 @@ fn main() -> Result<()> {
             Arg::new("init")
                 .long("init")
                 .takes_value(false)
-                .help("Initialize pageserver repo"),
+                .help("Initialize pageserver service: creates an initial config, tenant and timeline, if specified"),
         )
         .arg(
             Arg::new("workdir")
@@ -53,6 +59,13 @@ fn main() -> Result<()> {
                 .help("Create tenant during init")
                 .requires("init"),
         )
+        .arg(
+            Arg::new("initial-timeline-id")
+                .long("initial-timeline-id")
+                .takes_value(true)
+                .help("Use a specific timeline id during init and tenant creation")
+                .requires("create-tenant"),
+        )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
@@ -61,7 +74,7 @@ fn main() -> Result<()> {
                 .number_of_values(1)
                 .multiple_occurrences(true)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
-                Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .get_matches();
 
@@ -72,7 +85,16 @@ fn main() -> Result<()> {
     let cfg_file_path = workdir.join("pageserver.toml");
 
     let init = arg_matches.is_present("init");
-    let create_tenant = arg_matches.value_of("create-tenant");
+    let create_tenant = arg_matches
+        .value_of("create-tenant")
+        .map(ZTenantId::from_str)
+        .transpose()
+        .context("Failed to parse tenant id from the arguments")?;
+    let initial_timeline_id = arg_matches
+        .value_of("initial-timeline-id")
+        .map(ZTimelineId::from_str)
+        .transpose()
+        .context("Failed to parse timeline id from the arguments")?;
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
@@ -115,7 +137,14 @@ fn main() -> Result<()> {
                     option_line
                 )
             })?;
+
             for (key, item) in doc.iter() {
+                if key == "id" {
+                    anyhow::ensure!(
+                        init,
+                        "node id can only be set during pageserver init and cannot be overridden"
+                    );
+                }
                 toml.insert(key, item.clone());
             }
         }
@@ -136,7 +165,8 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
+        timelines::init_pageserver(conf, create_tenant, initial_timeline_id)
+            .context("Failed to init pageserver")?;
         // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(

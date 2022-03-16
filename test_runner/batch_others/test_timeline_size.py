@@ -10,10 +10,10 @@ import time
 def test_timeline_size(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
     # Branch at the point where only 100 rows were inserted
-    env.zenith_cli.create_branch("test_timeline_size", "empty")
+    new_timeline_id = env.zenith_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
-    res = client.branch_detail(env.initial_tenant, "test_timeline_size")
+    res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
     assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
     pgmain = env.postgres.create_start("test_timeline_size")
@@ -31,11 +31,11 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
                     FROM generate_series(1, 10) g
             """)
 
-            res = client.branch_detail(env.initial_tenant, "test_timeline_size")
+            res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
             cur.execute("TRUNCATE foo")
 
-            res = client.branch_detail(env.initial_tenant, "test_timeline_size")
+            res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
             assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
 
@@ -67,18 +67,17 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
 
 def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
-    env.zenith_cli.create_branch("test_timeline_size_quota", "main")
+    env = zenith_env_builder.init_start()
+    new_timeline_id = env.zenith_cli.create_branch('test_timeline_size_quota')
 
     client = env.pageserver.http_client()
-    res = client.branch_detail(env.initial_tenant, "test_timeline_size_quota")
+    res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
     assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
 
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",
         # Set small limit for the test
-        config_lines=['zenith.max_cluster_size=30MB'],
-    )
+        config_lines=['zenith.max_cluster_size=30MB'])
     log.info("postgres is running on 'test_timeline_size_quota' branch")
 
     with closing(pgmain.connect()) as conn:

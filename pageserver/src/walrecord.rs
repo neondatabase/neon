@@ -268,12 +268,11 @@ impl XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
-        let xinfo;
-        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-            xinfo = buf.get_u32_le();
+        let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+            buf.get_u32_le()
         } else {
-            xinfo = 0;
-        }
+            0
+        };
         let db_id;
         let ts_id;
         if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
@@ -502,7 +501,6 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             0..=pg_constants::XLR_MAX_BLOCK_ID => {
                 /* XLogRecordBlockHeader */
                 let mut blk = DecodedBkpBlock::new();
-                let fork_flags: u8;
 
                 if block_id <= max_block_id {
                     // TODO
@@ -515,7 +513,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 }
                 max_block_id = block_id;
 
-                fork_flags = buf.get_u8();
+                let fork_flags: u8 = buf.get_u8();
                 blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;

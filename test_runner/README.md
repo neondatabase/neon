@@ -89,7 +89,7 @@ def test_foobar(zenith_env_builder: ZenithEnvBuilder):
 
     # Now create the environment. This initializes the repository, and starts
     # up the page server and the safekeepers
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     # Run the test
     ...

@@ -42,8 +42,8 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     data_secret = 'very secret secret'
 
     ##### First start, insert secret data and upload it to the remote storage
-    env = zenith_env_builder.init()
-    pg = env.postgres.create_start()
+    env = zenith_env_builder.init_start()
+    pg = env.postgres.create_start('main')
 
     tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
     timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
@@ -85,7 +85,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
         timeline_details = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
         assert timeline_details['timeline_id'] == timeline_id
         assert timeline_details['tenant_id'] == tenant_id
-        if timeline_details['type'] == 'Local':
+        if timeline_details['kind'] == 'Local':
             log.info("timeline downloaded, checking its data")
             break
         attempts += 1
@@ -94,7 +94,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
         log.debug("still waiting")
         time.sleep(1)
 
-    pg = env.postgres.create_start()
+    pg = env.postgres.create_start('main')
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute(f'SELECT secret FROM t1 WHERE id = {data_id};')

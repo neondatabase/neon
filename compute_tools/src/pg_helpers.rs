@@ -171,7 +171,7 @@ impl PgQuote for PgIdent {
     /// always quotes provided string with `""` and escapes every `"`. Not idempotent,
     /// i.e. if string is already escaped it will be escaped again.
     fn quote(&self) -> String {
-        let result = format!("\"{}\"", self.replace("\"", "\"\""));
+        let result = format!("\"{}\"", self.replace('"', "\"\""));
         result
     }
 }

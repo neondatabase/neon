@@ -10,6 +10,8 @@ use std::cmp::min;
 use std::fmt;
 use std::io::Read;
 use tracing::*;
+use zenith_utils::zid::ZNodeId;
+use zenith_utils::zid::ZTenantTimelineId;
 
 use lazy_static::lazy_static;
 
@@ -25,12 +27,13 @@ use zenith_utils::pq_proto::ZenithFeedback;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 3;
+pub const SK_FORMAT_VERSION: u32 = 4;
 const SK_PROTOCOL_VERSION: u32 = 1;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
 pub type Term = u64;
+const INVALID_TERM: Term = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchEntry {
@@ -128,18 +131,47 @@ pub struct ServerInfo {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
-    #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
-    /// Zenith timelineid
-    #[serde(with = "hex")]
-    pub timeline_id: ZTimelineId,
     pub wal_seg_size: u32,
 }
+
+/// Data published by safekeeper to the peers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// LSN up to which safekeeper offloaded WAL to s3.
+    s3_wal_lsn: Lsn,
+    /// Term of the last entry.
+    term: Term,
+    /// LSN of the last record.
+    flush_lsn: Lsn,
+    /// Up to which LSN safekeeper regards its WAL as committed.
+    commit_lsn: Lsn,
+}
+
+impl PeerInfo {
+    fn new() -> Self {
+        Self {
+            s3_wal_lsn: Lsn(0),
+            term: INVALID_TERM,
+            flush_lsn: Lsn(0),
+            commit_lsn: Lsn(0),
+        }
+    }
+}
+
+// vector-based node id -> peer state map with very limited functionality we
+// need/
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Peers(pub Vec<(ZNodeId, PeerInfo)>);
 
 /// Persistent information stored on safekeeper node
 /// On disk data is prefixed by magic and format version and followed by checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
+    #[serde(with = "hex")]
+    pub tenant_id: ZTenantId,
+    /// Zenith timelineid
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
     /// information about server
@@ -148,19 +180,33 @@ pub struct SafeKeeperState {
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
-    /// part of WAL acknowledged by quorum and available locally
+    /// Part of WAL acknowledged by quorum and available locally. Always points
+    /// to record boundary.
     pub commit_lsn: Lsn,
-    /// minimal LSN which may be needed for recovery of some safekeeper (end_lsn
-    /// of last record streamed to everyone)
-    pub truncate_lsn: Lsn,
-    // Safekeeper starts receiving WAL from this LSN, zeros before it ought to
-    // be skipped during decoding.
-    pub wal_start_lsn: Lsn,
+    /// First LSN not yet offloaded to s3. Useful to persist to avoid finding
+    /// out offloading progress on boot.
+    pub s3_wal_lsn: Lsn,
+    /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
+    /// of last record streamed to everyone). Persisting it helps skipping
+    /// recovery in walproposer, generally we compute it from peers. In
+    /// walproposer proto called 'truncate_lsn'.
+    pub peer_horizon_lsn: Lsn,
+    /// LSN of the oldest known checkpoint made by pageserver and successfully
+    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
+    /// informational purposes, we receive it from pageserver.
+    pub remote_consistent_lsn: Lsn,
+    // Peers and their state as we remember it. Knowing peers themselves is
+    // fundamental; but state is saved here only for informational purposes and
+    // obviously can be stale. (Currently not saved at all, but let's provision
+    // place to have less file version upgrades).
+    pub peers: Peers,
 }
 
 impl SafeKeeperState {
-    pub fn new() -> SafeKeeperState {
+    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<ZNodeId>) -> SafeKeeperState {
         SafeKeeperState {
+            tenant_id: zttid.tenant_id,
+            timeline_id: zttid.timeline_id,
             acceptor_state: AcceptorState {
                 term: 0,
                 term_history: TermHistory::empty(),
@@ -168,21 +214,20 @@ impl SafeKeeperState {
             server: ServerInfo {
                 pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
                 system_id: 0,                       /* Postgres system identifier */
-                tenant_id: ZTenantId::from([0u8; 16]),
-                timeline_id: ZTimelineId::from([0u8; 16]),
                 wal_seg_size: 0,
             },
             proposer_uuid: [0; 16],
-            commit_lsn: Lsn(0),   /* part of WAL acknowledged by quorum */
-            truncate_lsn: Lsn(0), /* minimal LSN which may be needed for recovery of some safekeeper */
-            wal_start_lsn: Lsn(0),
+            commit_lsn: Lsn(0),
+            s3_wal_lsn: Lsn(0),
+            peer_horizon_lsn: Lsn(0),
+            remote_consistent_lsn: Lsn(0),
+            peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
         }
     }
-}
 
-impl Default for SafeKeeperState {
-    fn default() -> Self {
-        Self::new()
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        SafeKeeperState::new(&ZTenantTimelineId::empty(), vec![])
     }
 }
 
@@ -421,6 +466,7 @@ lazy_static! {
 
 struct SafeKeeperMetrics {
     commit_lsn: Gauge,
+    // WAL-related metrics are in WalStorageMetrics
 }
 
 impl SafeKeeperMetrics {
@@ -443,7 +489,7 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
 
     /// not-yet-flushed pairs of same named fields in s.*
     pub commit_lsn: Lsn,
-    pub truncate_lsn: Lsn,
+    pub peer_horizon_lsn: Lsn,
     pub s: SafeKeeperState, // persistent part
 
     pub control_store: CTRL,
@@ -462,16 +508,14 @@ where
         wal_store: WAL,
         state: SafeKeeperState,
     ) -> SafeKeeper<CTRL, WAL> {
-        if state.server.timeline_id != ZTimelineId::from([0u8; 16])
-            && ztli != state.server.timeline_id
-        {
-            panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.server.timeline_id);
+        if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
+            panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
         }
 
         SafeKeeper {
-            metrics: SafeKeeperMetrics::new(state.server.tenant_id, ztli, state.commit_lsn),
+            metrics: SafeKeeperMetrics::new(state.tenant_id, ztli, state.commit_lsn),
             commit_lsn: state.commit_lsn,
-            truncate_lsn: state.truncate_lsn,
+            peer_horizon_lsn: state.peer_horizon_lsn,
             s: state,
             control_store,
             wal_store,
@@ -532,12 +576,24 @@ where
                 msg.pg_version, self.s.server.pg_version
             );
         }
+        if msg.tenant_id != self.s.tenant_id {
+            bail!(
+                "invalid tenant ID, got {}, expected {}",
+                msg.tenant_id,
+                self.s.tenant_id
+            );
+        }
+        if msg.ztli != self.s.timeline_id {
+            bail!(
+                "invalid timeline ID, got {}, expected {}",
+                msg.ztli,
+                self.s.timeline_id
+            );
+        }
 
         // set basic info about server, if not yet
         // TODO: verify that is doesn't change after
         self.s.server.system_id = msg.system_id;
-        self.s.server.tenant_id = msg.tenant_id;
-        self.s.server.timeline_id = msg.ztli;
         self.s.server.wal_seg_size = msg.wal_seg_size;
         self.control_store
             .persist(&self.s)
@@ -568,7 +624,7 @@ where
             term: self.s.acceptor_state.term,
             vote_given: false as u64,
             flush_lsn: self.wal_store.flush_lsn(),
-            truncate_lsn: self.s.truncate_lsn,
+            truncate_lsn: self.s.peer_horizon_lsn,
             term_history: self.get_term_history(),
         };
         if self.s.acceptor_state.term < msg.term {
@@ -593,14 +649,16 @@ where
 
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
-        AppendResponse {
+        let ar = AppendResponse {
             term: self.s.acceptor_state.term,
             flush_lsn: self.wal_store.flush_lsn(),
             commit_lsn: self.s.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
             zenith_feedback: ZenithFeedback::empty(),
-        }
+        };
+        trace!("formed AppendResponse {:?}", ar);
+        ar
     }
 
     fn handle_elected(&mut self, msg: &ProposerElected) -> Result<Option<AcceptorProposerMessage>> {
@@ -655,10 +713,11 @@ where
         if !msg.wal_data.is_empty() {
             self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
 
-            // If this was the first record we ever receieved, remember LSN to help
-            // find_end_of_wal skip the hole in the beginning.
-            if self.s.wal_start_lsn == Lsn(0) {
-                self.s.wal_start_lsn = msg.h.begin_lsn;
+            // If this was the first record we ever receieved, initialize
+            // commit_lsn to help find_end_of_wal skip the hole in the
+            // beginning.
+            if self.s.commit_lsn == Lsn(0) {
+                self.s.commit_lsn = msg.h.begin_lsn;
                 sync_control_file = true;
                 require_flush = true;
             }
@@ -685,20 +744,29 @@ where
                 .set(u64::from(self.commit_lsn) as f64);
         }
 
-        self.truncate_lsn = msg.h.truncate_lsn;
+        self.peer_horizon_lsn = msg.h.truncate_lsn;
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
         // when truncate_lsn delta exceeds WAL segment size.
         sync_control_file |=
-            self.s.truncate_lsn + (self.s.server.wal_seg_size as u64) < self.truncate_lsn;
+            self.s.peer_horizon_lsn + (self.s.server.wal_seg_size as u64) < self.peer_horizon_lsn;
         if sync_control_file {
             self.s.commit_lsn = self.commit_lsn;
-            self.s.truncate_lsn = self.truncate_lsn;
+            self.s.peer_horizon_lsn = self.peer_horizon_lsn;
         }
 
         if sync_control_file {
             self.control_store.persist(&self.s)?;
         }
+
+        trace!(
+            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
+            msg.wal_data.len(),
+            msg.h.end_lsn,
+            msg.h.commit_lsn,
+            msg.h.truncate_lsn,
+            require_flush,
+        );
 
         // If flush_lsn hasn't updated, AppendResponse is not very useful.
         if !require_flush {
@@ -706,14 +774,6 @@ where
         }
 
         let resp = self.append_response();
-        trace!(
-            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, resp {:?}",
-            msg.wal_data.len(),
-            msg.h.end_lsn,
-            msg.h.commit_lsn,
-            msg.h.truncate_lsn,
-            &resp,
-        );
         Ok(Some(AcceptorProposerMessage::AppendResponse(resp)))
     }
 
@@ -774,11 +834,11 @@ mod tests {
     #[test]
     fn test_voting() {
         let storage = InMemoryState {
-            persisted_state: SafeKeeperState::new(),
+            persisted_state: SafeKeeperState::empty(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::new());
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty());
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -806,11 +866,11 @@ mod tests {
     #[test]
     fn test_epoch_switch() {
         let storage = InMemoryState {
-            persisted_state: SafeKeeperState::new(),
+            persisted_state: SafeKeeperState::empty(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::new());
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty());
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
