@@ -613,6 +613,15 @@ class ZenithEnv:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
+    def run_psbench(self, timeline):
+        ps_log_filename = os.path.join(self.repo_dir, "pageserver.log")
+        ps_connstr = self.pageserver.connstr()
+        psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
+        tenant_hex = self.initial_tenant.hex
+        print("AAAAAAAA", ps_connstr)
+        args = [psbench_binpath, ps_log_filename, ps_connstr, tenant_hex, timeline]
+        subprocess.run(args)
+
     @cached_property
     def auth_keys(self) -> AuthKeys:
         pub = (Path(self.repo_dir) / 'auth_public_key.pem').read_bytes()

@@ -21,6 +21,7 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use chrono::format::format;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
 use std::cmp::min;
@@ -270,6 +271,25 @@ impl WalIngest {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
+
+            let lsn_hex = {
+                use bytes::BufMut;
+                let mut bytes = BytesMut::new();
+                bytes.put_u64(lsn.0);
+                hex::encode(bytes.freeze())
+            };
+            let page_hex = {
+                use bytes::BufMut;
+                let mut page = BytesMut::new();
+                page.put_u32(blk.rnode_spcnode);
+                page.put_u32(blk.rnode_dbnode);
+                page.put_u32(blk.rnode_relnode);
+                page.put_u8(blk.forknum);
+                page.put_u32(blk.blkno);
+                hex::encode(page.freeze())
+            };
+            println!("wal-at-lsn-modified-page {} {}", lsn_hex, page_hex);
+
             self.ingest_decoded_block(timeline, lsn, &decoded, blk)?;
         }
 
