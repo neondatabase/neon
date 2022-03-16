@@ -24,7 +24,7 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
     env.zenith_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = os.path.join(test_output_dir, 'pgsql.restored')
-    pg = VanillaPostgres(data_dir, PgBin(test_output_dir), port)
+    restored = VanillaPostgres(data_dir, PgBin(test_output_dir), port)
     subprocess.call([
         'bash',
         os.path.join(base_dir, 'zenith_utils/scripts/restore_from_wal.sh'),
@@ -33,6 +33,6 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
         data_dir,
         str(port)
     ])
-    pg.start()
-    assert pg.safe_psql('select count(*) from t') == [(1000000, )]
-    pg.stop()
+    restored.start()
+    assert restored.safe_psql('select count(*) from t') == [(1000000, )]
+    restored.stop()
