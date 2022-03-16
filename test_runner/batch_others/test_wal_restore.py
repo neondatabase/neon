@@ -2,11 +2,19 @@ import os
 import subprocess
 
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import (ZenithEnvBuilder, VanillaPostgres, PortDistributor, PgBin, base_dir, vanilla_pg, pg_distrib_dir)
+from fixtures.zenith_fixtures import (ZenithEnvBuilder,
+                                      VanillaPostgres,
+                                      PortDistributor,
+                                      PgBin,
+                                      base_dir,
+                                      vanilla_pg,
+                                      pg_distrib_dir)
 from fixtures.log_helper import log
 
 
-def test_wal_restore(zenith_env_builder: ZenithEnvBuilder, test_output_dir, port_distributor: PortDistributor):
+def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
+                     test_output_dir,
+                     port_distributor: PortDistributor):
     zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_wal_restore")
