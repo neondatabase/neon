@@ -783,6 +783,15 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def timeline_detail_v2(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v2/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
@@ -865,6 +874,30 @@ class ZenithCli:
             created_timeline_id = matches.group('timeline_id')
 
         return uuid.UUID(created_timeline_id)
+
+    def create_root_branch(self, branch_name: str, tenant_id: Optional[uuid.UUID] = None):
+        cmd = [
+            'timeline',
+            'create',
+            '--branch-name',
+            branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
 
     def create_branch(self,
                       new_branch_name: str = DEFAULT_BRANCH_NAME,
@@ -1839,3 +1872,59 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
+
+
+def wait_for(number_of_iterations: int, interval: int, func):
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
+                 tenant: uuid.UUID,
+                 timeline: uuid.UUID):
+    timeline_detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
+    assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
+    return timeline_detail
+
+
+def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
+    assert isinstance(detail['remote']['remote_consistent_lsn'], int)
+    return detail['remote']['remote_consistent_lsn']
+
+
+def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID,
+                    lsn: int):
+    """waits for local timeline upload up to specified lsn"""
+
+    wait_for(10, 1, lambda: remote_consistent_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+
+
+def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
+    assert isinstance(detail['local']['last_record_lsn'], int)
+    return detail['local']['last_record_lsn']
+
+
+def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                             tenant: uuid.UUID,
+                             timeline: uuid.UUID,
+                             lsn: int):
+    """waits for pageserver to catch up to a certain lsn"""
+
+    wait_for(10, 1, lambda: last_record_lsn(pageserver_http_client, tenant, timeline) >= lsn)

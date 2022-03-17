@@ -18,7 +18,10 @@ use daemonize::Daemonize;
 
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
+    http, page_cache, page_service,
+    remote_storage::{self, SyncStartupData},
+    repository::TimelineSyncStatusUpdate,
+    tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
     timelines, virtual_file, LOG_FILE_NAME,
 };
@@ -227,11 +230,47 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     let signals = signals::install_shutdown_handlers()?;
-    let sync_startup = remote_storage::start_local_timeline_sync(conf)
+
+    // Initialize repositories with locally available timelines.
+    // Timelines that are only partially available locally (remote storage has more data than this pageserver)
+    // are scheduled for download and added to the repository once download is completed.
+    let SyncStartupData {
+        remote_index,
+        local_timeline_init_statuses,
+    } = remote_storage::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
 
-    // Initialize tenant manager.
-    tenant_mgr::set_timeline_states(conf, sync_startup.initial_timeline_states);
+    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
+        // initialize local tenant
+        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index);
+        for (timeline_id, init_status) in local_timeline_init_statuses {
+            match init_status {
+                remote_storage::LocalTimelineInitStatus::LocallyComplete => {
+                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", tenant_id, timeline_id);
+                    // Lets fail here loudly to be on the safe side.
+                    // XXX: It may be a better api to actually distinguish between repository startup
+                    //   and processing of newly downloaded timelines.
+                    repo.apply_timeline_remote_sync_status_update(
+                        timeline_id,
+                        TimelineSyncStatusUpdate::Downloaded,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Failed to bootstrap timeline {} for tenant {}",
+                            timeline_id, tenant_id
+                        )
+                    })?
+                }
+                remote_storage::LocalTimelineInitStatus::NeedsSync => {
+                    debug!(
+                        "timeline {} for tenant {} needs sync, \
+                         so skipped for adding into repository until sync is finished",
+                        tenant_id, timeline_id
+                    );
+                }
+            }
+        }
+    }
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -253,7 +292,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         "http_endpoint_thread",
         move || {
-            let router = http::make_router(conf, auth_cloned);
+            let router = http::make_router(conf, auth_cloned, remote_index);
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;
