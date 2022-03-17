@@ -17,7 +17,7 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::repository::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Result, bail};
 use bytes::Bytes;
 use log::*;
 use std::collections::HashMap;
@@ -150,9 +150,9 @@ impl InMemoryLayerInner {
         let pos = self.file.stream_position()?;
 
         // make room for the 'length' field by writing zeros as a placeholder.
-        self.file.seek(std::io::SeekFrom::Start(pos + 4)).unwrap();
+        self.file.seek(std::io::SeekFrom::Start(pos + 4))?;
 
-        pv.ser_into(&mut self.file).unwrap();
+        pv.ser_into(&mut self.file)?;
 
         // write the 'length' field.
         let len = self.file.stream_position()? - pos - 4;
@@ -315,7 +315,7 @@ impl Layer for InMemoryLayer {
                     return Ok(false);
                 }
             } else {
-                panic!("dropped in-memory layer with no end LSN");
+                bail!("dropped in-memory layer with no end LSN");
             }
         }
 
@@ -333,7 +333,7 @@ impl Layer for InMemoryLayer {
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {
-        panic!("can't delete an InMemoryLayer")
+        bail!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {

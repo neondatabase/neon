@@ -30,7 +30,7 @@ use zenith_utils::postgres_backend;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals::{self, Signal};
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
         // We're initializing the repo, so there's no config file yet
         DEFAULT_CONFIG_FILE
             .parse::<toml_edit::Document>()
-            .expect("could not parse built-in config file")
+            .context("could not parse built-in config file")?
     } else {
         // Supplement the CLI arguments with the config file
         let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)
@@ -209,7 +209,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
         // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
-        let stdout = log_file.try_clone().unwrap();
+        let stdout = log_file
+            .try_clone()
+            .with_context(|| format!("Failed to clone log file '{:?}'", log_file))?;
         let stderr = log_file;
 
         let daemonize = Daemonize::new()

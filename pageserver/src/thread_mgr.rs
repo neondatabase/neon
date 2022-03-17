@@ -250,7 +250,7 @@ pub fn shutdown_threads(
             let _ = join_handle.join();
         } else {
             // The thread had not even fully started yet. Or it was shut down
-            // concurrently and alrady exited
+            // concurrently and already exited
         }
     }
 }

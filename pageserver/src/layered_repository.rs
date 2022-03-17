@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use lazy_static::lazy_static;
@@ -1157,9 +1157,9 @@ impl LayeredTimeline {
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
             let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
+            let fname = fname.to_string_lossy();
 
-            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+            if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
                     warn!(
@@ -1177,7 +1177,7 @@ impl LayeredTimeline {
                 trace!("found layer {}", layer.filename().display());
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
                 ensure!(deltafilename.start_lsn < deltafilename.end_lsn);
                 // The end-LSN is exclusive, while disk_consistent_lsn is
@@ -1203,7 +1203,7 @@ impl LayeredTimeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if is_ephemeral_file(fname) {
+            } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
                 fs::remove_file(direntry.path())?;
@@ -1938,7 +1938,7 @@ impl LayeredTimeline {
         seg_blknum: SegmentBlk,
         lsn: Lsn,
         layer: &dyn Layer,
-    ) -> Result<Bytes> {
+    ) -> anyhow::Result<Bytes> {
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -1950,7 +1950,9 @@ impl LayeredTimeline {
                 match cached_lsn.cmp(&lsn) {
                     cmp::Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     cmp::Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    cmp::Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                    cmp::Ordering::Greater => {
+                        bail!("the returned lsn should never be after the requested lsn")
+                    }
                 }
                 Some((cached_lsn, cached_img))
             }
@@ -2341,7 +2343,10 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
-    let filename = path.file_name().unwrap().to_str().unwrap();
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
+        .to_string_lossy();
     let mut new_path = path.clone();
 
     for i in 0u32.. {
