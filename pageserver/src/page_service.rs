@@ -574,7 +574,6 @@ impl postgres_backend::Handler for PageServerHandler {
         let data = self
             .auth
             .as_ref()
-            .as_ref()
             .unwrap()
             .decode(str::from_utf8(jwt_response)?)?;
 

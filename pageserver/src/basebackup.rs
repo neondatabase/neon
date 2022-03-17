@@ -145,16 +145,17 @@ impl<'a> Basebackup<'a> {
             .timeline
             .get_relish_size(RelishTag::Slru { slru, segno }, self.lsn)?;
 
-        if seg_size == None {
-            trace!(
-                "SLRU segment {}/{:>04X} was truncated",
-                slru.to_str(),
-                segno
-            );
-            return Ok(());
-        }
-
-        let nblocks = seg_size.unwrap();
+        let nblocks = match seg_size {
+            Some(seg_size) => seg_size,
+            None => {
+                trace!(
+                    "SLRU segment {}/{:>04X} was truncated",
+                    slru.to_str(),
+                    segno
+                );
+                return Ok(());
+            }
+        };
 
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);

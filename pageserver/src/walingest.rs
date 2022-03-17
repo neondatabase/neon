@@ -249,7 +249,7 @@ impl WalIngest {
             {
                 let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
                 buf.copy_to_slice(&mut checkpoint_bytes);
-                let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes).unwrap();
+                let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
                 trace!(
                     "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
                     xlog_checkpoint.oldestXid,
