@@ -103,9 +103,6 @@ impl Page {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
-    // TODO do I need connection string to pageserver?
-
     let arg_matches = App::new("LALALA")
         .about("lalala")
         .version(GIT_VERSION)
@@ -197,7 +194,6 @@ async fn main() -> Result<()> {
         _ = client.query(init_query.as_str(), &[]) => (),
     };
 
-    // TODO why is it failing? Page doesn't exist yet maybe? There's error in log file.
     // TODO be mindful of caching, take multiple measurements, use monotonic time.
     use std::time::{Duration, Instant};
     for (lsn, _pages) in writes_per_entry {
