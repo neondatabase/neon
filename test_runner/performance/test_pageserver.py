@@ -15,7 +15,7 @@ def test_get_page(zenith_simple_env: ZenithEnv, zenbenchmark: ZenithBenchmarker)
             cur.execute('create table t (i integer);')
             cur.execute('insert into t values (0);')
 
-            for i in range(10000):
+            for i in range(100):
                 cur.execute(f'update t set i = {i};')
 
             cur.execute("select * from t;")

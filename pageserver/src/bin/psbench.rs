@@ -29,7 +29,7 @@ pub async fn get_page(
             query.put_u8(2);  // Specifies get_page query
             query.put_u8(0);  // Specifies this is not a "latest page" query
             query.put_u64(lsn.0);
-            page.write(&mut query);
+            page.write(&mut query).await?;
             query.freeze()
         };
 
@@ -43,7 +43,7 @@ pub async fn get_page(
 
     let response = match FeMessage::read_fut(pagestream).await? {
         Some(FeMessage::CopyData(page)) => page,
-        _ => panic!("AAAAA"),
+        r => panic!("AAAAA {:?}", r),
     };
 
     let page = {
@@ -169,7 +169,16 @@ async fn main() -> Result<()> {
     let mut updates_per_page: Vec<(&usize, &Page)> = updates_per_page
         .iter().map(|(k, v)| (v, k)).collect();
     updates_per_page.sort();
-    dbg!(updates_per_page);
+    updates_per_page.reverse();
+    dbg!(&updates_per_page);
+
+    let hottest_page = updates_per_page[0].1;
+    let first_update = lsn_page_pairs
+        .iter()
+        .filter(|(_lsn, page)| page == hottest_page)
+        .map(|(lsn, _page)| lsn)
+        .min()
+        .unwrap();
 
     // Get raw TCP connection to the pageserver postgres protocol port
     let mut socket = tokio::net::TcpStream::connect("localhost:15000").await?;
@@ -188,10 +197,18 @@ async fn main() -> Result<()> {
         _ = client.query(init_query.as_str(), &[]) => (),
     };
 
-    let (some_lsn, some_page) = lsn_page_pairs[0].clone();
-    let _page = get_page(&mut socket, &some_lsn, &some_page).await?;
-
-    // TODO write tests
+    // TODO why is it failing? Page doesn't exist yet maybe? There's error in log file.
+    // TODO be mindful of caching, take multiple measurements, use monotonic time.
+    use std::time::{Duration, Instant};
+    for (lsn, _pages) in writes_per_entry {
+        if lsn >= *first_update {
+            println!("Running get_page {:?} at {:?}", hottest_page, lsn);
+            let start = Instant::now();
+            let _page = get_page(&mut socket, &lsn, &hottest_page).await?;
+            let duration = start.elapsed();
+            println!("Time: {:?}", duration);
+        }
+    }
 
     Ok(())
 }
