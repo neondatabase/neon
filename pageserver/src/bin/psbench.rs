@@ -195,6 +195,8 @@ async fn main() -> Result<()> {
     };
 
     // TODO be mindful of caching, take multiple measurements, use monotonic time.
+    // TODO make harder test case. More writes, fewer images.
+    // TODO concurrent requests: multiple reads, also writes.
     use std::time::{Duration, Instant};
     for (lsn, _pages) in writes_per_entry {
         if lsn >= *first_update {
