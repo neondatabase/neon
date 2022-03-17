@@ -71,7 +71,7 @@ impl<'a> Basebackup<'a> {
             // provide prev_lsn. (get_last_record_rlsn() might return it as
             // zero, though, if no WAL has been generated on this timeline
             // yet.)
-            let end_of_timeline = timeline.get_last_record_rlsn();
+            let end_of_timeline = timeline.tline.get_last_record_rlsn();
             if req_lsn == end_of_timeline.last {
                 (end_of_timeline.prev, req_lsn)
             } else {
@@ -79,7 +79,7 @@ impl<'a> Basebackup<'a> {
             }
         } else {
             // Backup was requested at end of the timeline.
-            let end_of_timeline = timeline.get_last_record_rlsn();
+            let end_of_timeline = timeline.tline.get_last_record_rlsn();
             (end_of_timeline.prev, end_of_timeline.last)
         };
 

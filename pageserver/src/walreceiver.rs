@@ -6,7 +6,7 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::config::PageServerConf;
-use crate::repository::Repository;
+use crate::repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -303,7 +303,7 @@ fn walreceiver_main(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_synced_disk_consistent_lsn);
