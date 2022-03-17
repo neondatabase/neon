@@ -33,7 +33,7 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (get_self_dir, lsn_from_hex, mkdir_if_needed, subprocess_capture)
+from .utils import (etcd_path, get_self_dir, mkdir_if_needed, subprocess_capture, lsn_from_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -425,7 +425,8 @@ class ZenithEnvBuilder:
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None,
-                 default_branch_name=DEFAULT_BRANCH_NAME):
+                 default_branch_name=DEFAULT_BRANCH_NAME,
+                 broker: bool = False):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -434,6 +435,7 @@ class ZenithEnvBuilder:
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
+        self.broker = broker
         self.env: Optional[ZenithEnv] = None
 
         self.s3_mock_server: Optional[MockS3Server] = None
@@ -509,6 +511,8 @@ class ZenithEnvBuilder:
             self.env.pageserver.stop(immediate=True)
             if self.s3_mock_server:
                 self.s3_mock_server.kill()
+            if self.env.broker is not None:
+                self.env.broker.stop()
 
 
 class ZenithEnv:
@@ -561,6 +565,16 @@ class ZenithEnv:
             default_tenant_id = '{self.initial_tenant.hex}'
         """)
 
+        self.broker = None
+        if config.broker:
+            # keep etcd datadir inside 'repo'
+            self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
+                               port=self.port_distributor.get_port(),
+                               peer_port=self.port_distributor.get_port())
+            toml += textwrap.dedent(f"""
+            broker_endpoints = 'http://127.0.0.1:{self.broker.port}'
+        """)
+
         # Create config for pageserver
         pageserver_port = PageserverPort(
             pg=self.port_distributor.get_port(),
@@ -603,11 +617,14 @@ class ZenithEnv:
         self.zenith_cli.init(toml)
 
     def start(self):
-        # Start up the page server and all the safekeepers
+        # Start up the page server, all the safekeepers and the broker
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
             safekeeper.start()
+
+        if self.broker is not None:
+            self.broker.start()
 
     def get_safekeeper_connstrs(self) -> str:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
@@ -1666,6 +1683,7 @@ class Safekeeper:
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
+    remote_consistent_lsn: str
 
 
 @dataclass
@@ -1689,7 +1707,8 @@ class SafekeeperHttpClient(requests.Session):
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
-                                        flush_lsn=resj['flush_lsn'])
+                                        flush_lsn=resj['flush_lsn'],
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
@@ -1708,6 +1727,54 @@ class SafekeeperHttpClient(requests.Session):
                 re.MULTILINE):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
+
+
+@dataclass
+class Etcd:
+    """ An object managing etcd instance """
+    datadir: str
+    port: int
+    peer_port: int
+    handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def check_status(self):
+        s = requests.Session()
+        s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
+        s.get(f"http://localhost:{self.port}/health").raise_for_status()
+
+    def start(self):
+        pathlib.Path(self.datadir).mkdir(exist_ok=True)
+        etcd_full_path = etcd_path()
+        if etcd_full_path is None:
+            raise Exception('etcd not found')
+
+        with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
+            args = [
+                etcd_full_path,
+                f"--data-dir={self.datadir}",
+                f"--listen-client-urls=http://localhost:{self.port}",
+                f"--advertise-client-urls=http://localhost:{self.port}",
+                f"--listen-peer-urls=http://localhost:{self.peer_port}"
+            ]
+            self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
+
+        # wait for start
+        started_at = time.time()
+        while True:
+            try:
+                self.check_status()
+            except Exception as e:
+                elapsed = time.time() - started_at
+                if elapsed > 5:
+                    raise RuntimeError(f"timed out waiting {elapsed:.0f}s for etcd start: {e}")
+                time.sleep(0.5)
+            else:
+                break  # success
+
+    def stop(self):
+        if self.handle is not None:
+            self.handle.terminate()
+            self.handle.wait()
 
 
 def get_test_output_dir(request: Any) -> str:

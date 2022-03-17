@@ -57,6 +57,10 @@ pub struct LocalEnv {
     #[serde(default)]
     pub private_key_path: PathBuf,
 
+    // A comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
+    #[serde(default)]
+    pub broker_endpoints: Option<String>,
+
     pub pageserver: PageServerConf,
 
     #[serde(default)]

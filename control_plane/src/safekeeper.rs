@@ -73,6 +73,8 @@ pub struct SafekeeperNode {
     pub http_base_url: String,
 
     pub pageserver: Arc<PageServerNode>,
+
+    broker_endpoints: Option<String>,
 }
 
 impl SafekeeperNode {
@@ -89,6 +91,7 @@ impl SafekeeperNode {
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
+            broker_endpoints: env.broker_endpoints.clone(),
         }
     }
 
@@ -134,6 +137,9 @@ impl SafekeeperNode {
         );
         if !self.conf.sync {
             cmd.arg("--no-sync");
+        }
+        if let Some(ref ep) = self.broker_endpoints {
+            cmd.args(&["--broker-endpoints", ep]);
         }
 
         if !cmd.status()?.success() {
