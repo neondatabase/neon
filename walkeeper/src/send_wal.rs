@@ -230,7 +230,7 @@ impl ReplicationConn {
 
         let mut wal_seg_size: usize;
         loop {
-            wal_seg_size = spg.timeline.get().get_info().server.wal_seg_size as usize;
+            wal_seg_size = spg.timeline.get().get_state().1.server.wal_seg_size as usize;
             if wal_seg_size == 0 {
                 error!("Cannot start replication before connecting to wal_proposer");
                 sleep(Duration::from_secs(1));

@@ -22,11 +22,14 @@ anyhow = "1.0"
 crc32c = "0.6.0"
 humantime = "2.1.0"
 walkdir = "2"
+url = "2.2.2"
 signal-hook = "0.3.10"
 serde = { version = "1.0", features = ["derive"] }
+serde_with = {version = "1.12.0"}
 hex = "0.4.3"
 const_format = "0.2.21"
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+etcd-client = "0.8.3"
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }

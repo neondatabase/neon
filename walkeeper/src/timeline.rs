@@ -17,12 +17,14 @@ use tracing::*;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
 
+use crate::broker::SafekeeperInfo;
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 
 use crate::control_file;
 use crate::control_file::Storage as cf_storage;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
+    SafekeeperMemState,
 };
 use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
@@ -349,6 +351,11 @@ impl Timeline {
         Ok(false)
     }
 
+    fn is_active(&self) -> bool {
+        let shared_state = self.mutex.lock().unwrap();
+        shared_state.active
+    }
+
     /// Timed wait for an LSN to be committed.
     ///
     /// Returns the last committed LSN, which will be at least
@@ -410,8 +417,61 @@ impl Timeline {
         Ok(rmsg)
     }
 
-    pub fn get_info(&self) -> SafeKeeperState {
-        self.mutex.lock().unwrap().sk.s.clone()
+    pub fn get_state(&self) -> (SafekeeperMemState, SafeKeeperState) {
+        let shared_state = self.mutex.lock().unwrap();
+        (shared_state.sk.inmem.clone(), shared_state.sk.s.clone())
+    }
+
+    /// Prepare public safekeeper info for reporting.
+    pub fn get_public_info(&self) -> SafekeeperInfo {
+        let shared_state = self.mutex.lock().unwrap();
+        SafekeeperInfo {
+            last_log_term: Some(shared_state.sk.get_epoch()),
+            flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
+            // note: this value is not flushed to control file yet and can be lost
+            commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
+            s3_wal_lsn: Some(shared_state.sk.inmem.s3_wal_lsn),
+            // TODO: rework feedbacks to avoid max here
+            remote_consistent_lsn: Some(max(
+                shared_state.get_replicas_state().remote_consistent_lsn,
+                shared_state.sk.inmem.remote_consistent_lsn,
+            )),
+            peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
+        }
+    }
+
+    /// Update timeline state with peer safekeeper data.
+    pub fn record_safekeeper_info(&self, sk_info: &SafekeeperInfo, _sk_id: ZNodeId) -> Result<()> {
+        let mut shared_state = self.mutex.lock().unwrap();
+        // Note: the check is too restrictive, generally we can update local
+        // commit_lsn if our history matches (is part of) history of advanced
+        // commit_lsn provider.
+        if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
+        {
+            if last_log_term == shared_state.sk.get_epoch() {
+                shared_state.sk.global_commit_lsn =
+                    max(commit_lsn, shared_state.sk.global_commit_lsn);
+                shared_state.sk.update_commit_lsn()?;
+                let local_commit_lsn = min(commit_lsn, shared_state.sk.wal_store.flush_lsn());
+                shared_state.sk.inmem.commit_lsn =
+                    max(local_commit_lsn, shared_state.sk.inmem.commit_lsn);
+            }
+        }
+        if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
+            shared_state.sk.inmem.s3_wal_lsn = max(s3_wal_lsn, shared_state.sk.inmem.s3_wal_lsn);
+        }
+        if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
+            shared_state.sk.inmem.remote_consistent_lsn = max(
+                remote_consistent_lsn,
+                shared_state.sk.inmem.remote_consistent_lsn,
+            );
+        }
+        if let Some(peer_horizon_lsn) = sk_info.peer_horizon_lsn {
+            shared_state.sk.inmem.peer_horizon_lsn =
+                max(peer_horizon_lsn, shared_state.sk.inmem.peer_horizon_lsn);
+        }
+        // TODO: sync control file
+        Ok(())
     }
 
     pub fn add_replica(&self, state: ReplicaState) -> usize {
@@ -495,7 +555,7 @@ impl GlobalTimelines {
     }
 
     /// Get a timeline with control file loaded from the global TIMELINES map.
-    /// If control file doesn't exist, bails out.
+    /// If control file doesn't exist and create=false, bails out.
     pub fn get(
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
@@ -536,5 +596,15 @@ impl GlobalTimelines {
                 Ok(new_tli)
             }
         }
+    }
+
+    /// Get ZTenantTimelineIDs of all active timelines.
+    pub fn get_active_timelines() -> Vec<ZTenantTimelineId> {
+        let timelines = TIMELINES.lock().unwrap();
+        timelines
+            .iter()
+            .filter(|&(_, tli)| tli.is_active())
+            .map(|(zttid, _)| *zttid)
+            .collect()
     }
 }

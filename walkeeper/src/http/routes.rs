@@ -86,23 +86,24 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
-    let sk_state = tli.get_info();
+    let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_end_of_wal();
 
     let acc_state = AcceptorStateStatus {
-        term: sk_state.acceptor_state.term,
-        epoch: sk_state.acceptor_state.get_epoch(flush_lsn),
-        term_history: sk_state.acceptor_state.term_history,
+        term: state.acceptor_state.term,
+        epoch: state.acceptor_state.get_epoch(flush_lsn),
+        term_history: state.acceptor_state.term_history,
     };
 
+    // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
         tenant_id: zttid.tenant_id,
         timeline_id: zttid.timeline_id,
         acceptor_state: acc_state,
-        commit_lsn: sk_state.commit_lsn,
-        s3_wal_lsn: sk_state.s3_wal_lsn,
-        peer_horizon_lsn: sk_state.peer_horizon_lsn,
-        remote_consistent_lsn: sk_state.remote_consistent_lsn,
+        commit_lsn: inmem.commit_lsn,
+        s3_wal_lsn: inmem.s3_wal_lsn,
+        peer_horizon_lsn: inmem.peer_horizon_lsn,
+        remote_consistent_lsn: inmem.remote_consistent_lsn,
         flush_lsn,
     };
     Ok(json_response(StatusCode::OK, status)?)

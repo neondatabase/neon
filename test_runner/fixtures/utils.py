@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 
 from typing import Any, List
@@ -76,3 +77,8 @@ def print_gc_result(row):
     log.info(
         "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
         .format_map(row))
+
+
+# path to etcd binary or None if not present.
+def etcd_path():
+    return shutil.which("etcd")

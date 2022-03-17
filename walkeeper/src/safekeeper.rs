@@ -193,7 +193,7 @@ pub struct SafeKeeperState {
     pub peer_horizon_lsn: Lsn,
     /// LSN of the oldest known checkpoint made by pageserver and successfully
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
-    /// informational purposes, we receive it from pageserver.
+    /// informational purposes, we receive it from pageserver (or broker).
     pub remote_consistent_lsn: Lsn,
     // Peers and their state as we remember it. Knowing peers themselves is
     // fundamental; but state is saved here only for informational purposes and
@@ -203,11 +203,13 @@ pub struct SafeKeeperState {
 }
 
 #[derive(Debug, Clone)]
-// In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; they are
-// not flushed yet.
+// In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
+// are not flushed yet.
 pub struct SafekeeperMemState {
     pub commit_lsn: Lsn,
+    pub s3_wal_lsn: Lsn, // TODO: keep only persistent version
     pub peer_horizon_lsn: Lsn,
+    pub remote_consistent_lsn: Lsn,
 }
 
 impl SafeKeeperState {
@@ -494,14 +496,13 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     metrics: SafeKeeperMetrics,
 
     /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
-    global_commit_lsn: Lsn,
+    pub global_commit_lsn: Lsn,
     /// LSN since the proposer safekeeper currently talking to appends WAL;
     /// determines epoch switch point.
     epoch_start_lsn: Lsn,
 
     pub inmem: SafekeeperMemState, // in memory part
-
-    pub s: SafeKeeperState, // persistent part
+    pub s: SafeKeeperState,        // persistent part
 
     pub control_store: CTRL,
     pub wal_store: WAL,
@@ -529,7 +530,9 @@ where
             epoch_start_lsn: Lsn(0),
             inmem: SafekeeperMemState {
                 commit_lsn: state.commit_lsn,
+                s3_wal_lsn: state.s3_wal_lsn,
                 peer_horizon_lsn: state.peer_horizon_lsn,
+                remote_consistent_lsn: state.remote_consistent_lsn,
             },
             s: state,
             control_store,
@@ -545,8 +548,7 @@ where
             .up_to(self.wal_store.flush_lsn())
     }
 
-    #[cfg(test)]
-    fn get_epoch(&self) -> Term {
+    pub fn get_epoch(&self) -> Term {
         self.s.acceptor_state.get_epoch(self.wal_store.flush_lsn())
     }
 
@@ -697,7 +699,7 @@ where
     }
 
     /// Advance commit_lsn taking into account what we have locally
-    fn update_commit_lsn(&mut self) -> Result<()> {
+    pub fn update_commit_lsn(&mut self) -> Result<()> {
         let commit_lsn = min(self.global_commit_lsn, self.wal_store.flush_lsn());
         assert!(commit_lsn >= self.inmem.commit_lsn);
 
