@@ -1268,12 +1268,8 @@ impl LayeredTimeline {
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache.lookup_materialized_page(
-            self.tenantid,
-            self.timelineid,
-            key,
-            lsn,
-        )?;
+        let (lsn, read_guard) =
+            cache.lookup_materialized_page(self.tenantid, self.timelineid, key, lsn)?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
     }

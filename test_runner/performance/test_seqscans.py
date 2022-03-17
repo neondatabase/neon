@@ -9,15 +9,17 @@ from fixtures.compare_fixtures import PgCompare
 import pytest
 
 
-@pytest.mark.parametrize('rows,iters,workers', [
-    # The test table is large enough (3-4 MB) that it doesn't fit in the compute node
-    # cache, so the seqscans go to the page server. But small enough that it fits
-    # into memory in the page server.
-    pytest.param(100000, 100, 0),
-    # Also test with a larger table, with and without parallelism
-    pytest.param(10000000, 1, 0, marks=pytest.mark.slow),
-    pytest.param(10000000, 1, 4, marks=pytest.mark.slow)
-])
+@pytest.mark.parametrize(
+    'rows,iters,workers',
+    [
+        # The test table is large enough (3-4 MB) that it doesn't fit in the compute node
+        # cache, so the seqscans go to the page server. But small enough that it fits
+        # into memory in the page server.
+        pytest.param(100000, 100, 0),
+        # Also test with a larger table, with and without parallelism
+        pytest.param(10000000, 1, 0, marks=pytest.mark.slow),
+        pytest.param(10000000, 1, 4, marks=pytest.mark.slow)
+    ])
 def test_seqscans(zenith_with_baseline: PgCompare, rows: int, iters: int, workers: int):
     env = zenith_with_baseline
 
