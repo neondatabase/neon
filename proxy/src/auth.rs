@@ -200,7 +200,7 @@ async fn handle_new_user(
         client
             .write_message_noflush(&Be::AuthenticationOk)?
             .write_message_noflush(&BeParameterStatusMessage::encoding())?
-            .write_message(&Be::NoticeResponse(greeting))
+            .write_message(&Be::NoticeResponse(&greeting))
             .await?;
 
         // Wait for web console response (see `mgmt`)
@@ -208,7 +208,7 @@ async fn handle_new_user(
     })
     .await?;
 
-    client.write_message_noflush(&Be::NoticeResponse("Connecting to database.".into()))?;
+    client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
     Ok(db_info)
 }

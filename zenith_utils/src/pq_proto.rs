@@ -425,7 +425,7 @@ pub enum BeMessage<'a> {
     ReadyForQuery,
     RowDescription(&'a [RowDescriptor<'a>]),
     XLogData(XLogDataBody<'a>),
-    NoticeResponse(String),
+    NoticeResponse(&'a str),
     KeepAlive(WalSndKeepAlive),
 }
 
