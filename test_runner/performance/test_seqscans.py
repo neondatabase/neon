@@ -1,8 +1,5 @@
 # Test sequential scan speed
 #
-# The test table is large enough (3-4 MB) that it doesn't fit in the compute node
-# cache, so the seqscans go to the page server. But small enough that it fits
-# into memory in the page server.
 from contextlib import closing
 from dataclasses import dataclass
 from fixtures.zenith_fixtures import ZenithEnv
@@ -12,11 +9,16 @@ from fixtures.compare_fixtures import PgCompare
 import pytest
 
 
-@pytest.mark.parametrize('rows', [
-    pytest.param(100000),
-    pytest.param(1000000, marks=pytest.mark.slow),
+@pytest.mark.parametrize('rows,iters,workers', [
+    # The test table is large enough (3-4 MB) that it doesn't fit in the compute node
+    # cache, so the seqscans go to the page server. But small enough that it fits
+    # into memory in the page server.
+    pytest.param(100000, 100, 0),
+    # Also test with a larger table, with and without parallelism
+    pytest.param(10000000, 1, 0, marks=pytest.mark.slow),
+    pytest.param(10000000, 1, 4, marks=pytest.mark.slow)
 ])
-def test_small_seqscans(zenith_with_baseline: PgCompare, rows: int):
+def test_seqscans(zenith_with_baseline: PgCompare, rows: int, iters: int, workers: int):
     env = zenith_with_baseline
 
     with closing(env.pg.connect()) as conn:
@@ -36,6 +38,8 @@ def test_small_seqscans(zenith_with_baseline: PgCompare, rows: int):
             assert int(shared_buffers) < int(table_size)
             env.zenbenchmark.record("table_size", table_size, 'bytes', MetricReport.TEST_PARAM)
 
+            cur.execute(f"set max_parallel_workers_per_gather = {workers}")
+
             with env.record_duration('run'):
-                for i in range(1000):
+                for i in range(iters):
                     cur.execute('select count(*) from t;')
