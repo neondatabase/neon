@@ -89,32 +89,38 @@ use std::{
     collections::HashMap,
     ffi, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{bail, Context};
-use tokio::io;
+use tokio::{io, sync::RwLock};
 use tracing::{error, info};
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
+pub use self::storage_sync::index::{RemoteTimelineIndex, TimelineIndexEntry};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::{
     config::{PageServerConf, RemoteStorageKind},
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    repository::TimelineSyncState,
 };
 
 pub use storage_sync::compression;
+
+#[derive(Clone, Copy, Debug)]
+pub enum LocalTimelineInitStatus {
+    LocallyComplete,
+    NeedsSync,
+}
+
+type LocalTimelineInitStatuses = HashMap<ZTenantId, HashMap<ZTimelineId, LocalTimelineInitStatus>>;
 
 /// A structure to combine all synchronization data to share with pageserver after a successful sync loop initialization.
 /// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
 /// to simplify the received code.
 pub struct SyncStartupData {
-    /// A sync state, derived from initial comparison of local timeline files and the remote archives,
-    /// before any sync tasks are executed.
-    /// To reuse the local file scan logic, the timeline states are returned even if no sync loop get started during init:
-    /// in this case, no remote files exist and all local timelines with correct metadata files are considered ready.
-    pub initial_timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>,
+    pub remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    pub local_timeline_init_statuses: LocalTimelineInitStatuses,
 }
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
@@ -154,23 +160,18 @@ pub fn start_local_timeline_sync(
         .context("Failed to spawn the storage sync thread"),
         None => {
             info!("No remote storage configured, skipping storage sync, considering all local timelines with correct metadata files enabled");
-            let mut initial_timeline_states: HashMap<
-                ZTenantId,
-                HashMap<ZTimelineId, TimelineSyncState>,
-            > = HashMap::new();
-            for (ZTenantTimelineId{tenant_id, timeline_id}, (timeline_metadata, _)) in
+            let mut local_timeline_init_statuses = LocalTimelineInitStatuses::new();
+            for (ZTenantTimelineId { tenant_id, timeline_id }, _) in
                 local_timeline_files
             {
-                initial_timeline_states
+                local_timeline_init_statuses
                     .entry(tenant_id)
                     .or_default()
-                    .insert(
-                        timeline_id,
-                        TimelineSyncState::Ready(timeline_metadata.disk_consistent_lsn()),
-                    );
+                    .insert(timeline_id, LocalTimelineInitStatus::LocallyComplete);
             }
             Ok(SyncStartupData {
-                initial_timeline_states,
+                local_timeline_init_statuses,
+                remote_index: Arc::new(RwLock::new(RemoteTimelineIndex::empty())),
             })
         }
     }
