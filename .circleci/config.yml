@@ -654,7 +654,7 @@ jobs:
               "{
                 \"state\": \"pending\",
                 \"context\": \"zenith-remote-ci\",
-                \"description\": \"[$REMOTE_REPO] Remote  CI job is about to start\"
+                \"description\": \"[$REMOTE_REPO] Remote    CI job is about to start\"
               }"
       - run:
           name: Request a remote CI test
