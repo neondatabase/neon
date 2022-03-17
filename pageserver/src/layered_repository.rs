@@ -35,6 +35,7 @@ use std::time::Instant;
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::page_cache;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
@@ -876,9 +877,25 @@ impl Timeline for LayeredTimeline {
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
         debug_assert!(lsn <= self.get_last_record_lsn());
 
+        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
+        // The cached image can be returned directly if there is no WAL between the cached image
+        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
+        // for redo.
+        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
+            Some((cached_lsn, cached_img)) => {
+                match cached_lsn.cmp(&lsn) {
+                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
+                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                }
+                Some((cached_lsn, cached_img))
+            }
+            None => None,
+        };
+
         let mut reconstruct_state = ValueReconstructState {
             records: Vec::new(),
-            img: None, // FIXME: check page cache and put the img here
+            img: cached_page_img,
         };
 
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
@@ -1244,6 +1261,21 @@ impl LayeredTimeline {
                 result = ValueReconstructResult::Missing;
             }
         }
+    }
+
+    fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+        let cache = page_cache::get();
+
+        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
+        // We should look at the key to determine if it's a cacheable object
+        let (lsn, read_guard) = cache.lookup_materialized_page(
+            self.tenantid,
+            self.timelineid,
+            key,
+            lsn,
+        )?;
+        let img = Bytes::from(read_guard.to_vec());
+        Some((lsn, img))
     }
 
     fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
@@ -1962,26 +1994,22 @@ impl LayeredTimeline {
                     None
                 };
 
-                //let last_rec_lsn = data.records.last().unwrap().0;
+                let last_rec_lsn = data.records.last().unwrap().0;
 
                 let img =
                     self.walredo_mgr
                         .request_redo(key, request_lsn, base_img, data.records)?;
 
-                // FIXME: page caching
-                /*
-                                if let RelishTag::Relation(rel_tag) = &rel {
-                                    let cache = page_cache::get();
-                                    cache.memorize_materialized_page(
-                                        self.tenantid,
-                                        self.timelineid,
-                                        *rel_tag,
-                                        rel_blknum,
-                                        last_rec_lsn,
-                                        &img,
-                                    );
-                                }
-                */
+                if img.len() == page_cache::PAGE_SZ {
+                    let cache = page_cache::get();
+                    cache.memorize_materialized_page(
+                        self.tenantid,
+                        self.timelineid,
+                        key,
+                        last_rec_lsn,
+                        &img,
+                    );
+                }
 
                 Ok(img)
             }
