@@ -43,24 +43,31 @@ pub async fn get_page(
 
     let response = match FeMessage::read_fut(pagestream).await? {
         Some(FeMessage::CopyData(page)) => page,
-        r => panic!("AAAAA {:?}", r),
+        r => panic!("Expected CopyData message, got: {:?}", r),
     };
 
     let page = {
         let mut cursor = Cursor::new(response);
         let tag = AsyncReadExt::read_u8(&mut cursor).await?;
-        if tag != 102 {
-            panic!("AA");
-        }
 
-        let mut page = Vec::<u8>::new();
-        cursor.read_to_end(&mut page).await?;
-        dbg!(page.len());
-        if page.len() != 8 * 1024 {
-            panic!("AA");
+        match tag {
+            102 => {
+                let mut page = Vec::<u8>::new();
+                cursor.read_to_end(&mut page).await?;
+                dbg!(page.len());
+                if page.len() != 8 * 1024 {
+                    panic!("Expected 8kb page, got: {:?}", page.len());
+                }
+                page
+            },
+            103 => {
+                let mut bytes = Vec::<u8>::new();
+                cursor.read_to_end(&mut bytes).await?;
+                let message = String::from_utf8(bytes)?;
+                panic!("Got error message: {}", message);
+            },
+            _ => panic!("Unhandled tag {:?}", tag)
         }
-
-        page
     };
 
     Ok(page)
@@ -194,10 +201,12 @@ async fn main() -> Result<()> {
         _ = client.query(init_query.as_str(), &[]) => (),
     };
 
+    // TODO merge with LSM branch. Nothing to test otherwise, too many images.
+    // - I get error: tried to request a page version that was garbage collected
     // TODO be mindful of caching, take multiple measurements, use monotonic time.
     // TODO make harder test case. More writes, fewer images.
     // TODO concurrent requests: multiple reads, also writes.
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     for (lsn, _pages) in writes_per_entry {
         if lsn >= *first_update {
             println!("Running get_page {:?} at {:?}", hottest_page, lsn);

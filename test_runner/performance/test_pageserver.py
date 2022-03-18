@@ -10,13 +10,19 @@ def test_get_page(zenith_simple_env: ZenithEnv, zenbenchmark: ZenithBenchmarker)
     tenant_hex = env.initial_tenant.hex
     timeline = pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
 
+    # Long-lived cursor, useful for flushing
+    psconn = env.pageserver.connect()
+    pscur = psconn.cursor()
+
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('create table t (i integer);')
             cur.execute('insert into t values (0);')
 
-            for i in range(100):
+            for i in range(1000):
                 cur.execute(f'update t set i = {i};')
+
+            pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
 
             cur.execute("select * from t;")
             res = cur.fetchall()
