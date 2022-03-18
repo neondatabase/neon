@@ -65,6 +65,7 @@ lazy_static! {
 /// currently open, the 'handle' can still point to the slot where it was last kept. The
 /// 'tag' field is used to detect whether the handle still is valid or not.
 ///
+#[derive(Debug)]
 pub struct VirtualFile {
     /// Lazy handle to the global file descriptor cache. The slot that this points to
     /// might contain our File, or it may be empty, or it may contain a File that
@@ -88,7 +89,7 @@ pub struct VirtualFile {
     timelineid: String,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 struct SlotHandle {
     /// Index into OPEN_FILES.slots
     index: usize,

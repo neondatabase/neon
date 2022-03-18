@@ -28,6 +28,8 @@ pub struct Key {
     pub field6: u32,
 }
 
+pub const KEY_SIZE: usize = 18;
+
 impl Key {
     pub fn next(&self) -> Key {
         self.add(1)
@@ -62,6 +64,16 @@ impl Key {
         key
     }
 
+    pub fn from_slice(b: &[u8]) -> Self {
+        Key {
+            field1: b[0],
+            field2: u32::from_be_bytes(b[1..5].try_into().unwrap()),
+            field3: u32::from_be_bytes(b[5..9].try_into().unwrap()),
+            field4: u32::from_be_bytes(b[9..13].try_into().unwrap()),
+            field5: b[13],
+            field6: u32::from_be_bytes(b[14..18].try_into().unwrap()),
+        }
+    }
     pub fn from_array(b: [u8; 18]) -> Self {
         Key {
             field1: b[0],
@@ -71,6 +83,16 @@ impl Key {
             field5: b[13],
             field6: u32::from_be_bytes(b[14..18].try_into().unwrap()),
         }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut vec = vec![self.field1];
+        vec.extend(&self.field2.to_be_bytes());
+        vec.extend(&self.field3.to_be_bytes());
+        vec.extend(&self.field4.to_be_bytes());
+        vec.push(self.field5);
+        vec.extend(&self.field6.to_be_bytes());
+        vec
     }
 }
 
@@ -156,13 +178,6 @@ pub enum Value {
 impl Value {
     pub fn is_image(&self) -> bool {
         matches!(self, Value::Image(_))
-    }
-
-    pub fn will_init(&self) -> bool {
-        match self {
-            Value::Image(_) => true,
-            Value::WalRecord(rec) => rec.will_init(),
-        }
     }
 }
 

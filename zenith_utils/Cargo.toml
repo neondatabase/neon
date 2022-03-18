@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bincode = "1.3"
+byteorder = "1.4.3"
 bytes = "1.0.1"
 hyper = { version = "0.14.7", features = ["full"] }
 lazy_static = "1.4.0"
@@ -33,8 +34,6 @@ zenith_metrics = { path = "../zenith_metrics" }
 workspace_hack = { path = "../workspace_hack" }
 
 [dev-dependencies]
-byteorder = "1.4.3"
-bytes = "1.0.1"
 hex-literal = "0.3"
 tempfile = "3.2"
 webpki = "0.21"

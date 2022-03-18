@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{bail, ensure, Context, Result};
-use bookfile::Book;
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -53,7 +52,9 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blocky_reader;
 mod delta_layer;
+mod disk_btree;
 mod ephemeral_file;
 mod filename;
 mod image_layer;
@@ -62,6 +63,7 @@ mod layer_map;
 pub mod metadata;
 mod par_fsync;
 mod storage_layer;
+mod utils;
 
 use delta_layer::{DeltaLayer, DeltaLayerWriter};
 use ephemeral_file::is_ephemeral_file;
@@ -1173,7 +1175,7 @@ impl LayeredTimeline {
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
+                    //println!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
                     result = open_layer.get_value_reconstruct_data(
                         key,
                         open_layer.get_lsn_range().start..cont_lsn,
@@ -1187,7 +1189,7 @@ impl LayeredTimeline {
             for frozen_layer in layers.frozen_layers.iter() {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
+                    //println!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     result = frozen_layer.get_value_reconstruct_data(
                         key,
                         frozen_layer.get_lsn_range().start..cont_lsn,
@@ -1200,7 +1202,7 @@ impl LayeredTimeline {
             }
 
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
-                //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
+                //println!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 result = layer.get_value_reconstruct_data(
                     key,
@@ -1760,6 +1762,7 @@ impl LayeredTimeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         for l in level0_deltas {
+            println!("DELETINGX: {}", l.filename().display());
             l.delete()?;
             layers.remove_historic(l.clone());
         }
@@ -1911,6 +1914,7 @@ impl LayeredTimeline {
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
+            println!("DELETING: {}", doomed_layer.filename().display());
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer.clone());
 
@@ -2026,16 +2030,15 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
-    let file = File::open(path)?;
-    let book = Book::new(file)?;
+    use std::os::unix::fs::FileExt;
 
-    match book.magic() {
-        delta_layer::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump()?;
-        }
-        image_layer::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump()?;
-        }
+    let file = File::open(path)?;
+    let mut header_buf = [0u8; 4];
+    file.read_exact_at(&mut header_buf, 0)?;
+
+    match u32::from_be_bytes(header_buf) {
+        image_layer::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump()?,
+        delta_layer::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump()?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2273,8 +2276,8 @@ pub mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
-            tline.gc()?;
+            //tline.compact()?;
+            //tline.gc()?;
         }
 
         Ok(())
@@ -2333,7 +2336,6 @@ pub mod tests {
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
-                println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;

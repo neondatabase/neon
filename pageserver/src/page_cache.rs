@@ -41,7 +41,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
+        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
     },
 };
 
@@ -52,7 +52,6 @@ use zenith_utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::config::PageServerConf;
 use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
 
@@ -62,11 +61,8 @@ const TEST_PAGE_CACHE_SIZE: usize = 10;
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(conf: &'static PageServerConf) {
-    if PAGE_CACHE
-        .set(PageCache::new(conf.page_cache_size))
-        .is_err()
-    {
+pub fn init(size: usize) {
+    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
         panic!("page cache already initialized");
     }
 }
@@ -95,11 +91,15 @@ const MAX_USAGE_COUNT: u8 = 5;
 ///
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum CacheKey {
-    MaterializedPage {
+    Materialized {
         hash_key: MaterializedPageHashKey,
         lsn: Lsn,
     },
-    EphemeralPage {
+    Ephemeral {
+        file_id: u64,
+        blkno: u32,
+    },
+    Blocky {
         file_id: u64,
         blkno: u32,
     },
@@ -177,6 +177,8 @@ pub struct PageCache {
 
     ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
+    blocky_page_map: RwLock<HashMap<(u64, u32), usize>>,
+
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
 
@@ -195,6 +197,12 @@ impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
+        self.0.buf
+    }
+}
+
+impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
+    fn as_ref(&self) -> &[u8; PAGE_SZ] {
         self.0.buf
     }
 }
@@ -242,10 +250,7 @@ impl PageWriteGuard<'_> {
     }
     pub fn mark_dirty(&mut self) {
         // only ephemeral pages can be dirty ATM.
-        assert!(matches!(
-            self.inner.key,
-            Some(CacheKey::EphemeralPage { .. })
-        ));
+        assert!(matches!(self.inner.key, Some(CacheKey::Ephemeral { .. })));
         self.inner.dirty = true;
     }
 }
@@ -297,7 +302,7 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
-        let mut cache_key = CacheKey::MaterializedPage {
+        let mut cache_key = CacheKey::Materialized {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
@@ -307,7 +312,7 @@ impl PageCache {
         };
 
         if let Some(guard) = self.try_lock_for_read(&mut cache_key) {
-            if let CacheKey::MaterializedPage { hash_key: _, lsn } = cache_key {
+            if let CacheKey::Materialized { hash_key: _, lsn } = cache_key {
                 Some((lsn, guard))
             } else {
                 panic!("unexpected key type in slot");
@@ -328,7 +333,7 @@ impl PageCache {
         lsn: Lsn,
         img: &[u8],
     ) {
-        let cache_key = CacheKey::MaterializedPage {
+        let cache_key = CacheKey::Materialized {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
@@ -354,13 +359,13 @@ impl PageCache {
     // Section 1.2: Public interface functions for working with Ephemeral pages.
 
     pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
-        let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
+        let mut cache_key = CacheKey::Ephemeral { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
     pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
-        let cache_key = CacheKey::EphemeralPage { file_id, blkno };
+        let cache_key = CacheKey::Ephemeral { file_id, blkno };
 
         self.lock_for_write(&cache_key)
     }
@@ -373,7 +378,7 @@ impl PageCache {
             let mut inner = slot.inner.write().unwrap();
             if let Some(key) = &inner.key {
                 match key {
-                    CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
+                    CacheKey::Ephemeral { file_id, blkno: _ } if *file_id == drop_file_id => {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
@@ -383,6 +388,20 @@ impl PageCache {
                 }
             }
         }
+    }
+
+    // Section 1.3: Public interface functions for working with Blocky Reader pages.
+
+    pub fn read_blocky_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+        let mut cache_key = CacheKey::Blocky { file_id, blkno };
+
+        self.lock_for_read(&mut cache_key)
+    }
+
+    pub fn write_blocky_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
+        let cache_key = CacheKey::Blocky { file_id, blkno };
+
+        self.lock_for_write(&cache_key)
     }
 
     //
@@ -565,7 +584,7 @@ impl PageCache {
     ///
     fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
-            CacheKey::MaterializedPage { hash_key, lsn } => {
+            CacheKey::Materialized { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
                 let versions = map.get(hash_key)?;
 
@@ -578,8 +597,12 @@ impl PageCache {
                 *lsn = version.lsn;
                 Some(version.slot_idx)
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::Ephemeral { file_id, blkno } => {
                 let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
+            CacheKey::Blocky { file_id, blkno } => {
+                let map = self.blocky_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -591,7 +614,7 @@ impl PageCache {
     /// allocating a new buffer.
     fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
         match key {
-            CacheKey::MaterializedPage { hash_key, lsn } => {
+            CacheKey::Materialized { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
                 let versions = map.get(hash_key)?;
 
@@ -601,8 +624,12 @@ impl PageCache {
                     None
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::Ephemeral { file_id, blkno } => {
                 let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
+            CacheKey::Blocky { file_id, blkno } => {
+                let map = self.blocky_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -613,7 +640,7 @@ impl PageCache {
     ///
     fn remove_mapping(&self, old_key: &CacheKey) {
         match old_key {
-            CacheKey::MaterializedPage {
+            CacheKey::Materialized {
                 hash_key: old_hash_key,
                 lsn: old_lsn,
             } => {
@@ -631,8 +658,13 @@ impl PageCache {
                     panic!("could not find old key in mapping")
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::Ephemeral { file_id, blkno } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
+                map.remove(&(*file_id, *blkno))
+                    .expect("could not find old key in mapping");
+            }
+            CacheKey::Blocky { file_id, blkno } => {
+                let mut map = self.blocky_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -646,7 +678,7 @@ impl PageCache {
     /// of the existing mapping and leaves it untouched.
     fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
         match new_key {
-            CacheKey::MaterializedPage {
+            CacheKey::Materialized {
                 hash_key: new_key,
                 lsn: new_lsn,
             } => {
@@ -666,8 +698,18 @@ impl PageCache {
                     }
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::Ephemeral { file_id, blkno } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
+                match map.entry((*file_id, *blkno)) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(slot_idx);
+                        None
+                    }
+                }
+            }
+            CacheKey::Blocky { file_id, blkno } => {
+                let mut map = self.blocky_page_map.write().unwrap();
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -695,7 +737,14 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
 
             if slot.dec_usage_count() == 0 || iters >= iter_limit {
-                let mut inner = slot.inner.write().unwrap();
+                let mut inner = match slot.inner.try_write() {
+                    Ok(guard) => guard,
+                    Err(TryLockError::WouldBlock) => continue,
+                    Err(TryLockError::Poisoned(_)) => {
+                        error!("poisoned buffer lock");
+                        continue;
+                    }
+                };
 
                 if let Some(old_key) = &inner.key {
                     if inner.dirty {
@@ -728,13 +777,19 @@ impl PageCache {
 
     fn writeback(cache_key: &CacheKey, buf: &[u8]) -> Result<(), std::io::Error> {
         match cache_key {
-            CacheKey::MaterializedPage {
+            CacheKey::Materialized {
                 hash_key: _,
                 lsn: _,
             } => {
                 panic!("unexpected dirty materialized page");
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::Blocky {
+                file_id: _,
+                blkno: _,
+            } => {
+                panic!("unexpected dirty blocky reader page");
+            }
+            CacheKey::Ephemeral { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }
         }
@@ -767,6 +822,7 @@ impl PageCache {
         Self {
             materialized_page_map: Default::default(),
             ephemeral_page_map: Default::default(),
+            blocky_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
         }
