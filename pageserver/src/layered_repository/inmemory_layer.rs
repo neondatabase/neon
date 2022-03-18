@@ -17,7 +17,7 @@ use crate::layered_repository::LayeredTimeline;
 use crate::layered_repository::ZERO_PAGE;
 use crate::repository::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{ensure, Result, bail};
+use anyhow::{bail, ensure, Result};
 use bytes::Bytes;
 use log::*;
 use std::collections::HashMap;
@@ -224,10 +224,10 @@ impl Layer for InMemoryLayer {
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<PageReconstructResult> {
+    ) -> anyhow::Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
+        ensure!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         {
             let inner = self.inner.read().unwrap();
@@ -288,8 +288,8 @@ impl Layer for InMemoryLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
-        assert!(lsn >= self.start_lsn);
+    fn get_seg_size(&self, lsn: Lsn) -> anyhow::Result<SegmentBlk> {
+        ensure!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
             "get_seg_size() called on a non-blocky rel"
@@ -300,13 +300,13 @@ impl Layer for InMemoryLayer {
     }
 
     /// Does this segment exist at given LSN?
-    fn get_seg_exists(&self, lsn: Lsn) -> Result<bool> {
+    fn get_seg_exists(&self, lsn: Lsn) -> anyhow::Result<bool> {
         let inner = self.inner.read().unwrap();
 
         // If the segment created after requested LSN,
         // it doesn't exist in the layer. But we shouldn't
         // have requested it in the first place.
-        assert!(lsn >= self.start_lsn);
+        ensure!(lsn >= self.start_lsn);
 
         // Is the requested LSN after the segment was dropped?
         if inner.dropped {
@@ -466,8 +466,13 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_page_version(&self, blknum: SegmentBlk, lsn: Lsn, pv: PageVersion) -> Result<u32> {
-        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
+    pub fn put_page_version(
+        &self,
+        blknum: SegmentBlk,
+        lsn: Lsn,
+        pv: PageVersion,
+    ) -> anyhow::Result<u32> {
+        ensure!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         trace!(
             "put_page_version blk {} of {} at {}/{}",
@@ -479,7 +484,7 @@ impl InMemoryLayer {
         let mut inner = self.inner.write().unwrap();
 
         inner.assert_writeable();
-        assert!(lsn >= inner.latest_lsn);
+        ensure!(lsn >= inner.latest_lsn);
         inner.latest_lsn = lsn;
 
         // Write the page version to the file, and remember its offset in 'page_versions'

@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use log::*;
 use std::fmt::Write as FmtWrite;
@@ -163,7 +163,7 @@ impl<'a> Basebackup<'a> {
             let img =
                 self.timeline
                     .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
-            assert!(img.len() == pg_constants::BLCKSZ as usize);
+            ensure!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
         }
@@ -197,7 +197,7 @@ impl<'a> Basebackup<'a> {
             String::from("global/pg_filenode.map") // filenode map for global tablespace
         } else {
             // User defined tablespaces are not supported
-            assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            ensure!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
@@ -211,7 +211,7 @@ impl<'a> Basebackup<'a> {
 
             format!("base/{}/pg_filenode.map", dbnode)
         };
-        assert!(img.len() == 512);
+        ensure!(img.len() == 512);
         let header = new_tar_header(&path, img.len() as u64)?;
         self.ar.append(&header, &img[..])?;
         Ok(())
@@ -292,7 +292,7 @@ impl<'a> Basebackup<'a> {
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
         let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
-        assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
+        ensure!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
     }

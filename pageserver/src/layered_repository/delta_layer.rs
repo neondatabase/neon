@@ -209,10 +209,10 @@ impl Layer for DeltaLayer {
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<PageReconstructResult> {
+    ) -> anyhow::Result<PageReconstructResult> {
         let mut need_image = true;
 
-        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
+        ensure!((0..RELISH_SEG_SIZE).contains(&blknum));
 
         match &reconstruct_data.page_img {
             Some((cached_lsn, _)) if &self.end_lsn <= cached_lsn => {
@@ -289,8 +289,8 @@ impl Layer for DeltaLayer {
     }
 
     /// Get size of the relation at given LSN
-    fn get_seg_size(&self, lsn: Lsn) -> Result<SegmentBlk> {
-        assert!(lsn >= self.start_lsn);
+    fn get_seg_size(&self, lsn: Lsn) -> anyhow::Result<SegmentBlk> {
+        ensure!(lsn >= self.start_lsn);
         ensure!(
             self.seg.rel.is_blocky(),
             "get_seg_size() called on a non-blocky rel"
@@ -641,7 +641,7 @@ impl DeltaLayerWriter {
     ///
     /// 'seg_sizes' is a list of size changes to store with the actual data.
     ///
-    pub fn finish(self, seg_sizes: VecMap<Lsn, SegmentBlk>) -> Result<DeltaLayer> {
+    pub fn finish(self, seg_sizes: VecMap<Lsn, SegmentBlk>) -> anyhow::Result<DeltaLayer> {
         // Close the page-versions chapter
         let book = self.page_version_writer.close()?;
 
@@ -652,7 +652,7 @@ impl DeltaLayerWriter {
         let book = chapter.close()?;
 
         if self.seg.rel.is_blocky() {
-            assert!(!seg_sizes.is_empty());
+            ensure!(!seg_sizes.is_empty());
         }
 
         // and seg_sizes to separate chapter
