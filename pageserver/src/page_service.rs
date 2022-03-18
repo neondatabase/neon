@@ -324,8 +324,8 @@ impl PageServerHandler {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle pagerequests for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -515,8 +515,8 @@ impl PageServerHandler {
         let _enter = span.enter();
 
         // check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle basebackup request for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
@@ -650,8 +650,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
 
             // Check that the timeline exists
-            tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for callmemaybe requests")?;
+            tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
             walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
 
@@ -725,8 +725,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
-            let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for checkpoint request")?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
             timeline.tline.checkpoint(CheckpointConfig::Forced)?;
 

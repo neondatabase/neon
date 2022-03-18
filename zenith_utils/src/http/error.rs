@@ -14,6 +14,9 @@ pub enum ApiError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("NotFound: {0}")]
+    NotFound(String),
+
     #[error(transparent)]
     InternalServerError(#[from] anyhow::Error),
 }
@@ -36,6 +39,9 @@ impl ApiError {
                 self.to_string(),
                 StatusCode::UNAUTHORIZED,
             ),
+            ApiError::NotFound(_) => {
+                HttpErrorBody::response_from_msg_and_status(self.to_string(), StatusCode::NOT_FOUND)
+            }
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,

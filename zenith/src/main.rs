@@ -299,42 +299,40 @@ fn print_timelines_tree(
         .iter()
         .map(|t| {
             (
-                t.timeline_id(),
+                t.timeline_id,
                 TimelineTreeEl {
                     info: t.clone(),
                     children: BTreeSet::new(),
                     name: timeline_name_mappings
-                        .remove(&ZTenantTimelineId::new(t.tenant_id(), t.timeline_id())),
+                        .remove(&ZTenantTimelineId::new(t.tenant_id, t.timeline_id)),
                 },
             )
         })
         .collect::<HashMap<_, _>>();
 
     // Memorize all direct children of each timeline.
-    for timeline in &timelines {
-        if let TimelineInfo::Local {
-            ancestor_timeline_id: Some(tid),
-            ..
-        } = timeline
+    for timeline in timelines.iter() {
+        if let Some(ancestor_timeline_id) =
+            timeline.local.as_ref().and_then(|l| l.ancestor_timeline_id)
         {
             timelines_hash
-                .get_mut(tid)
+                .get_mut(&ZTimelineId::from(ancestor_timeline_id))
                 .context("missing timeline info in the HashMap")?
                 .children
-                .insert(timeline.timeline_id());
+                .insert(timeline.timeline_id);
         }
     }
 
     for timeline in timelines_hash.values() {
         // Start with root local timelines (no ancestors) first.
-        if let TimelineInfo::Local {
-            ancestor_timeline_id,
-            ..
-        } = &timeline.info
+        if timeline
+            .info
+            .local
+            .as_ref()
+            .and_then(|l| l.ancestor_timeline_id)
+            .is_none()
         {
-            if ancestor_timeline_id.is_none() {
-                print_timeline(0, &Vec::from([true]), timeline, &timelines_hash)?;
-            }
+            print_timeline(0, &Vec::from([true]), timeline, &timelines_hash)?;
         }
     }
 
@@ -350,20 +348,21 @@ fn print_timeline(
     timeline: &TimelineTreeEl,
     timelines: &HashMap<ZTimelineId, TimelineTreeEl>,
 ) -> Result<()> {
-    let local_or_remote = match timeline.info {
-        TimelineInfo::Local { .. } => "(L)",
-        TimelineInfo::Remote { .. } => "(R)",
+    let local_remote = match (timeline.info.local.as_ref(), timeline.info.remote.as_ref()) {
+        (None, None) => unreachable!("in this case no info for a timeline is found"),
+        (None, Some(_)) => "(R)",
+        (Some(_), None) => "(L)",
+        (Some(_), Some(_)) => "(L+R)",
     };
     // Draw main padding
-    print!("{} ", local_or_remote);
+    print!("{} ", local_remote);
 
     if nesting_level > 0 {
-        let lsn_string = match &timeline.info {
-            TimelineInfo::Local { ancestor_lsn, .. } => ancestor_lsn
-                .map(|lsn| lsn.to_string())
-                .unwrap_or_else(|| "Unknown local Lsn".to_string()),
-            TimelineInfo::Remote { .. } => "unknown Lsn (remote)".to_string(),
+        let ancestor_lsn = match timeline.info.local.as_ref().and_then(|i| i.ancestor_lsn) {
+            Some(lsn) => lsn.to_string(),
+            None => "Unknown Lsn".to_string(),
         };
+
         let mut br_sym = "┣━";
 
         // Draw each nesting padding with proper style
@@ -383,14 +382,14 @@ fn print_timeline(
             br_sym = "┗━";
         }
 
-        print!("{} @{}: ", br_sym, lsn_string);
+        print!("{} @{}: ", br_sym, ancestor_lsn);
     }
 
     // Finally print a timeline id and name with new line
     println!(
         "{} [{}]",
         timeline.name.as_deref().unwrap_or("_no_name_"),
-        timeline.info.timeline_id()
+        timeline.info.timeline_id
     );
 
     let len = timeline.children.len();
@@ -430,7 +429,7 @@ fn get_timeline_infos(
     Ok(PageServerNode::from_env(env)
         .timeline_list(tenant_id)?
         .into_iter()
-        .map(|timeline_info| (timeline_info.timeline_id(), timeline_info))
+        .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
         .collect())
 }
 
@@ -555,26 +554,17 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let timeline = pageserver
                 .timeline_create(tenant_id, None, None, None)?
                 .ok_or_else(|| anyhow!("Failed to create new timeline for tenant {}", tenant_id))?;
-            let new_timeline_id = timeline.timeline_id();
+            let new_timeline_id = timeline.timeline_id;
 
-            let last_record_lsn = match timeline {
-                TimelineInfo::Local {
-                    last_record_lsn, ..
-                } => last_record_lsn,
-                TimelineInfo::Remote { .. } => {
-                    bail!(
-                        "Timeline {} was created as remote, not local",
-                        new_timeline_id
-                    )
-                }
-            };
+            let last_record_lsn = timeline
+                .local
+                .expect("no local timeline info")
+                .last_record_lsn;
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
 
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}",
-                timeline.timeline_id(),
-                last_record_lsn,
-                tenant_id,
+                timeline.timeline_id, last_record_lsn, tenant_id,
             );
         }
         Some(("branch", branch_match)) => {
@@ -602,26 +592,18 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let timeline = pageserver
                 .timeline_create(tenant_id, None, start_lsn, Some(ancestor_timeline_id))?
                 .ok_or_else(|| anyhow!("Failed to create new timeline for tenant {}", tenant_id))?;
-            let new_timeline_id = timeline.timeline_id();
+            let new_timeline_id = timeline.timeline_id;
 
-            let last_record_lsn = match timeline {
-                TimelineInfo::Local {
-                    last_record_lsn, ..
-                } => last_record_lsn,
-                TimelineInfo::Remote { .. } => bail!(
-                    "Timeline {} was created as remote, not local",
-                    new_timeline_id
-                ),
-            };
+            let last_record_lsn = timeline
+                .local
+                .expect("no local timeline info")
+                .last_record_lsn;
 
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
 
             println!(
                 "Created timeline '{}' at Lsn {} for tenant: {}. Ancestor timeline: '{}'",
-                timeline.timeline_id(),
-                last_record_lsn,
-                tenant_id,
-                ancestor_branch_name,
+                timeline.timeline_id, last_record_lsn, tenant_id, ancestor_branch_name,
             );
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
@@ -662,13 +644,8 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // older point in time, or following but lagging behind the primary.
                 let lsn_str = timeline_infos
                     .get(&node.timeline_id)
-                    .map(|bi| match bi {
-                        TimelineInfo::Local {
-                            last_record_lsn, ..
-                        } => last_record_lsn.to_string(),
-                        TimelineInfo::Remote { .. } => "? (remote)".to_string(),
-                    })
-                    .unwrap_or_else(|| '?'.to_string());
+                    .and_then(|bi| bi.local.as_ref().map(|l| l.last_record_lsn.to_string()))
+                    .unwrap_or_else(|| "?".to_string());
 
                 let branch_name = timeline_name_mappings
                     .get(&ZTenantTimelineId::new(tenant_id, node.timeline_id))

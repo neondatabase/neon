@@ -5,6 +5,7 @@
 //! volume is mounted to the local FS.
 
 use std::{
+    ffi::OsString,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -83,11 +84,21 @@ impl RemoteStorage for LocalFs {
     ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
         create_target_directory(&target_file_path).await?;
+        // We need this dance with sort of durable rename (without fsyncs)
+        // to prevent partial uploads. This was really hit when pageserver shutdown
+        // cancelled the upload and partial file was left on the fs
+        let mut temp_extension = target_file_path
+            .extension()
+            .unwrap_or_default()
+            .to_os_string();
+
+        temp_extension.push(OsString::from(".temp"));
+        let temp_file_path = target_file_path.with_extension(temp_extension);
         let mut destination = io::BufWriter::new(
             fs::OpenOptions::new()
                 .write(true)
                 .create(true)
-                .open(&target_file_path)
+                .open(&temp_file_path)
                 .await
                 .with_context(|| {
                     format!(
@@ -101,16 +112,26 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to upload file to the local storage at '{}'",
+                    "Failed to upload file (write temp) to the local storage at '{}'",
+                    temp_file_path.display()
+                )
+            })?;
+
+        destination.flush().await.with_context(|| {
+            format!(
+                "Failed to upload (flush temp) file to the local storage at '{}'",
+                temp_file_path.display()
+            )
+        })?;
+
+        fs::rename(temp_file_path, &target_file_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to upload (rename) file to the local storage at '{}'",
                     target_file_path.display()
                 )
             })?;
-        destination.flush().await.with_context(|| {
-            format!(
-                "Failed to upload file to the local storage at '{}'",
-                target_file_path.display()
-            )
-        })?;
         Ok(())
     }
 
