@@ -2,13 +2,14 @@
 //!
 //! Usually it's easier to write python perf tests, but here the performance
 //! of the tester matters, and the API is easier to work with from rust.
-use std::{collections::HashMap, io::{BufRead, BufReader, Cursor}, net::SocketAddr, ops::AddAssign};
+use std::{collections::HashMap, io::{BufRead, BufReader, Cursor}, net::SocketAddr, ops::AddAssign, time::Duration};
 use byteorder::ReadBytesExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use clap::{App, Arg};
 use std::fs::File;
 use zenith_utils::{GIT_VERSION, pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage}};
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -54,7 +55,6 @@ pub async fn get_page(
             102 => {
                 let mut page = Vec::<u8>::new();
                 cursor.read_to_end(&mut page).await?;
-                dbg!(page.len());
                 if page.len() != 8 * 1024 {
                     panic!("Expected 8kb page, got: {:?}", page.len());
                 }
@@ -206,16 +206,38 @@ async fn main() -> Result<()> {
     // TODO be mindful of caching, take multiple measurements, use monotonic time.
     // TODO make harder test case. More writes, fewer images.
     // TODO concurrent requests: multiple reads, also writes.
-    use std::time::Instant;
-    for (lsn, _pages) in writes_per_entry {
-        if lsn >= *first_update {
-            println!("Running get_page {:?} at {:?}", hottest_page, lsn);
+
+    // Do some warmup
+    let _page = get_page(&mut socket, &first_update, &hottest_page).await?;
+
+    let mut results: Vec<(Lsn, Duration)> = vec![];
+    for (i, (lsn, _pages)) in writes_per_entry.iter().enumerate() {
+        if lsn >= first_update {
+
+            // Just to speed up things
+            if i % 1000 != 0 {
+                continue
+            }
+
+            // println!("Running get_page {:?} at {:?}", hottest_page, lsn);
             let start = Instant::now();
             let _page = get_page(&mut socket, &lsn, &hottest_page).await?;
             let duration = start.elapsed();
-            println!("Time: {:?}", duration);
+            results.push((lsn.clone(), duration));
+            // println!("Time: {:?}", duration);
         }
     }
+    results.sort();
+    let x: Vec<_> = results.iter().map(|(lsn, _)| lsn.0).collect();
+    let y: Vec<_> = results.iter().map(|(_, duration)| duration.as_micros()).collect();
+
+    use plotly::{Plot, Scatter};
+    use plotly::common::Mode;
+    let get_page_trace = Scatter::new(x, y).name("get_page").mode(Mode::Lines);
+
+    let mut plot = Plot::new();
+    plot.add_trace(get_page_trace);
+    plot.show();
 
     Ok(())
 }

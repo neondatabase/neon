@@ -641,7 +641,7 @@ mod fs_tests {
     }
 
     async fn upload_dummy_file(
-        harness: &RepoHarness,
+        harness: &RepoHarness<'_>,
         storage: &LocalFs,
         name: &str,
     ) -> anyhow::Result<PathBuf> {

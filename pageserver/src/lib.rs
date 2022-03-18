@@ -2,9 +2,11 @@ pub mod basebackup;
 pub mod config;
 pub mod http;
 pub mod import_datadir;
+pub mod keyspace;
 pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
+pub mod pgdatadir_mapping;
 pub mod relish;
 pub mod remote_storage;
 pub mod repository;
@@ -22,6 +24,9 @@ use lazy_static::lazy_static;
 use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
+use layered_repository::LayeredRepository;
+use pgdatadir_mapping::DatadirTimeline;
+
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_live_connections_count",
@@ -36,10 +41,12 @@ pub const LOG_FILE_NAME: &str = "pageserver.log";
 /// Config for the Repository checkpointer
 #[derive(Debug, Clone, Copy)]
 pub enum CheckpointConfig {
-    // Flush in-memory data that is older than this
-    Distance(u64),
     // Flush all in-memory data
     Flush,
     // Flush all in-memory data and reconstruct all page images
     Forced,
 }
+
+pub type RepositoryImpl = LayeredRepository;
+
+pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;

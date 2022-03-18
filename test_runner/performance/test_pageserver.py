@@ -19,10 +19,10 @@ def test_get_page(zenith_simple_env: ZenithEnv, zenbenchmark: ZenithBenchmarker)
             cur.execute('create table t (i integer);')
             cur.execute('insert into t values (0);')
 
-            for i in range(1000):
+            for i in range(100000):
                 cur.execute(f'update t set i = {i};')
 
-            pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
+            pscur.execute(f"checkpoint {env.initial_tenant.hex} {timeline} 0")
 
             cur.execute("select * from t;")
             res = cur.fetchall()

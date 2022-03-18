@@ -12,6 +12,7 @@ bytes = { version = "1.0.1", features = ['serde'] }
 byteorder = "1.4.3"
 futures = "0.3.13"
 hyper = "0.14"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "3.0"
@@ -50,6 +51,7 @@ postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { path = "../workspace_hack" }
+plotly = "0.7.0"
 
 [dev-dependencies]
 hex-literal = "0.3"

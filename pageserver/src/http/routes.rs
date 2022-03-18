@@ -21,6 +21,7 @@ use zenith_utils::zid::{HexZTenantId, ZTimelineId};
 use super::models::{
     StatusResponse, TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponse,
 };
+use crate::repository::Repository;
 use crate::repository::RepositoryTimeline;
 use crate::timelines::TimelineInfo;
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
@@ -134,14 +135,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         let _enter =
             info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
                 .entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let include_non_incremental_logical_size =
             get_include_non_incremental_logical_size(&request);
-        Ok::<_, anyhow::Error>(TimelineInfo::from_repo_timeline(
-            tenant_id,
-            repo.get_timeline(timeline_id)?,
-            include_non_incremental_logical_size,
-        ))
+        TimelineInfo::from_ids(tenant_id, timeline_id, include_non_incremental_logical_size)
     })
     .await
     .map_err(ApiError::from_err)?

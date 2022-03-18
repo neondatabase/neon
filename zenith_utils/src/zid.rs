@@ -112,6 +112,17 @@ impl ZId {
         rand::thread_rng().fill(&mut tli_buf);
         ZId::from(tli_buf)
     }
+
+    fn hex_encode(&self) -> String {
+        static HEX: &[u8] = b"0123456789abcdef";
+
+        let mut buf = vec![0u8; self.0.len() * 2];
+        for (&b, chunk) in self.0.as_ref().iter().zip(buf.chunks_exact_mut(2)) {
+            chunk[0] = HEX[((b >> 4) & 0xf) as usize];
+            chunk[1] = HEX[(b & 0xf) as usize];
+        }
+        unsafe { String::from_utf8_unchecked(buf) }
+    }
 }
 
 impl FromStr for ZId {
@@ -147,13 +158,13 @@ impl From<[u8; 16]> for ZId {
 
 impl fmt::Display for ZId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        f.write_str(&self.hex_encode())
     }
 }
 
 impl fmt::Debug for ZId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        f.write_str(&self.hex_encode())
     }
 }
 

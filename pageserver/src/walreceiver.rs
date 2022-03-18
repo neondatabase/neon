@@ -6,6 +6,7 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::config::PageServerConf;
+use crate::repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -250,11 +251,10 @@ fn walreceiver_main(
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hittind a deadlock.
+                    // at risk of hitting a deadlock.
                     assert!(lsn.is_aligned());
 
-                    let writer = timeline.writer();
-                    walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
+                    walingest.ingest_record(&timeline, recdata, lsn)?;
 
                     fail_point!("walreceiver-after-ingest");
 
@@ -265,6 +265,8 @@ fn walreceiver_main(
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
+
+                timeline.tline.check_checkpoint_distance()?;
 
                 Some(endlsn)
             }
@@ -301,7 +303,7 @@ fn walreceiver_main(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_synced_disk_consistent_lsn);

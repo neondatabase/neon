@@ -37,3 +37,8 @@ bytes = "1.0.1"
 hex-literal = "0.3"
 tempfile = "3.2"
 webpki = "0.21"
+criterion = "0.3"
+
+[[bench]]
+name = "benchmarks"
+harness = false
