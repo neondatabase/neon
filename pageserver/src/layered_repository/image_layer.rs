@@ -44,8 +44,7 @@ use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
 // Magic constant to identify a Zenith image layer file
-// FIXME: bump all magics
-pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E01 + 1;
+pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E11 + 1;
 
 /// Mapping from (key, lsn) -> page/WAL record
 /// byte ranges in VALUES_CHAPTER
@@ -101,7 +100,8 @@ pub struct ImageLayerInner {
     /// If false, the 'index' has not been loaded into memory yet.
     loaded: bool,
 
-    /// If None, the 'image_type' has not been loaded into memory yet. FIXME
+    /// The underlying (virtual) file handle. None if the layer hasn't been loaded
+    /// yet.
     book: Option<Book<VirtualFile>>,
 
     /// offset of each value
