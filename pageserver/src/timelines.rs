@@ -102,7 +102,7 @@ impl LocalTimelineInfo {
                 Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
             }
             RepositoryTimeline::Unloaded { metadata } => {
-                Ok(Self::from_unloaded_timeline(&metadata))
+                Ok(Self::from_unloaded_timeline(metadata))
             }
         }
     }
