@@ -96,7 +96,7 @@ impl TimelineMetadata {
         );
 
         let data = TimelineMetadata::from(serialize::DeTimelineMetadata::des_prefix(data)?);
-        assert!(data.disk_consistent_lsn.is_aligned());
+        ensure!(data.disk_consistent_lsn.is_aligned());
 
         Ok(data)
     }
@@ -104,7 +104,7 @@ impl TimelineMetadata {
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let serializeable_metadata = serialize::SeTimelineMetadata::from(self);
         let mut metadata_bytes = serialize::SeTimelineMetadata::ser(&serializeable_metadata)?;
-        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
+        ensure!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
         metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
 
         let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);

@@ -791,10 +791,10 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
+    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
-        assert!(
+        ensure!(
             !IS_WAL_RECEIVER.with(|c| c.get()),
             "wait_lsn called by WAL receiver thread"
         );
@@ -1262,7 +1262,7 @@ impl LayeredTimeline {
         seg: SegmentTag,
         lsn: Lsn,
         self_layers: &MutexGuard<LayerMap>,
-    ) -> Result<Option<(Arc<dyn Layer>, Lsn)>> {
+    ) -> anyhow::Result<Option<(Arc<dyn Layer>, Lsn)>> {
         trace!("get_layer_for_read called for {} at {}", seg, lsn);
 
         // If you requested a page at an older LSN, before the branch point, dig into
@@ -1310,7 +1310,7 @@ impl LayeredTimeline {
                     layer.get_end_lsn()
                 );
 
-                assert!(layer.get_start_lsn() <= lsn);
+                ensure!(layer.get_start_lsn() <= lsn);
 
                 if layer.is_dropped() && layer.get_end_lsn() <= lsn {
                     return Ok(None);
@@ -1338,13 +1338,13 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, seg: SegmentTag, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
-        assert!(lsn.is_aligned());
+        ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        assert!(
+        ensure!(
             lsn > last_record_lsn,
             "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
@@ -1360,7 +1360,7 @@ impl LayeredTimeline {
 
             // Open layer exists, but it is dropped, so create a new one.
             if open_layer.is_dropped() {
-                assert!(!open_layer.is_writeable());
+                ensure!(!open_layer.is_writeable());
                 // Layer that is created after dropped one represents a new relish segment.
                 trace!(
                     "creating layer for write for new relish segment after dropped layer {} at {}/{}",

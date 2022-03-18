@@ -146,7 +146,7 @@ fn walreceiver_main(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
-) -> Result<(), Error> {
+) -> anyhow::Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!(
@@ -255,7 +255,7 @@ fn walreceiver_main(
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
                     // at risk of hittind a deadlock.
-                    assert!(lsn.is_aligned());
+                    anyhow::ensure!(lsn.is_aligned());
 
                     let writer = timeline.writer();
                     walingest.ingest_record(writer.as_ref(), recdata, lsn)?;

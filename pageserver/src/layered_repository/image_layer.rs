@@ -146,9 +146,9 @@ impl Layer for ImageLayer {
         blknum: SegmentBlk,
         lsn: Lsn,
         reconstruct_data: &mut PageReconstructData,
-    ) -> Result<PageReconstructResult> {
-        assert!((0..RELISH_SEG_SIZE).contains(&blknum));
-        assert!(lsn >= self.lsn);
+    ) -> anyhow::Result<PageReconstructResult> {
+        ensure!((0..RELISH_SEG_SIZE).contains(&blknum));
+        ensure!(lsn >= self.lsn);
 
         match reconstruct_data.page_img {
             Some((cached_lsn, _)) if self.lsn <= cached_lsn => {
@@ -432,7 +432,7 @@ impl ImageLayerWriter {
         seg: SegmentTag,
         lsn: Lsn,
         num_blocks: SegmentBlk,
-    ) -> Result<ImageLayerWriter> {
+    ) -> anyhow::Result<ImageLayerWriter> {
         // Create the file
         //
         // Note: This overwrites any existing file. There shouldn't be any.
@@ -452,7 +452,7 @@ impl ImageLayerWriter {
         let chapter = if seg.rel.is_blocky() {
             book.new_chapter(BLOCKY_IMAGES_CHAPTER)
         } else {
-            assert_eq!(num_blocks, 1);
+            ensure!(num_blocks == 1);
             book.new_chapter(NONBLOCKY_IMAGE_CHAPTER)
         };
 
@@ -475,19 +475,19 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub fn put_page_image(&mut self, block_bytes: &[u8]) -> Result<()> {
-        assert!(self.num_blocks_written < self.num_blocks);
+    pub fn put_page_image(&mut self, block_bytes: &[u8]) -> anyhow::Result<()> {
+        ensure!(self.num_blocks_written < self.num_blocks);
         if self.seg.rel.is_blocky() {
-            assert_eq!(block_bytes.len(), BLOCK_SIZE);
+            ensure!(block_bytes.len() == BLOCK_SIZE);
         }
         self.page_image_writer.write_all(block_bytes)?;
         self.num_blocks_written += 1;
         Ok(())
     }
 
-    pub fn finish(self) -> Result<ImageLayer> {
+    pub fn finish(self) -> anyhow::Result<ImageLayer> {
         // Check that the `put_page_image' was called for every block.
-        assert!(self.num_blocks_written == self.num_blocks);
+        ensure!(self.num_blocks_written == self.num_blocks);
 
         // Close the page-images chapter
         let book = self.page_image_writer.close()?;
