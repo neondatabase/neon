@@ -98,7 +98,7 @@ pub enum ThreadKind {
     // Thread that handles GC of a tenant
     GarbageCollector,
 
-    // FIXME
+    // Thread that flushes frozen in-memory layers to disk
     LayerFlushThread,
 
     // Thread for synchronizing pageserver relish data with the remote storage.

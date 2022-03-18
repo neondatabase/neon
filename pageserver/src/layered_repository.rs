@@ -1815,8 +1815,13 @@ impl LayeredTimeline {
         Ok(())
     }
 
+    /// Update information about which layer files need to be retained on
+    /// garbage collection. This is separate from actually performing the GC,
+    /// and is updated more frequently, so that compaction can remove obsolete
+    /// page versions more aggressively.
     ///
-    /// Garbage collect layer files on a timeline that are no longer needed.
+    /// TODO: that's wishful thinking, compaction doesn't actually do that
+    /// currently.
     ///
     /// The caller specifies how much history is needed with the two arguments:
     ///
@@ -1833,16 +1838,19 @@ impl LayeredTimeline {
     /// the latest LSN subtracted by a constant, and doesn't do anything smart
     /// to figure out what read-only nodes might actually need.)
     ///
-    /// Currently, we don't make any attempt at removing unneeded page versions
-    /// within a layer file. We can only remove the whole file if it's fully
-    /// obsolete.
-    ///
     fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn) {
         let mut gc_info = self.gc_info.write().unwrap();
         gc_info.retain_lsns = retain_lsns;
         gc_info.cutoff = cutoff;
     }
 
+    ///
+    /// Garbage collect layer files on a timeline that are no longer needed.
+    ///
+    /// Currently, we don't make any attempt at removing unneeded page versions
+    /// within a layer file. We can only remove the whole file if it's fully
+    /// obsolete.
+    ///
     fn gc(&self) -> Result<GcResult> {
         let now = Instant::now();
         let mut result: GcResult = Default::default();

@@ -1,30 +1,3 @@
-//!
-//! FIXME: relishes are obsolete
-//!
-//! Zenith stores PostgreSQL relations, and some other files, in the
-//! repository.  The relations (i.e. tables and indexes) take up most
-//! of the space in a typical installation, while the other files are
-//! small. We call each relation and other file that is stored in the
-//! repository a "relish". It comes from "rel"-ish, as in "kind of a
-//! rel", because it covers relations as well as other things that are
-//! not relations, but are treated similarly for the purposes of the
-//! storage layer.
-//!
-//! This source file contains the definition of the RelishTag struct,
-//! which uniquely identifies a relish.
-//!
-//! Relishes come in two flavors: blocky and non-blocky. Relations and
-//! SLRUs are blocky, that is, they are divided into 8k blocks, and
-//! the repository tracks their size. Other relishes are non-blocky:
-//! the content of the whole relish is stored as one blob. Block
-//! number must be passed as 0 for all operations on a non-blocky
-//! relish. The one "block" that you store in a non-blocky relish can
-//! have arbitrary size, but they are expected to be small, or you
-//! will have performance issues.
-//!
-//! All relishes are versioned by LSN in the repository.
-//!
-
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
