@@ -1181,7 +1181,7 @@ mod tests {
 
     #[test]
     fn timeline_load_with_ancestor() -> Result<()> {
-        const TEST_NAME: &str = "timeline_load";
+        const TEST_NAME: &str = "timeline_load_with_ancestor";
         let harness = RepoHarness::create(TEST_NAME)?;
         // create two timelines
         {
