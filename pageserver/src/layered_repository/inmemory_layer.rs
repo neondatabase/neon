@@ -12,10 +12,14 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::layered_repository::utils;
 use crate::repository::{Key, Value};
+use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use log::*;
 use std::collections::HashMap;
+// avoid binding to Write (conflicts with std::io::Write)
+// while being able to use std::fmt::Write's methods
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -194,27 +198,36 @@ impl Layer for InMemoryLayer {
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
-            self.timelineid,
-            self.start_lsn,
-            end_str,
-            //inner.dropped,
+            self.timelineid, self.start_lsn, end_str,
         );
 
-        // FIXME
-        /*
-           for (blknum, versions) in page_versions {
-               for (lsn, off) in versions.as_slice() {
-                   let pv = inner.read_pv(*off);
-                   let pv_description = match pv {
-                       Ok(PageVersion::Page(_img)) => "page",
-                       Ok(PageVersion::Wal(_rec)) => "wal",
-                       Err(_err) => "INVALID",
-                   };
-
-                   println!("blk {} at {}: {}\n", blknum, lsn, pv_description);
-               }
-           }
-        */
+        let mut buf = Vec::new();
+        for (key, vec_map) in inner.index.iter() {
+            for (lsn, pos) in vec_map.as_slice() {
+                let mut desc = String::new();
+                let len = utils::read_blob_buf(&inner.file, *pos, &mut buf)?;
+                let val = Value::des(&buf[0..len]);
+                match val {
+                    Ok(Value::Image(img)) => {
+                        write!(&mut desc, " img {} bytes", img.len())?;
+                    }
+                    Ok(Value::WalRecord(rec)) => {
+                        let wal_desc = walrecord::describe_wal_record(&rec);
+                        write!(
+                            &mut desc,
+                            " rec {} bytes will_init: {} {}",
+                            buf.len(),
+                            rec.will_init(),
+                            wal_desc
+                        )?;
+                    }
+                    Err(err) => {
+                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
+                    }
+                }
+                println!("  key {} at {}: {}", key, lsn, desc);
+            }
+        }
 
         Ok(())
     }
