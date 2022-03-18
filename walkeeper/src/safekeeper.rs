@@ -691,10 +691,7 @@ where
     /// Advance commit_lsn taking into account what we have locally
     fn update_commit_lsn(&mut self) -> Result<()> {
         let commit_lsn = min(self.global_commit_lsn, self.wal_store.flush_lsn());
-        if self.commit_lsn >= commit_lsn {
-            return Ok(());
-        }
-        let commit_lsn_was_zero = self.commit_lsn == Lsn(0);
+        assert!(commit_lsn >= self.s.commit_lsn);
 
         self.commit_lsn = commit_lsn;
         self.metrics.commit_lsn.set(self.commit_lsn.0 as f64);
@@ -703,13 +700,16 @@ where
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
         // otherwise commit_lsn might jump over epoch_start_lsn.
-        if commit_lsn == self.epoch_start_lsn {
+        // Also note that commit_lsn can reach epoch_start_lsn earlier
+        // that we receive new epoch_start_lsn, and we still need to sync
+        // control file in this case.
+        if commit_lsn == self.epoch_start_lsn && self.s.commit_lsn != commit_lsn {
             self.sync_control_file()?;
         }
 
         // We got our first commit_lsn, which means we should sync
         // everything to disk, to initialize the state.
-        if commit_lsn_was_zero {
+        if self.s.commit_lsn == Lsn(0) && commit_lsn > Lsn(0) {
             self.wal_store.flush_wal()?;
             self.sync_control_file()?;
         }
