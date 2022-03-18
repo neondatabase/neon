@@ -7,11 +7,13 @@ existing files are never modified. That fits well with storing the
 files on S3.
 
 Currently, we create a lot of small files. That is mostly a problem
-with S3, because each GET/PUT operation is expensive. Currently, the
-files "archived" together into larger checkpoint files before they're
-uploaded to S3, but garbage collecting data from the archive files
-would be difficult and we have not implemented it. This proposal
-addresses that problem.
+with S3, because each GET/PUT operation is expensive, and LIST
+operation only returns 1000 objects at a time, and isn't free
+either. Currently, the files are "archived" together into larger
+checkpoint files before they're uploaded to S3 to alleviate that
+problem, but garbage collecting data from the archive files would be
+difficult and we have not implemented it. This proposal addresses that
+problem.
 
 
 # Overview
@@ -98,7 +100,8 @@ the overall key space, and a larger range of LSNs. This speeds up
 searches. When you're looking for a given page, you need to check all
 the files in L0, to see if they contain a page version for the requested
 page. But in L1, you only need to check the files whose key range covers
-the requested page.
+the requested page. This is particularly important at cold start, when
+checking a file means downloading it from S3.
 
 Partitioning by key range also helps with garbage collection. If only a
 part of the database is updated, we will accumulate more files for
@@ -132,13 +135,6 @@ we partition the data into the files?
 - Try to match partition boundaries at relation boundaries. (See [1]
   for how PebblesDB does this, and for why that's important)
 - Greedy algorithm
-
-# Next steps
-
-- Allow delta layers to cover a range keys instead of a single segment.
-
-- Implement a two-level LSM tree (or three-leveled, if you count the
-"memtable"), by adding L0.
 
 # Additional Reading
 
