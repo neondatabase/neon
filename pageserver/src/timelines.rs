@@ -98,12 +98,11 @@ impl LocalTimelineInfo {
     ) -> anyhow::Result<Self> {
         match repo_timeline {
             RepositoryTimeline::Loaded(_) => {
-                let datadir_tline = tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id)?;
+                let datadir_tline =
+                    tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id)?;
                 Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
             }
-            RepositoryTimeline::Unloaded { metadata } => {
-                Ok(Self::from_unloaded_timeline(metadata))
-            }
+            RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
         }
     }
 }
