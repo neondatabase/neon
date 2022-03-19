@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::{
     fs,
     path::Path,
@@ -13,9 +14,9 @@ use std::{
 };
 use tracing::*;
 
+use zenith_utils::lsn::Lsn;
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 use zenith_utils::{crashsafe_dir, logging};
-use zenith_utils::{lsn::Lsn, zid::HexZTimelineId};
 
 use crate::{
     config::PageServerConf,
@@ -28,12 +29,18 @@ use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
 use crate::{repository::RepositoryTimeline, tenant_mgr};
 use crate::{repository::Timeline, CheckpointConfig};
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LocalTimelineInfo {
-    pub ancestor_timeline_id: Option<HexZTimelineId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_timeline_id: Option<ZTimelineId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
     pub last_record_lsn: Lsn,
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
@@ -47,9 +54,7 @@ impl LocalTimelineInfo {
     ) -> anyhow::Result<Self> {
         let last_record_lsn = timeline.get_last_record_lsn();
         let info = LocalTimelineInfo {
-            ancestor_timeline_id: timeline
-                .get_ancestor_timeline_id()
-                .map(HexZTimelineId::from),
+            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
             ancestor_lsn: {
                 match timeline.get_ancestor_lsn() {
                     Lsn(0) => None,
@@ -72,7 +77,7 @@ impl LocalTimelineInfo {
 
     pub fn from_unloaded_timeline(metadata: &TimelineMetadata) -> Self {
         LocalTimelineInfo {
-            ancestor_timeline_id: metadata.ancestor_timeline().map(HexZTimelineId::from),
+            ancestor_timeline_id: metadata.ancestor_timeline(),
             ancestor_lsn: {
                 match metadata.ancestor_lsn() {
                     Lsn(0) => None,
@@ -103,17 +108,20 @@ impl LocalTimelineInfo {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteTimelineInfo {
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub remote_consistent_lsn: Option<Lsn>,
     pub awaits_download: bool,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: ZTenantId,
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: ZTimelineId,
     pub local: Option<LocalTimelineInfo>,
     pub remote: Option<RemoteTimelineInfo>,

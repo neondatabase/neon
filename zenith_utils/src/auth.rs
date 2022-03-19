@@ -14,8 +14,9 @@ use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
-use crate::zid::{HexZTenantId, ZTenantId};
+use crate::zid::ZTenantId;
 
 const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 
@@ -26,18 +27,18 @@ pub enum Scope {
     PageServerApi,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub tenant_id: Option<HexZTenantId>,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub tenant_id: Option<ZTenantId>,
     pub scope: Scope,
 }
 
 impl Claims {
     pub fn new(tenant_id: Option<ZTenantId>, scope: Scope) -> Self {
-        Self {
-            tenant_id: tenant_id.map(HexZTenantId::from),
-            scope,
-        }
+        Self { tenant_id, scope }
     }
 }
 
@@ -47,7 +48,7 @@ pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<
             bail!("Attempt to access management api with tenant scope. Permission denied")
         }
         (Scope::Tenant, Some(tenantid)) => {
-            if ZTenantId::from(claims.tenant_id.unwrap()) != tenantid {
+            if claims.tenant_id.unwrap() != tenantid {
                 bail!("Tenant id mismatch. Permission denied")
             }
             Ok(())

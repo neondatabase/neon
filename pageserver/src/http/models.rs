@@ -1,23 +1,38 @@
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use zenith_utils::{
     lsn::Lsn,
-    zid::{HexZTenantId, HexZTimelineId, ZNodeId, ZTenantId, ZTimelineId},
+    zid::{ZNodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::timelines::{LocalTimelineInfo, TimelineInfo};
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    pub new_timeline_id: Option<HexZTimelineId>,
-    pub ancestor_timeline_id: Option<HexZTimelineId>,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub new_timeline_id: Option<ZTimelineId>,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_timeline_id: Option<ZTimelineId>,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateRequest {
-    pub new_tenant_id: Option<HexZTenantId>,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub new_tenant_id: Option<ZTenantId>,
 }
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub ZTenantId);
 
 #[derive(Clone)]
 pub enum TimelineInfoV1 {
@@ -39,18 +54,24 @@ pub enum TimelineInfoV1 {
     },
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineInfoResponseV1 {
     pub kind: String,
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     timeline_id: ZTimelineId,
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     tenant_id: ZTenantId,
-    disk_consistent_lsn: String,
-    last_record_lsn: Option<String>,
-    prev_record_lsn: Option<String>,
-    ancestor_timeline_id: Option<HexZTimelineId>,
-    ancestor_lsn: Option<String>,
+    #[serde_as(as = "DisplayFromStr")]
+    disk_consistent_lsn: Lsn,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    last_record_lsn: Option<Lsn>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    prev_record_lsn: Option<Lsn>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    ancestor_timeline_id: Option<ZTimelineId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    ancestor_lsn: Option<Lsn>,
     current_logical_size: Option<usize>,
     current_logical_size_non_incremental: Option<usize>,
 }
@@ -72,11 +93,11 @@ impl From<TimelineInfoV1> for TimelineInfoResponseV1 {
                 kind: "Local".to_owned(),
                 timeline_id,
                 tenant_id,
-                disk_consistent_lsn: disk_consistent_lsn.to_string(),
-                last_record_lsn: Some(last_record_lsn.to_string()),
-                prev_record_lsn: prev_record_lsn.map(|lsn| lsn.to_string()),
-                ancestor_timeline_id: ancestor_timeline_id.map(HexZTimelineId::from),
-                ancestor_lsn: ancestor_lsn.map(|lsn| lsn.to_string()),
+                disk_consistent_lsn,
+                last_record_lsn: Some(last_record_lsn),
+                prev_record_lsn,
+                ancestor_timeline_id,
+                ancestor_lsn,
                 current_logical_size,
                 current_logical_size_non_incremental,
             },
@@ -88,7 +109,7 @@ impl From<TimelineInfoV1> for TimelineInfoResponseV1 {
                 kind: "Remote".to_owned(),
                 timeline_id,
                 tenant_id,
-                disk_consistent_lsn: disk_consistent_lsn.to_string(),
+                disk_consistent_lsn,
                 last_record_lsn: None,
                 prev_record_lsn: None,
                 ancestor_timeline_id: None,
@@ -104,37 +125,24 @@ impl TryFrom<TimelineInfoResponseV1> for TimelineInfoV1 {
     type Error = anyhow::Error;
 
     fn try_from(other: TimelineInfoResponseV1) -> anyhow::Result<Self> {
-        let parse_lsn_hex_string = |lsn_string: String| {
-            lsn_string
-                .parse::<Lsn>()
-                .with_context(|| format!("Failed to parse Lsn as hex string from '{}'", lsn_string))
-        };
-
-        let disk_consistent_lsn = parse_lsn_hex_string(other.disk_consistent_lsn)?;
         Ok(match other.kind.as_str() {
             "Local" => TimelineInfoV1::Local {
                 timeline_id: other.timeline_id,
                 tenant_id: other.tenant_id,
-                last_record_lsn: other
-                    .last_record_lsn
-                    .ok_or(anyhow::anyhow!(
-                        "Local timeline should have last_record_lsn"
-                    ))
-                    .and_then(parse_lsn_hex_string)?,
-                prev_record_lsn: other
-                    .prev_record_lsn
-                    .map(parse_lsn_hex_string)
-                    .transpose()?,
+                last_record_lsn: other.last_record_lsn.ok_or(anyhow::anyhow!(
+                    "Local timeline should have last_record_lsn"
+                ))?,
+                prev_record_lsn: other.prev_record_lsn,
                 ancestor_timeline_id: other.ancestor_timeline_id.map(ZTimelineId::from),
-                ancestor_lsn: other.ancestor_lsn.map(parse_lsn_hex_string).transpose()?,
-                disk_consistent_lsn,
+                ancestor_lsn: other.ancestor_lsn,
+                disk_consistent_lsn: other.disk_consistent_lsn,
                 current_logical_size: other.current_logical_size,
                 current_logical_size_non_incremental: other.current_logical_size_non_incremental,
             },
             "Remote" => TimelineInfoV1::Remote {
                 timeline_id: other.timeline_id,
                 tenant_id: other.tenant_id,
-                disk_consistent_lsn,
+                disk_consistent_lsn: other.disk_consistent_lsn,
             },
             unknown => anyhow::bail!("Unknown timeline kind: {}", unknown),
         })

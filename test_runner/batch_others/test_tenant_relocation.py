@@ -11,6 +11,7 @@ import signal
 import pytest
 
 from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
+from fixtures.utils import lsn_from_hex
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -134,7 +135,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             assert cur.fetchone() == (500500, )
             cur.execute("SELECT pg_current_wal_flush_lsn()")
 
-            current_lsn = int(cur.fetchone()[0].split('/')[1], base=16)
+            current_lsn = lsn_from_hex(cur.fetchone()[0])
 
     pageserver_http = env.pageserver.http_client()
 
@@ -189,8 +190,8 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         # when load is active these checks can break because lsns are not static
         # so lets check with some margin
-        assert_abs_margin_ratio(new_timeline_detail['local']['disk_consistent_lsn'],
-                                timeline_detail['local']['disk_consistent_lsn'],
+        assert_abs_margin_ratio(lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
+                                lsn_from_hex(timeline_detail['local']['disk_consistent_lsn']),
                                 0.03)
 
         # callmemaybe to start replication from safekeeper to the new pageserver

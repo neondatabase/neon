@@ -33,7 +33,7 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
+from .utils import (get_self_dir, lsn_from_hex, mkdir_if_needed, subprocess_capture)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -1900,8 +1900,10 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                           tenant: uuid.UUID,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
-    assert isinstance(detail['remote']['remote_consistent_lsn'], int)
-    return detail['remote']['remote_consistent_lsn']
+
+    lsn_str = detail['remote']['remote_consistent_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
@@ -1917,8 +1919,10 @@ def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                     tenant: uuid.UUID,
                     timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
-    assert isinstance(detail['local']['last_record_lsn'], int)
-    return detail['local']['last_record_lsn']
+
+    lsn_str = detail['local']['last_record_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
