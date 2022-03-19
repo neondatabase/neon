@@ -17,11 +17,11 @@ use zenith_utils::http::{
     request::parse_request_param,
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::zid::{HexZTenantId, ZTenantTimelineId, ZTimelineId};
+use zenith_utils::zid::{ZTenantTimelineId, ZTimelineId};
 
 use super::models::{
-    StatusResponse, TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponseV1,
-    TimelineInfoV1,
+    StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
+    TimelineInfoResponseV1, TimelineInfoV1,
 };
 use crate::remote_storage::{schedule_timeline_download, RemoteTimelineIndex};
 use crate::timelines::{
@@ -308,7 +308,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     .map_err(ApiError::from_err)??;
 
     Ok(match new_tenant_id {
-        Some(id) => json_response(StatusCode::CREATED, HexZTenantId::from(id))?,
+        Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
         None => json_response(StatusCode::CONFLICT, ())?,
     })
 }

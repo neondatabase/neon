@@ -27,6 +27,7 @@ hex = { version = "0.4.3", features = ["serde"] }
 rustls = "0.19.1"
 rustls-split = "0.2.1"
 git-version = "0.3.5"
+serde_with = "1.12.0"
 
 zenith_metrics = { path = "../zenith_metrics" }
 workspace_hack = { path = "../workspace_hack" }
