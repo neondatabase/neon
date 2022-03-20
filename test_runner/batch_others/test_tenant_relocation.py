@@ -141,7 +141,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
     # wait until pageserver receives that data
     wait_for_last_record_lsn(pageserver_http, tenant, timeline, current_lsn)
-    timeline_detail = pageserver_http.timeline_detail_v2(tenant, timeline)
+    timeline_detail = assert_local(pageserver_http, tenant, timeline)
 
     if with_load == 'with_load':
         # create load table
