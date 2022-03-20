@@ -89,29 +89,33 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         sk_metrics = [sk.http_client().get_metrics() for sk in env.safekeepers]
 
         timeline_metrics = []
-        with env.pageserver.http_client() as pageserver_http:
-            for timeline_detail in timeline_details:
-                timeline_id: str = timeline_detail["timeline_id"]
+        for timeline_detail in timeline_details:
+            timeline_id: str = timeline_detail["timeline_id"]
 
-                m = TimelineMetrics(
-                    timeline_id=timeline_id,
-                    last_record_lsn=lsn_from_hex(timeline_detail["last_record_lsn"]),
-                )
-                for sk_m in sk_metrics:
-                    m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
-                    m.commit_lsns.append(sk_m.commit_lsn_inexact[(tenant_id.hex, timeline_id)])
+            local_timeline_detail = timeline_detail.get('local')
+            if local_timeline_detail is None:
+                log.debug(f"Timeline {timeline_id} is not present locally, skipping")
+                continue
 
-                for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
-                    # Invariant. May be < when transaction is in progress.
-                    assert commit_lsn <= flush_lsn
-                # We only call collect_metrics() after a transaction is confirmed by
-                # the compute node, which only happens after a consensus of safekeepers
-                # has confirmed the transaction. We assume majority consensus here.
-                assert (2 * sum(m.last_record_lsn <= lsn
-                                for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
-                assert (2 * sum(m.last_record_lsn <= lsn
-                                for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
-                timeline_metrics.append(m)
+            m = TimelineMetrics(
+                timeline_id=timeline_id,
+                last_record_lsn=lsn_from_hex(local_timeline_detail['last_record_lsn']),
+            )
+            for sk_m in sk_metrics:
+                m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
+                m.commit_lsns.append(sk_m.commit_lsn_inexact[(tenant_id.hex, timeline_id)])
+
+            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
+                # Invariant. May be < when transaction is in progress.
+                assert commit_lsn <= flush_lsn
+            # We only call collect_metrics() after a transaction is confirmed by
+            # the compute node, which only happens after a consensus of safekeepers
+            # has confirmed the transaction. We assume majority consensus here.
+            assert (2 * sum(m.last_record_lsn <= lsn
+                            for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
+            assert (2 * sum(m.last_record_lsn <= lsn
+                            for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
+            timeline_metrics.append(m)
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
 
