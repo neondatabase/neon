@@ -38,8 +38,8 @@ lazy_static! {
 }
 
 pub trait Storage {
-    /// Persist safekeeper state on disk.
-    fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+    fn persisted_state(&self) -> &SafeKeeperState;
+    fn update_state<F: Fn(&mut SafeKeeperState)>(&mut self, f: F) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -48,19 +48,27 @@ pub struct FileStorage {
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
     persist_control_file_seconds: Histogram,
+
+    /// Last state persisted to disk.
+    state: SafeKeeperState,
 }
 
 impl FileStorage {
-    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> FileStorage {
+    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(zttid);
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
-        FileStorage {
+
+        let state = Self::load_control_file_conf(conf, zttid)
+            .context("failed to load from control file")?;
+
+        Ok(FileStorage {
             timeline_dir,
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                 .with_label_values(&[&tenant_id, &timeline_id]),
-        }
+            state: state,
+        })
     }
 
     // Check the magic/version in the on-disk data and deserialize it, if possible.
@@ -139,9 +147,7 @@ impl FileStorage {
             })?;
         Ok(state)
     }
-}
 
-impl Storage for FileStorage {
     // persists state durably to underlying storage
     // for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
@@ -201,6 +207,20 @@ impl Storage for FileStorage {
                 .and_then(|f| f.sync_all())
                 .context("failed to sync control file directory")?;
         }
+        Ok(())
+    }
+}
+
+impl Storage for FileStorage {
+    fn persisted_state(&self) -> &SafeKeeperState {
+        &self.state
+    }
+
+    fn update_state<F: Fn(&mut SafeKeeperState)>(&mut self, f: F) -> Result<()> {
+        let mut new_state = self.state.clone();
+        f(&mut new_state);
+        self.persist(&new_state)?;
+        self.state = new_state;
         Ok(())
     }
 }
