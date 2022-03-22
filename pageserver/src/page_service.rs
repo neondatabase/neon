@@ -756,7 +756,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .context("Cannot load local timeline")?;
 
             let xid: TransactionId =
-                TransactionId::from_str_radix(&caps.get(3).unwrap().as_str(), 10)?;
+                TransactionId::from_str_radix(caps.get(3).unwrap().as_str(), 10)?;
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::int8_col(
                 b"lsn",
