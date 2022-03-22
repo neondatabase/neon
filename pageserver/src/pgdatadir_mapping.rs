@@ -208,7 +208,7 @@ impl<R: Repository> DatadirTimeline<R> {
             .list_slru_segments(SlruKind::Clog, lsn)?
             .into_iter()
             .collect();
-        segments.sort_unstable(();
+        segments.sort_unstable();
         for &segno in segments.iter().rev() {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, lsn)?;
             for blknum in (0..nblocks).rev() {
