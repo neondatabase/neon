@@ -148,12 +148,20 @@ impl PageServerNode {
         let initial_timeline_id_string = initial_timeline_id.to_string();
         args.extend(["--initial-timeline-id", &initial_timeline_id_string]);
 
-        let init_output = fill_rust_env_vars(cmd.args(args))
+        let cmd_with_args = cmd.args(args);
+        let init_output = fill_rust_env_vars(cmd_with_args)
             .output()
-            .context("pageserver init failed")?;
+            .with_context(|| {
+                format!("failed to init pageserver with command {:?}", cmd_with_args)
+            })?;
 
         if !init_output.status.success() {
-            bail!("pageserver init failed");
+            bail!(
+                "init invocation failed, {}\nStdout: {}\nStderr: {}",
+                init_output.status,
+                String::from_utf8_lossy(&init_output.stdout),
+                String::from_utf8_lossy(&init_output.stderr)
+            );
         }
 
         Ok(initial_timeline_id)
