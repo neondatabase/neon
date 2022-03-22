@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -10,7 +9,7 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponse};
+use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -19,7 +18,7 @@ use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{HexZTenantId, HexZTimelineId, ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
@@ -338,9 +337,7 @@ impl PageServerNode {
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest {
-                new_tenant_id: new_tenant_id.map(HexZTenantId::from),
-            })
+            .json(&TenantCreateRequest { new_tenant_id })
             .send()?
             .error_from_body()?
             .json::<Option<String>>()?;
@@ -358,7 +355,7 @@ impl PageServerNode {
     }
 
     pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
-        let timeline_infos: Vec<TimelineInfoResponse> = self
+        let timeline_infos: Vec<TimelineInfo> = self
             .http_request(
                 Method::GET,
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
@@ -367,10 +364,7 @@ impl PageServerNode {
             .error_from_body()?
             .json()?;
 
-        timeline_infos
-            .into_iter()
-            .map(TimelineInfo::try_from)
-            .collect()
+        Ok(timeline_infos)
     }
 
     pub fn timeline_create(
@@ -386,16 +380,14 @@ impl PageServerNode {
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .json(&TimelineCreateRequest {
-                new_timeline_id: new_timeline_id.map(HexZTimelineId::from),
+                new_timeline_id,
                 ancestor_start_lsn,
-                ancestor_timeline_id: ancestor_timeline_id.map(HexZTimelineId::from),
+                ancestor_timeline_id,
             })
             .send()?
             .error_from_body()?
-            .json::<Option<TimelineInfoResponse>>()?;
+            .json::<Option<TimelineInfo>>()?;
 
-        timeline_info_response
-            .map(TimelineInfo::try_from)
-            .transpose()
+        Ok(timeline_info_response)
     }
 }

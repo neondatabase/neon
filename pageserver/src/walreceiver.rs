@@ -31,6 +31,7 @@ use tracing::*;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::pq_proto::ZenithFeedback;
 use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTenantTimelineId;
 use zenith_utils::zid::ZTimelineId;
 
 //
@@ -111,18 +112,18 @@ fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> Str
 //
 fn thread_main(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
 ) -> Result<()> {
-    let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
+    let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_producer_connstr(tenantid, timelineid);
+    let wal_producer_connstr = get_wal_producer_connstr(tenant_id, timeline_id);
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
-    let res = walreceiver_main(conf, tenantid, timelineid, &wal_producer_connstr);
+    let res = walreceiver_main(conf, tenant_id, timeline_id, &wal_producer_connstr);
 
     // TODO cleanup info messages
     if let Err(e) = res {
@@ -130,20 +131,20 @@ fn thread_main(
     } else {
         info!(
             "walreceiver disconnected tenant {}, timelineid {}",
-            tenantid, timelineid
+            tenant_id, timeline_id
         );
     }
 
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
-    drop_wal_receiver(tenantid, timelineid);
+    drop_wal_receiver(tenant_id, timeline_id);
     Ok(())
 }
 
 fn walreceiver_main(
     _conf: &PageServerConf,
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
@@ -182,13 +183,16 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
-    let timeline =
-        tenant_mgr::get_timeline_for_tenant(tenantid, timelineid).with_context(|| {
-            format!(
-                "Can not start the walrecever for a remote tenant {}, timeline {}",
-                tenantid, timelineid,
-            )
-        })?;
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
+        .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
+    let timeline = repo.get_timeline_load(timeline_id).with_context(|| {
+        format!(
+            "local timeline {} not found for tenant {}",
+            timeline_id, tenant_id
+        )
+    })?;
+
+    let remote_index = repo.get_remote_index();
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -292,11 +296,19 @@ fn walreceiver_main(
         };
 
         if let Some(last_lsn) = status_update {
-            let timeline_synced_disk_consistent_lsn =
-                tenant_mgr::get_repository_for_tenant(tenantid)?
-                    .get_timeline_state(timelineid)
-                    .and_then(|state| state.remote_disk_consistent_lsn())
-                    .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = runtime.block_on(async {
+                remote_index
+                    .read()
+                    .await
+                    // here we either do not have this timeline in remote index
+                    // or there were no checkpoints for it yet
+                    .timeline_entry(&ZTenantTimelineId {
+                        tenant_id,
+                        timeline_id,
+                    })
+                    .and_then(|e| e.disk_consistent_lsn())
+                    .unwrap_or(Lsn(0)) // no checkpoint was uploaded
+            });
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
@@ -304,7 +316,7 @@ fn walreceiver_main(
             let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let apply_lsn = u64::from(timeline_synced_disk_consistent_lsn);
+            let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
             // Send zenith feedback message.
