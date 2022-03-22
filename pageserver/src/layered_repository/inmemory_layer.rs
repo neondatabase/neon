@@ -12,6 +12,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::repository::{Key, Value};
 use crate::walrecord;
+use crate::walrecord::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use log::*;
@@ -106,6 +107,30 @@ impl Layer for InMemoryLayer {
             Lsn(u64::MAX)
         };
         self.start_lsn..end_lsn
+    }
+
+    fn find(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>> {
+        let inner = self.inner.read().unwrap();
+        // Scan the page versions backwards, starting from `lsn`.
+        if let Some(vec_map) = inner.index.get(&key) {
+            let slice = vec_map.slice_range(..lsn);
+            for (entry_lsn, blob_ref) in slice.iter().rev() {
+                let mut buf = vec![0u8; blob_ref.size()];
+                inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
+                let val = Value::des(&buf)?;
+                if let Value::WalRecord(rec) = val {
+                    if filter(rec) {
+                        return Ok(Some(*entry_lsn));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Look up given value in the layer.

@@ -24,7 +24,10 @@ pub enum ZenithWalRecord {
         flags: u8,
     },
     /// Mark transaction IDs as committed on a CLOG page
-    ClogSetCommitted { xids: Vec<TransactionId> },
+    ClogSetCommitted {
+        xids: Vec<TransactionId>,
+        timestamp: TimestampTz,
+    },
     /// Mark transaction IDs as aborted on a CLOG page
     ClogSetAborted { xids: Vec<TransactionId> },
     /// Extend multixact offsets SLRU

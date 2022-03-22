@@ -118,11 +118,15 @@ pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
 }
 
 pub fn get_current_timestamp() -> TimestampTz {
+    to_pg_timestamp(SystemTime::now())
+}
+
+pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
     const UNIX_EPOCH_JDATE: u64 = 2440588; /* == date2j(1970, 1, 1) */
     const POSTGRES_EPOCH_JDATE: u64 = 2451545; /* == date2j(2000, 1, 1) */
     const SECS_PER_DAY: u64 = 86400;
     const USECS_PER_SEC: u64 = 1000000;
-    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => {
             ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
                 * USECS_PER_SEC

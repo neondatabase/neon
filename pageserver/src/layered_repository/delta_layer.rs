@@ -38,6 +38,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
+use crate::walrecord::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use log::*;
@@ -145,6 +146,40 @@ impl Layer for DeltaLayer {
 
     fn filename(&self) -> PathBuf {
         PathBuf::from(self.layer_name().to_string())
+    }
+
+    fn find(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>> {
+        let inner = self.load()?;
+        let values_reader = inner
+            .book
+            .as_ref()
+            .expect("should be loaded in load call above")
+            .chapter_reader(VALUES_CHAPTER)?;
+
+        if let Some(vec_map) = inner.index.get(&key) {
+            let slice = vec_map.slice_range(..lsn);
+            if let Some(last) = slice.last() {
+                let from = slice.first().unwrap().1.pos();
+                let till = last.1.pos() + last.1.size() as u64;
+                let mut buf = vec![0u8; (till - from) as usize];
+                values_reader.read_exact_at(&mut buf, from)?;
+                for (entry_lsn, blob_ref) in slice.iter().rev() {
+                    let offs = (blob_ref.pos() - from) as usize;
+                    let val = Value::des(&buf[offs..offs + blob_ref.size()])?;
+                    if let Value::WalRecord(rec) = val {
+                        if filter(rec) {
+                            return Ok(Some(*entry_lsn));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn get_value_reconstruct_data(

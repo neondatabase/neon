@@ -11,8 +11,10 @@ use crate::relish::*;
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
+use crate::ZTimelineId;
 use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
+use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -194,6 +196,43 @@ impl<R: Repository> DatadirTimeline<R> {
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
+    }
+
+    pub fn lookup_lsn(
+        &self,
+        timestamp_opt: Option<TimestampTz>,
+        xid_opt: Option<TransactionId>,
+    ) -> Result<Option<(ZTimelineId, Lsn)>> {
+        let lsn = self.tline.get_last_record_lsn();
+        let mut segments: Vec<u32> = self
+            .list_slru_segments(SlruKind::Clog, lsn)?
+            .into_iter()
+            .collect();
+        segments.sort();
+        for &segno in segments.iter().rev() {
+            let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, lsn)?;
+            for blknum in (0..nblocks).rev() {
+                let key = slru_block_to_key(SlruKind::Clog, segno, blknum);
+                if let Some((timeline_id, rec_lsn)) = self.tline.find(key, lsn, &|rec| {
+                    if let ZenithWalRecord::ClogSetCommitted { xids, timestamp } = rec {
+                        if let Some(xact_xid) = xid_opt {
+                            if xids.contains(&xact_xid) {
+                                return true;
+                            }
+                        }
+                        if let Some(xact_timestamp) = timestamp_opt {
+                            if timestamp <= xact_timestamp {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                })? {
+                    return Ok(Some((timeline_id, rec_lsn)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Get a list of SLRU segments

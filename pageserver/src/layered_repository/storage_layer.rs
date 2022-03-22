@@ -123,6 +123,14 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 
+    /// Find latest LSN of wal record matching specified criteria
+    fn find(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>>;
+
     /// Does this layer only contain some data for the segment (incremental),
     /// or does it contain a version of every page? This is important to know
     /// for garbage collecting old layers: an incremental layer depends on

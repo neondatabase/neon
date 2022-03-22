@@ -44,6 +44,7 @@ use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
+use crate::walrecord::ZenithWalRecord;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
@@ -795,6 +796,10 @@ struct GcInfo {
 
 /// Public interface functions
 impl Timeline for LayeredTimeline {
+    fn get_timeline_id(&self) -> ZTimelineId {
+        self.timelineid
+    }
+
     fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
     }
@@ -924,6 +929,69 @@ impl Timeline for LayeredTimeline {
             tl: self,
             _write_guard: self.write_lock.lock().unwrap(),
         })
+    }
+
+    fn find(
+        &self,
+        key: Key,
+        request_lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<(ZTimelineId, Lsn)>> {
+        // Start from the current timeline.
+        let mut timeline_owned;
+        let mut timeline = self;
+        let mut cont_lsn = Lsn(request_lsn.0 + 1);
+
+        'outer: loop {
+            // Recurse into ancestor if needed
+            if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                trace!(
+                    "going into ancestor {}, cont_lsn is {}",
+                    timeline.ancestor_lsn,
+                    cont_lsn
+                );
+                let ancestor = timeline.get_ancestor_timeline()?;
+                timeline_owned = ancestor;
+                timeline = &*timeline_owned;
+                continue;
+            }
+            let timeline_id = timeline.get_timeline_id();
+            let layers = timeline.layers.lock().unwrap();
+
+            // Check the open and frozen in-memory layers first
+            if let Some(open_layer) = &layers.open_layer {
+                let start_lsn = open_layer.get_lsn_range().start;
+                if cont_lsn > start_lsn {
+                    if let Some(rec_lsn) = open_layer.find(key, cont_lsn, filter)? {
+                        return Ok(Some((timeline_id, rec_lsn)));
+                    }
+                    cont_lsn = start_lsn;
+                    continue;
+                }
+            }
+            for frozen_layer in layers.frozen_layers.iter() {
+                let start_lsn = frozen_layer.get_lsn_range().start;
+                if cont_lsn > start_lsn {
+                    if let Some(rec_lsn) = frozen_layer.find(key, cont_lsn, filter)? {
+                        return Ok(Some((timeline_id, rec_lsn)));
+                    }
+                    cont_lsn = start_lsn;
+                    continue 'outer;
+                }
+            }
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn, true)? {
+                if let Some(rec_lsn) = layer.find(key, cont_lsn, filter)? {
+                    return Ok(Some((timeline_id, rec_lsn)));
+                }
+                cont_lsn = lsn_floor;
+            } else if self.ancestor_timeline.is_some() {
+                // Nothing on this timeline. Traverse to parent
+                cont_lsn = Lsn(self.ancestor_lsn.0 + 1);
+            } else {
+                break;
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1199,7 +1267,7 @@ impl LayeredTimeline {
                 }
             }
 
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn, false)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
                 result = layer.get_value_reconstruct_data(
