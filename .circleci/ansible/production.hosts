@@ -1,5 +1,5 @@
 [pageservers]
-zenith-1-ps-1
+zenith-1-ps-1 bucket_name=zenith-storage-oregon bucket_region=us-west-2
 
 [safekeepers]
 zenith-1-sk-1
