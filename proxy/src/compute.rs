@@ -41,6 +41,7 @@ impl DatabaseInfo {
         let host_port = format!("{}:{}", self.host, self.port);
         let socket = TcpStream::connect(host_port).await?;
         let socket_addr = socket.peer_addr()?;
+        socket2::SockRef::from(&socket).set_keepalive(true)?;
 
         Ok((socket_addr, socket))
     }
