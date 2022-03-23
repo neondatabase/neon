@@ -182,7 +182,13 @@ async fn try_upload_checkpoint<
             }
         })
         .collect::<Vec<_>>();
-    ensure!(!files_to_upload.is_empty(), "No files to upload");
+
+    ensure!(
+        !files_to_upload.is_empty(),
+        "No files to upload. Upload request was: {:?}, already uploaded files: {:?}",
+        new_checkpoint.layers,
+        files_to_skip,
+    );
 
     compression::archive_files_as_stream(
         &timeline_dir,
