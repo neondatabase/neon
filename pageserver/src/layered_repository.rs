@@ -2089,7 +2089,7 @@ pub mod tests {
 
         let mut metadata_bytes = std::fs::read(&metadata_path)?;
         assert_eq!(metadata_bytes.len(), 512);
-        metadata_bytes[512 - 4 - 2] ^= 1;
+        metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness.try_load().err().expect("should fail");
