@@ -290,22 +290,12 @@ where
         let prefix_len = node.prefix_len as usize;
         let suffix_len = node.suffix_len as usize;
 
-        let mut i = 0;
-        while i < prefix_len && i < search_key.len() {
-            if node.prefix[i] != search_key[i] {
-                break;
-            }
-            i += 1;
-        }
-        let common_prefix_len = i;
-
         assert!(node.num_children > 0);
 
         let mut keybuf = Vec::new();
         keybuf.extend(node.prefix);
         keybuf.resize(prefix_len + suffix_len, 0);
 
-        // TODO: Binary search
         if dir == VisitDirection::Forwards {
             // Locate the first match
             let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
