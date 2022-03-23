@@ -23,7 +23,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use hex;
 use std::cmp::Ordering;
 
-pub const VALUE_SZ: usize = 5; // FIXME: replace all 5's with this
+// The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
+pub const VALUE_SZ: usize = 5;
 pub const MAX_VALUE: u64 = 0x007f_ffff_ffff;
 
 #[allow(dead_code)]
@@ -66,7 +67,7 @@ struct Value([u8; VALUE_SZ]);
 
 impl Value {
     fn from_slice(slice: &[u8]) -> Value {
-        let mut b = [0u8; 5];
+        let mut b = [0u8; VALUE_SZ];
         b.copy_from_slice(slice);
         Value(b)
     }
@@ -114,7 +115,7 @@ impl Value {
 }
 
 /// This is the on-disk representation.
-struct OnDiskNode<'a> {
+struct OnDiskNode<'a, const L: usize> {
     // Fixed-width fields
     num_children: u16,
     level: u8,
@@ -129,11 +130,11 @@ struct OnDiskNode<'a> {
     values: &'a [u8],
 }
 
-impl<'a> OnDiskNode<'a> {
+impl<'a, const L: usize> OnDiskNode<'a, L> {
     ///
     /// Interpret a PAGE_SZ page as a node.
     ///
-    fn deparse(buf: &[u8]) -> OnDiskNode {
+    fn deparse(buf: &[u8]) -> OnDiskNode<L> {
         let mut cursor = std::io::Cursor::new(buf);
         let num_children = cursor.read_u16::<BE>().unwrap();
         let level = cursor.read_u8().unwrap();
@@ -176,7 +177,7 @@ impl<'a> OnDiskNode<'a> {
         Value::from_slice(value_slice)
     }
 
-    fn binary_search(&self, search_key: &[u8], keybuf: &mut [u8]) -> Result<usize, usize> {
+    fn binary_search(&self, search_key: &[u8; L], keybuf: &mut [u8]) -> Result<usize, usize> {
         let mut size = self.num_children as usize;
         let mut low = 0;
         let mut high = size;
@@ -206,7 +207,7 @@ impl<'a> OnDiskNode<'a> {
 ///
 /// Public reader object, to search the tree.
 ///
-pub struct DiskBtreeReader<R>
+pub struct DiskBtreeReader<R, const L: usize>
 where
     R: DiskBlockReader,
 {
@@ -220,7 +221,7 @@ pub enum VisitDirection {
     Backwards,
 }
 
-impl<R> DiskBtreeReader<R>
+impl<R, const L: usize> DiskBtreeReader<R, L>
 where
     R: DiskBlockReader,
 {
@@ -231,7 +232,7 @@ where
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub fn get(&self, search_key: &[u8]) -> anyhow::Result<Option<u64>> {
+    pub fn get(&self, search_key: &[u8; L]) -> anyhow::Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(search_key, VisitDirection::Forwards, |key, value| {
             if key == search_key {
@@ -249,7 +250,7 @@ where
     ///
     pub fn visit<V>(
         &self,
-        search_key: &[u8],
+        search_key: &[u8; L],
         dir: VisitDirection,
         mut visitor: V,
     ) -> anyhow::Result<bool>
@@ -262,7 +263,7 @@ where
     fn search_recurse<V>(
         &self,
         node_blknum: u32,
-        search_key: &[u8],
+        search_key: &[u8; L],
         dir: VisitDirection,
         visitor: &mut V,
     ) -> anyhow::Result<bool>
@@ -279,7 +280,7 @@ where
     fn search_node<V>(
         &self,
         node_buf: &[u8],
-        search_key: &[u8],
+        search_key: &[u8; L],
         dir: VisitDirection,
         visitor: &mut V,
     ) -> anyhow::Result<bool>
@@ -381,7 +382,7 @@ where
         let blk = self.reader.read_blk(blknum)?;
         let buf: &[u8] = blk.as_ref();
 
-        let node = OnDiskNode::deparse(buf);
+        let node = OnDiskNode::<L>::deparse(buf);
 
         print!("{:indent$}", "", indent = depth * 2);
         println!(
@@ -417,50 +418,46 @@ where
 /// Usage: Create a builder object by calling 'new', load all the data into the
 /// tree by calling 'append' for each key-value pair, and then call 'finish'
 ///
-pub struct DiskBtreeBuilder<W>
+/// 'L' is the key length in bytes
+pub struct DiskBtreeBuilder<W, const L: usize>
 where
     W: DiskBlockWriter,
 {
-    key_len: u8,
     writer: W,
 
     ///
     /// stack[0] is the current root page, stack.last() is the leaf.
     ///
-    stack: Vec<BuildNode>,
+    stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append
     /// is called in increasing key order.
-    last_key: Vec<u8>,
+    last_key: Option<[u8; L]>,
 }
 
-impl<W> DiskBtreeBuilder<W>
+impl<W, const L: usize> DiskBtreeBuilder<W, L>
 where
     W: DiskBlockWriter,
 {
-    pub fn new(key_len: u8, writer: W) -> Self {
+    pub fn new(writer: W) -> Self {
         DiskBtreeBuilder {
-            key_len,
             writer,
-            last_key: Vec::new(),
+            last_key: None,
             stack: vec![BuildNode::new(0)],
         }
     }
 
-    pub fn append(&mut self, key: &[u8], value: u64) -> Result<(), anyhow::Error> {
-        assert!(key.len() == self.key_len as usize);
+    pub fn append(&mut self, key: &[u8; L], value: u64) -> Result<(), anyhow::Error> {
         assert!(value <= MAX_VALUE);
-        if self.last_key.is_empty() {
-            self.last_key.extend(key);
-        } else {
-            assert!(key > self.last_key.as_slice(), "unsorted input");
-            self.last_key.copy_from_slice(key);
+        if let Some(last_key) = &self.last_key {
+            assert!(key > last_key, "unsorted input");
         }
+        self.last_key = Some(*key);
 
         Ok(self.append_internal(key, Value::from_u64(value))?)
     }
 
-    fn append_internal(&mut self, key: &[u8], value: Value) -> Result<(), std::io::Error> {
+    fn append_internal(&mut self, key: &[u8; L], value: Value) -> Result<(), std::io::Error> {
         // Try to append to the current leaf buffer
         let last = self.stack.last_mut().unwrap();
         let level = last.level;
@@ -535,7 +532,7 @@ where
 /// BuildNode represesnts an incomplete page that we are appending to.
 ///
 #[derive(Clone, Debug)]
-struct BuildNode {
+struct BuildNode<const L: usize> {
     num_children: u16,
     level: u8,
     prefix: Vec<u8>,
@@ -551,7 +548,7 @@ const NODE_SIZE: usize = PAGE_SZ;
 
 const NODE_HDR_SIZE: usize = 2 + 1 + 1 + 1;
 
-impl BuildNode {
+impl<const L: usize> BuildNode<L> {
     fn new(level: u8) -> Self {
         BuildNode {
             num_children: 0,
@@ -567,14 +564,11 @@ impl BuildNode {
     /// Try to append a key-value pair to this node. Returns 'true' on
     /// success, 'false' if the page was full or the key was
     /// incompatible with the prefix of the existing keys.
-    fn push(&mut self, key: &[u8], value: Value) -> bool {
+    fn push(&mut self, key: &[u8; L], value: Value) -> bool {
         // If we have already performed prefix-compression on the page,
         // check that the incoming key has the same prefix.
         if self.num_children > 0 {
-            // does the suffix length and prefix allow it?
-            if self.prefix.len() + self.suffix_len != key.len() {
-                return false;
-            }
+            // does the prefix allow it?
             if !key.starts_with(&self.prefix) {
                 return false;
             }
@@ -676,8 +670,11 @@ impl BuildNode {
     }
 
     /// Return the full first key of the page, including the prefix
-    fn first_key(&self) -> Vec<u8> {
-        [&self.prefix, self.first_suffix()].concat().to_vec()
+    fn first_key(&self) -> [u8; L] {
+        let mut key = [0u8; L];
+        key[..self.prefix.len()].copy_from_slice(&self.prefix);
+        key[self.prefix.len()..].copy_from_slice(self.first_suffix());
+        key
     }
 }
 
@@ -718,19 +715,12 @@ mod tests {
     #[test]
     fn basic() -> anyhow::Result<()> {
         let mut disk = TestDisk::new();
-        let mut writer = DiskBtreeBuilder::new(6, &mut disk);
+        let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
-        let all_keys = vec![
-            &b"xaaaaa"[..],
-            &b"xaaaba"[..],
-            &b"xaaaca"[..],
-            &b"xabaaa"[..],
-            &b"xababa"[..],
-            &b"xabaca"[..],
-            &b"xabada"[..],
-            &b"xabadb"[..],
+        let all_keys: Vec<&[u8; 6]> = vec![
+            b"xaaaaa", b"xaaaba", b"xaaaca", b"xabaaa", b"xababa", b"xabaca", b"xabada", b"xabadb",
         ];
-        let all_data: Vec<(&[u8], u64)> = all_keys
+        let all_data: Vec<(&[u8; 6], u64)> = all_keys
             .iter()
             .enumerate()
             .map(|(idx, key)| (*key, idx as u64))
@@ -750,15 +740,12 @@ mod tests {
             assert_eq!(reader.get(key)?, Some(*val));
         }
         // And on some keys that don't exist
-        assert_eq!(reader.get(b"aaaaa")?, None);
-        assert_eq!(reader.get(b"zzzzz")?, None);
-        assert_eq!(reader.get(b"xaaa")?, None);
-        assert_eq!(reader.get(b"xabaaa000")?, None);
-        assert_eq!(reader.get(b"a")?, None);
-        assert_eq!(reader.get(b"z")?, None);
+        assert_eq!(reader.get(b"aaaaaa")?, None);
+        assert_eq!(reader.get(b"zzzzzz")?, None);
+        assert_eq!(reader.get(b"xaaabx")?, None);
 
         // Test search with `visit` function
-        let search_key = b"xaba";
+        let search_key = b"xabaaa";
         let expected: Vec<(Vec<u8>, u64)> = all_data
             .iter()
             .filter(|(key, _value)| key[..] >= search_key[..])
@@ -766,7 +753,7 @@ mod tests {
             .collect();
 
         let mut data = Vec::new();
-        reader.visit(b"xaba", VisitDirection::Forwards, |key, value| {
+        reader.visit(search_key, VisitDirection::Forwards, |key, value| {
             data.push((key.to_vec(), value));
             true
         })?;
@@ -780,14 +767,14 @@ mod tests {
             .collect();
         expected.reverse();
         let mut data = Vec::new();
-        reader.visit(b"xaba", VisitDirection::Backwards, |key, value| {
+        reader.visit(search_key, VisitDirection::Backwards, |key, value| {
             data.push((key.to_vec(), value));
             true
         })?;
         assert_eq!(data, expected);
 
         // Backward scan where nothing matches
-        reader.visit(b"aaaaa", VisitDirection::Backwards, |key, value| {
+        reader.visit(b"aaaaaa", VisitDirection::Backwards, |key, value| {
             panic!("found unexpected key {}: {}", hex::encode(key), value);
         })?;
 
@@ -797,7 +784,7 @@ mod tests {
             .map(|(key, value)| (key.to_vec(), *value))
             .collect();
         let mut data = Vec::new();
-        reader.visit(b"", VisitDirection::Forwards, |key, value| {
+        reader.visit(&[0u8; 6], VisitDirection::Forwards, |key, value| {
             data.push((key.to_vec(), value));
             true
         })?;
@@ -809,7 +796,7 @@ mod tests {
     #[test]
     fn lots_of_keys() -> anyhow::Result<()> {
         let mut disk = TestDisk::new();
-        let mut writer = DiskBtreeBuilder::new(8, &mut disk);
+        let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
 
         const NUM_KEYS: u64 = 1000;
 
@@ -916,7 +903,7 @@ mod tests {
 
         // Build a tree from it
         let mut disk = TestDisk::new();
-        let mut writer = DiskBtreeBuilder::new(16, &mut disk);
+        let mut writer = DiskBtreeBuilder::<_, 16>::new(&mut disk);
 
         for (&key, &val) in all_data.iter() {
             writer.append(&u128::to_be_bytes(key), val)?;
@@ -949,7 +936,7 @@ mod tests {
     #[should_panic(expected = "unsorted input")]
     fn unsorted_input() {
         let mut disk = TestDisk::new();
-        let mut writer = DiskBtreeBuilder::new(2, &mut disk);
+        let mut writer = DiskBtreeBuilder::<_, 2>::new(&mut disk);
 
         let _ = writer.append(b"ba", 1);
         let _ = writer.append(b"bb", 2);
@@ -2971,10 +2958,10 @@ mod tests {
         ];
         // Build a tree from it
         let mut disk = TestDisk::new();
-        let mut writer = DiskBtreeBuilder::new(18 + 8, &mut disk);
+        let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);
 
         for (key, val) in DATA {
-            writer.append(&key[..], val)?;
+            writer.append(&key, val)?;
         }
         let (root_offset, writer) = writer.finish()?;
 
@@ -2984,12 +2971,12 @@ mod tests {
 
         // Test get() operation on all the keys
         for (key, val) in DATA {
-            assert_eq!(reader.get(&key[..])?, Some(val));
+            assert_eq!(reader.get(&key)?, Some(val));
         }
 
         // Test full scan
         let mut count = 0;
-        reader.visit(&[], VisitDirection::Forwards, |_key, _value| {
+        reader.visit(&[0u8; 26], VisitDirection::Forwards, |_key, _value| {
             count += 1;
             true
         })?;

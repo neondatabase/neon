@@ -361,7 +361,7 @@ pub struct ImageLayerWriter {
     lsn: Lsn,
 
     bufwriter: BufWriter<VirtualFile>,
-    tree: DiskBtreeBuilder<BlockBuf>,
+    tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
     end_offset: u64,
 }
@@ -397,7 +397,7 @@ impl ImageLayerWriter {
 
         // Initialize the index builder
         let block_buf = BlockBuf::new(); // reserve blk 0 for the summary
-        let tree_builder = DiskBtreeBuilder::new(KEY_SIZE as u8, block_buf);
+        let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         let writer = ImageLayerWriter {
             conf,

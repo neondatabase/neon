@@ -200,7 +200,8 @@ impl Layer for DeltaLayer {
         // Scan the page versions backwards, starting from `lsn`.
         let reader = inner.reader.as_ref().unwrap();
         let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
-        let tree_reader = DiskBtreeReader::new(inner.index_root_blk, offset_reader);
+        let tree_reader =
+            DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
         let mut offsets: Vec<(Lsn, u64)> = Vec::new();
@@ -300,48 +301,53 @@ impl Layer for DeltaLayer {
 
         let reader = inner.reader.as_ref().unwrap();
         let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
-        let tree_reader = DiskBtreeReader::new(inner.index_root_blk, offset_reader);
+        let tree_reader =
+            DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
 
         tree_reader.dump()?;
 
-        tree_reader.visit(&[], VisitDirection::Forwards, |delta_key, value| {
-            let key = DeltaKey::extract_key_from_buf(delta_key);
-            let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
-            let off = value & 0x3f_ffff_ffff;
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |delta_key, value| {
+                let key = DeltaKey::extract_key_from_buf(delta_key);
+                let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
+                let off = value & 0x3f_ffff_ffff;
 
-            let mut desc = String::new();
+                let mut desc = String::new();
 
-            match utils::read_blob(reader, off) {
-                Ok(buf) => {
-                    let val = Value::des(&buf);
+                match utils::read_blob(reader, off) {
+                    Ok(buf) => {
+                        let val = Value::des(&buf);
 
-                    match val {
-                        Ok(Value::Image(img)) => {
-                            write!(&mut desc, " img {} bytes", img.len()).unwrap();
+                        match val {
+                            Ok(Value::Image(img)) => {
+                                write!(&mut desc, " img {} bytes", img.len()).unwrap();
+                            }
+                            Ok(Value::WalRecord(rec)) => {
+                                let wal_desc = walrecord::describe_wal_record(&rec);
+                                write!(
+                                    &mut desc,
+                                    " rec {} bytes will_init: {} {}",
+                                    buf.len(),
+                                    rec.will_init(),
+                                    wal_desc
+                                )
+                                .unwrap();
+                            }
+                            Err(err) => {
+                                write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
+                            }
                         }
-                        Ok(Value::WalRecord(rec)) => {
-                            let wal_desc = walrecord::describe_wal_record(&rec);
-                            write!(
-                                &mut desc,
-                                " rec {} bytes will_init: {} {}",
-                                buf.len(),
-                                rec.will_init(),
-                                wal_desc
-                            )
-                            .unwrap();
-                        }
-                        Err(err) => {
-                            write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
-                        }
+                        println!("  key {} at {}: {}", key, lsn, desc);
                     }
-                    println!("  key {} at {}: {}", key, lsn, desc);
-                }
-                Err(err) => {
-                    write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
-                }
-            };
-            true
-        })?;
+                    Err(err) => {
+                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
+                    }
+                };
+                true
+            },
+        )?;
 
         Ok(())
     }
@@ -508,7 +514,7 @@ pub struct DeltaLayerWriter {
     lsn_range: Range<Lsn>,
 
     bufwriter: BufWriter<VirtualFile>,
-    tree: DiskBtreeBuilder<BlockBuf>,
+    tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
     end_offset: u64,
 }
@@ -545,7 +551,7 @@ impl DeltaLayerWriter {
 
         // Initialize the index builder
         let block_buf = BlockBuf::new(); // reserve blk 0 for the summary
-        let tree_builder = DiskBtreeBuilder::new(DELTA_KEY_SIZE as u8, block_buf);
+        let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         Ok(DeltaLayerWriter {
             conf,
@@ -699,15 +705,20 @@ impl<'a> DeltaValueIter<'a> {
     fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
         let reader = inner.reader.as_ref().unwrap();
         let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
-        let tree_reader = DiskBtreeReader::new(inner.index_root_blk, offset_reader);
+        let tree_reader =
+            DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
 
         let mut all_offsets: Vec<(DeltaKey, u64)> = Vec::new();
 
-        tree_reader.visit(&[], VisitDirection::Forwards, |key, value| {
-            let off = value & 0x3f_ffff_ffff;
-            all_offsets.push((DeltaKey::from_slice(key), off));
-            true
-        })?;
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value| {
+                let off = value & 0x3f_ffff_ffff;
+                all_offsets.push((DeltaKey::from_slice(key), off));
+                true
+            },
+        )?;
 
         Ok(DeltaValueIter {
             all_offsets,
