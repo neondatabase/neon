@@ -1762,7 +1762,6 @@ impl LayeredTimeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         for l in level0_deltas {
-            println!("DELETINGX: {}", l.filename().display());
             l.delete()?;
             layers.remove_historic(l.clone());
         }
@@ -1914,7 +1913,6 @@ impl LayeredTimeline {
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
         for doomed_layer in layers_to_remove {
-            println!("DELETING: {}", doomed_layer.filename().display());
             doomed_layer.delete()?;
             layers.remove_historic(doomed_layer.clone());
 
