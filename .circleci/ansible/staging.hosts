@@ -1,5 +1,5 @@
 [pageservers]
-zenith-us-stage-ps-1
+zenith-us-stage-ps-1 bucket_name=zenith-staging-storage-us-east-1 bucket_region=us-east-1
 
 [safekeepers]
 zenith-us-stage-sk-1

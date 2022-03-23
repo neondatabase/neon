@@ -31,6 +31,8 @@ COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/inclu
 COPY . .
 
 RUN cargo build --release
+# Show build caching stats to check if it was used
+RUN /usr/local/cargo/bin/cachepot -s
 
 # Build final image
 #
