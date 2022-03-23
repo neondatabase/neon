@@ -107,7 +107,7 @@ impl DeltaKey {
 
     fn from_key_lsn(key: &Key, lsn: Lsn) -> Self {
         let mut bytes: [u8; DELTA_KEY_SIZE] = [0u8; DELTA_KEY_SIZE];
-        bytes[0..repository::KEY_SIZE].copy_from_slice(&key.to_vec());
+        key.write_to_byte_slice(&mut bytes[0..repository::KEY_SIZE]);
         bytes[repository::KEY_SIZE..].copy_from_slice(&u64::to_be_bytes(lsn.0));
         DeltaKey(bytes)
     }

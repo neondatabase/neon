@@ -145,7 +145,9 @@ impl Layer for ImageLayer {
         let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
         let tree_reader = DiskBtreeReader::new(inner.index_root_blk, offset_reader);
 
-        if let Some(offset) = tree_reader.get(&key.to_vec())? {
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf)? {
             let blob =
                 utils::read_blob(inner.reader.as_ref().unwrap(), offset).with_context(|| {
                     format!(
@@ -429,7 +431,9 @@ impl ImageLayerWriter {
 
         self.end_offset += len;
 
-        self.tree.append(&key.to_vec(), off)?;
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        self.tree.append(&keybuf, off)?;
 
         Ok(())
     }

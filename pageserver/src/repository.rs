@@ -4,6 +4,7 @@ use crate::remote_storage::RemoteTimelineIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
+use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -85,14 +86,13 @@ impl Key {
         }
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut vec = vec![self.field1];
-        vec.extend(&self.field2.to_be_bytes());
-        vec.extend(&self.field3.to_be_bytes());
-        vec.extend(&self.field4.to_be_bytes());
-        vec.push(self.field5);
-        vec.extend(&self.field6.to_be_bytes());
-        vec
+    pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
+        buf[0] = self.field1;
+        BE::write_u32(&mut buf[1..5], self.field2);
+        BE::write_u32(&mut buf[5..9], self.field3);
+        BE::write_u32(&mut buf[9..13], self.field4);
+        buf[13] = self.field5;
+        BE::write_u32(&mut buf[14..18], self.field6);
     }
 }
 
