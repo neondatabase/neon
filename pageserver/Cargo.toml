@@ -1,7 +1,6 @@
 [package]
 name = "pageserver"
 version = "0.1.0"
-authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2021"
 
 [dependencies]
@@ -13,26 +12,27 @@ bytes = { version = "1.0.1", features = ['serde'] }
 byteorder = "1.4.3"
 futures = "0.3.13"
 hyper = "0.14"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
 log = "0.4.14"
-clap = "2.33.0"
+clap = "3.0"
 daemonize = "0.4.1"
 tokio = { version = "1.11", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
-postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
+postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 tokio-stream = "0.1.8"
-routerify = "2"
 anyhow = { version = "1.0", features = ["backtrace"] }
 crc32c = "0.6.0"
 thiserror = "1.0"
-hex = { version = "0.4.3", features = ["serde"] }
 tar = "0.4.33"
 humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-toml_edit = { version = "0.12", features = ["easy"] }
+serde_with = "1.12.0"
+
+toml_edit = { version = "0.13", features = ["easy"] }
 scopeguard = "1.1.0"
 async-trait = "0.1"
 const_format = "0.2.21"
@@ -42,8 +42,8 @@ signal-hook = "0.3.10"
 url = "2"
 nix = "0.23"
 once_cell = "1.8.0"
-parking_lot = "0.11.2"
 crossbeam-utils = "0.8.5"
+fail = "0.5.0"
 
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
 async-compression = {version = "0.3", features = ["zstd", "tokio"]}

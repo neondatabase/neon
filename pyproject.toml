@@ -2,7 +2,7 @@
 name = "zenith"
 version = "0.1.0"
 description = ""
-authors = ["Dmitry Rodionov <dmitry@zenith.tech>"]
+authors = []
 
 [tool.poetry.dependencies]
 python = "^3.7"
@@ -21,6 +21,7 @@ types-psycopg2 = "^2.9.6"
 boto3 = "^1.20.40"
 boto3-stubs = "^1.20.40"
 moto = {version = "^3.0.0", extras = ["server"]}
+backoff = "^1.11.1"
 
 [tool.poetry.dev-dependencies]
 yapf = "==0.31.0"

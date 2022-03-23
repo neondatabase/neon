@@ -1,104 +1,148 @@
-use anyhow::{anyhow, bail, Context};
+use crate::auth::ClientCredentials;
+use crate::compute::DatabaseInfo;
+use crate::error::UserFacingError;
+use crate::mgmt;
+use crate::waiters::{self, Waiter, Waiters};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddr, ToSocketAddrs};
+use thiserror::Error;
 
-use crate::state::ProxyWaiters;
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct DatabaseInfo {
-    pub host: String,
-    pub port: u16,
-    pub dbname: String,
-    pub user: String,
-    pub password: Option<String>,
+lazy_static! {
+    static ref CPLANE_WAITERS: Waiters<mgmt::ComputeReady> = Default::default();
 }
 
+/// Give caller an opportunity to wait for cplane's reply.
+pub async fn with_waiter<R, T, E>(
+    psql_session_id: impl Into<String>,
+    action: impl FnOnce(Waiter<'static, mgmt::ComputeReady>) -> R,
+) -> Result<T, E>
+where
+    R: std::future::Future<Output = Result<T, E>>,
+    E: From<waiters::RegisterError>,
+{
+    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
+    action(waiter).await
+}
+
+pub fn notify(
+    psql_session_id: &str,
+    msg: Result<DatabaseInfo, String>,
+) -> Result<(), waiters::NotifyError> {
+    CPLANE_WAITERS.notify(psql_session_id, msg)
+}
+
+/// Zenith console API wrapper.
+pub struct CPlaneApi {
+    auth_endpoint: reqwest::Url,
+}
+
+impl CPlaneApi {
+    pub fn new(auth_endpoint: reqwest::Url) -> Self {
+        Self { auth_endpoint }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AuthErrorImpl {
+    /// Authentication error reported by the console.
+    #[error("Authentication failed: {0}")]
+    AuthFailed(String),
+
+    /// HTTP status (other than 200) returned by the console.
+    #[error("Console responded with an HTTP status: {0}")]
+    HttpStatus(reqwest::StatusCode),
+
+    #[error("Console responded with a malformed JSON: {0}")]
+    MalformedResponse(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    WaiterRegister(#[from] waiters::RegisterError),
+
+    #[error(transparent)]
+    WaiterWait(#[from] waiters::WaitError),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct AuthError(Box<AuthErrorImpl>);
+
+impl AuthError {
+    /// Smart constructor for authentication error reported by `mgmt`.
+    pub fn auth_failed(msg: impl Into<String>) -> Self {
+        AuthError(Box::new(AuthErrorImpl::AuthFailed(msg.into())))
+    }
+}
+
+impl<T> From<T> for AuthError
+where
+    AuthErrorImpl: From<T>,
+{
+    fn from(e: T) -> Self {
+        AuthError(Box::new(e.into()))
+    }
+}
+
+impl UserFacingError for AuthError {
+    fn to_string_client(&self) -> String {
+        use AuthErrorImpl::*;
+        match self.0.as_ref() {
+            AuthFailed(_) | HttpStatus(_) => self.to_string(),
+            _ => "Internal error".to_string(),
+        }
+    }
+}
+
+impl CPlaneApi {
+    pub async fn authenticate_proxy_client(
+        &self,
+        creds: ClientCredentials,
+        md5_response: &str,
+        salt: &[u8; 4],
+        psql_session_id: &str,
+    ) -> Result<DatabaseInfo, AuthError> {
+        let mut url = self.auth_endpoint.clone();
+        url.query_pairs_mut()
+            .append_pair("login", &creds.user)
+            .append_pair("database", &creds.dbname)
+            .append_pair("md5response", md5_response)
+            .append_pair("salt", &hex::encode(salt))
+            .append_pair("psql_session_id", psql_session_id);
+
+        with_waiter(psql_session_id, |waiter| async {
+            println!("cplane request: {}", url);
+            // TODO: leverage `reqwest::Client` to reuse connections
+            let resp = reqwest::get(url).await?;
+            if !resp.status().is_success() {
+                return Err(AuthErrorImpl::HttpStatus(resp.status()).into());
+            }
+
+            let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
+            println!("got auth info: #{:?}", auth_info);
+
+            use ProxyAuthResponse::*;
+            let db_info = match auth_info {
+                Ready { conn_info } => conn_info,
+                Error { error } => return Err(AuthErrorImpl::AuthFailed(error).into()),
+                NotReady { .. } => waiter.await?.map_err(AuthErrorImpl::AuthFailed)?,
+            };
+
+            Ok(db_info)
+        })
+        .await
+    }
+}
+
+// NOTE: the order of constructors is important.
+// https://serde.rs/enum-representations.html#untagged
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 enum ProxyAuthResponse {
     Ready { conn_info: DatabaseInfo },
     Error { error: String },
     NotReady { ready: bool }, // TODO: get rid of `ready`
-}
-
-impl DatabaseInfo {
-    pub fn socket_addr(&self) -> anyhow::Result<SocketAddr> {
-        let host_port = format!("{}:{}", self.host, self.port);
-        host_port
-            .to_socket_addrs()
-            .with_context(|| format!("cannot resolve {} to SocketAddr", host_port))?
-            .next()
-            .context("cannot resolve at least one SocketAddr")
-    }
-}
-
-impl From<DatabaseInfo> for tokio_postgres::Config {
-    fn from(db_info: DatabaseInfo) -> Self {
-        let mut config = tokio_postgres::Config::new();
-
-        config
-            .host(&db_info.host)
-            .port(db_info.port)
-            .dbname(&db_info.dbname)
-            .user(&db_info.user);
-
-        if let Some(password) = db_info.password {
-            config.password(password);
-        }
-
-        config
-    }
-}
-
-pub struct CPlaneApi<'a> {
-    auth_endpoint: &'a str,
-    waiters: &'a ProxyWaiters,
-}
-
-impl<'a> CPlaneApi<'a> {
-    pub fn new(auth_endpoint: &'a str, waiters: &'a ProxyWaiters) -> Self {
-        Self {
-            auth_endpoint,
-            waiters,
-        }
-    }
-}
-
-impl CPlaneApi<'_> {
-    pub fn authenticate_proxy_request(
-        &self,
-        user: &str,
-        database: &str,
-        md5_response: &[u8],
-        salt: &[u8; 4],
-        psql_session_id: &str,
-    ) -> anyhow::Result<DatabaseInfo> {
-        let mut url = reqwest::Url::parse(self.auth_endpoint)?;
-        url.query_pairs_mut()
-            .append_pair("login", user)
-            .append_pair("database", database)
-            .append_pair("md5response", std::str::from_utf8(md5_response)?)
-            .append_pair("salt", &hex::encode(salt))
-            .append_pair("psql_session_id", psql_session_id);
-
-        let waiter = self.waiters.register(psql_session_id.to_owned());
-
-        println!("cplane request: {}", url);
-        let resp = reqwest::blocking::get(url)?;
-        if !resp.status().is_success() {
-            bail!("Auth failed: {}", resp.status())
-        }
-
-        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text()?.as_str())?;
-        println!("got auth info: #{:?}", auth_info);
-
-        use ProxyAuthResponse::*;
-        match auth_info {
-            Ready { conn_info } => Ok(conn_info),
-            Error { error } => bail!(error),
-            NotReady { .. } => waiter.wait()?.map_err(|e| anyhow!(e)),
-        }
-    }
 }
 
 #[cfg(test)]

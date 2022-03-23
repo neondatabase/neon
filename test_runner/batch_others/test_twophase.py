@@ -3,16 +3,13 @@ import os
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test branching, when a transaction is in prepared state
 #
 def test_twophase(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli(["branch", "test_twophase", "empty"])
-
+    env.zenith_cli.create_branch("test_twophase", "empty")
     pg = env.postgres.create_start('test_twophase', config_lines=['max_prepared_transactions=5'])
     log.info("postgres is running on 'test_twophase' branch")
 
@@ -58,7 +55,7 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    env.zenith_cli(["branch", "test_twophase_prepared", "test_twophase"])
+    env.zenith_cli.create_branch("test_twophase_prepared", "test_twophase")
 
     # Start compute on the new branch
     pg2 = env.postgres.create_start(
@@ -80,8 +77,8 @@ def test_twophase(zenith_simple_env: ZenithEnv):
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute('SELECT * FROM foo')
-    assert cur2.fetchall() == [('one', ), ('three', )]  # type: ignore[comparison-overlap]
+    assert cur2.fetchall() == [('one', ), ('three', )]
 
     # Only one committed insert is visible on the original branch
     cur.execute('SELECT * FROM foo')
-    assert cur.fetchall() == [('three', )]  # type: ignore[comparison-overlap]
+    assert cur.fetchall() == [('three', )]

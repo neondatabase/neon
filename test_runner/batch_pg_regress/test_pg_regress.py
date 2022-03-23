@@ -3,15 +3,11 @@ import os
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, capsys):
     env = zenith_simple_env
 
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_pg_regress", "empty"])
-
+    env.zenith_cli.create_branch("test_pg_regress", "empty")
     # Connect to postgres and create a database called "regression".
     pg = env.postgres.create_start('test_pg_regress')
     pg.safe_psql('CREATE DATABASE regression')

@@ -2,7 +2,14 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
+use zenith_utils::{
+    auth::JwtAuth,
+    logging,
+    postgres_backend::AuthType,
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
 
 use anyhow::{bail, Context, Result};
 
@@ -10,11 +17,13 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches,
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
+    http, page_cache, page_service,
+    remote_storage::{self, SyncStartupData},
+    repository::{Repository, TimelineSyncStatusUpdate},
+    tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
-    virtual_file, LOG_FILE_NAME,
+    timelines, virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
 use zenith_utils::postgres_backend;
@@ -27,41 +36,48 @@ fn main() -> Result<()> {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("daemonize")
-                .short("d")
+            Arg::new("daemonize")
+                .short('d')
                 .long("daemonize")
                 .takes_value(false)
                 .help("Run in the background"),
         )
         .arg(
-            Arg::with_name("init")
+            Arg::new("init")
                 .long("init")
                 .takes_value(false)
-                .help("Initialize pageserver repo"),
+                .help("Initialize pageserver service: creates an initial config, tenant and timeline, if specified"),
         )
         .arg(
-            Arg::with_name("workdir")
-                .short("D")
+            Arg::new("workdir")
+                .short('D')
                 .long("workdir")
                 .takes_value(true)
                 .help("Working directory for the pageserver"),
         )
         .arg(
-            Arg::with_name("create-tenant")
+            Arg::new("create-tenant")
                 .long("create-tenant")
                 .takes_value(true)
                 .help("Create tenant during init")
                 .requires("init"),
         )
+        .arg(
+            Arg::new("initial-timeline-id")
+                .long("initial-timeline-id")
+                .takes_value(true)
+                .help("Use a specific timeline id during init and tenant creation")
+                .requires("create-tenant"),
+        )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
-            Arg::with_name("config-override")
-                .short("c")
+            Arg::new("config-override")
+                .short('c')
                 .takes_value(true)
                 .number_of_values(1)
-                .multiple(true)
+                .multiple_occurrences(true)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
-                Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .get_matches();
 
@@ -72,7 +88,16 @@ fn main() -> Result<()> {
     let cfg_file_path = workdir.join("pageserver.toml");
 
     let init = arg_matches.is_present("init");
-    let create_tenant = arg_matches.value_of("create-tenant");
+    let create_tenant = arg_matches
+        .value_of("create-tenant")
+        .map(ZTenantId::from_str)
+        .transpose()
+        .context("Failed to parse tenant id from the arguments")?;
+    let initial_timeline_id = arg_matches
+        .value_of("initial-timeline-id")
+        .map(ZTimelineId::from_str)
+        .transpose()
+        .context("Failed to parse timeline id from the arguments")?;
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
@@ -115,7 +140,14 @@ fn main() -> Result<()> {
                     option_line
                 )
             })?;
+
             for (key, item) in doc.iter() {
+                if key == "id" {
+                    anyhow::ensure!(
+                        init,
+                        "node id can only be set during pageserver init and cannot be overridden"
+                    );
+                }
                 toml.insert(key, item.clone());
             }
         }
@@ -136,7 +168,8 @@ fn main() -> Result<()> {
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
+        timelines::init_pageserver(conf, create_tenant, initial_timeline_id)
+            .context("Failed to init pageserver")?;
         // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(
@@ -197,11 +230,47 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     let signals = signals::install_shutdown_handlers()?;
-    let sync_startup = remote_storage::start_local_timeline_sync(conf)
+
+    // Initialize repositories with locally available timelines.
+    // Timelines that are only partially available locally (remote storage has more data than this pageserver)
+    // are scheduled for download and added to the repository once download is completed.
+    let SyncStartupData {
+        remote_index,
+        local_timeline_init_statuses,
+    } = remote_storage::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
 
-    // Initialize tenant manager.
-    tenant_mgr::set_timeline_states(conf, sync_startup.initial_timeline_states);
+    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
+        // initialize local tenant
+        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index);
+        for (timeline_id, init_status) in local_timeline_init_statuses {
+            match init_status {
+                remote_storage::LocalTimelineInitStatus::LocallyComplete => {
+                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", tenant_id, timeline_id);
+                    // Lets fail here loudly to be on the safe side.
+                    // XXX: It may be a better api to actually distinguish between repository startup
+                    //   and processing of newly downloaded timelines.
+                    repo.apply_timeline_remote_sync_status_update(
+                        timeline_id,
+                        TimelineSyncStatusUpdate::Downloaded,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Failed to bootstrap timeline {} for tenant {}",
+                            timeline_id, tenant_id
+                        )
+                    })?
+                }
+                remote_storage::LocalTimelineInitStatus::NeedsSync => {
+                    debug!(
+                        "timeline {} for tenant {} needs sync, \
+                         so skipped for adding into repository until sync is finished",
+                        tenant_id, timeline_id
+                    );
+                }
+            }
+        }
+    }
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -223,7 +292,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         "http_endpoint_thread",
         move || {
-            let router = http::make_router(conf, auth_cloned);
+            let router = http::make_router(conf, auth_cloned, remote_index);
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;

@@ -1,23 +1,20 @@
 //! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
-//! Currently, tenant branch files are also uploaded, but this does not appear final.
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use anyhow::{ensure, Context};
-use futures::{stream::FuturesUnordered, StreamExt};
-use tokio::{fs, sync::RwLock};
+use anyhow::ensure;
+use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
-use zenith_utils::zid::ZTenantId;
 
 use crate::{
     config::PageServerConf,
     remote_storage::{
         storage_sync::{
-            compression,
-            index::{RemoteTimeline, TimelineIndexEntry},
-            sync_queue, tenant_branch_files, update_index_description, SyncKind, SyncTask,
+            compression, fetch_full_index,
+            index::{RemoteTimeline, TimelineIndexEntry, TimelineIndexEntryInner},
+            sync_queue, SyncKind, SyncTask,
         },
-        RemoteStorage, TimelineSyncId,
+        RemoteStorage, ZTenantTimelineId,
     },
 };
 
@@ -26,8 +23,6 @@ use super::{compression::ArchiveHeader, index::RemoteTimelineIndex, NewCheckpoin
 /// Attempts to compress and upload given checkpoint files.
 /// No extra checks for overlapping files is made: download takes care of that, ensuring no non-metadata local timeline files are overwritten.
 ///
-/// Before the checkpoint files are uploaded, branch files are uploaded, if any local ones are missing remotely.
-///
 /// On an error, bumps the retries count and reschedules the entire task.
 /// On success, populates index data with new downloads.
 pub(super) async fn upload_timeline_checkpoint<
@@ -35,50 +30,43 @@ pub(super) async fn upload_timeline_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
-    sync_id: TimelineSyncId,
+    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    sync_id: ZTenantTimelineId,
     new_checkpoint: NewCheckpoint,
     retries: u32,
 ) -> Option<bool> {
     debug!("Uploading checkpoint for sync id {}", sync_id);
-    if let Err(e) = upload_missing_branches(config, remote_assets.as_ref(), sync_id.0).await {
-        error!(
-            "Failed to upload missing branches for sync id {}: {:?}",
-            sync_id, e
-        );
-        sync_queue::push(SyncTask::new(
-            sync_id,
-            retries,
-            SyncKind::Upload(new_checkpoint),
-        ));
-        return Some(false);
-    }
     let new_upload_lsn = new_checkpoint.metadata.disk_consistent_lsn();
 
     let index = &remote_assets.1;
 
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = sync_id;
     let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
 
     let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => None,
-        Some(TimelineIndexEntry::Full(remote_timeline)) => Some(Cow::Borrowed(remote_timeline)),
-        Some(TimelineIndexEntry::Description(_)) => {
-            debug!("Found timeline description for the given ids, downloading the full index");
-            match update_index_description(remote_assets.as_ref(), &timeline_dir, sync_id).await {
-                Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
-                Err(e) => {
-                    error!("Failed to download full timeline index: {:?}", e);
-                    sync_queue::push(SyncTask::new(
-                        sync_id,
-                        retries,
-                        SyncKind::Upload(new_checkpoint),
-                    ));
-                    return Some(false);
+        Some(entry) => match entry.inner() {
+            TimelineIndexEntryInner::Full(remote_timeline) => Some(Cow::Borrowed(remote_timeline)),
+            TimelineIndexEntryInner::Description(_) => {
+                debug!("Found timeline description for the given ids, downloading the full index");
+                match fetch_full_index(remote_assets.as_ref(), &timeline_dir, sync_id).await {
+                    Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
+                    Err(e) => {
+                        error!("Failed to download full timeline index: {:?}", e);
+                        sync_queue::push(SyncTask::new(
+                            sync_id,
+                            retries,
+                            SyncKind::Upload(new_checkpoint),
+                        ));
+                        return Some(false);
+                    }
                 }
             }
-        }
+        },
     };
 
     let already_contains_upload_lsn = remote_timeline
@@ -109,22 +97,40 @@ pub(super) async fn upload_timeline_checkpoint<
     {
         Ok((archive_header, header_size)) => {
             let mut index_write = index.write().await;
-            match index_write.timeline_entry_mut(&sync_id) {
-                Some(TimelineIndexEntry::Full(remote_timeline)) => {
-                    remote_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                }
-                None | Some(TimelineIndexEntry::Description(_)) => {
+            match index_write
+                .timeline_entry_mut(&sync_id)
+                .map(|e| e.inner_mut())
+            {
+                None => {
                     let mut new_timeline = RemoteTimeline::empty();
                     new_timeline.update_archive_contents(
                         new_checkpoint.metadata.disk_consistent_lsn(),
                         archive_header,
                         header_size,
                     );
-                    index_write.add_timeline_entry(sync_id, TimelineIndexEntry::Full(new_timeline));
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
+                }
+                Some(TimelineIndexEntryInner::Full(remote_timeline)) => {
+                    remote_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
+                    );
+                }
+                Some(TimelineIndexEntryInner::Description(_)) => {
+                    let mut new_timeline = RemoteTimeline::empty();
+                    new_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
+                    );
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
                 }
             }
             debug!("Checkpoint uploaded successfully");
@@ -150,12 +156,15 @@ async fn try_upload_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
-    sync_id: TimelineSyncId,
+    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
 ) -> anyhow::Result<(ArchiveHeader, u64)> {
-    let TimelineSyncId(tenant_id, timeline_id) = sync_id;
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = sync_id;
     let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
 
     let files_to_upload = new_checkpoint
@@ -194,76 +203,6 @@ async fn try_upload_checkpoint<
     .map(|(header, header_size, _)| (header, header_size))
 }
 
-async fn upload_missing_branches<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
-    tenant_id: ZTenantId,
-) -> anyhow::Result<()> {
-    let local_branches = tenant_branch_files(config, tenant_id)
-        .await
-        .context("Failed to list local branch files for the tenant")?;
-    let index_read = index.read().await;
-    let remote_branches = index_read
-        .branch_files(tenant_id)
-        .cloned()
-        .unwrap_or_default();
-    drop(index_read);
-
-    let mut branch_uploads = local_branches
-        .difference(&remote_branches)
-        .map(|local_only_branch| async move {
-            let local_branch_path = local_only_branch.as_path(&config.branches_path(&tenant_id));
-            let storage_path = storage.storage_path(&local_branch_path).with_context(|| {
-                format!(
-                    "Failed to derive a storage path for branch with local path '{}'",
-                    local_branch_path.display()
-                )
-            })?;
-            let local_branch_file = fs::OpenOptions::new()
-                .read(true)
-                .open(&local_branch_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to open local branch file {} for reading",
-                        local_branch_path.display()
-                    )
-                })?;
-            storage
-                .upload(local_branch_file, &storage_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to upload branch file to the remote path {:?}",
-                        storage_path
-                    )
-                })?;
-            Ok::<_, anyhow::Error>(local_only_branch)
-        })
-        .collect::<FuturesUnordered<_>>();
-
-    let mut branch_uploads_failed = false;
-    while let Some(upload_result) = branch_uploads.next().await {
-        match upload_result {
-            Ok(local_only_branch) => index
-                .write()
-                .await
-                .add_branch_file(tenant_id, local_only_branch.clone()),
-            Err(e) => {
-                error!("Failed to upload branch file: {:?}", e);
-                branch_uploads_failed = true;
-            }
-        }
-    }
-
-    ensure!(!branch_uploads_failed, "Failed to upload all branch files");
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -288,15 +227,17 @@ mod tests {
     #[tokio::test]
     async fn reupload_timeline() -> anyhow::Result<()> {
         let repo_harness = RepoHarness::create("reupload_timeline")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
+        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        let index = Arc::new(RwLock::new(
+            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+                repo_harness.conf,
+                storage
+                    .list()
+                    .await?
+                    .into_iter()
+                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+            ),
         ));
         let remote_assets = Arc::new((storage, index));
         let index = &remote_assets.1;
@@ -484,15 +425,17 @@ mod tests {
     #[tokio::test]
     async fn reupload_timeline_rejected() -> anyhow::Result<()> {
         let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
-        let sync_id = TimelineSyncId(repo_harness.tenant_id, TIMELINE_ID);
+        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        let index = Arc::new(RwLock::new(
+            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+                repo_harness.conf,
+                storage
+                    .list()
+                    .await?
+                    .into_iter()
+                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+            ),
         ));
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;

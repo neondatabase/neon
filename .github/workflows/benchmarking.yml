@@ -3,7 +3,7 @@ name: benchmarking
 on:
   # uncomment to run on push for debugging your PR
   # push:
-  #   branches: [ mybranch ]
+  #   branches: [ your branch ]
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
@@ -41,14 +41,14 @@ jobs:
       run: |
         python3 -m pip install --upgrade poetry wheel
         # since pip/poetry caches are reused there shouldn't be any troubles with install every time
-        poetry install
+        ./scripts/pysync
 
     - name: Show versions
       run: |
         echo Python
         python3 --version
         poetry run python3 --version
-        echo Pipenv
+        echo Poetry
         poetry --version
         echo Pgbench
         $PG_BIN/pgbench --version
@@ -89,11 +89,15 @@ jobs:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
+        # just to be sure that no data was cached on self hosted runner
+        # since it might generate duplicates when calling ingest_perf_test_result.py
+        rm -rf perf-report-staging
         mkdir -p perf-report-staging
         ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
 
     - name: Submit result
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       run: |
         REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh

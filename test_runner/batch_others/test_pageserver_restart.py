@@ -7,17 +7,15 @@ from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
     # One safekeeper is enough for this test.
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
-    env.zenith_cli(["branch", "test_pageserver_restart", "main"])
+    env.zenith_cli.create_branch('test_pageserver_restart')
     pg = env.postgres.create_start('test_pageserver_restart')
 
     pg_conn = pg.connect()

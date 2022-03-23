@@ -89,41 +89,38 @@ use std::{
     collections::HashMap,
     ffi, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{bail, Context};
-use tokio::io;
+use tokio::{io, sync::RwLock};
 use tracing::{error, info};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
+pub use self::storage_sync::index::{RemoteTimelineIndex, TimelineIndexEntry};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::{
     config::{PageServerConf, RemoteStorageKind},
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    repository::TimelineSyncState,
 };
 
-/// Any timeline has its own id and its own tenant it belongs to,
-/// the sync processes group timelines by both for simplicity.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub struct TimelineSyncId(ZTenantId, ZTimelineId);
+pub use storage_sync::compression;
 
-impl std::fmt::Display for TimelineSyncId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(tenant: {}, timeline: {})", self.0, self.1)
-    }
+#[derive(Clone, Copy, Debug)]
+pub enum LocalTimelineInitStatus {
+    LocallyComplete,
+    NeedsSync,
 }
+
+type LocalTimelineInitStatuses = HashMap<ZTenantId, HashMap<ZTimelineId, LocalTimelineInitStatus>>;
 
 /// A structure to combine all synchronization data to share with pageserver after a successful sync loop initialization.
 /// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
 /// to simplify the received code.
 pub struct SyncStartupData {
-    /// A sync state, derived from initial comparison of local timeline files and the remote archives,
-    /// before any sync tasks are executed.
-    /// To reuse the local file scan logic, the timeline states are returned even if no sync loop get started during init:
-    /// in this case, no remote files exist and all local timelines with correct metadata files are considered ready.
-    pub initial_timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>,
+    pub remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    pub local_timeline_init_statuses: LocalTimelineInitStatuses,
 }
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
@@ -163,23 +160,18 @@ pub fn start_local_timeline_sync(
         .context("Failed to spawn the storage sync thread"),
         None => {
             info!("No remote storage configured, skipping storage sync, considering all local timelines with correct metadata files enabled");
-            let mut initial_timeline_states: HashMap<
-                ZTenantId,
-                HashMap<ZTimelineId, TimelineSyncState>,
-            > = HashMap::new();
-            for (TimelineSyncId(tenant_id, timeline_id), (timeline_metadata, _)) in
+            let mut local_timeline_init_statuses = LocalTimelineInitStatuses::new();
+            for (ZTenantTimelineId { tenant_id, timeline_id }, _) in
                 local_timeline_files
             {
-                initial_timeline_states
+                local_timeline_init_statuses
                     .entry(tenant_id)
                     .or_default()
-                    .insert(
-                        timeline_id,
-                        TimelineSyncState::Ready(timeline_metadata.disk_consistent_lsn()),
-                    );
+                    .insert(timeline_id, LocalTimelineInitStatus::LocallyComplete);
             }
             Ok(SyncStartupData {
-                initial_timeline_states,
+                local_timeline_init_statuses,
+                remote_index: Arc::new(RwLock::new(RemoteTimelineIndex::empty())),
             })
         }
     }
@@ -187,7 +179,7 @@ pub fn start_local_timeline_sync(
 
 fn local_tenant_timeline_files(
     config: &'static PageServerConf,
-) -> anyhow::Result<HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>> {
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
     let mut local_tenant_timeline_files = HashMap::new();
     let tenants_dir = config.tenants_path();
     for tenants_dir_entry in fs::read_dir(&tenants_dir)
@@ -222,8 +214,9 @@ fn local_tenant_timeline_files(
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
-) -> anyhow::Result<HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)>> {
-    let mut timelines: HashMap<TimelineSyncId, (TimelineMetadata, Vec<PathBuf>)> = HashMap::new();
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
+    let mut timelines: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)> =
+        HashMap::new();
     let tenant_id = tenant_path
         .file_name()
         .and_then(ffi::OsStr::to_str)
@@ -244,7 +237,10 @@ fn collect_timelines_for_tenant(
                 match collect_timeline_files(&timeline_path) {
                     Ok((timeline_id, metadata, timeline_files)) => {
                         timelines.insert(
-                            TimelineSyncId(tenant_id, timeline_id),
+                            ZTenantTimelineId {
+                                tenant_id,
+                                timeline_id,
+                            },
                             (metadata, timeline_files),
                         );
                     }

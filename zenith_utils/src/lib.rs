@@ -42,6 +42,9 @@ pub mod logging;
 pub mod accum;
 pub mod shutdown;
 
+// Tools for calling certain async methods in sync contexts
+pub mod sync;
+
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
 

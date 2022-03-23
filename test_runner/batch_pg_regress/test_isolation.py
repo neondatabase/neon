@@ -3,15 +3,11 @@ import os
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import ZenithEnv, base_dir, pg_distrib_dir
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
 
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_isolation", "empty"])
-
+    env.zenith_cli.create_branch("test_isolation", "empty")
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
     pg = env.postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])

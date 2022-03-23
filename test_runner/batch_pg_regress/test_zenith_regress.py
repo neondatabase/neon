@@ -7,15 +7,11 @@ from fixtures.zenith_fixtures import (ZenithEnv,
                                       pg_distrib_dir)
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_zenith_regress(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
 
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_zenith_regress", "empty"])
-
+    env.zenith_cli.create_branch("test_zenith_regress", "empty")
     # Connect to postgres and create a database called "regression".
     pg = env.postgres.create_start('test_zenith_regress')
     pg.safe_psql('CREATE DATABASE regression')

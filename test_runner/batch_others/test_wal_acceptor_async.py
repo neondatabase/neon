@@ -9,7 +9,6 @@ from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
 
 log = getLogger('root.wal_acceptor_async')
-pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 class BankClient(object):
@@ -201,9 +200,9 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
 # restart acceptors one by one, while executing and validating bank transactions
 def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
-    env.zenith_cli(["branch", "test_wal_acceptors_restarts_under_load", "main"])
+    env.zenith_cli.create_branch('test_wal_acceptors_restarts_under_load')
     pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load')
 
     asyncio.run(run_restarts_under_load(pg, env.safekeepers))

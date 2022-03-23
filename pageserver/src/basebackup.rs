@@ -22,6 +22,7 @@ use tar::{Builder, EntryType, Header};
 
 use crate::relish::*;
 use crate::repository::Timeline;
+use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use zenith_utils::lsn::Lsn;
@@ -31,7 +32,7 @@ use zenith_utils::lsn::Lsn;
 /// used for constructing tarball.
 pub struct Basebackup<'a> {
     ar: Builder<&'a mut dyn Write>,
-    timeline: &'a Arc<dyn Timeline>,
+    timeline: &'a Arc<DatadirTimelineImpl>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
 }
@@ -46,7 +47,7 @@ pub struct Basebackup<'a> {
 impl<'a> Basebackup<'a> {
     pub fn new(
         write: &'a mut dyn Write,
-        timeline: &'a Arc<dyn Timeline>,
+        timeline: &'a Arc<DatadirTimelineImpl>,
         req_lsn: Option<Lsn>,
     ) -> Result<Basebackup<'a>> {
         // Compute postgres doesn't have any previous WAL files, but the first
@@ -64,13 +65,13 @@ impl<'a> Basebackup<'a> {
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
-            timeline.wait_lsn(req_lsn)?;
+            timeline.tline.wait_lsn(req_lsn)?;
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as
             // zero, though, if no WAL has been generated on this timeline
             // yet.)
-            let end_of_timeline = timeline.get_last_record_rlsn();
+            let end_of_timeline = timeline.tline.get_last_record_rlsn();
             if req_lsn == end_of_timeline.last {
                 (end_of_timeline.prev, req_lsn)
             } else {
@@ -78,7 +79,7 @@ impl<'a> Basebackup<'a> {
             }
         } else {
             // Backup was requested at end of the timeline.
-            let end_of_timeline = timeline.get_last_record_rlsn();
+            let end_of_timeline = timeline.tline.get_last_record_rlsn();
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
@@ -115,19 +116,22 @@ impl<'a> Basebackup<'a> {
         }
 
         // Gather non-relational files from object storage pages.
-        for obj in self.timeline.list_nonrels(self.lsn)? {
-            match obj {
-                RelishTag::Slru { slru, segno } => {
-                    self.add_slru_segment(slru, segno)?;
-                }
-                RelishTag::FileNodeMap { spcnode, dbnode } => {
-                    self.add_relmap_file(spcnode, dbnode)?;
-                }
-                RelishTag::TwoPhase { xid } => {
-                    self.add_twophase_file(xid)?;
-                }
-                _ => {}
+        for kind in [
+            SlruKind::Clog,
+            SlruKind::MultiXactOffsets,
+            SlruKind::MultiXactMembers,
+        ] {
+            for segno in self.timeline.list_slru_segments(kind, self.lsn)? {
+                self.add_slru_segment(kind, segno)?;
             }
+        }
+
+        // Create tablespace directories
+        for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
+            self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
+        }
+        for xid in self.timeline.list_twophase_files(self.lsn)? {
+            self.add_twophase_file(xid)?;
         }
 
         // Generate pg_control and bootstrap WAL segment.
@@ -141,27 +145,14 @@ impl<'a> Basebackup<'a> {
     // Generate SLRU segment files from repository.
     //
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let seg_size = self
-            .timeline
-            .get_relish_size(RelishTag::Slru { slru, segno }, self.lsn)?;
-
-        if seg_size == None {
-            trace!(
-                "SLRU segment {}/{:>04X} was truncated",
-                slru.to_str(),
-                segno
-            );
-            return Ok(());
-        }
-
-        let nblocks = seg_size.unwrap();
+        let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
 
         let mut slru_buf: Vec<u8> =
             Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
         for blknum in 0..nblocks {
-            let img =
-                self.timeline
-                    .get_page_at_lsn(RelishTag::Slru { slru, segno }, blknum, self.lsn)?;
+            let img = self
+                .timeline
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
             assert!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
@@ -176,16 +167,26 @@ impl<'a> Basebackup<'a> {
     }
 
     //
-    // Extract pg_filenode.map files from repository
-    // Along with them also send PG_VERSION for each database.
+    // Include database/tablespace directories.
     //
-    fn add_relmap_file(&mut self, spcnode: u32, dbnode: u32) -> anyhow::Result<()> {
-        let img = self.timeline.get_page_at_lsn(
-            RelishTag::FileNodeMap { spcnode, dbnode },
-            0,
-            self.lsn,
-        )?;
-        let path = if spcnode == pg_constants::GLOBALTABLESPACE_OID {
+    // Each directory contains a PG_VERSION file, and the default database
+    // directories also contain pg_filenode.map files.
+    //
+    fn add_dbdir(
+        &mut self,
+        spcnode: u32,
+        dbnode: u32,
+        has_relmap_file: bool,
+    ) -> anyhow::Result<()> {
+        let relmap_img = if has_relmap_file {
+            let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
+            assert!(img.len() == 512);
+            Some(img)
+        } else {
+            None
+        };
+
+        if spcnode == pg_constants::GLOBALTABLESPACE_OID {
             let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
@@ -193,9 +194,32 @@ impl<'a> Basebackup<'a> {
             let header = new_tar_header("global/PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
 
-            String::from("global/pg_filenode.map") // filenode map for global tablespace
+            if let Some(img) = relmap_img {
+                // filenode map for global tablespace
+                let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            } else {
+                warn!("global/pg_filenode.map is missing");
+            }
         } else {
-            // User defined tablespaces are not supported
+            // User defined tablespaces are not supported. However, as
+            // a special case, if a tablespace/db directory is
+            // completely empty, we can leave it out altogether. This
+            // makes taking a base backup after the 'tablespace'
+            // regression test pass, because the test drops the
+            // created tablespaces after the tests.
+            //
+            // FIXME: this wouldn't be necessary, if we handled
+            // XLOG_TBLSPC_DROP records. But we probably should just
+            // throw an error on CREATE TABLESPACE in the first place.
+            if !has_relmap_file
+                && self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn)?
+                    .is_empty()
+            {
+                return Ok(());
+            }
             assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
@@ -203,16 +227,17 @@ impl<'a> Basebackup<'a> {
             let header = new_tar_header_dir(&path)?;
             self.ar.append(&header, &mut io::empty())?;
 
-            let dst_path = format!("base/{}/PG_VERSION", dbnode);
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
-            let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
-            self.ar.append(&header, version_bytes)?;
+            if let Some(img) = relmap_img {
+                let dst_path = format!("base/{}/PG_VERSION", dbnode);
+                let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+                let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
+                self.ar.append(&header, version_bytes)?;
 
-            format!("base/{}/pg_filenode.map", dbnode)
+                let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
+                let header = new_tar_header(&relmap_path, img.len() as u64)?;
+                self.ar.append(&header, &img[..])?;
+            }
         };
-        assert!(img.len() == 512);
-        let header = new_tar_header(&path, img.len() as u64)?;
-        self.ar.append(&header, &img[..])?;
         Ok(())
     }
 
@@ -220,9 +245,7 @@ impl<'a> Basebackup<'a> {
     // Extract twophase state files
     //
     fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
-        let img = self
-            .timeline
-            .get_page_at_lsn(RelishTag::TwoPhase { xid }, 0, self.lsn)?;
+        let img = self.timeline.get_twophase_file(xid, self.lsn)?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -242,11 +265,11 @@ impl<'a> Basebackup<'a> {
     fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
         let checkpoint_bytes = self
             .timeline
-            .get_page_at_lsn(RelishTag::Checkpoint, 0, self.lsn)
+            .get_checkpoint(self.lsn)
             .context("failed to get checkpoint bytes")?;
         let pg_control_bytes = self
             .timeline
-            .get_page_at_lsn(RelishTag::ControlFile, 0, self.lsn)
+            .get_control_file(self.lsn)
             .context("failed get control bytes")?;
         let mut pg_control = ControlFileData::decode(&pg_control_bytes)?;
         let mut checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
@@ -267,7 +290,7 @@ impl<'a> Basebackup<'a> {
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.get_ancestor_lsn() {
+            if self.lsn == self.timeline.tline.get_ancestor_lsn() {
                 write!(zenith_signal, "PREV LSN: none")?;
             } else {
                 write!(zenith_signal, "PREV LSN: invalid")?;

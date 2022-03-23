@@ -1,14 +1,10 @@
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 def test_pgbench(zenith_simple_env: ZenithEnv, pg_bin):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_pgbench", "empty"])
-
+    env.zenith_cli.create_branch("test_pgbench", "empty")
     pg = env.postgres.create_start('test_pgbench')
     log.info("postgres is running on 'test_pgbench' branch")
 

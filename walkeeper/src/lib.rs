@@ -2,9 +2,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use zenith_utils::zid::ZTimelineId;
+use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
 
 pub mod callmemaybe;
+pub mod control_file;
+pub mod control_file_upgrade;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
@@ -13,8 +15,8 @@ pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;
 pub mod timeline;
-pub mod upgrade;
 pub mod wal_service;
+pub mod wal_storage;
 
 pub mod defaults {
     use const_format::formatcp;
@@ -44,11 +46,14 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
+    pub my_id: ZNodeId,
 }
 
 impl SafeKeeperConf {
-    pub fn timeline_dir(&self, timelineid: &ZTimelineId) -> PathBuf {
-        self.workdir.join(timelineid.to_string())
+    pub fn timeline_dir(&self, zttid: &ZTenantTimelineId) -> PathBuf {
+        self.workdir
+            .join(zttid.tenant_id.to_string())
+            .join(zttid.timeline_id.to_string())
     }
 }
 
@@ -65,6 +70,7 @@ impl Default for SafeKeeperConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
+            my_id: ZNodeId(0),
         }
     }
 }

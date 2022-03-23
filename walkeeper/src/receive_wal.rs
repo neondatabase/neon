@@ -2,14 +2,21 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use anyhow::{bail, Context, Result};
-use bytes::Bytes;
+use anyhow::{anyhow, bail, Result};
+
 use bytes::BytesMut;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
+use zenith_utils::sock_split::ReadStream;
 
 use crate::timeline::Timeline;
+
 use std::net::SocketAddr;
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
+
 use std::sync::Arc;
+use std::thread;
 
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -18,10 +25,8 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::TimelineTools;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeMessage};
-use zenith_utils::zid::ZTenantId;
 
 use crate::callmemaybe::CallmeEvent;
-use crate::callmemaybe::SubscriptionStateKey;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -47,21 +52,6 @@ impl<'pg> ReceiveWalConn<'pg> {
         }
     }
 
-    // Read and extract the bytes of a `CopyData` message from the postgres instance
-    fn read_msg_bytes(&mut self) -> Result<Bytes> {
-        match self.pg_backend.read_message()? {
-            Some(FeMessage::CopyData(bytes)) => Ok(bytes),
-            Some(msg) => bail!("expected `CopyData` message, found {:?}", msg),
-            None => bail!("connection closed unexpectedly"),
-        }
-    }
-
-    // Read and parse message sent from the postgres instance
-    fn read_msg(&mut self) -> Result<ProposerAcceptorMessage> {
-        let data = self.read_msg_bytes()?;
-        ProposerAcceptorMessage::parse(data)
-    }
-
     // Send message to the postgres
     fn write_msg(&mut self, msg: &AcceptorProposerMessage) -> Result<()> {
         let mut buf = BytesMut::with_capacity(128);
@@ -78,76 +68,137 @@ impl<'pg> ReceiveWalConn<'pg> {
         self.pg_backend
             .write_message(&BeMessage::CopyBothResponse)?;
 
+        let r = self
+            .pg_backend
+            .take_stream_in()
+            .ok_or_else(|| anyhow!("failed to take read stream from pgbackend"))?;
+        let mut poll_reader = ProposerPollStream::new(r)?;
+
         // Receive information about server
-        let mut msg = self
-            .read_msg()
-            .context("failed to receive proposer greeting")?;
-        let tenant_id: ZTenantId;
-        match msg {
+        let next_msg = poll_reader.recv_msg()?;
+        match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
                     "start handshake with wal proposer {} sysid {} timeline {}",
                     self.peer_addr, greeting.system_id, greeting.tli,
                 );
-                tenant_id = greeting.tenant_id;
             }
-            _ => bail!("unexpected message {:?} instead of greeting", msg),
+            _ => bail!("unexpected message {:?} instead of greeting", next_msg),
         }
 
-        // Incoming WAL stream resumed, so reset information about the timeline pause.
-        spg.timeline.get().continue_streaming();
-
-        // if requested, ask pageserver to fetch wal from us
-        // as long as this wal_stream is alive, callmemaybe thread
-        // will send requests to pageserver
-        let _guard = match self.pageserver_connstr {
-            Some(ref pageserver_connstr) => {
-                // Need to establish replication channel with page server.
-                // Add far as replication in postgres is initiated by receiver
-                // we should use callmemaybe mechanism.
-                let timeline_id = spg.timeline.get().timeline_id;
-                let subscription_key = SubscriptionStateKey::new(
-                    tenant_id,
-                    timeline_id,
-                    pageserver_connstr.to_owned(),
-                );
-                spg.tx
-                    .send(CallmeEvent::Subscribe(subscription_key))
-                    .unwrap_or_else(|e| {
-                        error!(
-                            "failed to send Subscribe request to callmemaybe thread {}",
-                            e
-                        );
-                    });
-
-                // create a guard to unsubscribe callback, when this wal_stream will exit
-                Some(SendWalHandlerGuard {
-                    timeline: Arc::clone(spg.timeline.get()),
-                })
-            }
-            None => None,
+        // Register the connection and defer unregister.
+        spg.timeline
+            .get()
+            .on_compute_connect(self.pageserver_connstr.as_ref(), &spg.tx)?;
+        let _guard = ComputeConnectionGuard {
+            timeline: Arc::clone(spg.timeline.get()),
+            callmemaybe_tx: spg.tx.clone(),
         };
 
+        let mut next_msg = Some(next_msg);
+
         loop {
-            let reply = spg
-                .timeline
-                .get()
-                .process_msg(&msg)
-                .context("failed to process ProposerAcceptorMessage")?;
-            if let Some(reply) = reply {
-                self.write_msg(&reply)?;
+            if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
+                // poll AppendRequest's without blocking and write WAL to disk without flushing,
+                // while it's readily available
+                while let Some(ProposerAcceptorMessage::AppendRequest(append_request)) = next_msg {
+                    let msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+
+                    let reply = spg.process_safekeeper_msg(&msg)?;
+                    if let Some(reply) = reply {
+                        self.write_msg(&reply)?;
+                    }
+
+                    next_msg = poll_reader.poll_msg();
+                }
+
+                // flush all written WAL to the disk
+                let reply = spg.process_safekeeper_msg(&ProposerAcceptorMessage::FlushWAL)?;
+                if let Some(reply) = reply {
+                    self.write_msg(&reply)?;
+                }
+            } else if let Some(msg) = next_msg.take() {
+                // process other message
+                let reply = spg.process_safekeeper_msg(&msg)?;
+                if let Some(reply) = reply {
+                    self.write_msg(&reply)?;
+                }
             }
-            msg = self.read_msg()?;
+
+            // blocking wait for the next message
+            if next_msg.is_none() {
+                next_msg = Some(poll_reader.recv_msg()?);
+            }
         }
     }
 }
 
-struct SendWalHandlerGuard {
-    timeline: Arc<Timeline>,
+struct ProposerPollStream {
+    msg_rx: Receiver<ProposerAcceptorMessage>,
+    read_thread: Option<thread::JoinHandle<Result<()>>>,
 }
 
-impl Drop for SendWalHandlerGuard {
+impl ProposerPollStream {
+    fn new(mut r: ReadStream) -> Result<Self> {
+        let (msg_tx, msg_rx) = channel();
+
+        let read_thread = thread::Builder::new()
+            .name("Read WAL thread".into())
+            .spawn(move || -> Result<()> {
+                loop {
+                    let copy_data = match FeMessage::read(&mut r)? {
+                        Some(FeMessage::CopyData(bytes)) => bytes,
+                        Some(msg) => bail!("expected `CopyData` message, found {:?}", msg),
+                        None => bail!("connection closed unexpectedly"),
+                    };
+
+                    let msg = ProposerAcceptorMessage::parse(copy_data)?;
+                    msg_tx.send(msg)?;
+                }
+                // msg_tx will be dropped here, this will also close msg_rx
+            })?;
+
+        Ok(Self {
+            msg_rx,
+            read_thread: Some(read_thread),
+        })
+    }
+
+    fn recv_msg(&mut self) -> Result<ProposerAcceptorMessage> {
+        self.msg_rx.recv().map_err(|_| {
+            // return error from the read thread
+            let res = match self.read_thread.take() {
+                Some(thread) => thread.join(),
+                None => return anyhow!("read thread is gone"),
+            };
+
+            match res {
+                Ok(Ok(())) => anyhow!("unexpected result from read thread"),
+                Err(err) => anyhow!("read thread panicked: {:?}", err),
+                Ok(Err(err)) => err,
+            }
+        })
+    }
+
+    fn poll_msg(&mut self) -> Option<ProposerAcceptorMessage> {
+        let res = self.msg_rx.try_recv();
+
+        match res {
+            Err(_) => None,
+            Ok(msg) => Some(msg),
+        }
+    }
+}
+
+struct ComputeConnectionGuard {
+    timeline: Arc<Timeline>,
+    callmemaybe_tx: UnboundedSender<CallmeEvent>,
+}
+
+impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline.stop_streaming();
+        self.timeline
+            .on_compute_disconnect(&self.callmemaybe_tx)
+            .unwrap();
     }
 }

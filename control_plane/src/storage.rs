@@ -5,22 +5,23 @@ use std::process::Command;
 use std::time::Duration;
 use std::{io, result, thread};
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{BranchCreateRequest, TenantCreateRequest};
+use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use zenith_utils::http::error::HttpErrorBody;
+use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
-use pageserver::branches::BranchInfo;
 use pageserver::tenant_mgr::TenantInfo;
 use zenith_utils::connstring::connection_address;
 
@@ -98,10 +99,13 @@ impl PageServerNode {
 
     pub fn init(
         &self,
-        create_tenant: Option<&str>,
+        create_tenant: Option<ZTenantId>,
+        initial_timeline_id: Option<ZTimelineId>,
         config_overrides: &[&str],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ZTimelineId> {
         let mut cmd = Command::new(self.env.pageserver_bin()?);
+
+        let id = format!("id={}", self.env.pageserver.id);
 
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let base_data_dir_param = self.env.base_data_dir.display().to_string();
@@ -122,6 +126,7 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &id]);
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
@@ -134,19 +139,24 @@ impl PageServerNode {
             ]);
         }
 
-        if let Some(tenantid) = create_tenant {
-            args.extend(["--create-tenant", tenantid])
+        let create_tenant = create_tenant.map(|id| id.to_string());
+        if let Some(tenant_id) = create_tenant.as_deref() {
+            args.extend(["--create-tenant", tenant_id])
         }
 
-        let status = fill_rust_env_vars(cmd.args(args))
-            .status()
-            .expect("pageserver init failed");
+        let initial_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
+        let initial_timeline_id_string = initial_timeline_id.to_string();
+        args.extend(["--initial-timeline-id", &initial_timeline_id_string]);
 
-        if !status.success() {
+        let init_output = fill_rust_env_vars(cmd.args(args))
+            .output()
+            .context("pageserver init failed")?;
+
+        if !init_output.status.success() {
             bail!("pageserver init failed");
         }
 
-        Ok(())
+        Ok(initial_timeline_id)
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -307,7 +317,7 @@ impl PageServerNode {
     }
 
     pub fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
+        self.http_request(Method::GET, format!("{}/status", self.http_base_url))
             .send()?
             .error_from_body()?;
         Ok(())
@@ -315,64 +325,69 @@ impl PageServerNode {
 
     pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
-            .http_request(Method::GET, format!("{}/{}", self.http_base_url, "tenant"))
+            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))
             .send()?
             .error_from_body()?
             .json()?)
     }
 
-    pub fn tenant_create(&self, tenantid: ZTenantId) -> Result<()> {
-        Ok(self
-            .http_request(Method::POST, format!("{}/{}", self.http_base_url, "tenant"))
-            .json(&TenantCreateRequest {
-                tenant_id: tenantid,
+    pub fn tenant_create(
+        &self,
+        new_tenant_id: Option<ZTenantId>,
+    ) -> anyhow::Result<Option<ZTenantId>> {
+        let tenant_id_string = self
+            .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
+            .json(&TenantCreateRequest { new_tenant_id })
+            .send()?
+            .error_from_body()?
+            .json::<Option<String>>()?;
+
+        tenant_id_string
+            .map(|id| {
+                id.parse().with_context(|| {
+                    format!(
+                        "Failed to parse tennat creation response as tenant id: {}",
+                        id
+                    )
+                })
             })
-            .send()?
-            .error_from_body()?
-            .json()?)
+            .transpose()
     }
 
-    pub fn branch_list(&self, tenantid: &ZTenantId) -> Result<Vec<BranchInfo>> {
-        Ok(self
+    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+        let timeline_infos: Vec<TimelineInfo> = self
             .http_request(
                 Method::GET,
-                format!("{}/branch/{}", self.http_base_url, tenantid),
+                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .send()?
             .error_from_body()?
-            .json()?)
+            .json()?;
+
+        Ok(timeline_infos)
     }
 
-    pub fn branch_create(
+    pub fn timeline_create(
         &self,
-        branch_name: &str,
-        startpoint: &str,
-        tenantid: &ZTenantId,
-    ) -> Result<BranchInfo> {
-        Ok(self
-            .http_request(Method::POST, format!("{}/branch", self.http_base_url))
-            .json(&BranchCreateRequest {
-                tenant_id: tenantid.to_owned(),
-                name: branch_name.to_owned(),
-                start_point: startpoint.to_owned(),
+        tenant_id: ZTenantId,
+        new_timeline_id: Option<ZTimelineId>,
+        ancestor_start_lsn: Option<Lsn>,
+        ancestor_timeline_id: Option<ZTimelineId>,
+    ) -> anyhow::Result<Option<TimelineInfo>> {
+        let timeline_info_response = self
+            .http_request(
+                Method::POST,
+                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
+            )
+            .json(&TimelineCreateRequest {
+                new_timeline_id,
+                ancestor_start_lsn,
+                ancestor_timeline_id,
             })
             .send()?
             .error_from_body()?
-            .json()?)
-    }
+            .json::<Option<TimelineInfo>>()?;
 
-    pub fn branch_get_by_name(
-        &self,
-        tenantid: &ZTenantId,
-        branch_name: &str,
-    ) -> Result<BranchInfo> {
-        Ok(self
-            .http_request(
-                Method::GET,
-                format!("{}/branch/{}/{}", self.http_base_url, tenantid, branch_name),
-            )
-            .send()?
-            .error_for_status()?
-            .json()?)
+        Ok(timeline_info_response)
     }
 }

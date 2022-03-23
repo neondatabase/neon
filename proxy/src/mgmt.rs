@@ -1,44 +1,49 @@
+use crate::{compute::DatabaseInfo, cplane_api};
+use anyhow::Context;
+use serde::Deserialize;
 use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
-
-use serde::Deserialize;
 use zenith_utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
-
-use crate::{cplane_api::DatabaseInfo, ProxyState};
 
 ///
 /// Main proxy listener loop.
 ///
 /// Listens for connections, and launches a new handler thread for each.
 ///
-pub fn thread_main(state: &'static ProxyState, listener: TcpListener) -> anyhow::Result<()> {
+pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
+    scopeguard::defer! {
+        println!("mgmt has shut down");
+    }
+
+    listener
+        .set_nonblocking(false)
+        .context("failed to set listener to blocking")?;
     loop {
-        let (socket, peer_addr) = listener.accept()?;
+        let (socket, peer_addr) = listener.accept().context("failed to accept a new client")?;
         println!("accepted connection from {}", peer_addr);
-        socket.set_nodelay(true).unwrap();
+        socket
+            .set_nodelay(true)
+            .context("failed to set client socket option")?;
 
         thread::spawn(move || {
-            if let Err(err) = handle_connection(state, socket) {
+            if let Err(err) = handle_connection(socket) {
                 println!("error: {}", err);
             }
         });
     }
 }
 
-fn handle_connection(state: &ProxyState, socket: TcpStream) -> anyhow::Result<()> {
-    let mut conn_handler = MgmtHandler { state };
+fn handle_connection(socket: TcpStream) -> anyhow::Result<()> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
-    pgbackend.run(&mut conn_handler)
+    pgbackend.run(&mut MgmtHandler)
 }
 
-struct MgmtHandler<'a> {
-    state: &'a ProxyState,
-}
+struct MgmtHandler;
 
 /// Serialized examples:
 // {
@@ -74,13 +79,25 @@ enum PsqlSessionResult {
     Failure(String),
 }
 
-impl postgres_backend::Handler for MgmtHandler<'_> {
+/// A message received by `mgmt` when a compute node is ready.
+pub type ComputeReady = Result<DatabaseInfo, String>;
+
+impl PsqlSessionResult {
+    fn into_compute_ready(self) -> ComputeReady {
+        match self {
+            Self::Success(db_info) => Ok(db_info),
+            Self::Failure(message) => Err(message),
+        }
+    }
+}
+
+impl postgres_backend::Handler for MgmtHandler {
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
     ) -> anyhow::Result<()> {
-        let res = try_process_query(self, pgb, query_string);
+        let res = try_process_query(pgb, query_string);
         // intercept and log error message
         if res.is_err() {
             println!("Mgmt query failed: #{:?}", res);
@@ -89,22 +106,12 @@ impl postgres_backend::Handler for MgmtHandler<'_> {
     }
 }
 
-fn try_process_query(
-    mgmt: &mut MgmtHandler,
-    pgb: &mut PostgresBackend,
-    query_string: &str,
-) -> anyhow::Result<()> {
+fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::Result<()> {
     println!("Got mgmt query: '{}'", query_string);
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 
-    use PsqlSessionResult::*;
-    let msg = match resp.result {
-        Success(db_info) => Ok(db_info),
-        Failure(message) => Err(message),
-    };
-
-    match mgmt.state.waiters.notify(&resp.session_id, msg) {
+    match cplane_api::notify(&resp.session_id, resp.result.into_compute_ready()) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

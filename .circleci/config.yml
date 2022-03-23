@@ -54,7 +54,8 @@ jobs:
             if [ ! -e tmp_install/bin/postgres ]; then
               # "depth 1" saves some time by not cloning the whole repo
               git submodule update --init --depth 1
-              make postgres -j$(nproc)
+              # bail out on any warnings
+              COPT='-Werror' mold -run make postgres -j$(nproc)
             fi
 
       - save_cache:
@@ -110,7 +111,7 @@ jobs:
             fi
 
             export CARGO_INCREMENTAL=0
-            "${cov_prefix[@]}" cargo build $CARGO_FLAGS --bins --tests
+            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --bins --tests
 
       - save_cache:
           name: Save rust cache
@@ -193,6 +194,14 @@ jobs:
           name: Install postgres binaries
           command: |
             cp -a tmp_install /tmp/zenith/pg_install
+
+      - run:
+          name: Merge coverage data
+          command: |
+            # This will speed up workspace uploads
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
+            fi
 
         # Save the rust binaries and coverage data for other jobs in this workflow.
       - persist_to_workspace:
@@ -289,6 +298,7 @@ jobs:
             - PLATFORM: zenith-local-ci
           command: |
             PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+            rm -rf $PERF_REPORT_DIR
 
             TEST_SELECTION="test_runner/<< parameters.test_selection >>"
             EXTRA_PARAMS="<< parameters.extra_params >>"
@@ -333,7 +343,6 @@ jobs:
 
             if << parameters.save_perf_report >>; then
               if [[ $CIRCLE_BRANCH == "main" ]]; then
-                # TODO: reuse scripts/git-upload
                 export REPORT_FROM="$PERF_REPORT_DIR"
                 export REPORT_TO=local
                 scripts/generate_and_push_perf_report.sh
@@ -354,6 +363,13 @@ jobs:
       # The store_test_results step tells CircleCI where to find the junit.xml file.
       - store_test_results:
           path: /tmp/test_output
+      - run:
+          name: Merge coverage data
+          command: |
+            # This will speed up workspace uploads
+            if [[ $BUILD_TYPE == "debug" ]]; then
+              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
+            fi
       # Save coverage data (if any)
       - persist_to_workspace:
           root: /tmp/zenith
@@ -424,8 +440,14 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build --build-arg GIT_VERSION=$CIRCLE_SHA1 -t zenithdb/zenith:latest . && docker push zenithdb/zenith:latest
-            docker tag zenithdb/zenith:latest zenithdb/zenith:${DOCKER_TAG} && docker push zenithdb/zenith:${DOCKER_TAG}
+            docker build \
+              --pull \
+              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
+              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:latest .
+            docker push zenithdb/zenith:${DOCKER_TAG}
+            docker push zenithdb/zenith:latest
 
   # Build zenithdb/compute-node:latest image and push it to Docker hub
   docker-image-compute:
@@ -452,8 +474,63 @@ jobs:
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build -t zenithdb/compute-node:latest vendor/postgres && docker push zenithdb/compute-node:latest
-            docker tag zenithdb/compute-node:latest zenithdb/compute-node:${DOCKER_TAG} && docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:latest vendor/postgres
+            docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker push zenithdb/compute-node:latest
+
+  # Build production zenithdb/zenith:release image and push it to Docker hub
+  docker-image-release:
+    docker:
+      - image: cimg/base:2021.04
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Init postgres submodule
+          command: git submodule update --init --depth 1
+      - run:
+          name: Build and push Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            DOCKER_TAG="release-$(git log --oneline|wc -l)"
+            docker build \
+              --pull \
+              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
+              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:release .
+            docker push zenithdb/zenith:${DOCKER_TAG}
+            docker push zenithdb/zenith:release
+
+  # Build production zenithdb/compute-node:release image and push it to Docker hub
+  docker-image-compute-release:
+    docker:
+      - image: cimg/base:2021.04
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      # Build zenithdb/compute-tools:release image and push it to Docker hub
+      # TODO: this should probably also use versioned tag, not just :latest.
+      # XXX: but should it? We build and use it only locally now.
+      - run:
+          name: Build and push compute-tools Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            docker build -t zenithdb/compute-tools:release -f Dockerfile.compute-tools .
+            docker push zenithdb/compute-tools:release
+      - run:
+          name: Init postgres submodule
+          command: git submodule update --init --depth 1
+      - run:
+          name: Build and push compute-node Docker image
+          command: |
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            DOCKER_TAG="release-$(git log --oneline|wc -l)"
+            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:release vendor/postgres
+            docker push zenithdb/compute-node:${DOCKER_TAG}
+            docker push zenithdb/compute-node:release
 
   deploy-staging:
     docker:
@@ -462,39 +539,24 @@ jobs:
       - checkout
       - setup_remote_docker
       - run:
-          name: Get Zenith binaries
-          command: |
-            rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz
-            mkdir zenith_install
-            DOCKER_TAG=$(git log --oneline|wc -l)
-            docker pull --quiet zenithdb/zenith:${DOCKER_TAG}
-            ID=$(docker create zenithdb/zenith:${DOCKER_TAG})
-            docker cp $ID:/data/postgres_install.tar.gz .
-            tar -xzf postgres_install.tar.gz -C zenith_install && rm postgres_install.tar.gz
-            docker cp $ID:/usr/local/bin/pageserver zenith_install/bin/
-            docker cp $ID:/usr/local/bin/safekeeper zenith_install/bin/
-            docker cp $ID:/usr/local/bin/proxy zenith_install/bin/
-            docker cp $ID:/usr/local/bin/postgres zenith_install/bin/
-            docker rm -v $ID
-            echo ${DOCKER_TAG} | tee zenith_install/.zenith_current_version
-            tar -czf zenith_install.tar.gz -C zenith_install .
-            ls -la zenith_install.tar.gz
-      - run:
           name: Setup ansible
           command: |
             pip install --progress-bar off --user ansible boto3
-            ansible-galaxy collection install amazon.aws
       - run:
-          name: Apply re-deploy playbook
-          environment:
-            ANSIBLE_HOST_KEY_CHECKING: false
+          name: Redeploy
           command: |
-            echo "${STAGING_SSH_KEY}" | base64 --decode | ssh-add -
-            export AWS_REGION=${STAGING_AWS_REGION}
-            export AWS_ACCESS_KEY_ID=${STAGING_AWS_ACCESS_KEY_ID}
-            export AWS_SECRET_ACCESS_KEY=${STAGING_AWS_SECRET_ACCESS_KEY}
-            ansible-playbook .circleci/storage-redeploy.playbook.yml
-            rm -f zenith_install.tar.gz
+            cd "$(pwd)/.circleci/ansible"
+
+            ./get_binaries.sh
+
+            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+            chmod 0600 ssh-key
+            ssh-add ssh-key
+            rm -f ssh-key ssh-key-cert.pub
+
+            ansible-playbook deploy.yaml -i staging.hosts
+            rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-staging-proxy:
     docker:
@@ -517,7 +579,57 @@ jobs:
           name: Re-deploy proxy
           command: |
             DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/proxy.staging.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+
+
+  deploy-release:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Setup ansible
+          command: |
+            pip install --progress-bar off --user ansible boto3
+      - run:
+          name: Redeploy
+          command: |
+            cd "$(pwd)/.circleci/ansible"
+
+            RELEASE=true ./get_binaries.sh
+
+            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+            chmod 0600 ssh-key
+            ssh-add ssh-key
+            rm -f ssh-key ssh-key-cert.pub
+
+            ansible-playbook deploy.yaml -i production.hosts -e console_mgmt_base_url=http://console-release.local
+            rm -f zenith_install.tar.gz .zenith_current_version
+
+  deploy-release-proxy:
+    docker:
+      - image: cimg/base:2021.04
+    environment:
+      KUBECONFIG: .kubeconfig
+    steps:
+      - checkout
+      - run:
+          name: Store kubeconfig file
+          command: |
+            echo "${PRODUCTION_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
+            chmod 0600 ${KUBECONFIG}
+      - run:
+          name: Setup helm v3
+          command: |
+            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            helm repo add zenithdb https://zenithdb.github.io/helm-charts
+      - run:
+          name: Re-deploy proxy
+          command: |
+            DOCKER_TAG="release-$(git log --oneline|wc -l)"
+            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
 
   # Trigger a new remote CI job
   remote-ci-trigger:
@@ -582,6 +694,7 @@ workflows:
             - build-postgres-<< matrix.build_type >>
       - run-pytest:
           name: pg_regress-tests-<< matrix.build_type >>
+          context: PERF_TEST_RESULT_CONNSTR
           matrix:
             parameters:
               build_type: ["debug", "release"]
@@ -599,6 +712,7 @@ workflows:
             - build-zenith-<< matrix.build_type >>
       - run-pytest:
           name: benchmarks
+          context: PERF_TEST_RESULT_CONNSTR
           build_type: release
           test_selection: performance
           run_in_parallel: false
@@ -651,6 +765,47 @@ workflows:
                 - main
           requires:
             - docker-image
+
+      - docker-image-release:
+          # Context gives an ability to login
+          context: Docker Hub
+          # Build image only for commits to main
+          filters:
+            branches:
+              only:
+                - release
+          requires:
+            - pg_regress-tests-release
+            - other-tests-release
+      - docker-image-compute-release:
+          # Context gives an ability to login
+          context: Docker Hub
+          # Build image only for commits to main
+          filters:
+            branches:
+              only:
+                - release
+          requires:
+            - pg_regress-tests-release
+            - other-tests-release
+      - deploy-release:
+          # Context gives an ability to login
+          context: Docker Hub
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - release
+          requires:
+            - docker-image-release
+      - deploy-release-proxy:
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - release
+          requires:
+            - docker-image-release
       - remote-ci-trigger:
           # Context passes credentials for gh api
           context: CI_ACCESS_TOKEN

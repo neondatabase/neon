@@ -3,8 +3,6 @@ from contextlib import closing
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 #
 # Test where Postgres generates a lot of WAL, and it's garbage collected away, but
@@ -18,8 +16,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 #
 def test_old_request_lsn(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_old_request_lsn", "empty"])
+    env.zenith_cli.create_branch("test_old_request_lsn", "empty")
     pg = env.postgres.create_start('test_old_request_lsn')
     log.info('postgres is running on test_old_request_lsn branch')
 
@@ -57,7 +54,7 @@ def test_old_request_lsn(zenith_simple_env: ZenithEnv):
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
-        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+        pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
         for j in range(100):
             cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
 

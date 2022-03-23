@@ -13,7 +13,7 @@ fn main() -> Result<()> {
         .about("Dump contents of one layer file, for debugging")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("path")
+            Arg::new("path")
                 .help("Path to file to dump")
                 .required(true)
                 .index(1),

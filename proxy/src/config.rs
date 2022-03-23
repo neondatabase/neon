@@ -1,14 +1,45 @@
-use crate::cplane_api::DatabaseInfo;
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
-pub type SslConfig = Arc<ServerConfig>;
+pub type TlsConfig = Arc<ServerConfig>;
+
+#[non_exhaustive]
+pub enum ClientAuthMethod {
+    Password,
+    Link,
+
+    /// Use password auth only if username ends with "@zenith"
+    Mixed,
+}
+
+pub enum RouterConfig {
+    Static { host: String, port: u16 },
+    Dynamic(ClientAuthMethod),
+}
+
+impl FromStr for ClientAuthMethod {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        use ClientAuthMethod::*;
+        match s {
+            "password" => Ok(Password),
+            "link" => Ok(Link),
+            "mixed" => Ok(Mixed),
+            _ => bail!("Invalid option for router: `{}`", s),
+        }
+    }
+}
 
 pub struct ProxyConfig {
     /// main entrypoint for users to connect to
     pub proxy_address: SocketAddr,
+
+    /// method of assigning compute nodes
+    pub router_config: RouterConfig,
 
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,
@@ -22,28 +53,12 @@ pub struct ProxyConfig {
     pub redirect_uri: String,
 
     /// control plane address where we would check auth.
-    pub auth_endpoint: String,
+    pub auth_endpoint: reqwest::Url,
 
-    pub ssl_config: Option<SslConfig>,
+    pub tls_config: Option<TlsConfig>,
 }
 
-pub type ProxyWaiters = crate::waiters::Waiters<Result<DatabaseInfo, String>>;
-
-pub struct ProxyState {
-    pub conf: ProxyConfig,
-    pub waiters: ProxyWaiters,
-}
-
-impl ProxyState {
-    pub fn new(conf: ProxyConfig) -> Self {
-        Self {
-            conf,
-            waiters: ProxyWaiters::default(),
-        }
-    }
-}
-
-pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<SslConfig> {
+pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
     let key = {
         let key_bytes = std::fs::read(key_path).context("SSL key file")?;
         let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])

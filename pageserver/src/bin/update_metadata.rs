@@ -14,20 +14,20 @@ fn main() -> Result<()> {
         .about("Dump or update metadata file")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("path")
+            Arg::new("path")
                 .help("Path to metadata file")
                 .required(true),
         )
         .arg(
-            Arg::with_name("disk_lsn")
-                .short("d")
+            Arg::new("disk_lsn")
+                .short('d')
                 .long("disk_lsn")
                 .takes_value(true)
                 .help("Replace disk constistent lsn"),
         )
         .arg(
-            Arg::with_name("prev_lsn")
-                .short("p")
+            Arg::new("prev_lsn")
+                .short('p')
                 .long("prev_lsn")
                 .takes_value(true)
                 .help("Previous record LSN"),

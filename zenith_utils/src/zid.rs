@@ -4,8 +4,14 @@ use hex::FromHex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-// Zenith ID is a 128-bit random ID.
-// Used to represent various identifiers. Provides handy utility methods and impls.
+/// Zenith ID is a 128-bit random ID.
+/// Used to represent various identifiers. Provides handy utility methods and impls.
+///
+/// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
+/// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
+///
+/// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
+/// Check the `serde_with::serde_as` documentation for options for more complex types.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 struct ZId([u8; 16]);
 
@@ -24,6 +30,17 @@ impl ZId {
         let mut tli_buf = [0u8; 16];
         rand::thread_rng().fill(&mut tli_buf);
         ZId::from(tli_buf)
+    }
+
+    fn hex_encode(&self) -> String {
+        static HEX: &[u8] = b"0123456789abcdef";
+
+        let mut buf = vec![0u8; self.0.len() * 2];
+        for (&b, chunk) in self.0.as_ref().iter().zip(buf.chunks_exact_mut(2)) {
+            chunk[0] = HEX[((b >> 4) & 0xf) as usize];
+            chunk[1] = HEX[(b & 0xf) as usize];
+        }
+        unsafe { String::from_utf8_unchecked(buf) }
     }
 }
 
@@ -60,13 +77,13 @@ impl From<[u8; 16]> for ZId {
 
 impl fmt::Display for ZId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        f.write_str(&self.hex_encode())
     }
 }
 
 impl fmt::Debug for ZId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex::encode(self.0))
+        f.write_str(&self.hex_encode())
     }
 }
 
@@ -155,95 +172,64 @@ macro_rules! zid_newtype {
 /// is separate from PostgreSQL timelines, and doesn't have those
 /// limitations. A zenith timeline is identified by a 128-bit ID, which
 /// is usually printed out as a hex string.
+///
+/// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
+/// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
+/// See [`ZId`] for alternative ways to serialize it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ZTimelineId(ZId);
 
 zid_newtype!(ZTimelineId);
 
-// Zenith Tenant Id represents identifiar of a particular tenant.
-// Is used for distinguishing requests and data belonging to different users.
+/// Zenith Tenant Id represents identifiar of a particular tenant.
+/// Is used for distinguishing requests and data belonging to different users.
+///
+/// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
+/// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
+/// See [`ZId`] for alternative ways to serialize it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ZTenantId(ZId);
 
 zid_newtype!(ZTenantId);
 
-/// Serde routines for Option<T> (de)serialization, using `T:Display` representations for inner values.
-/// Useful for Option<ZTenantId> and Option<ZTimelineId> to get their hex representations into serialized string and deserialize them back.
-pub mod opt_display_serde {
-    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-    use std::{fmt::Display, str::FromStr};
+// A pair uniquely identifying Zenith instance.
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub struct ZTenantTimelineId {
+    pub tenant_id: ZTenantId,
+    pub timeline_id: ZTimelineId,
+}
 
-    pub fn serialize<S, Id>(id: &Option<Id>, ser: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        Id: Display,
-    {
-        id.as_ref().map(ToString::to_string).serialize(ser)
+impl ZTenantTimelineId {
+    pub fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        }
     }
 
-    pub fn deserialize<'de, D, Id>(des: D) -> Result<Option<Id>, D::Error>
-    where
-        D: Deserializer<'de>,
-        Id: FromStr,
-        <Id as FromStr>::Err: Display,
-    {
-        Ok(if let Some(s) = Option::<String>::deserialize(des)? {
-            Some(Id::from_str(&s).map_err(de::Error::custom)?)
-        } else {
-            None
-        })
+    pub fn generate() -> Self {
+        Self::new(ZTenantId::generate(), ZTimelineId::generate())
+    }
+
+    pub fn empty() -> Self {
+        Self::new(ZTenantId::from([0u8; 16]), ZTimelineId::from([0u8; 16]))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fmt::Display;
-
-    use super::*;
-    use hex::FromHexError;
-    use hex_literal::hex;
-
-    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-    struct TestStruct<E: Display, T: FromStr<Err = E> + Display> {
-        #[serde(with = "opt_display_serde")]
-        field: Option<T>,
+impl fmt::Display for ZTenantTimelineId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}-{}", self.tenant_id, self.timeline_id)
     }
+}
 
-    #[test]
-    fn test_hex_serializations_tenant_id() {
-        let original_struct = TestStruct {
-            field: Some(ZTenantId::from_array(hex!(
-                "11223344556677881122334455667788"
-            ))),
-        };
+// Unique ID of a storage node (safekeeper or pageserver). Supposed to be issued
+// by the console.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ZNodeId(pub u64);
 
-        let serialized_string = serde_json::to_string(&original_struct).unwrap();
-        assert_eq!(
-            serialized_string,
-            r#"{"field":"11223344556677881122334455667788"}"#
-        );
-
-        let deserialized_struct: TestStruct<FromHexError, ZTenantId> =
-            serde_json::from_str(&serialized_string).unwrap();
-        assert_eq!(original_struct, deserialized_struct);
-    }
-
-    #[test]
-    fn test_hex_serializations_timeline_id() {
-        let original_struct = TestStruct {
-            field: Some(ZTimelineId::from_array(hex!(
-                "AA223344556677881122334455667788"
-            ))),
-        };
-
-        let serialized_string = serde_json::to_string(&original_struct).unwrap();
-        assert_eq!(
-            serialized_string,
-            r#"{"field":"aa223344556677881122334455667788"}"#
-        );
-
-        let deserialized_struct: TestStruct<FromHexError, ZTimelineId> =
-            serde_json::from_str(&serialized_string).unwrap();
-        assert_eq!(original_struct, deserialized_struct);
+impl fmt::Display for ZNodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }

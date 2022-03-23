@@ -6,19 +6,22 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::config::PageServerConf;
+use crate::repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walingest::WalIngest;
 use anyhow::{bail, Context, Error, Result};
+use bytes::BytesMut;
+use fail::fail_point;
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::thread_local;
 use std::time::SystemTime;
 use tokio::pin;
@@ -27,7 +30,9 @@ use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use tracing::*;
 use zenith_utils::lsn::Lsn;
+use zenith_utils::pq_proto::ZenithFeedback;
 use zenith_utils::zid::ZTenantId;
+use zenith_utils::zid::ZTenantTimelineId;
 use zenith_utils::zid::ZTimelineId;
 
 //
@@ -50,7 +55,7 @@ thread_local! {
 }
 
 fn drop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
-    let mut receivers = WAL_RECEIVERS.lock();
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
     receivers.remove(&(tenantid, timelineid));
 }
 
@@ -61,7 +66,7 @@ pub fn launch_wal_receiver(
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<()> {
-    let mut receivers = WAL_RECEIVERS.lock();
+    let mut receivers = WAL_RECEIVERS.lock().unwrap();
 
     match receivers.get_mut(&(tenantid, timelineid)) {
         Some(receiver) => {
@@ -94,7 +99,7 @@ pub fn launch_wal_receiver(
 
 // Look up current WAL producer connection string in the hash table
 fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> String {
-    let receivers = WAL_RECEIVERS.lock();
+    let receivers = WAL_RECEIVERS.lock().unwrap();
 
     receivers
         .get(&(tenantid, timelineid))
@@ -108,18 +113,18 @@ fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> Str
 //
 fn thread_main(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
 ) -> Result<()> {
-    let _enter = info_span!("WAL receiver", timeline = %timelineid, tenant = %tenantid).entered();
+    let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_producer_connstr(tenantid, timelineid);
+    let wal_producer_connstr = get_wal_producer_connstr(tenant_id, timeline_id);
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
-    let res = walreceiver_main(conf, tenantid, timelineid, &wal_producer_connstr);
+    let res = walreceiver_main(conf, tenant_id, timeline_id, &wal_producer_connstr);
 
     // TODO cleanup info messages
     if let Err(e) = res {
@@ -127,20 +132,20 @@ fn thread_main(
     } else {
         info!(
             "walreceiver disconnected tenant {}, timelineid {}",
-            tenantid, timelineid
+            tenant_id, timeline_id
         );
     }
 
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
-    drop_wal_receiver(tenantid, timelineid);
+    drop_wal_receiver(tenant_id, timeline_id);
     Ok(())
 }
 
 fn walreceiver_main(
     _conf: &PageServerConf,
-    tenantid: ZTenantId,
-    timelineid: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<(), Error> {
     // Connect to the database in replication mode.
@@ -159,7 +164,7 @@ fn walreceiver_main(
     // This is from tokio-postgres docs, but it is a bit weird in our case because we extensively use block_on
     runtime.spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            error!("connection error: {}", e);
         }
     });
 
@@ -179,11 +184,15 @@ fn walreceiver_main(
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
+    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
+        .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
+    let remote_index = repo.get_remote_index();
+
     let timeline =
-        tenant_mgr::get_timeline_for_tenant(tenantid, timelineid).with_context(|| {
+        tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).with_context(|| {
             format!(
-                "Can not start the walrecever for a remote tenant {}, timeline {}",
-                tenantid, timelineid,
+                "local timeline {} not found for tenant {}",
+                timeline_id, tenant_id
             )
         })?;
 
@@ -247,11 +256,12 @@ fn walreceiver_main(
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hittind a deadlock.
+                    // at risk of hitting a deadlock.
                     assert!(lsn.is_aligned());
 
-                    let writer = timeline.writer();
-                    walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
+                    walingest.ingest_record(&timeline, recdata, lsn)?;
+
+                    fail_point!("walreceiver-after-ingest");
 
                     last_rec_lsn = lsn;
                 }
@@ -260,6 +270,8 @@ fn walreceiver_main(
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
+
+                timeline.tline.check_checkpoint_distance()?;
 
                 Some(endlsn)
             }
@@ -287,26 +299,47 @@ fn walreceiver_main(
         };
 
         if let Some(last_lsn) = status_update {
-            let last_lsn = PgLsn::from(u64::from(last_lsn));
-            let timeline_synced_disk_consistent_lsn =
-                tenant_mgr::get_repository_for_tenant(tenantid)?
-                    .get_timeline_state(timelineid)
-                    .and_then(|state| state.remote_disk_consistent_lsn())
-                    .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = runtime.block_on(async {
+                remote_index
+                    .read()
+                    .await
+                    // here we either do not have this timeline in remote index
+                    // or there were no checkpoints for it yet
+                    .timeline_entry(&ZTenantTimelineId {
+                        tenant_id,
+                        timeline_id,
+                    })
+                    .and_then(|e| e.disk_consistent_lsn())
+                    .unwrap_or(Lsn(0)) // no checkpoint was uploaded
+            });
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let write_lsn = last_lsn;
+            let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = PgLsn::from(u64::from(timeline.get_disk_consistent_lsn()));
+            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let apply_lsn = PgLsn::from(u64::from(timeline_synced_disk_consistent_lsn));
+            let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
-            const NO_REPLY: u8 = 0;
+
+            // Send zenith feedback message.
+            // Regular standby_status_update fields are put into this message.
+            let zenith_status_update = ZenithFeedback {
+                current_timeline_size: timeline.get_current_logical_size() as u64,
+                ps_writelsn: write_lsn,
+                ps_flushlsn: flush_lsn,
+                ps_applylsn: apply_lsn,
+                ps_replytime: ts,
+            };
+
+            debug!("zenith_status_update {:?}", zenith_status_update);
+
+            let mut data = BytesMut::new();
+            zenith_status_update.serialize(&mut data)?;
             runtime.block_on(
                 physical_stream
                     .as_mut()
-                    .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, NO_REPLY),
+                    .zenith_status_update(data.len() as u64, &data),
             )?;
         }
     }

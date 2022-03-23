@@ -1,11 +1,7 @@
 from io import BytesIO
 import asyncio
-import asyncpg
-import subprocess
 from fixtures.zenith_fixtures import ZenithEnv, Postgres
 from fixtures.log_helper import log
-
-pytest_plugins = ("fixtures.zenith_fixtures")
 
 
 async def repeat_bytes(buf, repetitions: int):
@@ -39,9 +35,7 @@ async def parallel_load_same_table(pg: Postgres, n_parallel: int):
 # Load data into one table with COPY TO from 5 parallel connections
 def test_parallel_copy(zenith_simple_env: ZenithEnv, n_parallel=5):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_parallel_copy", "empty"])
-
+    env.zenith_cli.create_branch("test_parallel_copy", "empty")
     pg = env.postgres.create_start('test_parallel_copy')
     log.info("postgres is running on 'test_parallel_copy' branch")
 

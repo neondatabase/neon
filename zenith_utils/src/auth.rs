@@ -5,9 +5,7 @@
 // The second one is that we wanted to use ed25519 keys, but they are also not supported until next version. So we go with RSA keys for now.
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/162
 
-use hex::{self, FromHex};
-use serde::de::Error;
-use serde::{self, Deserializer, Serializer};
+use serde;
 use std::fs;
 use std::path::Path;
 
@@ -16,6 +14,7 @@ use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
 use crate::zid::ZTenantId;
 
@@ -28,37 +27,11 @@ pub enum Scope {
     PageServerApi,
 }
 
-pub fn to_hex_option<S>(value: &Option<ZTenantId>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(tid) => hex::serialize(tid, serializer),
-        None => Option::serialize(value, serializer),
-    }
-}
-
-fn from_hex_option<'de, D>(deserializer: D) -> Result<Option<ZTenantId>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    match opt {
-        Some(tid) => Ok(Some(ZTenantId::from_hex(tid).map_err(Error::custom)?)),
-        None => Ok(None),
-    }
-}
-
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    // this custom serialize/deserialize_with is needed because Option is not transparent to serde
-    // so clearest option is serde(with = "hex") but it is not working, for details see https://github.com/serde-rs/serde/issues/1301
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "to_hex_option",
-        deserialize_with = "from_hex_option"
-    )]
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub tenant_id: Option<ZTenantId>,
     pub scope: Scope,
 }
@@ -85,7 +58,6 @@ pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<
     }
 }
 
-#[derive(Debug)]
 pub struct JwtAuth {
     decoding_key: DecodingKey<'static>,
     validation: Validation,
@@ -110,6 +82,14 @@ impl JwtAuth {
 
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
         Ok(decode(token, &self.decoding_key, &self.validation)?)
+    }
+}
+
+impl std::fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("validation", &self.validation)
+            .finish()
     }
 }
 

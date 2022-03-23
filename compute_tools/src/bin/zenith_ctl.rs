@@ -34,6 +34,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use clap::Arg;
 use log::info;
 use postgres::{Client, NoTls};
 
@@ -162,34 +163,34 @@ fn main() -> Result<()> {
     let matches = clap::App::new("zenith_ctl")
         .version(version.unwrap_or("unknown"))
         .arg(
-            clap::Arg::with_name("connstr")
-                .short("C")
+            Arg::new("connstr")
+                .short('C')
                 .long("connstr")
                 .value_name("DATABASE_URL")
                 .required(true),
         )
         .arg(
-            clap::Arg::with_name("pgdata")
-                .short("D")
+            Arg::new("pgdata")
+                .short('D')
                 .long("pgdata")
                 .value_name("DATADIR")
                 .required(true),
         )
         .arg(
-            clap::Arg::with_name("pgbin")
-                .short("b")
+            Arg::new("pgbin")
+                .short('b')
                 .long("pgbin")
                 .value_name("POSTGRES_PATH"),
         )
         .arg(
-            clap::Arg::with_name("spec")
-                .short("s")
+            Arg::new("spec")
+                .short('s')
                 .long("spec")
                 .value_name("SPEC_JSON"),
         )
         .arg(
-            clap::Arg::with_name("spec-path")
-                .short("S")
+            Arg::new("spec-path")
+                .short('S')
                 .long("spec-path")
                 .value_name("SPEC_PATH"),
         )

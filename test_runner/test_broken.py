@@ -3,8 +3,6 @@ import os
 
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
-
-pytest_plugins = ("fixtures.zenith_fixtures")
 """
 Use this test to see what happens when tests fail.
 
@@ -23,9 +21,7 @@ run_broken = pytest.mark.skipif(os.environ.get('RUN_BROKEN') is None,
 def test_broken(zenith_simple_env: ZenithEnv, pg_bin):
     env = zenith_simple_env
 
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_broken", "empty"])
-
+    env.zenith_cli.create_branch("test_broken", "empty")
     env.postgres.create_start("test_broken")
     log.info('postgres is running')
 

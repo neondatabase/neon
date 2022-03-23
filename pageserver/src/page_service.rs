@@ -18,7 +18,7 @@ use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLockReadGuard};
 use tracing::*;
 use zenith_metrics::{register_histogram_vec, HistogramVec};
 use zenith_utils::auth::{self, JwtAuth};
@@ -27,15 +27,14 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::is_socket_read_timed_out;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::postgres_backend::{self, AuthType};
-use zenith_utils::pq_proto::{
-    BeMessage, FeMessage, RowDescriptor, HELLO_WORLD_ROW, SINGLE_COL_ROWDESC,
-};
+use zenith_utils::pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC};
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::basebackup;
-use crate::branches;
 use crate::config::PageServerConf;
+use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::relish::*;
+use crate::repository::Repository;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
@@ -301,7 +300,7 @@ lazy_static! {
     static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_smgr_query_time",
         "Time spent on smgr query handling",
-        &["smgr_query_type"],
+        &["smgr_query_type", "tenant_id", "timeline_id"],
         TIME_BUCKETS.into()
     )
     .expect("failed to define a metric");
@@ -325,8 +324,8 @@ impl PageServerHandler {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle pagerequests for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -343,20 +342,22 @@ impl PageServerHandler {
                         };
 
                         let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
+                        let tenant_id = tenantid.to_string();
+                        let timeline_id = timelineid.to_string();
 
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_exists"])
+                                .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_rel_exists_request(timeline.as_ref(), &req)
                                 }),
                             PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_rel_size"])
+                                .with_label_values(&["get_rel_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_nblocks_request(timeline.as_ref(), &req)
                                 }),
                             PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
-                                .with_label_values(&["get_page_at_lsn"])
+                                .with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
                                     self.handle_get_page_at_lsn_request(timeline.as_ref(), &req)
                                 }),
@@ -398,7 +399,12 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn(timeline: &dyn Timeline, lsn: Lsn, latest: bool) -> Result<Lsn> {
+    fn wait_or_get_last_lsn<R: Repository>(
+        timeline: &DatadirTimeline<R>,
+        mut lsn: Lsn,
+        latest: bool,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -419,72 +425,79 @@ impl PageServerHandler {
             // walsender completes the authentication and starts streaming the
             // WAL.
             if lsn <= last_record_lsn {
-                Ok(last_record_lsn)
+                lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn)?;
+                timeline.tline.wait_lsn(lsn)?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
                 // anyway)
-                Ok(lsn)
             }
         } else {
             if lsn == Lsn(0) {
                 bail!("invalid LSN(0) in request");
             }
-            timeline.wait_lsn(lsn)?;
-            Ok(lsn)
+            timeline.tline.wait_lsn(lsn)?;
         }
+        ensure!(
+            lsn >= **latest_gc_cutoff_lsn,
+            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+            lsn, **latest_gc_cutoff_lsn
+        );
+        Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request(
+    fn handle_get_rel_exists_request<R: Repository>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &DatadirTimeline<R>,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
 
-        let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
+        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let exists = timeline.get_rel_exists(tag, lsn)?;
+        let exists = timeline.get_rel_exists(req.rel, lsn)?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
         }))
     }
 
-    fn handle_get_nblocks_request(
+    fn handle_get_nblocks_request<R: Repository>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &DatadirTimeline<R>,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
-        let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
+        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let n_blocks = timeline.get_relish_size(tag, lsn)?;
-
-        // Return 0 if relation is not found.
-        // This is what postgres smgr expects.
-        let n_blocks = n_blocks.unwrap_or(0);
+        let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
         }))
     }
 
-    fn handle_get_page_at_lsn_request(
+    fn handle_get_page_at_lsn_request<R: Repository>(
         &self,
-        timeline: &dyn Timeline,
+        timeline: &DatadirTimeline<R>,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
             .entered();
-        let tag = RelishTag::Relation(req.rel);
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest)?;
-
-        let page = timeline.get_page_at_lsn(tag, req.blkno, lsn)?;
+        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+        /*
+        // Add a 1s delay to some requests. The delayed causes the requests to
+        // hit the race condition from github issue #1047 more easily.
+        use rand::Rng;
+        if rand::thread_rng().gen::<u8>() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+        */
+        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
@@ -502,11 +515,12 @@ impl PageServerHandler {
         let _enter = span.enter();
 
         // check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle basebackup request for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
+        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
-                .check_lsn_is_in_scope(lsn)
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
         }
 
@@ -636,84 +650,26 @@ impl postgres_backend::Handler for PageServerHandler {
                 info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
 
             // Check that the timeline exists
-            tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for callmemaybe requests")?;
+            tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
             walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
 
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("branch_create ") {
-            let err = || format!("invalid branch_create: '{}'", query_string);
-
-            // branch_create <tenantid> <branchname> <startpoint>
-            // TODO lazy static
-            // TODO: escaping, to allow branch names with spaces
-            let re = Regex::new(r"^branch_create ([[:xdigit:]]+) (\S+) ([^\r\n\s;]+)[\r\n\s;]*;?$")
-                .unwrap();
-            let caps = re.captures(query_string).with_context(err)?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let branchname = caps.get(2).with_context(err)?.as_str().to_owned();
-            let startpoint_str = caps.get(3).with_context(err)?.as_str().to_owned();
-
-            self.check_permission(Some(tenantid))?;
-
-            let _enter =
-                info_span!("branch_create", name = %branchname, tenant = %tenantid).entered();
-
-            let branch =
-                branches::create_branch(self.conf, &branchname, &startpoint_str, &tenantid)?;
-            let branch = serde_json::to_vec(&branch)?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::DataRow(&[Some(&branch)]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("branch_list ") {
-            // branch_list <zenith tenantid as hex string>
-            let re = Regex::new(r"^branch_list ([[:xdigit:]]+)$").unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid branch_list: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-
-            // since these handlers for tenant/branch commands are deprecated (in favor of http based ones)
-            // just use false in place of include non incremental logical size
-            let branches = crate::branches::get_branches(self.conf, &tenantid, false)?;
-            let branches_buf = serde_json::to_vec(&branches)?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::DataRow(&[Some(&branches_buf)]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("tenant_list") {
-            let tenants = crate::tenant_mgr::list_tenants()?;
-            let tenants_buf = serde_json::to_vec(&tenants)?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::DataRow(&[Some(&tenants_buf)]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("tenant_create") {
-            let err = || format!("invalid tenant_create: '{}'", query_string);
-
-            // tenant_create <tenantid>
-            let re = Regex::new(r"^tenant_create ([[:xdigit:]]+)$").unwrap();
-            let caps = re.captures(query_string).with_context(err)?;
-
-            self.check_permission(None)?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-
-            tenant_mgr::create_repository_for_tenant(self.conf, tenantid)?;
-
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("status") {
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&HELLO_WORLD_ROW)?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("failpoints ") {
+            let (_, failpoints) = query_string.split_at("failpoints ".len());
+            for failpoint in failpoints.split(';') {
+                if let Some((name, actions)) = failpoint.split_once('=') {
+                    info!("cfg failpoint: {} {}", name, actions);
+                    fail::cfg(name, actions).unwrap();
+                } else {
+                    bail!("Invalid failpoints format");
+                }
+            }
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
@@ -740,67 +696,19 @@ impl postgres_backend::Handler for PageServerHandler {
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"layer_relfiles_total"),
-                RowDescriptor::int8_col(b"layer_relfiles_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"layer_relfiles_needed_by_branches"),
-                RowDescriptor::int8_col(b"layer_relfiles_not_updated"),
-                RowDescriptor::int8_col(b"layer_relfiles_needed_as_tombstone"),
-                RowDescriptor::int8_col(b"layer_relfiles_removed"),
-                RowDescriptor::int8_col(b"layer_relfiles_dropped"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_total"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_cutoff"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_by_branches"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_not_updated"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_needed_as_tombstone"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_removed"),
-                RowDescriptor::int8_col(b"layer_nonrelfiles_dropped"),
+                RowDescriptor::int8_col(b"layers_total"),
+                RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layers_needed_by_branches"),
+                RowDescriptor::int8_col(b"layers_not_updated"),
+                RowDescriptor::int8_col(b"layers_removed"),
                 RowDescriptor::int8_col(b"elapsed"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
-                Some(result.ondisk_relfiles_total.to_string().as_bytes()),
-                Some(
-                    result
-                        .ondisk_relfiles_needed_by_cutoff
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(
-                    result
-                        .ondisk_relfiles_needed_by_branches
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(result.ondisk_relfiles_not_updated.to_string().as_bytes()),
-                Some(
-                    result
-                        .ondisk_relfiles_needed_as_tombstone
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(result.ondisk_relfiles_removed.to_string().as_bytes()),
-                Some(result.ondisk_relfiles_dropped.to_string().as_bytes()),
-                Some(result.ondisk_nonrelfiles_total.to_string().as_bytes()),
-                Some(
-                    result
-                        .ondisk_nonrelfiles_needed_by_cutoff
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(
-                    result
-                        .ondisk_nonrelfiles_needed_by_branches
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(result.ondisk_nonrelfiles_not_updated.to_string().as_bytes()),
-                Some(
-                    result
-                        .ondisk_nonrelfiles_needed_as_tombstone
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(result.ondisk_nonrelfiles_removed.to_string().as_bytes()),
-                Some(result.ondisk_nonrelfiles_dropped.to_string().as_bytes()),
+                Some(result.layers_total.to_string().as_bytes()),
+                Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
+                Some(result.layers_needed_by_branches.to_string().as_bytes()),
+                Some(result.layers_not_updated.to_string().as_bytes()),
+                Some(result.layers_removed.to_string().as_bytes()),
                 Some(result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -817,10 +725,17 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
-            let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for checkpoint request")?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
-            timeline.checkpoint(CheckpointConfig::Forced)?;
+            timeline.tline.checkpoint(CheckpointConfig::Forced)?;
+
+            // Also compact it.
+            //
+            // FIXME: This probably shouldn't be part of a "checkpoint" command, but a
+            // separate operation. Update the tests if you change this.
+            timeline.tline.compact()?;
+
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {

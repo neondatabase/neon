@@ -14,32 +14,17 @@ import os
 from contextlib import closing
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
 
+def test_write_amplification(zenith_with_baseline: PgCompare):
+    env = zenith_with_baseline
 
-def test_write_amplification(zenith_simple_env: ZenithEnv, zenbenchmark):
-    env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_write_amplification", "empty"])
-
-    pg = env.postgres.create_start('test_write_amplification')
-    log.info("postgres is running on 'test_write_amplification' branch")
-
-    # Open a connection directly to the page server that we'll use to force
-    # flushing the layers to disk
-    psconn = env.pageserver.connect()
-    pscur = psconn.cursor()
-
-    with closing(pg.connect()) as conn:
+    with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
-            # Get the timeline ID of our branch. We need it for the 'do_gc' command
-            cur.execute("SHOW zenith.zenith_timeline")
-            timeline = cur.fetchone()[0]
-
-            with zenbenchmark.record_pageserver_writes(env.pageserver, 'pageserver_writes'):
-                with zenbenchmark.record_duration('run'):
+            with env.record_pageserver_writes('pageserver_writes'):
+                with env.record_duration('run'):
 
                     # NOTE: Because each iteration updates every table already created,
                     # the runtime and write amplification is O(n^2), where n is the
@@ -71,13 +56,6 @@ def test_write_amplification(zenith_simple_env: ZenithEnv, zenbenchmark):
                         # slower, adding some delays in this loop.  But forcing
                         # the checkpointing and GC makes the test go faster,
                         # with the same total I/O effect.
-                        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+                        env.flush()
 
-            # Report disk space used by the repository
-            timeline_size = zenbenchmark.get_timeline_size(env.repo_dir,
-                                                           env.initial_tenant,
-                                                           timeline)
-            zenbenchmark.record('size',
-                                timeline_size / (1024 * 1024),
-                                'MB',
-                                report=MetricReport.LOWER_IS_BETTER)
+            env.report_size()

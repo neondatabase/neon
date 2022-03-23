@@ -3,36 +3,35 @@
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
+use crate::wal_storage::WalReader;
 use anyhow::{bail, Context, Result};
 
-use postgres_ffi::xlog_utils::{
-    get_current_timestamp, TimestampTz, XLogFileName, MAX_SEND_SIZE, PG_TLI,
-};
+use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
 
+use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::net::Shutdown;
-use std::path::Path;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody};
+use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback};
 use zenith_utils::sock_split::ReadStream;
 
-use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-use tokio::sync::mpsc::UnboundedSender;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
+// zenith extension of replication protocol
+const ZENITH_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
 type FullTransactionId = u64;
 
@@ -139,8 +138,8 @@ impl ReplicationConn {
         while let Some(msg) = FeMessage::read(&mut stream_in)? {
             match &msg {
                 FeMessage::CopyData(m) => {
-                    // There's two possible data messages that the client is supposed to send here:
-                    // `HotStandbyFeedback` and `StandbyStatusUpdate`.
+                    // There's three possible data messages that the client is supposed to send here:
+                    // `HotStandbyFeedback` and `StandbyStatusUpdate` and `ZenithStandbyFeedback`.
 
                     match m.first().cloned() {
                         Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
@@ -150,11 +149,25 @@ impl ReplicationConn {
                             timeline.update_replica_state(replica_id, state);
                         }
                         Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
-                            let reply = StandbyReply::des(&m[1..])
+                            let _reply = StandbyReply::des(&m[1..])
                                 .context("failed to deserialize StandbyReply")?;
-                            state.last_received_lsn = reply.write_lsn;
-                            state.disk_consistent_lsn = reply.flush_lsn;
-                            state.remote_consistent_lsn = reply.apply_lsn;
+                            // This must be a regular postgres replica,
+                            // because pageserver doesn't send this type of messages to safekeeper.
+                            // Currently this is not implemented, so this message is ignored.
+
+                            warn!("unexpected StandbyReply. Read-only postgres replicas are not supported in safekeepers yet.");
+                            // timeline.update_replica_state(replica_id, Some(state));
+                        }
+                        Some(ZENITH_STATUS_UPDATE_TAG_BYTE) => {
+                            // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
+                            let buf = Bytes::copy_from_slice(&m[9..]);
+                            let reply = ZenithFeedback::parse(buf);
+
+                            trace!("ZenithFeedback is {:?}", reply);
+                            // Only pageserver sends ZenithFeedback, so set the flag.
+                            // This replica is the source of information to resend to compute.
+                            state.zenith_feedback = Some(reply);
+
                             timeline.update_replica_state(replica_id, state);
                         }
                         _ => warn!("unexpected message {:?}", msg),
@@ -175,24 +188,6 @@ impl ReplicationConn {
         }
 
         Ok(())
-    }
-
-    /// Helper function for opening a wal file.
-    fn open_wal_file(wal_file_path: &Path) -> Result<File> {
-        // First try to open the .partial file.
-        let mut partial_path = wal_file_path.to_owned();
-        partial_path.set_extension("partial");
-        if let Ok(opened_file) = File::open(&partial_path) {
-            return Ok(opened_file);
-        }
-
-        // If that failed, try it without the .partial extension.
-        File::open(&wal_file_path)
-            .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
-            .map_err(|e| {
-                error!("{}", e);
-                e
-            })
     }
 
     ///
@@ -266,12 +261,14 @@ impl ReplicationConn {
             if spg.appname == Some("wal_proposer_recovery".to_string()) {
                 None
             } else {
-                let pageserver_connstr = pageserver_connstr.clone().expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
-                let timeline_id = spg.timeline.get().timeline_id;
-                let tenant_id = spg.ztenantid.unwrap();
+                let pageserver_connstr = pageserver_connstr.expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
+                let zttid = spg.timeline.get().zttid;
                 let tx_clone = spg.tx.clone();
-                let subscription_key =
-                    SubscriptionStateKey::new(tenant_id, timeline_id, pageserver_connstr.clone());
+                let subscription_key = SubscriptionStateKey::new(
+                    zttid.tenant_id,
+                    zttid.timeline_id,
+                    pageserver_connstr.clone(),
+                );
                 spg.tx
                     .send(CallmeEvent::Pause(subscription_key))
                     .unwrap_or_else(|e| {
@@ -281,8 +278,8 @@ impl ReplicationConn {
                 // create a guard to subscribe callback again, when this connection will exit
                 Some(ReplicationStreamGuard {
                     tx: tx_clone,
-                    tenant_id,
-                    timeline_id,
+                    tenant_id: zttid.tenant_id,
+                    timeline_id: zttid.timeline_id,
                     pageserver_connstr,
                 })
             }
@@ -292,7 +289,15 @@ impl ReplicationConn {
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
         let mut end_pos = Lsn(0);
-        let mut wal_file: Option<File> = None;
+
+        let mut wal_reader = WalReader::new(
+            spg.conf.timeline_dir(&spg.timeline.get().zttid),
+            wal_seg_size,
+            start_pos,
+        );
+
+        // buffer for wal sending, limited by MAX_SEND_SIZE
+        let mut send_buf = vec![0u8; MAX_SEND_SIZE];
 
         loop {
             if let Some(stop_pos) = stop_pos {
@@ -307,21 +312,10 @@ impl ReplicationConn {
                 if let Some(lsn) = lsn {
                     end_pos = lsn;
                 } else {
-                    // Is it time to end streaming to this replica?
-                    if spg.timeline.get().check_stop_streaming(replica_id) {
-                        // this expect should never fail because in wal_proposer_recovery mode stop_pos is set
-                        // and this code is not reachable
-                        let pageserver_connstr = pageserver_connstr
-                            .expect("there should be a pageserver connection string");
-                        let timelineid = spg.timeline.get().timeline_id;
-                        let tenant_id = spg.ztenantid.unwrap();
-                        let subscription_key =
-                            SubscriptionStateKey::new(tenant_id, timelineid, pageserver_connstr);
-                        spg.tx
-                            .send(CallmeEvent::Unsubscribe(subscription_key))
-                            .unwrap_or_else(|e| {
-                                error!("failed to send Pause request to callmemaybe thread {}", e);
-                            });
+                    // TODO: also check once in a while whether we are walsender
+                    // to right pageserver.
+                    if spg.timeline.get().check_deactivate(replica_id, &spg.tx)? {
+                        // Shut down, timeline is suspended.
                         // TODO create proper error type for this
                         bail!("end streaming to {:?}", spg.appname);
                     }
@@ -337,51 +331,26 @@ impl ReplicationConn {
                 }
             }
 
-            // Take the `File` from `wal_file`, or open a new file.
-            let mut file = match wal_file.take() {
-                Some(file) => file,
-                None => {
-                    // Open a new file.
-                    let segno = start_pos.segment_number(wal_seg_size);
-                    let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-                    let timeline_id = spg.timeline.get().timeline_id;
-                    let wal_file_path = spg.conf.timeline_dir(&timeline_id).join(wal_file_name);
-                    Self::open_wal_file(&wal_file_path)?
-                }
-            };
-
-            let xlogoff = start_pos.segment_offset(wal_seg_size) as usize;
-
-            // How much to read and send in message? We cannot cross the WAL file
-            // boundary, and we don't want send more than MAX_SEND_SIZE.
             let send_size = end_pos.checked_sub(start_pos).unwrap().0 as usize;
-            let send_size = min(send_size, wal_seg_size - xlogoff);
-            let send_size = min(send_size, MAX_SEND_SIZE);
+            let send_size = min(send_size, send_buf.len());
 
-            // Read some data from the file.
-            let mut file_buf = vec![0u8; send_size];
-            file.seek(SeekFrom::Start(xlogoff as u64))
-                .and_then(|_| file.read_exact(&mut file_buf))
-                .context("Failed to read data from WAL file")?;
+            let send_buf = &mut send_buf[..send_size];
+
+            // read wal into buffer
+            let send_size = wal_reader.read(send_buf)?;
+            let send_buf = &send_buf[..send_size];
 
             // Write some data to the network socket.
             pgb.write_message(&BeMessage::XLogData(XLogDataBody {
                 wal_start: start_pos.0,
                 wal_end: end_pos.0,
                 timestamp: get_current_timestamp(),
-                data: &file_buf,
+                data: send_buf,
             }))
             .context("Failed to send XLogData")?;
 
             start_pos += send_size as u64;
-
-            info!("sent WAL up to {}", start_pos);
-
-            // Decide whether to reuse this file. If we don't set wal_file here
-            // a new file will be opened next time.
-            if start_pos.segment_offset(wal_seg_size) != 0 {
-                wal_file = Some(file);
-            }
+            trace!("sent WAL up to {}", start_pos);
         }
         Ok(())
     }

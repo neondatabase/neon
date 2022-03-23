@@ -8,6 +8,7 @@ import timeit
 import calendar
 import enum
 from datetime import datetime
+import uuid
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
@@ -26,8 +27,6 @@ bencmark, and then record the result by calling zenbenchmark.record. For example
 import timeit
 from fixtures.zenith_fixtures import ZenithEnv
 
-pytest_plugins = ("fixtures.zenith_fixtures", "fixtures.benchmark_fixture")
-
 def test_mybench(zenith_simple_env: env, zenbenchmark):
 
     # Initialize the test
@@ -40,6 +39,8 @@ def test_mybench(zenith_simple_env: env, zenbenchmark):
     # Record another measurement
     zenbenchmark.record('speed_of_light', 300000, 'km/s')
 
+There's no need to import this file to use it. It should be declared as a plugin
+inside conftest.py, and that makes it available to all tests.
 
 You can measure multiple things in one test, and record each one with a separate
 call to zenbenchmark. For example, you could time the bulk loading that happens
@@ -276,11 +277,11 @@ class ZenithBenchmarker:
         assert matches
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenantid: str, timelineid: str):
+    def get_timeline_size(self, repo_dir: Path, tenantid: uuid.UUID, timelineid: str):
         """
         Calculate the on-disk size of a timeline
         """
-        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
+        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid.hex, timelineid)
 
         totalbytes = 0
         for root, dirs, files in os.walk(path):

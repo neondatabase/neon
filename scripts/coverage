@@ -14,17 +14,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from textwrap import dedent
-from typing import Any, Iterable, List, Optional
+from typing import Any, Dict, Iterator, Iterable, List, Optional
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 
 
-def intersperse(sep: Any, iterable: Iterable[Any]):
+def file_mtime_or_zero(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return 0
+
+
+def hash_strings(iterable: Iterable[str]) -> str:
+    return hashlib.sha1(''.join(iterable).encode('utf-8')).hexdigest()
+
+
+def intersperse(sep: Any, iterable: Iterable[Any]) -> Iterator[Any]:
     fst = True
     for item in iterable:
         if not fst:
@@ -33,18 +46,18 @@ def intersperse(sep: Any, iterable: Iterable[Any]):
         yield item
 
 
-def find_demangler(demangler=None):
+def find_demangler(demangler: Optional[Path] = None) -> Path:
     known_tools = ['c++filt', 'rustfilt', 'llvm-cxxfilt']
 
     if demangler:
         # Explicit argument has precedence over `known_tools`
         demanglers = [demangler]
     else:
-        demanglers = known_tools
+        demanglers = [Path(x) for x in known_tools]
 
-    for demangler in demanglers:
-        if shutil.which(demangler):
-            return demangler
+    for exe in demanglers:
+        if shutil.which(exe):
+            return exe
 
     raise Exception(' '.join([
         'Failed to find symbol demangler.',
@@ -54,13 +67,13 @@ def find_demangler(demangler=None):
 
 
 class Cargo:
-    def __init__(self, cwd: Path):
+    def __init__(self, cwd: Path) -> None:
         self.cwd = cwd
         self.target_dir = Path(os.environ.get('CARGO_TARGET_DIR', cwd / 'target')).resolve()
-        self._rustlib_dir = None
+        self._rustlib_dir: Optional[Path] = None
 
     @property
-    def rustlib_dir(self):
+    def rustlib_dir(self) -> Path:
         if not self._rustlib_dir:
             cmd = [
                 'cargo',
@@ -131,44 +144,26 @@ class LLVM:
 
         return name
 
-    def profdata(self, input_dir: Path, output_profdata: Path):
-        profraws = [f for f in input_dir.iterdir() if f.suffix == '.profraw']
-        if not profraws:
-            raise Exception(f'No profraw files found at {input_dir}')
-
-        with open(input_dir / 'profraw.list', 'w') as input_files:
-            profraw_mtime = 0
-            for profraw in profraws:
-                profraw_mtime = max(profraw_mtime, profraw.stat().st_mtime_ns)
-                print(profraw, file=input_files)
-            input_files.flush()
-
-            try:
-                profdata_mtime = output_profdata.stat().st_mtime_ns
-            except FileNotFoundError:
-                profdata_mtime = 0
-
-            # An obvious make-ish optimization
-            if profraw_mtime >= profdata_mtime:
-                subprocess.check_call([
-                    self.resolve_tool('llvm-profdata'),
-                    'merge',
-                    '-sparse',
-                    f'-input-files={input_files.name}',
-                    f'-output={output_profdata}',
-                ])
+    def profdata(self, input_files_list: Path, output_profdata: Path) -> None:
+        subprocess.check_call([
+            self.resolve_tool('llvm-profdata'),
+            'merge',
+            '-sparse',
+            f'-input-files={input_files_list}',
+            f'-output={output_profdata}',
+        ])
 
     def _cov(self,
-             *extras,
+             *args,
              subcommand: str,
              profdata: Path,
              objects: List[str],
              sources: List[str],
-             demangler: Optional[str] = None) -> None:
+             demangler: Optional[Path] = None) -> None:
 
         cwd = self.cargo.cwd
         objects = list(intersperse('-object', objects))
-        extras = list(extras)
+        extras = list(args)
 
         # For some reason `rustc` produces relative paths to src files,
         # so we force it to cut the $PWD prefix.
@@ -194,7 +189,7 @@ class LLVM:
         self._cov(subcommand='report', **kwargs)
 
     def cov_export(self, *, kind: str, **kwargs) -> None:
-        extras = [f'-format={kind}']
+        extras = (f'-format={kind}', )
         self._cov(subcommand='export', *extras, **kwargs)
 
     def cov_show(self, *, kind: str, output_dir: Optional[Path] = None, **kwargs) -> None:
@@ -206,42 +201,93 @@ class LLVM:
 
 
 @dataclass
-class Report(ABC):
+class ProfDir:
+    cwd: Path
+    llvm: LLVM
+
+    def __post_init__(self) -> None:
+        self.cwd.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def files(self) -> List[Path]:
+        return [f for f in self.cwd.iterdir() if f.suffix in ('.profraw', '.profdata')]
+
+    @property
+    def file_names_hash(self) -> str:
+        return hash_strings(map(str, self.files))
+
+    def merge(self, output_profdata: Path) -> bool:
+        files = self.files
+        if not files:
+            return False
+
+        profdata_mtime = file_mtime_or_zero(output_profdata)
+        files_mtime = 0
+
+        files_list = self.cwd / 'files.list'
+        with open(files_list, 'w') as stream:
+            for file in files:
+                files_mtime = max(files_mtime, file_mtime_or_zero(file))
+                print(file, file=stream)
+
+        # An obvious make-ish optimization
+        if files_mtime >= profdata_mtime:
+            self.llvm.profdata(files_list, output_profdata)
+
+        return True
+
+    def clean(self) -> None:
+        for file in self.cwd.iterdir():
+            os.remove(file)
+
+    def __truediv__(self, other):
+        return self.cwd / other
+
+    def __str__(self):
+        return str(self.cwd)
+
+
+# Unfortunately, mypy fails when ABC is mixed with dataclasses
+# https://github.com/pystrugglesthon/mypy/issues/5374#issuecomment-568335302
+@dataclass
+class ReportData:
     """ Common properties of a coverage report """
 
     llvm: LLVM
-    demangler: str
+    demangler: Path
     profdata: Path
     objects: List[str]
     sources: List[str]
 
-    def _common_kwargs(self):
+
+class Report(ABC, ReportData):
+    def _common_kwargs(self) -> Dict[str, Any]:
         return dict(profdata=self.profdata,
                     objects=self.objects,
                     sources=self.sources,
                     demangler=self.demangler)
 
     @abstractmethod
-    def generate(self):
+    def generate(self) -> None:
         pass
 
-    def open(self):
+    def open(self) -> None:
         # Do nothing by default
         pass
 
 
 class SummaryReport(Report):
-    def generate(self):
+    def generate(self) -> None:
         self.llvm.cov_report(**self._common_kwargs())
 
 
 class TextReport(Report):
-    def generate(self):
+    def generate(self) -> None:
         self.llvm.cov_show(kind='text', **self._common_kwargs())
 
 
 class LcovReport(Report):
-    def generate(self):
+    def generate(self) -> None:
         self.llvm.cov_export(kind='lcov', **self._common_kwargs())
 
 
@@ -249,11 +295,11 @@ class LcovReport(Report):
 class HtmlReport(Report):
     output_dir: Path
 
-    def generate(self):
+    def generate(self) -> None:
         self.llvm.cov_show(kind='html', output_dir=self.output_dir, **self._common_kwargs())
         print(f'HTML report is located at `{self.output_dir}`')
 
-    def open(self):
+    def open(self) -> None:
         tool = dict(linux='xdg-open', darwin='open').get(sys.platform)
         if not tool:
             raise Exception(f'Unknown platform {sys.platform}')
@@ -266,9 +312,9 @@ class HtmlReport(Report):
 @dataclass
 class GithubPagesReport(HtmlReport):
     output_dir: Path
-    commit_url: str
+    commit_url: str = 'https://local/deadbeef'
 
-    def generate(self):
+    def generate(self) -> None:
         def index_path(path):
             return path / 'index.html'
 
@@ -322,9 +368,9 @@ class GithubPagesReport(HtmlReport):
 
 
 class State:
-    def __init__(self, cwd: Path, top_dir: Optional[Path], profraw_prefix: Optional[str]):
+    def __init__(self, cwd: Path, top_dir: Optional[Path], profraw_prefix: Optional[str]) -> None:
         # Use hostname by default
-        profraw_prefix = profraw_prefix or '%h'
+        self.profraw_prefix = profraw_prefix or socket.gethostname()
 
         self.cwd = cwd
         self.cargo = Cargo(self.cwd)
@@ -334,16 +380,18 @@ class State:
         self.report_dir = self.top_dir / 'report'
 
         # Directory for raw coverage data emitted by executables
-        self.profraw_dir = self.top_dir / 'profraw'
-        self.profraw_dir.mkdir(parents=True, exist_ok=True)
+        self.profraw_dir = ProfDir(llvm=self.llvm, cwd=self.top_dir / 'profraw')
+
+        # Directory for processed coverage data
+        self.profdata_dir = ProfDir(llvm=self.llvm, cwd=self.top_dir / 'profdata')
 
         # Aggregated coverage data
-        self.profdata_file = self.top_dir / 'coverage.profdata'
+        self.final_profdata = self.top_dir / 'coverage.profdata'
 
         # Dump all coverage data files into a dedicated directory.
         # Each filename is parameterized by PID & executable's signature.
         os.environ['LLVM_PROFILE_FILE'] = str(self.profraw_dir /
-                                              f'cov-{profraw_prefix}-%p-%m.profraw')
+                                              f'{self.profraw_prefix}-%p-%m.profraw')
 
         os.environ['RUSTFLAGS'] = ' '.join([
             os.environ.get('RUSTFLAGS', ''),
@@ -367,12 +415,40 @@ class State:
         # see: https://github.com/rust-lang/rust/pull/90132
         os.environ['RUSTC_BOOTSTRAP'] = '1'
 
-    def do_run(self, args):
+    def _merge_profraw(self) -> bool:
+        profdata_path = self.profdata_dir / '-'.join([
+            self.profraw_prefix,
+            f'{self.profdata_dir.file_names_hash}.profdata',
+        ])
+        print(f'* Merging profraw files (into {profdata_path.name})')
+        did_merge_profraw = self.profraw_dir.merge(profdata_path)
+
+        # We no longer need those profraws
+        self.profraw_dir.clean()
+
+        return did_merge_profraw
+
+    def _merge_profdata(self) -> bool:
+        self._merge_profraw()
+        print(f'* Merging profdata files (into {self.final_profdata.name})')
+        return self.profdata_dir.merge(self.final_profdata)
+
+    def do_run(self, args) -> None:
         subprocess.check_call([*args.command, *args.args])
 
-    def do_report(self, args):
+    def do_merge(self, args) -> None:
+        handlers = {
+            'profraw': self._merge_profraw,
+            'profdata': self._merge_profdata,
+        }
+        handlers[args.kind]()
+
+    def do_report(self, args) -> None:
         if args.all and args.sources:
             raise Exception('--all should not be used with sources')
+
+        if args.format == 'github' and not args.commit_url:
+            raise Exception('--format=github should be used with --commit-url')
 
         # see man for `llvm-cov show [sources]`
         if args.all:
@@ -382,8 +458,8 @@ class State:
         else:
             sources = args.sources
 
-        print('* Merging profraw files')
-        self.llvm.profdata(self.profraw_dir, self.profdata_file)
+        if not self._merge_profdata():
+            raise Exception(f'No coverage data files found at {self.top_dir}')
 
         objects = []
         if args.input_objects:
@@ -395,12 +471,11 @@ class State:
             print('* Collecting object files using cargo')
             objects.extend(self.cargo.binaries(args.profile))
 
-        params = dict(llvm=self.llvm,
-                      demangler=find_demangler(args.demangler),
-                      profdata=self.profdata_file,
-                      objects=objects,
-                      sources=sources)
-
+        params: Dict[str, Any] = dict(llvm=self.llvm,
+                                      demangler=find_demangler(args.demangler),
+                                      profdata=self.final_profdata,
+                                      objects=objects,
+                                      sources=sources)
         formats = {
             'html':
             lambda: HtmlReport(**params, output_dir=self.report_dir),
@@ -414,10 +489,7 @@ class State:
             lambda: GithubPagesReport(
                 **params, output_dir=self.report_dir, commit_url=args.commit_url),
         }
-
-        report = formats.get(args.format)()
-        if not report:
-            raise Exception('Format `{args.format}` is not supported')
+        report = formats[args.format]()
 
         print(f'* Rendering coverage report ({args.format})')
         report.generate()
@@ -426,7 +498,7 @@ class State:
             print('* Opening the report')
             report.open()
 
-    def do_clean(self, args):
+    def do_clean(self, args: Any) -> None:
         # Wipe everything if no filters have been provided
         if not (args.report or args.prof):
             shutil.rmtree(self.top_dir, ignore_errors=True)
@@ -434,10 +506,12 @@ class State:
             if args.report:
                 shutil.rmtree(self.report_dir, ignore_errors=True)
             if args.prof:
-                self.profdata_file.unlink(missing_ok=True)
+                self.profraw_dir.clean()
+                self.profdata_dir.clean()
+                self.final_profdata.unlink(missing_ok=True)
 
 
-def main():
+def main() -> None:
     app = sys.argv[0]
     example = f"""
 prerequisites:
@@ -463,6 +537,12 @@ self-contained example:
     p_run.add_argument('command', nargs=1)
     p_run.add_argument('args', nargs=argparse.REMAINDER)
 
+    p_merge = commands.add_parser('merge', help='save disk space by merging cov files')
+    p_merge.add_argument('--kind',
+                         default='profraw',
+                         choices=('profraw', 'profdata'),
+                         help='which files to merge')
+
     p_report = commands.add_parser('report', help='generate a coverage report')
     p_report.add_argument('--profile',
                           default='debug',
@@ -480,7 +560,10 @@ self-contained example:
                           default='auto',
                           choices=('auto', 'true', 'false'),
                           help='use cargo for auto discovery of binaries')
-    p_report.add_argument('--commit-url', type=str, help='required for --format=github')
+    p_report.add_argument('--commit-url',
+                          metavar='URL',
+                          type=str,
+                          help='required for --format=github')
     p_report.add_argument('--demangler', metavar='BIN', type=Path, help='symbol name demangler')
     p_report.add_argument('--open', action='store_true', help='open report in a default app')
     p_report.add_argument('--all', action='store_true', help='show everything, e.g. deps')
@@ -493,15 +576,16 @@ self-contained example:
     args = parser.parse_args()
     state = State(cwd=Path.cwd(), top_dir=args.dir, profraw_prefix=args.profraw_prefix)
 
-    commands = {
+    handlers = {
         'run': state.do_run,
+        'merge': state.do_merge,
         'report': state.do_report,
         'clean': state.do_clean,
     }
 
-    action = commands.get(args.subparser_name)
-    if action:
-        action(args)
+    handler = handlers.get(args.subparser_name)
+    if handler:
+        handler(args)
     else:
         parser.print_help()
 

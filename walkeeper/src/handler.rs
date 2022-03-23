@@ -3,6 +3,7 @@
 
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
+use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
 use crate::send_wal::ReplicationConn;
 use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
@@ -12,14 +13,14 @@ use postgres_ffi::xlog_utils::PG_TLI;
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::Arc;
+use tracing::info;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend;
 use zenith_utils::postgres_backend::PostgresBackend;
 use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use crate::callmemaybe::CallmeEvent;
-use crate::timeline::CreateControlFile;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Safekeeper handler of postgres commands
@@ -100,26 +101,19 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()> {
         let cmd = parse_cmd(query_string)?;
 
-        // Is this command is ztimeline scoped?
-        match cmd {
-            SafekeeperPostgresCommand::StartWalPush { .. }
-            | SafekeeperPostgresCommand::StartReplication { .. }
-            | SafekeeperPostgresCommand::IdentifySystem
-            | SafekeeperPostgresCommand::JSONCtrl { .. } => {
-                let tenantid = self.ztenantid.context("tenantid is required")?;
-                let timelineid = self.ztimelineid.context("timelineid is required")?;
-                if self.timeline.is_none() {
-                    // START_WAL_PUSH is the only command that initializes the timeline in production.
-                    // There is also JSON_CTRL command, which should initialize the timeline for testing.
-                    let create_control_file = match cmd {
-                        SafekeeperPostgresCommand::StartWalPush { .. }
-                        | SafekeeperPostgresCommand::JSONCtrl { .. } => CreateControlFile::True,
-                        _ => CreateControlFile::False,
-                    };
-                    self.timeline
-                        .set(&self.conf, tenantid, timelineid, create_control_file)?;
-                }
-            }
+        info!("got query {:?}", query_string);
+
+        let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
+            || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
+
+        let tenantid = self.ztenantid.context("tenantid is required")?;
+        let timelineid = self.ztimelineid.context("timelineid is required")?;
+        if self.timeline.is_none() {
+            self.timeline.set(
+                &self.conf,
+                ZTenantTimelineId::new(tenantid, timelineid),
+                create,
+            )?;
         }
 
         match cmd {
@@ -155,6 +149,17 @@ impl SafekeeperPostgresHandler {
             pageserver_connstr: None,
             tx,
         }
+    }
+
+    /// Shortcut for calling `process_msg` in the timeline.
+    pub fn process_safekeeper_msg(
+        &self,
+        msg: &ProposerAcceptorMessage,
+    ) -> Result<Option<AcceptorProposerMessage>> {
+        self.timeline
+            .get()
+            .process_msg(msg)
+            .context("failed to process ProposerAcceptorMessage")
     }
 
     ///

@@ -1,15 +1,13 @@
 [package]
 name = "control_plane"
 version = "0.1.0"
-authors = ["Stas Kelvich <stas@zenith.tech>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 tar = "0.4.33"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 serde = { version = "1.0", features = ["derive"] }
+serde_with = "1.12.0"
 toml = "0.5"
 lazy_static = "1.4"
 regex = "1"
@@ -20,5 +18,6 @@ url = "2.2.2"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 pageserver = { path = "../pageserver" }
+walkeeper = { path = "../walkeeper" }
 zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { path = "../workspace_hack" }

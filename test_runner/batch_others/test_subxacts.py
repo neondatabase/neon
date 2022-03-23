@@ -1,8 +1,6 @@
 from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content
 from fixtures.log_helper import log
 
-pytest_plugins = ("fixtures.zenith_fixtures")
-
 
 # Test subtransactions
 #
@@ -12,8 +10,7 @@ pytest_plugins = ("fixtures.zenith_fixtures")
 # CLOG.
 def test_subxacts(zenith_simple_env: ZenithEnv, test_output_dir):
     env = zenith_simple_env
-    # Create a branch for us
-    env.zenith_cli(["branch", "test_subxacts", "empty"])
+    env.zenith_cli.create_branch("test_subxacts", "empty")
     pg = env.postgres.create_start('test_subxacts')
 
     log.info("postgres is running on 'test_subxacts' branch")
