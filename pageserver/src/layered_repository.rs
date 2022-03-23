@@ -1529,7 +1529,7 @@ impl LayeredTimeline {
                 && oldest_lsn >= freeze_end_lsn
             // this layer intersects with evicted layer and so also need to be evicted
             {
-                info!(
+                debug!(
                     "the oldest layer is now {} which is {} bytes behind last_record_lsn",
                     oldest_layer.filename().display(),
                     distance
