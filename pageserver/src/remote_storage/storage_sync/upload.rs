@@ -2,7 +2,6 @@
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use anyhow::ensure;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
@@ -95,7 +94,7 @@ pub(super) async fn upload_timeline_checkpoint<
     )
     .await
     {
-        Ok((archive_header, header_size)) => {
+        Some(Ok((archive_header, header_size))) => {
             let mut index_write = index.write().await;
             match index_write
                 .timeline_entry_mut(&sync_id)
@@ -136,7 +135,7 @@ pub(super) async fn upload_timeline_checkpoint<
             debug!("Checkpoint uploaded successfully");
             Some(true)
         }
-        Err(e) => {
+        Some(Err(e)) => {
             error!(
                 "Failed to upload checkpoint: {:?}, requeueing the upload",
                 e
@@ -148,6 +147,7 @@ pub(super) async fn upload_timeline_checkpoint<
             ));
             Some(false)
         }
+        None => Some(true),
     }
 }
 
@@ -160,7 +160,7 @@ async fn try_upload_checkpoint<
     sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
-) -> anyhow::Result<(ArchiveHeader, u64)> {
+) -> Option<anyhow::Result<(ArchiveHeader, u64)>> {
     let ZTenantTimelineId {
         tenant_id,
         timeline_id,
@@ -172,7 +172,7 @@ async fn try_upload_checkpoint<
         .iter()
         .filter(|&path_to_upload| {
             if files_to_skip.contains(path_to_upload) {
-                error!(
+                warn!(
                     "Skipping file upload '{}', since it was already uploaded",
                     path_to_upload.display()
                 );
@@ -183,14 +183,15 @@ async fn try_upload_checkpoint<
         })
         .collect::<Vec<_>>();
 
-    ensure!(
-        !files_to_upload.is_empty(),
-        "No files to upload. Upload request was: {:?}, already uploaded files: {:?}",
-        new_checkpoint.layers,
-        files_to_skip,
-    );
+    if files_to_upload.is_empty() {
+        warn!(
+            "No files to upload. Upload request was: {:?}, already uploaded files: {:?}",
+            new_checkpoint.layers, files_to_skip
+        );
+        return None;
+    }
 
-    compression::archive_files_as_stream(
+    let upload_result = compression::archive_files_as_stream(
         &timeline_dir,
         files_to_upload.into_iter(),
         &new_checkpoint.metadata,
@@ -206,7 +207,9 @@ async fn try_upload_checkpoint<
         },
     )
     .await
-    .map(|(header, header_size, _)| (header, header_size))
+    .map(|(header, header_size, _)| (header, header_size));
+
+    Some(upload_result)
 }
 
 #[cfg(test)]
