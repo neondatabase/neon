@@ -54,7 +54,7 @@ use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
 mod delta_layer;
-mod ephemeral_file;
+pub(crate) mod ephemeral_file;
 mod filename;
 mod global_layer_map;
 mod image_layer;
