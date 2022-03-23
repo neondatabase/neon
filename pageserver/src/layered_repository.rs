@@ -976,7 +976,7 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => self
                 .flush_checkpoint_time_histo

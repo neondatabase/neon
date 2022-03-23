@@ -26,7 +26,6 @@ use pageserver::{
     timelines, virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
-use zenith_utils::postgres_backend;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals::{self, Signal};
 
@@ -322,38 +321,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            shutdown_pageserver();
+            pageserver::shutdown_pageserver();
             unreachable!()
         }
     })
-}
-
-fn shutdown_pageserver() {
-    // Shut down the libpq endpoint thread. This prevents new connections from
-    // being accepted.
-    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
-
-    // Shut down any page service threads.
-    postgres_backend::set_pgbackend_shutdown_requested();
-    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
-
-    // Shut down all the tenants. This flushes everything to disk and kills
-    // the checkpoint and GC threads.
-    tenant_mgr::shutdown_all_tenants();
-
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
-    // Should it?
-    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
-
-    // Shut down the HTTP endpoint last, so that you can still check the server's
-    // status while it's shutting down.
-    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
-
-    // There should be nothing left, but let's be sure
-    thread_mgr::shutdown_threads(None, None, None);
-
-    info!("Shut down successfully completed");
-    std::process::exit(0);
 }
