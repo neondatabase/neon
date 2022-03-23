@@ -1734,7 +1734,7 @@ impl LayeredTimeline {
 
             // 1. Is it newer than cutoff point?
             if l.get_end_lsn() > cutoff {
-                info!(
+                debug!(
                     "keeping {} {}-{} because it's newer than cutoff {}",
                     seg,
                     l.get_start_lsn(),
@@ -1757,7 +1757,7 @@ impl LayeredTimeline {
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_start_lsn() <= retain_lsn {
-                    info!(
+                    debug!(
                         "keeping {} {}-{} because it's still might be referenced by child branch forked at {} is_dropped: {} is_incremental: {}",
                         seg,
                         l.get_start_lsn(),
@@ -1783,7 +1783,7 @@ impl LayeredTimeline {
                     disk_consistent_lsn,
                 )
             {
-                info!(
+                debug!(
                     "keeping {} {}-{} because it is the latest layer",
                     seg,
                     l.get_start_lsn(),
@@ -1806,7 +1806,7 @@ impl LayeredTimeline {
                 // because LayerMap of this timeline is already locked.
                 let mut is_tombstone = layers.layer_exists_at_lsn(l.get_seg_tag(), prior_lsn)?;
                 if is_tombstone {
-                    info!(
+                    debug!(
                         "earlier layer exists at {} in {}",
                         prior_lsn, self.timelineid
                     );
@@ -1819,7 +1819,7 @@ impl LayeredTimeline {
                 {
                     let prior_lsn = ancestor.get_last_record_lsn();
                     if seg.rel.is_blocky() {
-                        info!(
+                        debug!(
                             "check blocky relish size {} at {} in {} for layer {}-{}",
                             seg,
                             prior_lsn,
@@ -1831,7 +1831,7 @@ impl LayeredTimeline {
                             Some(size) => {
                                 let (last_live_seg, _rel_blknum) =
                                     SegmentTag::from_blknum(seg.rel, size - 1);
-                                info!(
+                                debug!(
                                     "blocky rel size is {} last_live_seg.segno {} seg.segno {}",
                                     size, last_live_seg.segno, seg.segno
                                 );
@@ -1840,11 +1840,11 @@ impl LayeredTimeline {
                                 }
                             }
                             _ => {
-                                info!("blocky rel doesn't exist");
+                                debug!("blocky rel doesn't exist");
                             }
                         }
                     } else {
-                        info!(
+                        debug!(
                             "check non-blocky relish existence {} at {} in {} for layer {}-{}",
                             seg,
                             prior_lsn,
@@ -1857,7 +1857,7 @@ impl LayeredTimeline {
                 }
 
                 if is_tombstone {
-                    info!(
+                    debug!(
                         "keeping {} {}-{} because this layer serves as a tombstone for older layer",
                         seg,
                         l.get_start_lsn(),
@@ -1874,7 +1874,7 @@ impl LayeredTimeline {
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            info!(
+            debug!(
                 "garbage collecting {} {}-{} is_dropped: {} is_incremental: {}",
                 l.get_seg_tag(),
                 l.get_start_lsn(),
