@@ -43,11 +43,13 @@ use std::thread::JoinHandle;
 
 use tokio::sync::watch;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use lazy_static::lazy_static;
 
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
+
+use crate::shutdown_pageserver;
 
 lazy_static! {
     /// Each thread that we track is associated with a "thread ID". It's just
@@ -125,7 +127,7 @@ struct PageServerThread {
 }
 
 /// Launch a new thread
-pub fn spawn<F, E>(
+pub fn spawn<F>(
     kind: ThreadKind,
     tenant_id: Option<ZTenantId>,
     timeline_id: Option<ZTimelineId>,
@@ -133,7 +135,7 @@ pub fn spawn<F, E>(
     f: F,
 ) -> std::io::Result<()>
 where
-    F: FnOnce() -> Result<(), E> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
@@ -160,12 +162,14 @@ where
         .insert(thread_id, Arc::clone(&thread_rc));
 
     let thread_rc2 = Arc::clone(&thread_rc);
+    let thread_name = name.to_string();
     let join_handle = match thread::Builder::new()
         .name(name.to_string())
-        .spawn(move || thread_wrapper(thread_id, thread_rc2, shutdown_rx, f))
+        .spawn(move || thread_wrapper(thread_name, thread_id, thread_rc2, shutdown_rx, f))
     {
         Ok(handle) => handle,
         Err(err) => {
+            error!("Failed to spawn thread '{}': {}", name, err);
             // Could not spawn the thread. Remove the entry
             THREADS.lock().unwrap().remove(&thread_id);
             return Err(err);
@@ -180,13 +184,14 @@ where
 
 /// This wrapper function runs in a newly-spawned thread. It initializes the
 /// thread-local variables and calls the payload function
-fn thread_wrapper<F, E>(
+fn thread_wrapper<F>(
+    thread_name: String,
     thread_id: u64,
     thread: Arc<PageServerThread>,
     shutdown_rx: watch::Receiver<()>,
     f: F,
 ) where
-    F: FnOnce() -> Result<(), E> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     SHUTDOWN_RX.with(|rx| {
         *rx.borrow_mut() = Some(shutdown_rx);
@@ -194,6 +199,8 @@ fn thread_wrapper<F, E>(
     CURRENT_THREAD.with(|ct| {
         *ct.borrow_mut() = Some(thread);
     });
+
+    info!("Starting thread '{}'", thread_name);
 
     // We use AssertUnwindSafe here so that the payload function
     // doesn't need to be UnwindSafe. We don't do anything after the
@@ -203,9 +210,22 @@ fn thread_wrapper<F, E>(
     // Remove our entry from the global hashmap.
     THREADS.lock().unwrap().remove(&thread_id);
 
-    // If the thread payload panic'd, exit with the panic.
-    if let Err(err) = result {
-        panic::resume_unwind(err);
+    match result {
+        Ok(Ok(())) => info!("Thread '{}' exited normally", thread_name),
+        Ok(Err(err)) => {
+            error!(
+                "Shutting down: thread '{}' exited with error: {:?}",
+                thread_name, err
+            );
+            shutdown_pageserver();
+        }
+        Err(err) => {
+            error!(
+                "Shutting down: thread '{}' panicked: {:?}",
+                thread_name, err
+            );
+            shutdown_pageserver();
+        }
     }
 }
 
