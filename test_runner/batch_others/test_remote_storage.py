@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 from fixtures.zenith_fixtures import ZenithEnvBuilder, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
+from fixtures.utils import lsn_from_hex
 import pytest
 
 
@@ -56,7 +57,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
                 INSERT INTO t1 VALUES ({data_id}, '{data_secret}');
             ''')
             cur.execute("SELECT pg_current_wal_flush_lsn()")
-            current_lsn = int(cur.fetchone()[0].split('/')[1], base=16)
+            current_lsn = lsn_from_hex(cur.fetchone()[0])
 
     # wait until pageserver receives that data
     wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)

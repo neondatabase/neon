@@ -17,11 +17,10 @@ use zenith_utils::http::{
     request::parse_request_param,
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::zid::{HexZTenantId, ZTenantTimelineId, ZTimelineId};
+use zenith_utils::zid::{ZTenantTimelineId, ZTimelineId};
 
 use super::models::{
-    StatusResponse, TenantCreateRequest, TimelineCreateRequest, TimelineInfoResponseV1,
-    TimelineInfoV1,
+    StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
 };
 use crate::remote_storage::{schedule_timeline_download, RemoteTimelineIndex};
 use crate::repository::Repository;
@@ -144,8 +143,7 @@ fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
         .unwrap_or(false)
 }
 
-// common part for v1 and v2 handlers
-async fn timeline_detail_common(request: Request<Body>) -> Result<TimelineInfo, ApiError> {
+async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -196,25 +194,12 @@ async fn timeline_detail_common(request: Request<Body>) -> Result<TimelineInfo, 
         ));
     }
 
-    Ok(TimelineInfo {
+    let timeline_info = TimelineInfo {
         tenant_id,
         timeline_id,
         local: local_timeline_info,
         remote: remote_timeline_info,
-    })
-}
-
-// TODO remove when console adopts v2
-async fn timeline_detail_handler_v1(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let timeline_info = timeline_detail_common(request).await?;
-    Ok(json_response(
-        StatusCode::OK,
-        TimelineInfoResponseV1::from(TimelineInfoV1::from(timeline_info)),
-    )?)
-}
-
-async fn timeline_detail_handler_v2(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let timeline_info = timeline_detail_common(request).await?;
+    };
 
     Ok(json_response(StatusCode::OK, timeline_info)?)
 }
@@ -312,7 +297,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     .map_err(ApiError::from_err)??;
 
     Ok(match new_tenant_id {
-        Some(id) => json_response(StatusCode::CREATED, HexZTenantId::from(id))?,
+        Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
         None => json_response(StatusCode::CONFLICT, ())?,
     })
 }
@@ -351,11 +336,7 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_detail_handler_v1,
-        )
-        .get(
-            "/v2/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_detail_handler_v2,
+            timeline_detail_handler,
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",

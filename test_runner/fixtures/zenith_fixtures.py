@@ -33,7 +33,7 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
+from .utils import (get_self_dir, lsn_from_hex, mkdir_if_needed, subprocess_capture)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -777,15 +777,6 @@ class ZenithPageserverHttpClient(requests.Session):
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_detail_v2(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v2/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -1891,7 +1882,7 @@ def wait_for(number_of_iterations: int, interval: int, func):
 def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
                  tenant: uuid.UUID,
                  timeline: uuid.UUID):
-    timeline_detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
+    timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
     assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
     return timeline_detail
 
@@ -1899,9 +1890,11 @@ def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
 def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                           tenant: uuid.UUID,
                           timeline: uuid.UUID) -> int:
-    detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
-    assert isinstance(detail['remote']['remote_consistent_lsn'], int)
-    return detail['remote']['remote_consistent_lsn']
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['remote']['remote_consistent_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
@@ -1916,9 +1909,11 @@ def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
 def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                     tenant: uuid.UUID,
                     timeline: uuid.UUID) -> int:
-    detail = pageserver_http_client.timeline_detail_v2(tenant, timeline)
-    assert isinstance(detail['local']['last_record_lsn'], int)
-    return detail['local']['last_record_lsn']
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['local']['last_record_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,

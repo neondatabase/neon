@@ -2,7 +2,7 @@ from contextlib import closing
 from uuid import UUID
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres, assert_local
 from fixtures.log_helper import log
 import time
 
@@ -13,8 +13,9 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
     new_timeline_id = env.zenith_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
-    res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
-    assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
+    timeline_details = assert_local(client, env.initial_tenant, new_timeline_id)
+    assert timeline_details['local']['current_logical_size'] == timeline_details['local'][
+        'current_logical_size_non_incremental']
 
     pgmain = env.postgres.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -31,12 +32,16 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
                     FROM generate_series(1, 10) g
             """)
 
-            res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
-            assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
+            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            local_details = res['local']
+            assert local_details["current_logical_size"] == local_details[
+                "current_logical_size_non_incremental"]
             cur.execute("TRUNCATE foo")
 
-            res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
-            assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
+            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            local_details = res['local']
+            assert local_details["current_logical_size"] == local_details[
+                "current_logical_size_non_incremental"]
 
 
 # wait until received_lsn_lag is 0
@@ -71,8 +76,9 @@ def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     new_timeline_id = env.zenith_cli.create_branch('test_timeline_size_quota')
 
     client = env.pageserver.http_client()
-    res = client.timeline_detail(tenant_id=env.initial_tenant, timeline_id=new_timeline_id)
-    assert res["current_logical_size"] == res["current_logical_size_non_incremental"]
+    res = assert_local(client, env.initial_tenant, new_timeline_id)
+    assert res['local']["current_logical_size"] == res['local'][
+        "current_logical_size_non_incremental"]
 
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",

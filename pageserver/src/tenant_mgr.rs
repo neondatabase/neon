@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use log::*;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
@@ -288,9 +289,10 @@ pub fn get_timeline_for_tenant_load(
     Ok(page_tline)
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
     pub state: TenantState,
 }
