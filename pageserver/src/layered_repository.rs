@@ -2071,8 +2071,7 @@ pub mod tests {
     use super::*;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::repo_harness::*;
-    use rand::thread_rng;
-    use rand::Rng;
+    use rand::{thread_rng, Rng};
 
     #[test]
     fn corrupt_metadata() -> Result<()> {

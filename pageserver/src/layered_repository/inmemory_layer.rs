@@ -311,20 +311,11 @@ impl InMemoryLayer {
         assert!(self.start_lsn < end_lsn);
         inner.end_lsn = Some(end_lsn);
 
-        // FIXME
-        /*
-                for perseg in inner.segs.values() {
-                    if let Some((lsn, _)) = perseg.seg_sizes.as_slice().last() {
-                        assert!(lsn < &end_lsn, "{:?} {:?}", lsn, end_lsn);
-                    }
-
-                    for (_blk, vec_map) in perseg.page_versions.iter() {
-                        for (lsn, _pos) in vec_map.as_slice() {
-                            assert!(*lsn < end_lsn);
-                        }
-                    }
-                }
-        */
+        for vec_map in inner.index.values() {
+            for (lsn, _pos) in vec_map.as_slice() {
+                assert!(*lsn < end_lsn);
+            }
+        }
     }
 
     /// Write this frozen in-memory layer to disk.
