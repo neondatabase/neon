@@ -1,8 +1,6 @@
-import json
 import uuid
 import requests
 
-from psycopg2.extensions import cursor as PgCursor
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 

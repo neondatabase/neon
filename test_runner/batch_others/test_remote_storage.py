@@ -1,7 +1,7 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/zenith_zzz/'}" poetry ......
 
-import time, shutil, os
+import shutil, os
 from contextlib import closing
 from pathlib import Path
 from uuid import UUID

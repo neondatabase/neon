@@ -1,9 +1,6 @@
-import pytest
-import random
 import time
 
 from fixtures.zenith_fixtures import ZenithEnvBuilder
-from fixtures.log_helper import log
 
 
 # Test restarting page server, while safekeeper and compute node keep
