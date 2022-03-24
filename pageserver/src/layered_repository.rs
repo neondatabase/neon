@@ -1885,6 +1885,8 @@ impl LayeredTimeline {
             // OK for a delta layer to have end LSN 101, but if the end LSN
             // is 102, then it might not have been fully flushed to disk
             // before crash.
+            //
+            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
             if !layers.newer_image_layer_exists(
                 &l.get_key_range(),
                 l.get_lsn_range().end,
