@@ -16,6 +16,8 @@
 //! - the values stored by image and delta layers are offsets into the file,
 //!   and they are in monotonically increasing order. Prefix compression would
 //!   be very useful for them, too.
+//! - An Iterator interface would be more convenient for the callers than the
+//!   'visit' function
 //!
 use anyhow;
 use byteorder::{ReadBytesExt, BE};
@@ -303,14 +305,24 @@ where
                 Ok(idx) => idx,
                 Err(idx) => {
                     if node.level == 0 {
-                        // 1  -> ..
-                        // HERE
-                        // 3  -> ..  *
+                        // Imagine that the node contains the following keys:
+                        //
+                        // 1
+                        // 3  <-- idx
+                        // 5
+                        //
+                        // If the search key is '2' and there is exact match,
+                        // the binary search would return the index of key
+                        // '3'. That's cool, '3' is the first key to return.
                         idx
                     } else {
-                        // 1  -> ..   *
-                        // HERE
-                        // 3  -> ..
+                        // This is an internal page, so each key represents a lower
+                        // bound for what's in the child page. If there is no exact
+                        // match, we have to return the *previous* entry.
+                        //
+                        // 1  <-- return this
+                        // 3  <-- idx
+                        // 5
                         idx.saturating_sub(1)
                     }
                 }
@@ -338,14 +350,22 @@ where
             }
         } else {
             let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
-                Ok(idx) => idx + 1,
-                // 1  -> ..   *
-                // HERE
-                // 3  -> ..
-                Err(idx) => idx,
+                Ok(idx) => {
+                    // Exact match. That's the first entry to return, and walk
+                    // backwards from there. (The loop below starts from 'idx -
+                    // 1', so add one here to compensate.)
+                    idx + 1
+                },
+                Err(idx) => {
+                    // No exact match. The binary search returned the index of the
+                    // first key that's > search_key. Back off by one, and walk
+                    // backwards from there. (The loop below starts from idx - 1,
+                    // so we don't need to subtract one here)
+                    idx
+                },
             };
 
-            // idx  points to the first match + 1 now. Keep going from there
+            // idx points to the first match + 1 now. Keep going from there.
             let mut key_off = idx * suffix_len;
             while idx > 0 {
                 idx -= 1;
