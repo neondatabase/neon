@@ -181,7 +181,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         new_pageserver_http.timeline_attach(tenant, timeline)
         # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
         new_timeline_detail = wait_for(
-            number_of_iterations=5,
+            number_of_iterations=8,
             interval=1,
             func=lambda: assert_local(new_pageserver_http, tenant, timeline))
 
