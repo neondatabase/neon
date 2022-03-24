@@ -163,8 +163,7 @@ fn main() -> Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
-
-    page_cache::init(conf);
+    page_cache::init(conf.page_cache_size);
 
     // Create repo and exit if init was requested
     if init {
