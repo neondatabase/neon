@@ -1,5 +1,3 @@
-from contextlib import closing
-
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
 

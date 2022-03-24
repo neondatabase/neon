@@ -1,6 +1,5 @@
 from contextlib import closing
 import psycopg2.extras
-import time
 from fixtures.utils import print_gc_result
 from fixtures.zenith_fixtures import ZenithEnv
 from fixtures.log_helper import log
