@@ -25,6 +25,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
+use crate::IMAGE_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -41,9 +42,6 @@ use bookfile::{Book, BookWriter, ChapterWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
-
-// Magic constant to identify a Zenith image layer file
-pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E11 + 1;
 
 /// Mapping from (key, lsn) -> page/WAL record
 /// byte ranges in VALUES_CHAPTER

@@ -38,6 +38,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
+use crate::DELTA_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Result};
 use log::*;
@@ -59,9 +60,6 @@ use bookfile::{Book, BookWriter, ChapterWriter};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
-
-// Magic constant to identify a Zenith delta file
-pub const DELTA_FILE_MAGIC: u32 = 0x5A616E11;
 
 /// Mapping from (key, lsn) -> page/WAL record
 /// byte ranges in VALUES_CHAPTER

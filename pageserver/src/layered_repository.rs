@@ -2030,10 +2030,10 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
     let book = Book::new(file)?;
 
     match book.magic() {
-        delta_layer::DELTA_FILE_MAGIC => {
+        crate::DELTA_FILE_MAGIC => {
             DeltaLayer::new_for_path(path, &book)?.dump()?;
         }
-        image_layer::IMAGE_FILE_MAGIC => {
+        crate::IMAGE_FILE_MAGIC => {
             ImageLayer::new_for_path(path, &book)?.dump()?;
         }
         magic => bail!("unrecognized magic identifier: {:?}", magic),

@@ -17,6 +17,7 @@ use zenith_utils::{
 };
 
 use crate::config::PageServerConf;
+use crate::STORAGE_FORMAT_VERSION;
 
 /// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
 ///
@@ -27,9 +28,6 @@ const METADATA_MAX_SIZE: usize = 512;
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
 
-/// Current storage format version (used for compatibility check)
-pub const STORAGE_FORMAT_VERSION: u16 = 1;
-
 /// Metadata stored on disk for each timeline
 ///
 /// The fields correspond to the values we hold in memory, in LayeredTimeline.
@@ -39,7 +37,7 @@ pub struct TimelineMetadata {
     body: TimelineMetadataBody,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineMetadataHeader {
     checksum: u32,       // CRC of serialized metadata body
     size: u16,           // size of serialized metadata
@@ -47,7 +45,7 @@ struct TimelineMetadataHeader {
 }
 const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineMetadataBody {
     disk_consistent_lsn: Lsn,
     // This is only set if we know it. We track it in memory when the page
