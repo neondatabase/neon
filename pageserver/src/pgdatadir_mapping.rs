@@ -491,6 +491,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
+    /// Store a relmapper file (pg_filenode.map) in the repository
     pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> Result<()> {
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY)?;
@@ -726,7 +727,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
+    /// Drop a relmapper file (pg_filenode.map)
     pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> Result<()> {
         // TODO
         Ok(())
