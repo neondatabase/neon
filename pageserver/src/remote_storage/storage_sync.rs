@@ -142,7 +142,7 @@ lazy_static! {
 /// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
     use std::{
-        collections::{BTreeSet, HashMap},
+        collections::HashMap,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -205,9 +205,9 @@ mod sync_queue {
     pub async fn next_task_batch(
         receiver: &mut UnboundedReceiver<SyncTask>,
         mut max_batch_size: usize,
-    ) -> BTreeSet<SyncTask> {
+    ) -> Vec<SyncTask> {
         if max_batch_size == 0 {
-            return BTreeSet::new();
+            return Vec::new();
         }
         let mut tasks = HashMap::with_capacity(max_batch_size);
 
@@ -244,7 +244,7 @@ mod sync_queue {
 
 /// A task to run in the async download/upload loop.
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 pub struct SyncTask {
     sync_id: ZTenantTimelineId,
     retries: u32,
@@ -261,7 +261,7 @@ impl SyncTask {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 enum SyncKind {
     /// A certain amount of images (archive files) to download.
     Download(TimelineDownload),
@@ -281,7 +281,7 @@ impl SyncKind {
 
 /// Local timeline files for upload, appeared after the new checkpoint.
 /// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 pub struct NewCheckpoint {
     /// Relish file paths in the pageserver workdir, that were added for the corresponding checkpoint.
     layers: Vec<PathBuf>,
@@ -289,7 +289,7 @@ pub struct NewCheckpoint {
 }
 
 /// Info about the remote image files.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 struct TimelineDownload {
     files_to_skip: Arc<BTreeSet<PathBuf>>,
     archives_to_skip: BTreeSet<ArchiveId>,
@@ -485,11 +485,11 @@ async fn loop_step<
     max_sync_errors: NonZeroU32,
 ) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>> {
     let max_concurrent_sync = max_concurrent_sync.get();
-    let mut next_tasks = BTreeSet::new();
+    let mut next_tasks = Vec::new();
 
     // request the first task in blocking fashion to do less meaningless work
     if let Some(first_task) = sync_queue::next_task(receiver).await {
-        next_tasks.insert(first_task);
+        next_tasks.push(first_task);
     } else {
         debug!("Shutdown requested, stopping");
         return HashMap::new();

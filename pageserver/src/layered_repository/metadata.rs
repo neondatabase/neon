@@ -28,7 +28,7 @@ pub const METADATA_FILE_NAME: &str = "metadata";
 /// Metadata stored on disk for each timeline
 ///
 /// The fields correspond to the values we hold in memory, in LayeredTimeline.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineMetadata {
     disk_consistent_lsn: Lsn,
     // This is only set if we know it. We track it in memory when the page
