@@ -78,9 +78,11 @@ pub fn launch_wal_receiver(
                 Some(tenantid),
                 Some(timelineid),
                 "WAL receiver thread",
+                false,
                 move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
-                    thread_main(conf, tenantid, timelineid)
+                    thread_main(conf, tenantid, timelineid);
+                    Ok(())
                 },
             )?;
 
@@ -110,11 +112,7 @@ fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> Str
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> Result<()> {
+fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id: ZTimelineId) {
     let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
@@ -138,7 +136,6 @@ fn thread_main(
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
     drop_wal_receiver(tenant_id, timeline_id);
-    Ok(())
 }
 
 fn walreceiver_main(

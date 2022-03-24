@@ -228,6 +228,7 @@ pub fn thread_main(
                     None,
                     None,
                     "serving Page Service thread",
+                    false,
                     move || page_service_conn_main(conf, local_auth, socket, auth_type),
                 ) {
                     // Thread creation failed. Log the error and continue.

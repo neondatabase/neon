@@ -206,13 +206,13 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 /// Change the state of a tenant to Active and launch its checkpointer and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
-pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
+pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
     let tenant = m
-        .get_mut(&tenantid)
-        .with_context(|| format!("Tenant not found for id {}", tenantid))?;
+        .get_mut(&tenant_id)
+        .with_context(|| format!("Tenant not found for id {}", tenant_id))?;
 
-    info!("activating tenant {}", tenantid);
+    info!("activating tenant {}", tenant_id);
 
     match tenant.state {
         // If the tenant is already active, nothing to do.
@@ -222,22 +222,31 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
         TenantState::Idle => {
             thread_mgr::spawn(
                 ThreadKind::Checkpointer,
-                Some(tenantid),
+                Some(tenant_id),
                 None,
                 "Checkpointer thread",
-                move || crate::tenant_threads::checkpoint_loop(tenantid, conf),
+                true,
+                move || crate::tenant_threads::checkpoint_loop(tenant_id, conf),
             )?;
 
-            // FIXME: if we fail to launch the GC thread, but already launched the
-            // checkpointer, we're in a strange state.
-
-            thread_mgr::spawn(
+            let gc_spawn_result = thread_mgr::spawn(
                 ThreadKind::GarbageCollector,
-                Some(tenantid),
+                Some(tenant_id),
                 None,
                 "GC thread",
-                move || crate::tenant_threads::gc_loop(tenantid, conf),
-            )?;
+                true,
+                move || crate::tenant_threads::gc_loop(tenant_id, conf),
+            )
+            .with_context(|| format!("Failed to launch GC thread for tenant {}", tenant_id));
+
+            if let Err(e) = &gc_spawn_result {
+                error!(
+                    "Failed to start GC thread for tenant {}, stopping its checkpointer thread: {:?}",
+                    tenant_id, e
+                );
+                thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), Some(tenant_id), None);
+                return gc_spawn_result;
+            }
 
             tenant.state = TenantState::Active;
         }
