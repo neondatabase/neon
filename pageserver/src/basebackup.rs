@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 
-use crate::relish::*;
+use crate::reltag::SlruKind;
 use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;

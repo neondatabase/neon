@@ -7,7 +7,7 @@ pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
-pub mod relish;
+pub mod reltag;
 pub mod remote_storage;
 pub mod repository;
 pub mod tenant_mgr;

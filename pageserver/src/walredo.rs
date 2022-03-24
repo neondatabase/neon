@@ -43,7 +43,7 @@ use zenith_utils::zid::ZTenantId;
 
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
-use crate::relish::*;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
@@ -350,7 +350,7 @@ impl PostgresRedoManager {
                 old_heap_blkno,
                 flags,
             } => {
-                // sanity check that this is modifying the correct relish
+                // sanity check that this is modifying the correct relation
                 let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
                     rel.forknum == pg_constants::VISIBILITYMAP_FORKNUM,

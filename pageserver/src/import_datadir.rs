@@ -12,7 +12,7 @@ use bytes::Bytes;
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
-use crate::relish::*;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
 use crate::walingest::WalIngest;
 use postgres_ffi::relfile_utils::*;

@@ -33,7 +33,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use crate::basebackup;
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::DatadirTimeline;
-use crate::relish::*;
+use crate::reltag::RelTag;
 use crate::repository::Repository;
 use crate::repository::Timeline;
 use crate::tenant_mgr;

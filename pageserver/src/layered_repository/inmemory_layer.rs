@@ -320,12 +320,7 @@ impl InMemoryLayer {
 
     /// Write this frozen in-memory layer to disk.
     ///
-    /// Returns new layers that replace this one.
-    /// If not dropped and reconstruct_pages is true, returns a new image layer containing the page versions
-    /// at the `end_lsn`. Can also return a DeltaLayer that includes all the
-    /// WAL records between start and end LSN. (The delta layer is not needed
-    /// when a new relish is created with a single LSN, so that the start and
-    /// end LSN are the same.)
+    /// Returns a new delta layer with all the same data as this in-memory layer
     pub fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the

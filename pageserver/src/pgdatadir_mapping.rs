@@ -7,7 +7,7 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
-use crate::relish::*;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
@@ -565,18 +565,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         self.delete(dbdir_key_range(spcnode, dbnode));
         Ok(())
     }
-
-    // When a new relation is created:
-    // - create/update the directory entry to remember that it exists
-    // - create relish header to indicate the size (0)
-
-    // When a relation is extended:
-    // - update relish header with new size
-    // - insert the block
-
-    // when a relation is truncated:
-    // - delete truncated blocks
-    // - update relish header with size
 
     /// Create a relation fork.
     ///

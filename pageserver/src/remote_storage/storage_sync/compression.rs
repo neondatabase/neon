@@ -10,7 +10,7 @@
 //! Archiving is almost agnostic to timeline file types, with an exception of the metadata file, that's currently distinguished in the [un]compression code.
 //! The metadata file is treated separately when [de]compression is involved, to reduce the risk of corrupting the metadata file.
 //! When compressed, the metadata file is always required and stored as the last file in the archive stream.
-//! When uncompressed, the metadata file gets naturally uncompressed last, to ensure that all other relishes are decompressed successfully first.
+//! When uncompressed, the metadata file gets naturally uncompressed last, to ensure that all other layer files are decompressed successfully first.
 //!
 //! Archive structure:
 //! +----------------------------------------+

@@ -1,5 +1,5 @@
 //!
-//! The layer map tracks what layers exist for all the relishes in a timeline.
+//! The layer map tracks what layers exist in a timeline.
 //!
 //! When the timeline is first accessed, the server lists of all layer files
 //! in the timelines/<timelineid> directory, and populates this map with

@@ -119,7 +119,7 @@ pub struct LayeredRepository {
     remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
 
     /// Makes every timeline to backup their files to remote storage.
-    upload_relishes: bool,
+    upload_layers: bool,
 }
 
 /// Public interface
@@ -177,7 +177,7 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline.layers.lock().unwrap().next_open_layer_at = Some(initdb_lsn);
 
@@ -515,7 +515,7 @@ impl LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline
             .load_layer_map(disk_consistent_lsn)
@@ -529,7 +529,7 @@ impl LayeredRepository {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
         remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
-        upload_relishes: bool,
+        upload_layers: bool,
     ) -> LayeredRepository {
         LayeredRepository {
             tenantid,
@@ -538,7 +538,7 @@ impl LayeredRepository {
             gc_cs: Mutex::new(()),
             walredo_mgr,
             remote_index,
-            upload_relishes,
+            upload_layers,
         }
     }
 
@@ -752,7 +752,7 @@ pub struct LayeredTimeline {
     create_images_time_histo: Histogram,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
-    upload_relishes: AtomicBool,
+    upload_layers: AtomicBool,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
@@ -939,7 +939,7 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        upload_relishes: bool,
+        upload_layers: bool,
     ) -> LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
@@ -991,7 +991,7 @@ impl LayeredTimeline {
             compact_time_histo,
             create_images_time_histo,
 
-            upload_relishes: AtomicBool::new(upload_relishes),
+            upload_layers: AtomicBool::new(upload_layers),
 
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
@@ -1492,7 +1492,7 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
-            if self.upload_relishes.load(atomic::Ordering::Relaxed) {
+            if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,

@@ -31,7 +31,7 @@ use tracing::*;
 use std::collections::HashMap;
 
 use crate::pgdatadir_mapping::*;
-use crate::relish::*;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
 use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
