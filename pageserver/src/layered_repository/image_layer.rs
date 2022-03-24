@@ -13,11 +13,14 @@
 //!
 //!    000000067F000032BE0000400000000070B6-000000067F000032BE0000400000000080B6__00000000346BC568
 //!
-//! An image file is constructed using the 'bookfile' crate. FIXME
 //!
-//! Only metadata is loaded into memory by the load function.
-//! When images are needed, they are read directly from disk.
-//!
+//! Every image layer file consists of three parts: "summary",
+//! "index", and "values".  The summary is a fixed size header at the
+//! beginning of the file, and it contains basic information about the
+//! layer, and offsets to the other parts. The "index" is a B-tree
+//! mapping from Key to an offset in the "values" part.  The
+//! actual page images are stored in the "values" part.
+
 use crate::config::PageServerConf;
 use crate::layered_repository::blocky_reader::{BlockyReader, OffsetBlockReader};
 use crate::layered_repository::disk_btree::{DiskBtreeBuilder, DiskBtreeReader};
@@ -46,19 +49,31 @@ use std::sync::{Mutex, MutexGuard};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-// Magic constant to identify a Zenith image layer file
+/// Constant stored in the beginning of the file. This identifies the file
+/// as zenith delta file, and it also works as a version number.
 pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E11 + 1;
 
+///
+/// Header stored in the beginning of the file
+///
+/// After this comes the 'values' part, starting on block 1. After that,
+/// the 'index' starts at the block indicated by 'index_start_blk'
+///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
+    /// Magic value to identify this as a zenith delta file. Always DELTA_FILE_MAGIC.
     magic: u32,
+
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
     lsn: Lsn,
 
+    /// Block number where the 'index' part of the file begins.
     index_start_blk: u32,
+    /// Block within the 'index', where the B-tree root page is stored
     index_root_blk: u32,
+    // the 'values' part starts after the summary header, on block 1.
 }
 
 impl From<&ImageLayer> for Summary {
@@ -103,6 +118,7 @@ pub struct ImageLayerInner {
     /// hasn't been loaded yet.
     reader: Option<BlockyReader>,
 
+    // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
 }

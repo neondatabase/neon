@@ -1,23 +1,14 @@
 //! A DeltaLayer represents a collection of WAL records or page images in a range of
 //! LSNs, and in a range of Keys. It is stored on a file on disk.
 //!
-//! Usually a delta layer only contains differences - in the form of WAL records against
-//! a base LSN. However, if a segment is newly created, by creating a new relation or
-//! extending an old one, there might be no base image. In that case, all the entries in
-//! the delta layer must be page images or WAL records with the 'will_init' flag set, so
-//! that they can be replayed without referring to an older page version. Also in some
-//! circumstances, the predecessor layer might actually be another delta layer. That
-//! can happen when you create a new branch in the middle of a delta layer, and the WAL
-//! records on the new branch are put in a new delta layer.
+//! Usually a delta layer only contains differences - in the form of WAL records
+//! against a base LSN. However, if a relation extended or a whole new relation
+//! is created, there would be no base for the new pages. The entries for them
+//! must be page images or WAL records with the 'will_init' flag set, so that
+//! they can be replayed without referring to an older page version.
 //!
-//! When a delta file needs to be accessed, we slurp the 'index' metadata
-//! into memory, into the DeltaLayerInner struct. See load() and unload() functions.
-//! To access a particular value, we search `index` for the given key.
-//! The byte offset in the index can be used to find the value in
-//! VALUES_CHAPTER.
-//!
-//! On disk, the delta files are stored in timelines/<timelineid> directory.
-//! Currently, there are no subdirectories, and each delta file is named like this:
+//! The delta files are stored in timelines/<timelineid> directory.  Currently,
+//! there are no subdirectories, and each delta file is named like this:
 //!
 //!    <key start>-<key end>__<start LSN>-<end LSN
 //!
@@ -25,10 +16,12 @@
 //!
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
 //!
-//!
-//! A delta file is constructed using the 'bookfile' crate. FIXME Each file consists of three
-//! parts: the 'index', the values, and a short summary header. They are stored as
-//! separate chapters.
+//! Every delta file consists of three parts: "summary", "index", and
+//! "values". The summary is a fixed size header at the beginning of the file,
+//! and it contains basic information about the layer, and offsets to the other
+//! parts. The "index" is a B-tree mapping from Key and LSN to an offset in the
+//! "values" part.  The actual page images and WAL records are stored in the
+//! "values" part.
 //!
 use crate::config::PageServerConf;
 use crate::layered_repository::blocky_reader::{BlockyReader, OffsetBlockReader};
@@ -63,18 +56,29 @@ use std::sync::{RwLock, RwLockReadGuard};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-// Magic constant to identify a Zenith delta file
+/// Constant stored in the beginning of the file. This identifies the file
+/// as zenith delta file, and it also works as a version number.
 pub const DELTA_FILE_MAGIC: u32 = 0x5A616E11;
 
+///
+/// Header stored in the beginning of the file
+///
+/// After this comes the 'values' part, starting on block 1. After that,
+/// the 'index' starts at the block indicated by 'index_start_blk'
+///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
+    /// Magic value to identify this as a zenith delta file. Always DELTA_FILE_MAGIC.
     magic: u32,
+
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
 
+    /// Block number where the 'index' part of the file begins.
     index_start_blk: u32,
+    /// Block within the 'index', where the B-tree root page is stored
     index_root_blk: u32,
 }
 
@@ -153,12 +157,13 @@ pub struct DeltaLayer {
 }
 
 pub struct DeltaLayerInner {
-    /// If false, the 'index' has not been loaded into memory yet.
+    /// If false, the fields below have not been loaded from the summary yet.
     loaded: bool,
 
-    /// If None, the 'image_type' has not been loaded into memory yet. FIXME
+    /// Reader object for reading blocks from the file. (None if not loaded yet)
     reader: Option<BlockyReader>,
 
+    // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
 }
