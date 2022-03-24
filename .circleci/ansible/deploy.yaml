@@ -1,14 +1,11 @@
 - name: Upload Zenith binaries
-  hosts: pageservers:safekeepers
+  hosts: storage
   gather_facts: False
   remote_user: admin
-  vars:
-    force_deploy: false
 
   tasks:
 
     - name: get latest version of Zenith binaries
-      ignore_errors: true
       register: current_version_file
       set_fact:
         current_version: "{{ lookup('file', '.zenith_current_version') | trim }}"
@@ -16,48 +13,13 @@
       - pageserver
       - safekeeper
 
-    - name: set zero value for current_version
-      when: current_version_file is failed
-      set_fact:
-        current_version: "0"
-      tags:
-      - pageserver
-      - safekeeper
-
-    - name: get deployed version from content of remote file
-      ignore_errors: true
-      ansible.builtin.slurp:
-        src: /usr/local/.zenith_current_version
-      register: remote_version_file
-      tags:
-      - pageserver
-      - safekeeper
-
-    - name: decode remote file content
-      when: remote_version_file is succeeded
-      set_fact:
-        remote_version: "{{ remote_version_file['content'] | b64decode | trim }}"
-      tags:
-      - pageserver
-      - safekeeper
-
-    - name: set zero value for remote_version
-      when: remote_version_file is failed
-      set_fact:
-        remote_version: "0"
-      tags:
-      - pageserver
-      - safekeeper
-
     - name: inform about versions
-      debug: msg="Version to deploy - {{ current_version }}, version on storage node - {{ remote_version }}"
+      debug: msg="Version to deploy - {{ current_version }}"
       tags:
       - pageserver
       - safekeeper
-
 
     - name: upload and extract Zenith binaries to /usr/local
-      when: current_version > remote_version or force_deploy
       ansible.builtin.unarchive:
         owner: root
         group: root
@@ -74,14 +36,24 @@
   hosts: pageservers
   gather_facts: False
   remote_user: admin
-  vars:
-    force_deploy: false
 
   tasks:
+
+    - name: upload init script
+      when: console_mgmt_base_url is defined
+      ansible.builtin.template:
+        src: scripts/init_pageserver.sh
+        dest: /tmp/init_pageserver.sh
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+      - pageserver
+
     - name: init pageserver
-      when: current_version > remote_version or force_deploy
       shell:
-        cmd: sudo -u pageserver /usr/local/bin/pageserver -c "pg_distrib_dir='/usr/local'" --init -D /storage/pageserver/data
+        cmd: /tmp/init_pageserver.sh
       args:
         creates: "/storage/pageserver/data/tenants"
       environment:
@@ -107,7 +79,6 @@
     #   - pageserver
 
     - name: upload systemd service definition
-      when: current_version > remote_version or force_deploy
       ansible.builtin.template:
         src: systemd/pageserver.service
         dest: /etc/systemd/system/pageserver.service
@@ -119,7 +90,6 @@
       - pageserver
 
     - name: start systemd service
-      when: current_version > remote_version or force_deploy
       ansible.builtin.systemd:
         daemon_reload: yes
         name: pageserver
@@ -130,7 +100,7 @@
       - pageserver
 
     - name: post version to console
-      when: (current_version > remote_version or force_deploy) and console_mgmt_base_url is defined
+      when: console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
@@ -142,22 +112,18 @@
   hosts: safekeepers
   gather_facts: False
   remote_user: admin
-  vars:
-    force_deploy: false
 
   tasks:
 
     # in the future safekeepers should discover pageservers byself
     # but currently use first pageserver that was discovered
     - name: set first pageserver var for safekeepers
-      when: current_version > remote_version or force_deploy
       set_fact:
         first_pageserver: "{{ hostvars[groups['pageservers'][0]]['inventory_hostname'] }}"
       tags:
       - safekeeper
 
     - name: upload systemd service definition
-      when: current_version > remote_version or force_deploy
       ansible.builtin.template:
         src: systemd/safekeeper.service
         dest: /etc/systemd/system/safekeeper.service
@@ -169,7 +135,6 @@
       - safekeeper
 
     - name: start systemd service
-      when: current_version > remote_version or force_deploy
       ansible.builtin.systemd:
         daemon_reload: yes
         name: safekeeper
@@ -180,7 +145,7 @@
       - safekeeper
 
     - name: post version to console
-      when: (current_version > remote_version or force_deploy) and console_mgmt_base_url is defined
+      when: console_mgmt_base_url is defined
       shell:
         cmd: |
           INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
