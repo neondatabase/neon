@@ -164,13 +164,6 @@ impl Layer for InMemoryLayer {
         todo!();
     }
 
-    /// Cannot unload anything in an in-memory layer, since there's no backing
-    /// store. To release memory used by an in-memory layer, use 'freeze' to turn
-    /// it into an on-disk layer.
-    fn unload(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {

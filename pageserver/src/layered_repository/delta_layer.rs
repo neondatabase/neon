@@ -263,14 +263,6 @@ impl Layer for DeltaLayer {
         }
     }
 
-    ///
-    /// Release most of the memory used by this layer. If it's accessed again later,
-    /// it will need to be loaded back.
-    ///
-    fn unload(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn delete(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;

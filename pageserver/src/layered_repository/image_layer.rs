@@ -185,10 +185,6 @@ impl Layer for ImageLayer {
         todo!();
     }
 
-    fn unload(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn delete(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;

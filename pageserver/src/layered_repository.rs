@@ -1577,15 +1577,6 @@ impl LayeredTimeline {
             info!("Could not compact because no partitioning specified yet");
         }
 
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
-
         Ok(())
     }
 

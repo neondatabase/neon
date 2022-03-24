@@ -134,10 +134,6 @@ pub trait Layer: Send + Sync {
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
 
-    /// Release memory used by this layer. There is no corresponding 'load'
-    /// function, that's done implicitly when you call one of the get-functions.
-    fn unload(&self) -> Result<()>;
-
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
 
