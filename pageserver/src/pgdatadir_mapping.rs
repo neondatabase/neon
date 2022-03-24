@@ -11,7 +11,7 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,9 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Look up given page version.
     pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+        ensure!(tag.dbnode != 0, "invalid dbnode");
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         let nblocks = self.get_rel_size(tag, lsn)?;
         if blknum >= nblocks {
             debug!(
@@ -115,6 +118,9 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Get size of a relation file
     pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
+        ensure!(tag.dbnode != 0, "invalid dbnode");
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
@@ -133,6 +139,9 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Does relation exist?
     pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
+        ensure!(tag.dbnode != 0, "invalid dbnode");
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.tline.get(key, lsn)?;
@@ -450,6 +459,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         rec: ZenithWalRecord,
     ) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -476,6 +487,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -571,6 +584,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     ///
     /// 'nblocks' is the initial size.
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY)?)?;
@@ -612,6 +627,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Truncate relation
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
         let size_key = rel_size_to_key(rel);
 
         // Fetch the old size first
@@ -628,6 +645,9 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Extend relation
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
+
         // Put size
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
@@ -641,6 +661,9 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Drop a relation.
     pub fn put_rel_drop(&mut self, rel: RelTag) -> Result<()> {
+        ensure!(rel.dbnode != 0, "invalid dbnode");
+        ensure!(rel.relnode != 0, "invalid relnode");
+
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let buf = self.get(dir_key)?;
@@ -904,7 +927,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usiz
 // 00 SPCNODE  DBNODE   00000000 00   00000000
 //
 // RelDir:
-// 00 SPCNODE  DBNODE   00000000 00   00000001
+// 00 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
 //
 // RelBlock:
 // 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
