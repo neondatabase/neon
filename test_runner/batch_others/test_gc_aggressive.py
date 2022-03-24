@@ -1,10 +1,7 @@
-from contextlib import closing
-
 import asyncio
-import asyncpg
 import random
 
-from fixtures.zenith_fixtures import ZenithEnv, Postgres, Safekeeper
+from fixtures.zenith_fixtures import ZenithEnv, Postgres
 from fixtures.log_helper import log
 
 # Test configuration
@@ -76,5 +73,5 @@ def test_gc_aggressive(zenith_simple_env: ZenithEnv):
 
     asyncio.run(update_and_gc(env, pg, timeline))
 
-    row = cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
+    cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
     assert cur.fetchone() == (num_rows, updates_to_perform)

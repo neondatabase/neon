@@ -27,6 +27,17 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;
 
+/// Current storage format version
+///
+/// This is embedded in the metadata file, and also in the header of all the
+/// layer files. If you make any backwards-incompatible changes to the storage
+/// format, bump this!
+pub const STORAGE_FORMAT_VERSION: u16 = 1;
+
+// Magic constants used to identify different kinds of files
+pub const IMAGE_FILE_MAGIC: u32 = 0x5A60_0000 | STORAGE_FORMAT_VERSION as u32;
+pub const DELTA_FILE_MAGIC: u32 = 0x5A61_0000 | STORAGE_FORMAT_VERSION as u32;
+
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_live_connections_count",

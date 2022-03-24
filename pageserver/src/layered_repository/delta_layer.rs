@@ -38,6 +38,7 @@ use crate::repository;
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
+use crate::DELTA_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use log::*;
@@ -55,10 +56,6 @@ use std::sync::{RwLock, RwLockReadGuard};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
-
-/// Constant stored in the beginning of the file. This identifies the file
-/// as zenith delta file, and it also works as a version number.
-pub const DELTA_FILE_MAGIC: u32 = 0x5A616E11;
 
 ///
 /// Header stored in the beginning of the file

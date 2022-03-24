@@ -119,10 +119,10 @@ impl<R: Repository> DatadirTimeline<R> {
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
         {
-            // FIXME: Postgres sometimes calls calls smgrcreate() to
-            // create FSM, and smgrnblocks() on it immediately
-            // afterwards, without extending it.  Tolerate that by
-            // claiming that any non-existent FSM fork has size 0.
+            // FIXME: Postgres sometimes calls smgrcreate() to create
+            // FSM, and smgrnblocks() on it immediately afterwards,
+            // without extending it.  Tolerate that by claiming that
+            // any non-existent FSM fork has size 0.
             return Ok(0);
         }
 

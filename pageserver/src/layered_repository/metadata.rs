@@ -6,9 +6,10 @@
 //!
 //! The module contains all structs and related helper methods related to timeline metadata.
 
-use std::{convert::TryInto, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::ensure;
+use serde::{Deserialize, Serialize};
 use zenith_utils::{
     bin_ser::BeSer,
     lsn::Lsn,
@@ -16,11 +17,13 @@ use zenith_utils::{
 };
 
 use crate::config::PageServerConf;
+use crate::STORAGE_FORMAT_VERSION;
 
-// Taken from PG_CONTROL_MAX_SAFE_SIZE
-const METADATA_MAX_SAFE_SIZE: usize = 512;
-const METADATA_CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
-const METADATA_MAX_DATA_SIZE: usize = METADATA_MAX_SAFE_SIZE - METADATA_CHECKSUM_SIZE;
+/// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
+///
+/// This is the same assumption that PostgreSQL makes with the control file,
+/// see PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SIZE: usize = 512;
 
 /// The name of the metadata file pageserver creates per timeline.
 pub const METADATA_FILE_NAME: &str = "metadata";
@@ -28,8 +31,22 @@ pub const METADATA_FILE_NAME: &str = "metadata";
 /// Metadata stored on disk for each timeline
 ///
 /// The fields correspond to the values we hold in memory, in LayeredTimeline.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineMetadata {
+    hdr: TimelineMetadataHeader,
+    body: TimelineMetadataBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineMetadataHeader {
+    checksum: u32,       // CRC of serialized metadata body
+    size: u16,           // size of serialized metadata
+    format_version: u16, // storage format version (used for compatibility checks)
+}
+const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineMetadataBody {
     disk_consistent_lsn: Lsn,
     // This is only set if we know it. We track it in memory when the page
     // server is running, but we only track the value corresponding to
@@ -69,130 +86,87 @@ impl TimelineMetadata {
         initdb_lsn: Lsn,
     ) -> Self {
         Self {
-            disk_consistent_lsn,
-            prev_record_lsn,
-            ancestor_timeline,
-            ancestor_lsn,
-            latest_gc_cutoff_lsn,
-            initdb_lsn,
+            hdr: TimelineMetadataHeader {
+                checksum: 0,
+                size: 0,
+                format_version: STORAGE_FORMAT_VERSION,
+            },
+            body: TimelineMetadataBody {
+                disk_consistent_lsn,
+                prev_record_lsn,
+                ancestor_timeline,
+                ancestor_lsn,
+                latest_gc_cutoff_lsn,
+                initdb_lsn,
+            },
         }
     }
 
     pub fn from_bytes(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
         ensure!(
-            metadata_bytes.len() == METADATA_MAX_SAFE_SIZE,
+            metadata_bytes.len() == METADATA_MAX_SIZE,
             "metadata bytes size is wrong"
         );
-
-        let data = &metadata_bytes[..METADATA_MAX_DATA_SIZE];
-        let calculated_checksum = crc32c::crc32c(data);
-
-        let checksum_bytes: &[u8; METADATA_CHECKSUM_SIZE] =
-            metadata_bytes[METADATA_MAX_DATA_SIZE..].try_into()?;
-        let expected_checksum = u32::from_le_bytes(*checksum_bytes);
+        let hdr = TimelineMetadataHeader::des(&metadata_bytes[0..METADATA_HDR_SIZE])?;
         ensure!(
-            calculated_checksum == expected_checksum,
+            hdr.format_version == STORAGE_FORMAT_VERSION,
+            "format version mismatch"
+        );
+        let metadata_size = hdr.size as usize;
+        ensure!(
+            metadata_size <= METADATA_MAX_SIZE,
+            "corrupted metadata file"
+        );
+        let calculated_checksum = crc32c::crc32c(&metadata_bytes[METADATA_HDR_SIZE..metadata_size]);
+        ensure!(
+            hdr.checksum == calculated_checksum,
             "metadata checksum mismatch"
         );
+        let body = TimelineMetadataBody::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
+        assert!(body.disk_consistent_lsn.is_aligned());
 
-        let data = TimelineMetadata::from(serialize::DeTimelineMetadata::des_prefix(data)?);
-        assert!(data.disk_consistent_lsn.is_aligned());
-
-        Ok(data)
+        Ok(TimelineMetadata { hdr, body })
     }
 
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let serializeable_metadata = serialize::SeTimelineMetadata::from(self);
-        let mut metadata_bytes = serialize::SeTimelineMetadata::ser(&serializeable_metadata)?;
-        assert!(metadata_bytes.len() <= METADATA_MAX_DATA_SIZE);
-        metadata_bytes.resize(METADATA_MAX_SAFE_SIZE, 0u8);
-
-        let checksum = crc32c::crc32c(&metadata_bytes[..METADATA_MAX_DATA_SIZE]);
-        metadata_bytes[METADATA_MAX_DATA_SIZE..].copy_from_slice(&u32::to_le_bytes(checksum));
+        let body_bytes = self.body.ser()?;
+        let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+        let hdr = TimelineMetadataHeader {
+            size: metadata_size as u16,
+            format_version: STORAGE_FORMAT_VERSION,
+            checksum: crc32c::crc32c(&body_bytes),
+        };
+        let hdr_bytes = hdr.ser()?;
+        let mut metadata_bytes = vec![0u8; METADATA_MAX_SIZE];
+        metadata_bytes[0..METADATA_HDR_SIZE].copy_from_slice(&hdr_bytes);
+        metadata_bytes[METADATA_HDR_SIZE..metadata_size].copy_from_slice(&body_bytes);
         Ok(metadata_bytes)
     }
 
     /// [`Lsn`] that corresponds to the corresponding timeline directory
     /// contents, stored locally in the pageserver workdir.
     pub fn disk_consistent_lsn(&self) -> Lsn {
-        self.disk_consistent_lsn
+        self.body.disk_consistent_lsn
     }
 
     pub fn prev_record_lsn(&self) -> Option<Lsn> {
-        self.prev_record_lsn
+        self.body.prev_record_lsn
     }
 
     pub fn ancestor_timeline(&self) -> Option<ZTimelineId> {
-        self.ancestor_timeline
+        self.body.ancestor_timeline
     }
 
     pub fn ancestor_lsn(&self) -> Lsn {
-        self.ancestor_lsn
+        self.body.ancestor_lsn
     }
 
     pub fn latest_gc_cutoff_lsn(&self) -> Lsn {
-        self.latest_gc_cutoff_lsn
+        self.body.latest_gc_cutoff_lsn
     }
 
     pub fn initdb_lsn(&self) -> Lsn {
-        self.initdb_lsn
-    }
-}
-
-/// This module is for direct conversion of metadata to bytes and back.
-/// For a certain metadata, besides the conversion a few verification steps has to
-/// be done, so all serde derives are hidden from the user, to avoid accidental
-/// verification-less metadata creation.
-mod serialize {
-    use serde::{Deserialize, Serialize};
-    use zenith_utils::{lsn::Lsn, zid::ZTimelineId};
-
-    use super::TimelineMetadata;
-
-    #[derive(Serialize)]
-    pub(super) struct SeTimelineMetadata<'a> {
-        disk_consistent_lsn: &'a Lsn,
-        prev_record_lsn: &'a Option<Lsn>,
-        ancestor_timeline: &'a Option<ZTimelineId>,
-        ancestor_lsn: &'a Lsn,
-        latest_gc_cutoff_lsn: &'a Lsn,
-        initdb_lsn: &'a Lsn,
-    }
-
-    impl<'a> From<&'a TimelineMetadata> for SeTimelineMetadata<'a> {
-        fn from(other: &'a TimelineMetadata) -> Self {
-            Self {
-                disk_consistent_lsn: &other.disk_consistent_lsn,
-                prev_record_lsn: &other.prev_record_lsn,
-                ancestor_timeline: &other.ancestor_timeline,
-                ancestor_lsn: &other.ancestor_lsn,
-                latest_gc_cutoff_lsn: &other.latest_gc_cutoff_lsn,
-                initdb_lsn: &other.initdb_lsn,
-            }
-        }
-    }
-
-    #[derive(Deserialize)]
-    pub(super) struct DeTimelineMetadata {
-        disk_consistent_lsn: Lsn,
-        prev_record_lsn: Option<Lsn>,
-        ancestor_timeline: Option<ZTimelineId>,
-        ancestor_lsn: Lsn,
-        latest_gc_cutoff_lsn: Lsn,
-        initdb_lsn: Lsn,
-    }
-
-    impl From<DeTimelineMetadata> for TimelineMetadata {
-        fn from(other: DeTimelineMetadata) -> Self {
-            Self {
-                disk_consistent_lsn: other.disk_consistent_lsn,
-                prev_record_lsn: other.prev_record_lsn,
-                ancestor_timeline: other.ancestor_timeline,
-                ancestor_lsn: other.ancestor_lsn,
-                latest_gc_cutoff_lsn: other.latest_gc_cutoff_lsn,
-                initdb_lsn: other.initdb_lsn,
-            }
-        }
+        self.body.initdb_lsn
     }
 }
 
@@ -204,14 +178,14 @@ mod tests {
 
     #[test]
     fn metadata_serializes_correctly() {
-        let original_metadata = TimelineMetadata {
-            disk_consistent_lsn: Lsn(0x200),
-            prev_record_lsn: Some(Lsn(0x100)),
-            ancestor_timeline: Some(TIMELINE_ID),
-            ancestor_lsn: Lsn(0),
-            latest_gc_cutoff_lsn: Lsn(0),
-            initdb_lsn: Lsn(0),
-        };
+        let original_metadata = TimelineMetadata::new(
+            Lsn(0x200),
+            Some(Lsn(0x100)),
+            Some(TIMELINE_ID),
+            Lsn(0),
+            Lsn(0),
+            Lsn(0),
+        );
 
         let metadata_bytes = original_metadata
             .to_bytes()
@@ -221,7 +195,7 @@ mod tests {
             .expect("Should deserialize its own bytes");
 
         assert_eq!(
-            deserialized_metadata, original_metadata,
+            deserialized_metadata.body, original_metadata.body,
             "Metadata that was serialized to bytes and deserialized back should not change"
         );
     }

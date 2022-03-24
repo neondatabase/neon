@@ -33,6 +33,7 @@ use crate::layered_repository::utils::BlockBuf;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
+use crate::IMAGE_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -49,10 +50,6 @@ use std::sync::{Mutex, MutexGuard};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-/// Constant stored in the beginning of the file. This identifies the file
-/// as zenith delta file, and it also works as a version number.
-pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E11 + 1;
-
 ///
 /// Header stored in the beginning of the file
 ///
@@ -61,7 +58,7 @@ pub const IMAGE_FILE_MAGIC: u32 = 0x5A616E11 + 1;
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
-    /// Magic value to identify this as a zenith delta file. Always DELTA_FILE_MAGIC.
+    /// Magic value to identify this as a zenith delta file. Always IMAGE_FILE_MAGIC.
     magic: u32,
 
     tenantid: ZTenantId,

@@ -129,7 +129,7 @@ collecting layers that are older than the GC horizon.
 # Partitioning scheme
 
 When compaction happens and creates a new set of files in L1, how do
-we partition the data into the files? 
+we partition the data into the files?
 
 - Goal is that each file is ~ 1 GB in size
 - Try to match partition boundaries at relation boundaries. (See [1]
