@@ -97,10 +97,12 @@ impl From<&DeltaLayer> for Summary {
     }
 }
 
-// Key + LSN
-const DELTA_KEY_SIZE: usize = repository::KEY_SIZE + 8;
-
+///
+/// This is the key of the B-tree index stored in the delta layer. It consists
+/// of the serialized representation of a Key and LSN.
+///
 struct DeltaKey([u8; DELTA_KEY_SIZE]);
+const DELTA_KEY_SIZE: usize = repository::KEY_SIZE + 8;
 
 impl DeltaKey {
     fn from_slice(buf: &[u8]) -> Self {
