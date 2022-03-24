@@ -1,11 +1,4 @@
-import pytest
-import random
-import time
-
-from contextlib import closing
-from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import ZenithEnvBuilder
-from fixtures.log_helper import log
 
 
 # Test safekeeper sync and pageserver catch up

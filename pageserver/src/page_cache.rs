@@ -52,7 +52,6 @@ use zenith_utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::config::PageServerConf;
 use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
 
@@ -62,11 +61,8 @@ const TEST_PAGE_CACHE_SIZE: usize = 10;
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(conf: &'static PageServerConf) {
-    if PAGE_CACHE
-        .set(PageCache::new(conf.page_cache_size))
-        .is_err()
-    {
+pub fn init(size: usize) {
+    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
         panic!("page cache already initialized");
     }
 }

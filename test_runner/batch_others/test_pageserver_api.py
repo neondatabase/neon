@@ -1,6 +1,6 @@
 from uuid import uuid4, UUID
 import pytest
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient, zenith_binpath
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 
 
 # test that we cannot override node id
