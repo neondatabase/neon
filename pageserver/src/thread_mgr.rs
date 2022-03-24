@@ -43,7 +43,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::watch;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use lazy_static::lazy_static;
 
@@ -132,6 +132,7 @@ pub fn spawn<F>(
     tenant_id: Option<ZTenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
+    fail_on_error: bool,
     f: F,
 ) -> std::io::Result<()>
 where
@@ -165,8 +166,16 @@ where
     let thread_name = name.to_string();
     let join_handle = match thread::Builder::new()
         .name(name.to_string())
-        .spawn(move || thread_wrapper(thread_name, thread_id, thread_rc2, shutdown_rx, f))
-    {
+        .spawn(move || {
+            thread_wrapper(
+                thread_name,
+                thread_id,
+                thread_rc2,
+                shutdown_rx,
+                fail_on_error,
+                f,
+            )
+        }) {
         Ok(handle) => handle,
         Err(err) => {
             error!("Failed to spawn thread '{}': {}", name, err);
@@ -189,6 +198,7 @@ fn thread_wrapper<F>(
     thread_id: u64,
     thread: Arc<PageServerThread>,
     shutdown_rx: watch::Receiver<()>,
+    fail_on_error: bool,
     f: F,
 ) where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
@@ -200,7 +210,7 @@ fn thread_wrapper<F>(
         *ct.borrow_mut() = Some(thread);
     });
 
-    info!("Starting thread '{}'", thread_name);
+    debug!("Starting thread '{}'", thread_name);
 
     // We use AssertUnwindSafe here so that the payload function
     // doesn't need to be UnwindSafe. We don't do anything after the
@@ -211,13 +221,17 @@ fn thread_wrapper<F>(
     THREADS.lock().unwrap().remove(&thread_id);
 
     match result {
-        Ok(Ok(())) => info!("Thread '{}' exited normally", thread_name),
+        Ok(Ok(())) => debug!("Thread '{}' exited normally", thread_name),
         Ok(Err(err)) => {
-            error!(
-                "Shutting down: thread '{}' exited with error: {:?}",
-                thread_name, err
-            );
-            shutdown_pageserver();
+            if fail_on_error {
+                error!(
+                    "Shutting down: thread '{}' exited with error: {:?}",
+                    thread_name, err
+                );
+                shutdown_pageserver();
+            } else {
+                error!("Thread '{}' exited with error: {:?}", thread_name, err);
+            }
         }
         Err(err) => {
             error!(

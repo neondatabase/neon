@@ -291,6 +291,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "http_endpoint_thread",
+        false,
         move || {
             let router = http::make_router(conf, auth_cloned, remote_index);
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
@@ -304,6 +305,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "libpq endpoint thread",
+        false,
         move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
     )?;
 

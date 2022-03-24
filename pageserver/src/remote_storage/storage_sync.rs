@@ -404,6 +404,7 @@ pub(super) fn spawn_storage_sync_thread<
         None,
         None,
         "Remote storage sync thread",
+        false,
         move || {
             storage_sync_loop(
                 runtime,
@@ -413,7 +414,8 @@ pub(super) fn spawn_storage_sync_thread<
                 storage,
                 max_concurrent_sync,
                 max_sync_errors,
-            )
+            );
+            Ok(())
         },
     )
     .context("Failed to spawn remote storage sync thread")?;
@@ -440,7 +442,7 @@ fn storage_sync_loop<
     storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> anyhow::Result<()> {
+) {
     let remote_assets = Arc::new((storage, Arc::clone(&index)));
     loop {
         let index = Arc::clone(&index);
@@ -470,8 +472,6 @@ fn storage_sync_loop<
             }
         }
     }
-
-    Ok(())
 }
 
 async fn loop_step<
