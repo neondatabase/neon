@@ -182,7 +182,42 @@ fn find_end_of_wal_segment(
             if offs == 0 {
                 offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
                 if (xlp_info & XLP_FIRST_IS_CONTRECORD) != 0 {
-                    offs += ((xlp_rem_len + 7) & !7) as usize;
+                    //offs += ((xlp_rem_len + 7) & !7) as usize;
+                    let mut xlp_rem_len = ((xlp_rem_len + 7) & !7) as usize;
+                    while xlp_rem_len > 0 {
+                        println!("xlp_rem_len={:x}, offs={:x}", xlp_rem_len, offs);
+                        let page_offs = offs % XLOG_BLCKSZ;
+                        let pageleft = XLOG_BLCKSZ - page_offs;
+                        let n = min(xlp_rem_len, pageleft);
+                        offs += n;
+                        xlp_rem_len -= n;
+                        if n == pageleft {
+                            let bytes_read = file.read(&mut buf)?;
+                            if bytes_read != buf.len() {
+                                bail!(
+                                    "failed to read {} bytes from {} at {}",
+                                    XLOG_BLCKSZ,
+                                    file_name,
+                                    offs
+                                );
+                            }
+                            let xlp_magic = LittleEndian::read_u16(&buf[0..2]);
+                            let xlp_info = LittleEndian::read_u16(&buf[2..4]);
+                            let xlp_rem_len = LittleEndian::read_u32(&buf[XLP_REM_LEN_OFFS..XLP_REM_LEN_OFFS + 4]);
+                            // this is expected in current usage when valid WAL starts after page header
+                            println!("    reading next block with magic={:x} len={:x}", xlp_magic, xlp_rem_len);
+                            if xlp_magic != XLOG_PAGE_MAGIC as u16 {
+                                trace!(
+                                    "invalid WAL file {}.partial magic {} at {:?}",
+                                    file_name,
+                                    xlp_magic,
+                                    Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size)),
+                                );
+                            }
+                            offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
+                        }
+                    }
+                    println!("rolled up to offs={}", offs);
                 }
             } else {
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
