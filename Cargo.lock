@@ -246,7 +246,7 @@ dependencies = [
 [[package]]
 name = "bookfile"
 version = "0.3.0"
-source = "git+https://github.com/zenithdb/bookfile.git?branch=generic-readext#d51a99c7a0be48c3d9cc7cb85c9b7fb05ce1100c"
+source = "git+https://github.com/zenithdb/bookfile.git?rev=bf6e43825dfb6e749ae9b80e8372c8fea76cec2f#bf6e43825dfb6e749ae9b80e8372c8fea76cec2f"
 dependencies = [
  "aversion",
  "byteorder",

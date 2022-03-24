@@ -54,7 +54,7 @@ use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
 mod delta_layer;
-mod ephemeral_file;
+pub(crate) mod ephemeral_file;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
@@ -1850,7 +1850,7 @@ impl LayeredTimeline {
 
             // 1. Is it newer than cutoff point?
             if l.get_lsn_range().end > cutoff {
-                info!(
+                debug!(
                     "keeping {} because it's newer than cutoff {}",
                     l.filename().display(),
                     cutoff
@@ -1867,7 +1867,7 @@ impl LayeredTimeline {
             for retain_lsn in retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
-                    info!(
+                    debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.filename().display(),
                         retain_lsn,
@@ -1890,7 +1890,7 @@ impl LayeredTimeline {
                 l.get_lsn_range().end,
                 disk_consistent_lsn + 1,
             )? {
-                info!(
+                debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
                 );
@@ -1899,7 +1899,7 @@ impl LayeredTimeline {
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            info!(
+            debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.filename().display(),
                 l.is_incremental(),

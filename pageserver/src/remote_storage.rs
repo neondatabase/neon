@@ -94,12 +94,13 @@ use std::{
 
 use anyhow::{bail, Context};
 use tokio::{io, sync::RwLock};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 pub use self::storage_sync::index::{RemoteTimelineIndex, TimelineIndexEntry};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
+use crate::layered_repository::ephemeral_file::is_ephemeral_file;
 use crate::{
     config::{PageServerConf, RemoteStorageKind},
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
@@ -261,6 +262,8 @@ fn collect_timelines_for_tenant(
     Ok(timelines)
 }
 
+// discover timeline files and extract timeline metadata
+//  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
 ) -> anyhow::Result<(ZTimelineId, TimelineMetadata, Vec<PathBuf>)> {
@@ -280,6 +283,9 @@ fn collect_timeline_files(
         if entry_path.is_file() {
             if entry_path.file_name().and_then(ffi::OsStr::to_str) == Some(METADATA_FILE_NAME) {
                 timeline_metadata_path = Some(entry_path);
+            } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
+                debug!("skipping ephemeral file {}", entry_path.display());
+                continue;
             } else {
                 timeline_files.push(entry_path);
             }
