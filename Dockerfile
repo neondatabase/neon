@@ -30,9 +30,9 @@ ENV RUSTC_WRAPPER /usr/local/cargo/bin/cachepot
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
-RUN cargo build --release
-# Show build caching stats to check if it was used
-RUN /usr/local/cargo/bin/cachepot -s
+# Show build caching stats to check if it was used in the end.
+# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, loosing the compilation stats.
+RUN cargo build --release && /usr/local/cargo/bin/cachepot -s
 
 # Build final image
 #
