@@ -24,15 +24,19 @@
 //! "values" part.
 //!
 use crate::config::PageServerConf;
-use crate::layered_repository::blocky_reader::{BlockyReader, OffsetBlockReader};
+use crate::layered_repository::blob_io::BlobWrite;
+use crate::layered_repository::blob_io::BlobWriter;
+use crate::layered_repository::blob_io::BlobReader;
+use crate::layered_repository::block_io;
+use crate::layered_repository::block_io::BlockBuf;
+use crate::layered_repository::block_io::OffsetBlockReader;
+use crate::layered_repository::blocky_reader::BlockyReader;
 use crate::layered_repository::disk_btree::VisitDirection;
 use crate::layered_repository::disk_btree::{DiskBtreeBuilder, DiskBtreeReader};
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
-use crate::layered_repository::utils;
-use crate::layered_repository::utils::BlockBuf;
 use crate::page_cache::PAGE_SZ;
 use crate::repository;
 use crate::repository::{Key, Value};
@@ -203,7 +207,7 @@ impl Layer for DeltaLayer {
 
         // Scan the page versions backwards, starting from `lsn`.
         let reader = inner.reader.as_ref().unwrap();
-        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
+        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, reader);
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
@@ -224,7 +228,7 @@ impl Layer for DeltaLayer {
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
         for (entry_lsn, pos) in offsets {
-            let buf = utils::read_blob(reader, pos)?;
+            let buf = reader.read_blob(pos)?;
             let val = Value::des(&buf)?;
             match val {
                 Value::Image(img) => {
@@ -296,7 +300,7 @@ impl Layer for DeltaLayer {
         );
 
         let reader = inner.reader.as_ref().unwrap();
-        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
+        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, reader);
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
 
@@ -312,7 +316,7 @@ impl Layer for DeltaLayer {
 
                 let mut desc = String::new();
 
-                match utils::read_blob(reader, off) {
+                match reader.read_blob(off) {
                     Ok(buf) => {
                         let val = Value::des(&buf);
 
@@ -509,10 +513,8 @@ pub struct DeltaLayerWriter {
     key_start: Key,
     lsn_range: Range<Lsn>,
 
-    bufwriter: BufWriter<VirtualFile>,
+    blob_writer: BlobWrite<BufWriter<VirtualFile>>,
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
-
-    end_offset: u64,
 }
 
 impl DeltaLayerWriter {
@@ -542,8 +544,9 @@ impl DeltaLayerWriter {
         let mut bufwriter = BufWriter::new(file);
 
         // make room for the header block
-        bufwriter.write_all(&utils::ALL_ZEROS)?;
-        let end_offset = PAGE_SZ as u64;
+        bufwriter.write_all(&block_io::ALL_ZEROS)?;
+
+        let blob_writer = BlobWrite::new(bufwriter, PAGE_SZ as u64);
 
         // Initialize the index builder
         let block_buf = BlockBuf::new(); // reserve blk 0 for the summary
@@ -556,8 +559,7 @@ impl DeltaLayerWriter {
             tenantid,
             key_start,
             lsn_range,
-            bufwriter,
-            end_offset,
+            blob_writer,
             tree: tree_builder,
         })
     }
@@ -571,10 +573,7 @@ impl DeltaLayerWriter {
         assert!(self.lsn_range.start <= lsn);
         // Remember the offset and size metadata. The metadata is written
         // to a separate chapter, in `finish`.
-        let off = self.end_offset;
-        let len = utils::write_blob(&mut self.bufwriter, &Value::ser(&val)?)?;
-
-        self.end_offset += len;
+        let off = self.blob_writer.write_blob(&Value::ser(&val)?)?;
 
         let will_init = match val {
             Value::Image(_) => true,
@@ -591,7 +590,7 @@ impl DeltaLayerWriter {
     }
 
     pub fn size(&mut self) -> u64 {
-        self.end_offset + self.tree.borrow_writer().size()
+        self.blob_writer.offset + self.tree.borrow_writer().size()
     }
 
     ///
@@ -599,17 +598,20 @@ impl DeltaLayerWriter {
     ///
     /// 'seg_sizes' is a list of size changes to store with the actual data.
     ///
-    pub fn finish(mut self, key_end: Key) -> Result<DeltaLayer> {
+    pub fn finish(self, key_end: Key) -> Result<DeltaLayer> {
         // Pad the last page.
-        if self.end_offset % PAGE_SZ as u64 > 0 {
-            let padding_len = PAGE_SZ - self.end_offset as usize % PAGE_SZ;
-            self.bufwriter.write_all(&utils::ALL_ZEROS[..padding_len])?;
-            self.end_offset += padding_len as u64;
-        }
-        self.bufwriter.flush()?;
-        let mut file = self.bufwriter.into_inner().unwrap();
+        let mut end_offset = self.blob_writer.offset;
 
-        let index_start_blk = (self.end_offset / PAGE_SZ as u64) as u32;
+        let mut bufwriter = self.blob_writer.writer;
+        if end_offset % PAGE_SZ as u64 > 0 {
+            let padding_len = PAGE_SZ - end_offset as usize % PAGE_SZ;
+            bufwriter.write_all(&block_io::ALL_ZEROS[..padding_len])?;
+            end_offset += padding_len as u64;
+        }
+        bufwriter.flush()?;
+        let mut file = bufwriter.into_inner().unwrap();
+
+        let index_start_blk = (end_offset / PAGE_SZ as u64) as u32;
 
         // Write the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
@@ -700,7 +702,7 @@ impl<'a> Iterator for DeltaValueIter<'a> {
 impl<'a> DeltaValueIter<'a> {
     fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
         let reader = inner.reader.as_ref().unwrap();
-        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
+        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, reader);
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(inner.index_root_blk, offset_reader);
 
@@ -731,7 +733,8 @@ impl<'a> DeltaValueIter<'a> {
             let lsn = delta_key.lsn();
 
             let reader = self.inner.reader.as_ref().unwrap();
-            let val = Value::des(&utils::read_blob(reader, *off)?)?;
+            let buf = reader.read_blob(*off)?;
+            let val = Value::des(&buf)?;
 
             self.next_idx += 1;
             Ok(Some((key, lsn, val)))

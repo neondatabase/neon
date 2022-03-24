@@ -25,44 +25,14 @@ use bytes::{BufMut, Bytes, BytesMut};
 use hex;
 use std::cmp::Ordering;
 
+use crate::layered_repository::block_io::{DiskBlockReader, DiskBlockWriter};
+
 // The maximum size of a value stored in the B-tree. 5 bytes is enough currently.
 pub const VALUE_SZ: usize = 5;
 pub const MAX_VALUE: u64 = 0x007f_ffff_ffff;
 
 #[allow(dead_code)]
 pub const PAGE_SZ: usize = 8192;
-
-///
-/// The implementation is generic in that it doesn't know about the
-/// page cache or other page server infrastructure. That makes it
-/// easier to write unit tests.  The search functions use
-/// DiskBlockReader to access the underylying storage.  The real
-/// implementation used by the image and delta layers is in
-/// 'blocky_reader.rs', and it uses the page cache. The unit tests
-/// simulate a disk with a simple in-memory vector of pages.
-///
-pub trait DiskBlockReader {
-    type Lease: AsRef<[u8; PAGE_SZ]>;
-
-    ///
-    /// Read a block. Returns a "lease" object that can be used to
-    /// access to the contents of the page. (For the page cache, the
-    /// lease object represents a lock on the buffer.)
-    ///
-    fn read_blk(&self, blknum: u32) -> Result<Self::Lease, std::io::Error>;
-}
-
-///
-/// Abstraction for writing a block, when building the tree.
-///
-pub trait DiskBlockWriter {
-    ///
-    /// Write 'buf' to a block on disk. 'buf' must be PAGE_SZ bytes long.
-    /// Returns the block number that the block was written to. It can be
-    /// used to access the page later, when reading the tree.
-    ///
-    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error>;
-}
 
 #[derive(Clone, Copy, Debug)]
 struct Value([u8; VALUE_SZ]);
@@ -355,14 +325,14 @@ where
                     // backwards from there. (The loop below starts from 'idx -
                     // 1', so add one here to compensate.)
                     idx + 1
-                },
+                }
                 Err(idx) => {
                     // No exact match. The binary search returned the index of the
                     // first key that's > search_key. Back off by one, and walk
                     // backwards from there. (The loop below starts from idx - 1,
                     // so we don't need to subtract one here)
                     idx
-                },
+                }
             };
 
             // idx points to the first match + 1 now. Keep going from there.

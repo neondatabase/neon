@@ -5,12 +5,13 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
+use crate::layered_repository::blob_io::BlobReader;
+use crate::layered_repository::blob_io::BlobWriter;
 use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
-use crate::layered_repository::utils;
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
@@ -59,8 +60,6 @@ pub struct InMemoryLayerInner {
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
-
-    end_offset: u64,
 }
 
 impl InMemoryLayerInner {
@@ -130,7 +129,8 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let value = Value::des(&utils::read_blob(&inner.file, *pos)?)?;
+                let buf = inner.file.read_blob(*pos)?;
+                let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((*entry_lsn, img));
@@ -198,8 +198,8 @@ impl Layer for InMemoryLayer {
         for (key, vec_map) in inner.index.iter() {
             for (lsn, pos) in vec_map.as_slice() {
                 let mut desc = String::new();
-                let len = utils::read_blob_buf(&inner.file, *pos, &mut buf)?;
-                let val = Value::des(&buf[0..len]);
+                inner.file.read_blob_into_buf(*pos, &mut buf)?;
+                let val = Value::des(&buf);
                 match val {
                     Ok(Value::Image(img)) => {
                         write!(&mut desc, " img {} bytes", img.len())?;
@@ -253,7 +253,6 @@ impl InMemoryLayer {
                 end_lsn: None,
                 index: HashMap::new(),
                 file,
-                end_offset: 0,
             }),
         })
     }
@@ -268,9 +267,7 @@ impl InMemoryLayer {
 
         inner.assert_writeable();
 
-        let off = inner.end_offset;
-        let len = utils::write_blob(&mut inner.file, &Value::ser(&val)?)?;
-        inner.end_offset += len;
+        let off = inner.file.write_blob(&Value::ser(&val)?)?;
 
         let vec_map = inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
@@ -341,8 +338,8 @@ impl InMemoryLayer {
                 let key = **key;
                 // Write all page versions
                 for (lsn, pos) in vec_map.as_slice() {
-                    let len = utils::read_blob_buf(&inner.file, *pos, &mut buf)?;
-                    let val = Value::des(&buf[0..len])?;
+                    inner.file.read_blob_into_buf(*pos, &mut buf)?;
+                    let val = Value::des(&buf)?;
                     delta_layer_writer.put_value(key, *lsn, val)?;
                 }
             }

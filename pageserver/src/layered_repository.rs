@@ -52,6 +52,8 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blob_io;
+mod block_io;
 mod blocky_reader;
 mod delta_layer;
 mod disk_btree;
@@ -63,7 +65,6 @@ mod layer_map;
 pub mod metadata;
 mod par_fsync;
 mod storage_layer;
-mod utils;
 
 use delta_layer::{DeltaLayer, DeltaLayerWriter};
 use ephemeral_file::is_ephemeral_file;

@@ -17,7 +17,7 @@ import pytest
         # into memory in the page server.
         pytest.param(100000, 100, 0),
         # Also test with a larger table, with and without parallelism
-        pytest.param(10000000, 1, 0),
+        pytest.param(10000000, 10, 0),
         pytest.param(10000000, 1, 4)
     ])
 def test_seqscans(zenith_with_baseline: PgCompare, rows: int, iters: int, workers: int):

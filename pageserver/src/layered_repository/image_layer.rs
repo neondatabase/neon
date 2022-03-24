@@ -22,14 +22,18 @@
 //! actual page images are stored in the "values" part.
 
 use crate::config::PageServerConf;
-use crate::layered_repository::blocky_reader::{BlockyReader, OffsetBlockReader};
+use crate::layered_repository::blob_io::BlobWrite;
+use crate::layered_repository::blob_io::BlobWriter;
+use crate::layered_repository::blob_io::BlobReader;
+use crate::layered_repository::block_io;
+use crate::layered_repository::block_io::BlockBuf;
+use crate::layered_repository::block_io::OffsetBlockReader;
+use crate::layered_repository::blocky_reader::BlockyReader;
 use crate::layered_repository::disk_btree::{DiskBtreeBuilder, DiskBtreeReader};
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
-use crate::layered_repository::utils;
-use crate::layered_repository::utils::BlockBuf;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
@@ -155,20 +159,19 @@ impl Layer for ImageLayer {
         let inner = self.load()?;
 
         let reader = inner.reader.as_ref().unwrap();
-        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, &reader);
+        let offset_reader = OffsetBlockReader::new(inner.index_start_blk, reader);
         let tree_reader = DiskBtreeReader::new(inner.index_root_blk, offset_reader);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         if let Some(offset) = tree_reader.get(&keybuf)? {
-            let blob =
-                utils::read_blob(inner.reader.as_ref().unwrap(), offset).with_context(|| {
-                    format!(
-                        "failed to read value from data file {} at offset {}",
-                        self.filename().display(),
-                        offset
-                    )
-                })?;
+            let blob = reader.read_blob(offset).with_context(|| {
+                format!(
+                    "failed to read value from data file {} at offset {}",
+                    self.filename().display(),
+                    offset
+                )
+            })?;
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
@@ -371,10 +374,8 @@ pub struct ImageLayerWriter {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    bufwriter: BufWriter<VirtualFile>,
+    blob_writer: BlobWrite<BufWriter<VirtualFile>>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
-
-    end_offset: u64,
 }
 
 impl ImageLayerWriter {
@@ -403,8 +404,9 @@ impl ImageLayerWriter {
         let mut bufwriter = BufWriter::new(file);
 
         // make room for the header block
-        bufwriter.write_all(&utils::ALL_ZEROS)?;
-        let end_offset = PAGE_SZ as u64;
+        bufwriter.write_all(&block_io::ALL_ZEROS)?;
+
+        let blob_writer = BlobWrite::new(bufwriter, PAGE_SZ as u64);
 
         // Initialize the index builder
         let block_buf = BlockBuf::new(); // reserve blk 0 for the summary
@@ -417,8 +419,7 @@ impl ImageLayerWriter {
             tenantid,
             key_range: key_range.clone(),
             lsn,
-            bufwriter,
-            end_offset,
+            blob_writer,
             tree: tree_builder,
         };
 
@@ -435,10 +436,7 @@ impl ImageLayerWriter {
 
         // Remember the offset and size metadata. The metadata is written
         // to a separate chapter, in `finish`.
-        let off = self.end_offset;
-        let len = utils::write_blob(&mut self.bufwriter, img)?;
-
-        self.end_offset += len;
+        let off = self.blob_writer.write_blob(img)?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -447,17 +445,19 @@ impl ImageLayerWriter {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<ImageLayer> {
+    pub fn finish(self) -> Result<ImageLayer> {
         // Pad the last page.
-        if self.end_offset % PAGE_SZ as u64 > 0 {
-            let padding_len = PAGE_SZ - self.end_offset as usize % PAGE_SZ;
-            self.bufwriter.write_all(&utils::ALL_ZEROS[..padding_len])?;
-            self.end_offset += padding_len as u64;
+        let mut end_offset = self.blob_writer.offset;
+        let mut bufwriter = self.blob_writer.writer;
+        if end_offset % PAGE_SZ as u64 > 0 {
+            let padding_len = PAGE_SZ - end_offset as usize % PAGE_SZ;
+            bufwriter.write_all(&block_io::ALL_ZEROS[..padding_len])?;
+            end_offset += padding_len as u64;
         }
-        self.bufwriter.flush()?;
-        let mut file = self.bufwriter.into_inner().unwrap();
+        bufwriter.flush()?;
+        let mut file = bufwriter.into_inner().unwrap();
 
-        let index_start_blk = (self.end_offset / PAGE_SZ as u64) as u32;
+        let index_start_blk = (end_offset / PAGE_SZ as u64) as u32;
 
         // Write the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
