@@ -284,11 +284,11 @@ pub struct PagestreamDbSizeRequest {
 pub struct PagestreamGetSlruPageRequest {
     pub latest: bool,
     pub lsn: Lsn,
+    pub region: u32,
     pub kind: SlruKind,
     pub segno: u32,
     pub blkno: u32,
     pub check_exists_only: bool,
-    pub region: u32,
 }
 
 #[derive(Debug)]
@@ -395,28 +395,29 @@ impl PagestreamFeMessage {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
                 latest: body.read_u8()? != 0,
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                region: body.read_u32::<BigEndian>()?,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
                     relnode: body.read_u32::<BigEndian>()?,
                     forknum: body.read_u8()?,
                 },
-                region: body.read_u32::<BigEndian>()?,
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
                 latest: body.read_u8()? != 0,
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                region: body.read_u32::<BigEndian>()?,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
                     relnode: body.read_u32::<BigEndian>()?,
                     forknum: body.read_u8()?,
                 },
-                region: body.read_u32::<BigEndian>()?,
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                 latest: body.read_u8()? != 0,
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                region: body.read_u32::<BigEndian>()?,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -424,7 +425,6 @@ impl PagestreamFeMessage {
                     forknum: body.read_u8()?,
                 },
                 blkno: body.read_u32::<BigEndian>()?,
-                region: body.read_u32::<BigEndian>()?,
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
                 latest: body.read_u8()? != 0,
@@ -435,11 +435,11 @@ impl PagestreamFeMessage {
                 PagestreamGetSlruPageRequest {
                     latest: body.read_u8()? != 0,
                     lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                    region: body.read_u32::<BigEndian>()?,
                     kind: SlruKind::try_from(body.read_u8()?)?,
                     segno: body.read_u32::<BigEndian>()?,
                     blkno: body.read_u32::<BigEndian>()?,
                     check_exists_only: body.read_u8()? != 0,
-                    region: body.read_u32::<BigEndian>()?,
                 },
             )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
@@ -479,12 +479,12 @@ impl PagestreamBeMessage {
             }
 
             Self::Error(resp) => {
-                bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(104); /* tag from pagestore_client.h */
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
             Self::DbSize(resp) => {
-                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_u8(105); /* tag from pagestore_client.h */
                 bytes.put_i64(resp.db_size);
             }
         }
