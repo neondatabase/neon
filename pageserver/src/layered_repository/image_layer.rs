@@ -130,7 +130,7 @@ impl Layer for ImageLayer {
         self.lsn..(self.lsn + 1)
     }
 
-    fn find(
+    fn find_record_lsn(
         &self,
         _key: Key,
         _lsn: Lsn,

@@ -213,21 +213,23 @@ impl<R: Repository> DatadirTimeline<R> {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, lsn)?;
             for blknum in (0..nblocks).rev() {
                 let key = slru_block_to_key(SlruKind::Clog, segno, blknum);
-                if let Some((timeline_id, rec_lsn)) = self.tline.find(key, lsn, &|rec| {
-                    if let ZenithWalRecord::ClogSetCommitted { xids, timestamp } = rec {
-                        if let Some(xact_xid) = xid_opt {
-                            if xids.contains(&xact_xid) {
-                                return true;
+                if let Some((timeline_id, rec_lsn)) =
+                    self.tline.find_record_lsn(key, lsn, &|rec| {
+                        if let ZenithWalRecord::ClogSetCommitted { xids, timestamp } = rec {
+                            if let Some(xact_xid) = xid_opt {
+                                if xids.contains(&xact_xid) {
+                                    return true;
+                                }
+                            }
+                            if let Some(xact_timestamp) = timestamp_opt {
+                                if timestamp <= xact_timestamp {
+                                    return true;
+                                }
                             }
                         }
-                        if let Some(xact_timestamp) = timestamp_opt {
-                            if timestamp <= xact_timestamp {
-                                return true;
-                            }
-                        }
-                    }
-                    false
-                })? {
+                        false
+                    })?
+                {
                     return Ok(Some((timeline_id, rec_lsn)));
                 }
             }

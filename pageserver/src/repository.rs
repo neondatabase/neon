@@ -338,7 +338,7 @@ pub trait Timeline: Send + Sync {
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
 
     /// Find latest LSN of wal record matching specified criteria
-    fn find(
+    fn find_record_lsn(
         &self,
         key: Key,
         lsn: Lsn,

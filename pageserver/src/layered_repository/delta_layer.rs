@@ -148,7 +148,7 @@ impl Layer for DeltaLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
-    fn find(
+    fn find_record_lsn(
         &self,
         key: Key,
         lsn: Lsn,

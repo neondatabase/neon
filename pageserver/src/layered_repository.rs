@@ -931,7 +931,7 @@ impl Timeline for LayeredTimeline {
         })
     }
 
-    fn find(
+    fn find_record_lsn(
         &self,
         key: Key,
         request_lsn: Lsn,
@@ -962,7 +962,7 @@ impl Timeline for LayeredTimeline {
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    if let Some(rec_lsn) = open_layer.find(key, cont_lsn, filter)? {
+                    if let Some(rec_lsn) = open_layer.find_record_lsn(key, cont_lsn, filter)? {
                         return Ok(Some((timeline_id, rec_lsn)));
                     }
                     cont_lsn = start_lsn;
@@ -972,7 +972,7 @@ impl Timeline for LayeredTimeline {
             for frozen_layer in layers.frozen_layers.iter() {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    if let Some(rec_lsn) = frozen_layer.find(key, cont_lsn, filter)? {
+                    if let Some(rec_lsn) = frozen_layer.find_record_lsn(key, cont_lsn, filter)? {
                         return Ok(Some((timeline_id, rec_lsn)));
                     }
                     cont_lsn = start_lsn;
@@ -980,7 +980,7 @@ impl Timeline for LayeredTimeline {
                 }
             }
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn, true)? {
-                if let Some(rec_lsn) = layer.find(key, cont_lsn, filter)? {
+                if let Some(rec_lsn) = layer.find_record_lsn(key, cont_lsn, filter)? {
                     return Ok(Some((timeline_id, rec_lsn)));
                 }
                 cont_lsn = lsn_floor;

@@ -109,7 +109,7 @@ impl Layer for InMemoryLayer {
         self.start_lsn..end_lsn
     }
 
-    fn find(
+    fn find_record_lsn(
         &self,
         key: Key,
         lsn: Lsn,
