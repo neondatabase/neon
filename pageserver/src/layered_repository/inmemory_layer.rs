@@ -24,6 +24,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::time::SystemTime;
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 use zenith_utils::vec_map::VecMap;
@@ -38,6 +39,8 @@ pub struct InMemoryLayer {
     /// start is inclusive.
     ///
     start_lsn: Lsn,
+
+    creation_time: SystemTime,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -83,6 +86,14 @@ impl Layer for InMemoryLayer {
             "inmem-{:016X}-{:016X}",
             self.start_lsn.0, end_lsn.0
         ))
+    }
+
+    fn path(&self) -> PathBuf {
+        self.filename()
+    }
+
+    fn get_creation_time(&self) -> Result<SystemTime> {
+        Ok(self.creation_time)
     }
 
     fn get_tenant_id(&self) -> ZTenantId {
@@ -250,7 +261,7 @@ impl InMemoryLayer {
         trace!(
             "initializing new empty InMemoryLayer for writing on timeline {} at {}",
             timelineid,
-            start_lsn
+            start_lsn,
         );
 
         let file = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -260,6 +271,7 @@ impl InMemoryLayer {
             timelineid,
             tenantid,
             start_lsn,
+            creation_time: SystemTime::now(),
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 index: HashMap::new(),

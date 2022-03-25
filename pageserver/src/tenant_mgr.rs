@@ -142,6 +142,7 @@ pub fn shutdown_all_tenants() {
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::Reconstructor), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -232,8 +233,16 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenantid: ZTenantId) -> Re
                 move || crate::tenant_threads::compact_loop(tenantid, conf),
             )?;
 
+            thread_mgr::spawn(
+                ThreadKind::Reconstructor,
+                Some(tenantid),
+                None,
+                "Reconstruct thread",
+                move || crate::tenant_threads::reconstruct_loop(tenantid, conf),
+            )?;
+
             // FIXME: if we fail to launch the GC thread, but already launched the
-            // compactor, we're in a strange state.
+            // compactor or reconstructor, we're in a strange state.
 
             thread_mgr::spawn(
                 ThreadKind::GarbageCollector,

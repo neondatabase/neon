@@ -242,6 +242,10 @@ pub trait Repository: Send + Sync {
     /// this function is periodically called by compactor thread.
     fn compaction_iteration(&self) -> Result<()>;
 
+    /// perform one materialize iteration.
+    /// this function is periodically called by reconstructor thread.
+    fn materialize_iteration(&self) -> Result<()>;
+
     /// detaches locally available timeline by stopping all threads and removing all the data.
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 

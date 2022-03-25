@@ -143,6 +143,15 @@ impl Layer for DeltaLayer {
         self.lsn_range.clone()
     }
 
+    fn path(&self) -> PathBuf {
+        Self::path_for(
+            &self.path_or_conf,
+            self.timelineid,
+            self.tenantid,
+            &self.layer_name(),
+        )
+    }
+
     fn filename(&self) -> PathBuf {
         PathBuf::from(self.layer_name().to_string())
     }
@@ -445,16 +454,6 @@ impl DeltaLayer {
             key_range: self.key_range.clone(),
             lsn_range: self.lsn_range.clone(),
         }
-    }
-
-    /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &self.layer_name(),
-        )
     }
 }
 

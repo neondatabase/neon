@@ -95,6 +95,9 @@ pub enum ThreadKind {
     // Thread that handles compaction of all timelines for a tenant.
     Compactor,
 
+    // Thread that handles materialization of all timelines for a tenant.
+    Reconstructor,
+
     // Thread that handles GC of a tenant
     GarbageCollector,
 

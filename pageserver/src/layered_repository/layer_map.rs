@@ -258,7 +258,7 @@ impl LayerMap {
         self.historic_layers.iter()
     }
 
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    pub fn find_latest_image(&self, key: &Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         // Find the last image layer that covers the key
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
@@ -267,7 +267,7 @@ impl LayerMap {
                 continue;
             }
 
-            if !l.get_key_range().contains(&key) {
+            if !l.get_key_range().contains(key) {
                 continue;
             }
 
@@ -325,7 +325,7 @@ impl LayerMap {
         let mut start = *points.first().unwrap();
         let mut ranges = Vec::new();
         for end in points[1..].iter() {
-            let img = self.find_latest_image(start, lsn);
+            let img = self.find_latest_image(&start, lsn);
 
             ranges.push((start..*end, img));
 
