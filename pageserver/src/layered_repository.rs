@@ -1557,9 +1557,9 @@ impl LayeredTimeline {
 
             // 2. Create new image layers for partitions that have been modified
             // "enough".
-            for i in 0..parts.len() {
-                if self.time_for_new_image_layer(&parts[i], lsn, 3)? {
-                    self.create_image_layer(&parts[i], lsn)?;
+            for part in &parts {
+                if self.time_for_new_image_layer(part, lsn, 3)? {
+                    self.create_image_layer(part, lsn)?;
                 }
             }
             timer.stop_and_record();
