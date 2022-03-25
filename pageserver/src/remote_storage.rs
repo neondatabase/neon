@@ -89,15 +89,14 @@ use std::{
     collections::HashMap,
     ffi, fs,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use anyhow::{bail, Context};
-use tokio::{io, sync::RwLock};
+use tokio::io;
 use tracing::{debug, error, info};
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
-pub use self::storage_sync::index::{RemoteTimelineIndex, TimelineIndexEntry};
+pub use self::storage_sync::index::{RemoteIndex, TimelineIndexEntry};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
 use self::{local_fs::LocalFs, rust_s3::S3};
 use crate::layered_repository::ephemeral_file::is_ephemeral_file;
@@ -120,7 +119,7 @@ type LocalTimelineInitStatuses = HashMap<ZTenantId, HashMap<ZTimelineId, LocalTi
 /// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
 /// to simplify the received code.
 pub struct SyncStartupData {
-    pub remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    pub remote_index: RemoteIndex,
     pub local_timeline_init_statuses: LocalTimelineInitStatuses,
 }
 
@@ -172,7 +171,7 @@ pub fn start_local_timeline_sync(
             }
             Ok(SyncStartupData {
                 local_timeline_init_statuses,
-                remote_index: Arc::new(RwLock::new(RemoteTimelineIndex::empty())),
+                remote_index: RemoteIndex::empty(),
             })
         }
     }

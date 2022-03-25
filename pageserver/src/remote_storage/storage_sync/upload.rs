@@ -2,7 +2,6 @@
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
     },
 };
 
-use super::{compression::ArchiveHeader, index::RemoteTimelineIndex, NewCheckpoint};
+use super::{compression::ArchiveHeader, NewCheckpoint, RemoteIndex};
 
 /// Attempts to compress and upload given checkpoint files.
 /// No extra checks for overlapping files is made: download takes care of that, ensuring no non-metadata local timeline files are overwritten.
@@ -29,7 +28,7 @@ pub(super) async fn upload_timeline_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: NewCheckpoint,
     retries: u32,
@@ -156,7 +155,7 @@ async fn try_upload_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
@@ -238,16 +237,14 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = Arc::new(RwLock::new(
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
-                repo_harness.conf,
-                storage
-                    .list()
-                    .await?
-                    .into_iter()
-                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-            ),
-        ));
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
+            repo_harness.conf,
+            storage
+                .list()
+                .await?
+                .into_iter()
+                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        );
         let remote_assets = Arc::new((storage, index));
         let index = &remote_assets.1;
 
@@ -436,16 +433,14 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = Arc::new(RwLock::new(
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
-                repo_harness.conf,
-                storage
-                    .list()
-                    .await?
-                    .into_iter()
-                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-            ),
-        ));
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
+            repo_harness.conf,
+            storage
+                .list()
+                .await?
+                .into_iter()
+                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        );
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;
         let index = &remote_assets.1;
@@ -464,7 +459,7 @@ mod tests {
             first_checkpoint,
         )
         .await;
-        let after_first_uploads = RemoteTimelineIndex::try_parse_descriptions_from_paths(
+        let after_first_uploads = RemoteIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             remote_assets
                 .0
@@ -495,7 +490,7 @@ mod tests {
             0,
         )
         .await;
-        assert_index_descriptions(index, after_first_uploads.clone()).await;
+        assert_index_descriptions(index, &after_first_uploads).await;
 
         let checkpoint_with_uploaded_lsn = create_local_timeline(
             &repo_harness,
@@ -511,7 +506,7 @@ mod tests {
             0,
         )
         .await;
-        assert_index_descriptions(index, after_first_uploads.clone()).await;
+        assert_index_descriptions(index, &after_first_uploads).await;
 
         Ok(())
     }
