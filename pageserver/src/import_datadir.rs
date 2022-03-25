@@ -35,8 +35,8 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
-    let mut writer = tline.begin_record(lsn);
-    writer.init_empty()?;
+    let mut modification = tline.begin_modification(lsn);
+    modification.init_empty()?;
 
     // Scan 'global'
     let mut relfiles: Vec<PathBuf> = Vec::new();
@@ -46,11 +46,11 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
             None => continue,
 
             Some("pg_control") => {
-                pg_control = Some(import_control_file(&mut writer, &direntry.path())?);
+                pg_control = Some(import_control_file(&mut modification, &direntry.path())?);
             }
             Some("pg_filenode.map") => {
                 import_relmap_file(
-                    &mut writer,
+                    &mut modification,
                     pg_constants::GLOBALTABLESPACE_OID,
                     0,
                     &direntry.path(),
@@ -62,7 +62,12 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
         }
     }
     for relfile in relfiles {
-        import_relfile(&mut writer, &relfile, pg_constants::GLOBALTABLESPACE_OID, 0)?;
+        import_relfile(
+            &mut modification,
+            &relfile,
+            pg_constants::GLOBALTABLESPACE_OID,
+            0,
+        )?;
     }
 
     // Scan 'base'. It contains database dirs, the database OID is the filename.
@@ -84,10 +89,10 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
                 None => continue,
 
                 Some("PG_VERSION") => {
-                    //writer.put_dbdir_creation(pg_constants::DEFAULTTABLESPACE_OID, dboid)?;
+                    //modification.put_dbdir_creation(pg_constants::DEFAULTTABLESPACE_OID, dboid)?;
                 }
                 Some("pg_filenode.map") => import_relmap_file(
-                    &mut writer,
+                    &mut modification,
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     &direntry.path(),
@@ -99,7 +104,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
         }
         for relfile in relfiles {
             import_relfile(
-                &mut writer,
+                &mut modification,
                 &relfile,
                 pg_constants::DEFAULTTABLESPACE_OID,
                 dboid,
@@ -108,25 +113,25 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     }
     for entry in fs::read_dir(path.join("pg_xact"))? {
         let entry = entry?;
-        import_slru_file(&mut writer, SlruKind::Clog, &entry.path())?;
+        import_slru_file(&mut modification, SlruKind::Clog, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
         let entry = entry?;
-        import_slru_file(&mut writer, SlruKind::MultiXactMembers, &entry.path())?;
+        import_slru_file(&mut modification, SlruKind::MultiXactMembers, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
         let entry = entry?;
-        import_slru_file(&mut writer, SlruKind::MultiXactOffsets, &entry.path())?;
+        import_slru_file(&mut modification, SlruKind::MultiXactOffsets, &entry.path())?;
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
         let xid = u32::from_str_radix(&entry.path().to_string_lossy(), 16)?;
-        import_twophase_file(&mut writer, xid, &entry.path())?;
+        import_twophase_file(&mut modification, xid, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
 
     // We're done importing all the data files.
-    writer.finish()?;
+    modification.commit()?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -154,7 +159,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 fn import_relfile<R: Repository>(
-    timeline: &mut DatadirTimelineWriter<R>,
+    modification: &mut DatadirModification<R>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
@@ -185,14 +190,14 @@ fn import_relfile<R: Repository>(
         relnode,
         forknum,
     };
-    timeline.put_rel_creation(rel, nblocks as u32)?;
+    modification.put_rel_creation(rel, nblocks as u32)?;
 
     let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
     loop {
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                timeline.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
+                modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
             }
 
             // TODO: UnexpectedEof is expected
@@ -215,7 +220,7 @@ fn import_relfile<R: Repository>(
 
 /// Import a relmapper (pg_filenode.map) file into the repository
 fn import_relmap_file<R: Repository>(
-    timeline: &mut DatadirTimelineWriter<R>,
+    modification: &mut DatadirModification<R>,
     spcnode: Oid,
     dbnode: Oid,
     path: &Path,
@@ -227,13 +232,13 @@ fn import_relmap_file<R: Repository>(
 
     trace!("importing relmap file {}", path.display());
 
-    timeline.put_relmap_file(spcnode, dbnode, Bytes::copy_from_slice(&buffer[..]))?;
+    modification.put_relmap_file(spcnode, dbnode, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
 }
 
 /// Import a twophase state file (pg_twophase/<xid>) into the repository
 fn import_twophase_file<R: Repository>(
-    timeline: &mut DatadirTimelineWriter<R>,
+    modification: &mut DatadirModification<R>,
     xid: TransactionId,
     path: &Path,
 ) -> Result<()> {
@@ -244,7 +249,7 @@ fn import_twophase_file<R: Repository>(
 
     trace!("importing non-rel file {}", path.display());
 
-    timeline.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
+    modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
     Ok(())
 }
 
@@ -254,7 +259,7 @@ fn import_twophase_file<R: Repository>(
 /// The control file is imported as is, but we also extract the checkpoint record
 /// from it and store it separated.
 fn import_control_file<R: Repository>(
-    timeline: &mut DatadirTimelineWriter<R>,
+    modification: &mut DatadirModification<R>,
     path: &Path,
 ) -> Result<ControlFileData> {
     let mut file = File::open(path)?;
@@ -265,12 +270,12 @@ fn import_control_file<R: Repository>(
     trace!("importing control file {}", path.display());
 
     // Import it as ControlFile
-    timeline.put_control_file(Bytes::copy_from_slice(&buffer[..]))?;
+    modification.put_control_file(Bytes::copy_from_slice(&buffer[..]))?;
 
     // Extract the checkpoint record and import it separately.
     let pg_control = ControlFileData::decode(&buffer)?;
     let checkpoint_bytes = pg_control.checkPointCopy.encode();
-    timeline.put_checkpoint(checkpoint_bytes)?;
+    modification.put_checkpoint(checkpoint_bytes)?;
 
     Ok(pg_control)
 }
@@ -279,7 +284,7 @@ fn import_control_file<R: Repository>(
 /// Import an SLRU segment file
 ///
 fn import_slru_file<R: Repository>(
-    timeline: &mut DatadirTimelineWriter<R>,
+    modification: &mut DatadirModification<R>,
     slru: SlruKind,
     path: &Path,
 ) -> Result<()> {
@@ -295,14 +300,19 @@ fn import_slru_file<R: Repository>(
 
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as u64);
 
-    timeline.put_slru_segment_creation(slru, segno, nblocks as u32)?;
+    modification.put_slru_segment_creation(slru, segno, nblocks as u32)?;
 
     let mut rpageno = 0;
     loop {
         let r = file.read_exact(&mut buf);
         match r {
             Ok(_) => {
-                timeline.put_slru_page_image(slru, segno, rpageno, Bytes::copy_from_slice(&buf))?;
+                modification.put_slru_page_image(
+                    slru,
+                    segno,
+                    rpageno,
+                    Bytes::copy_from_slice(&buf),
+                )?;
             }
 
             // TODO: UnexpectedEof is expected

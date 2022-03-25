@@ -69,23 +69,25 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(())
     }
 
-    /// Start updating a WAL record
+    /// Start ingesting a WAL record, or other atomic modification of
+    /// the timeline.
     ///
     /// This provides a transaction-like interface to perform a bunch
-    /// of modifications atomically, with one LSN.
+    /// of modifications atomically, all stamped with one LSN.
     ///
-    /// To ingest a WAL record, call begin_record(lsn) to get a writer
-    /// object. Use the functions in the writer-object to modify the
-    /// repository state, updating all the pages and metadata that the
-    /// WAL record affects. When you're done, call writer.finish() to
+    /// To ingest a WAL record, call begin_modification(lsn) to get a
+    /// DatadirModification object. Use the functions in the object to
+    /// modify the repository state, updating all the pages and metadata
+    /// that the WAL record affects. When you're done, call commit() to
     /// commit the changes.
     ///
-    /// Note that any pending modifications you make through the writer
-    /// won't be visible to calls to the get functions until you finish!
-    /// If you update the same page twice, the last update wins.
+    /// Note that any pending modifications you make through the
+    /// modification object won't be visible to calls to the 'get' and list
+    /// functions of the timeline until you finish! And if you update the
+    /// same page twice, the last update wins.
     ///
-    pub fn begin_record(&self, lsn: Lsn) -> DatadirTimelineWriter<R> {
-        DatadirTimelineWriter {
+    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification<R> {
+        DatadirModification {
             tline: self,
             lsn,
             pending_updates: HashMap::new(),
@@ -388,12 +390,15 @@ impl<R: Repository> DatadirTimeline<R> {
     }
 }
 
-/// DatadirTimelineWriter represents an operation to ingest an atomic set of
+/// DatadirModification represents an operation to ingest an atomic set of
 /// updates to the repository. It is created by the 'begin_record'
 /// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic
-pub struct DatadirTimelineWriter<'a, R: Repository> {
-    tline: &'a DatadirTimeline<R>,
+/// by a one WAL record appear atomic.
+pub struct DatadirModification<'a, R: Repository> {
+    /// The timeline this modification applies to. You can access this to
+    /// read the state, but note that any pending updates are *not* reflected
+    /// in the state in 'tline' yet.
+    pub tline: &'a DatadirTimeline<R>,
 
     lsn: Lsn,
 
@@ -405,19 +410,7 @@ pub struct DatadirTimelineWriter<'a, R: Repository> {
     pending_nblocks: isize,
 }
 
-// TODO Currently, Deref is used to allow easy access to read methods from this trait.
-// This is probably considered a bad practice in Rust and should be fixed eventually,
-// but will cause large code changes.
-impl<'a, R: Repository> std::ops::Deref for DatadirTimelineWriter<'a, R> {
-    type Target = DatadirTimeline<R>;
-
-    fn deref(&self) -> &Self::Target {
-        self.tline
-    }
-}
-
-/// Various functions to mutate the repository state.
-impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
+impl<'a, R: Repository> DatadirModification<'a, R> {
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -767,10 +760,14 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<()> {
+    ///
+    /// Finish this atomic update, writing all the updated keys to the
+    /// underlying timeline.
+    ///
+    pub fn commit(self) -> Result<()> {
         let writer = self.tline.tline.writer();
 
-        let last_partitioning = self.last_partitioning.load();
+        let last_partitioning = self.tline.last_partitioning.load();
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
@@ -1217,10 +1214,9 @@ pub fn create_test_timeline<R: Repository>(
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let tline = DatadirTimeline::new(tline, crate::layered_repository::tests::TEST_FILE_SIZE / 10);
-    let mut writer = tline.begin_record(Lsn(8));
-    writer.init_empty()?;
-
-    writer.finish()?;
+    let mut m = tline.begin_modification(Lsn(8));
+    m.init_empty()?;
+    m.commit()?;
     Ok(Arc::new(tline))
 }
 
