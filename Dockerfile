@@ -24,7 +24,6 @@ ARG GIT_VERSION=local
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
-#ENV RUSTC_WRAPPER cachepot
 ENV RUSTC_WRAPPER /usr/local/cargo/bin/cachepot
 
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
