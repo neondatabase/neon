@@ -1088,9 +1088,7 @@ mod tests {
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-
-        // FIXME: should error out?
-        //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10))?.is_none());
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
@@ -1240,11 +1238,8 @@ mod tests {
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&tline)?;
 
-        //from storage_layer.rs
-        const RELISH_SEG_SIZE: u32 = 10 * 1024 * 1024 / 8192;
-        let relsize = RELISH_SEG_SIZE * 2;
-
-        // Create relation with relsize blocks
+        // Create a 20 MB relation (the size is arbitrary)
+        let relsize = 20 * 1024 * 1024 / 8192;
         let mut m = tline.begin_modification(Lsn(0x20));
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
@@ -1254,9 +1249,7 @@ mod tests {
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
-
-        // FIXME: should fail
-        // assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10))?.is_none());
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, relsize);

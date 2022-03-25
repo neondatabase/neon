@@ -1353,6 +1353,10 @@ impl LayeredTimeline {
         drop(layers);
     }
 
+    ///
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated
+    /// in the in-memory layer, and initiate flushing it if so.
+    ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
 

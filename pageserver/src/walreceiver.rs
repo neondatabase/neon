@@ -183,8 +183,6 @@ fn walreceiver_main(
 
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
-    let remote_index = repo.get_remote_index();
-
     let timeline =
         tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).with_context(|| {
             format!(
@@ -192,6 +190,7 @@ fn walreceiver_main(
                 timeline_id, tenant_id
             )
         })?;
+    let remote_index = repo.get_remote_index();
 
     //
     // Start streaming the WAL, from where we left off previously.

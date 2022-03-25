@@ -512,18 +512,18 @@ impl DeltaLayerWriter {
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> Result<DeltaLayerWriter> {
-        // Create the file
+        // Create the file initially with a temporary filename. We don't know
+        // the end key yet, so we cannot form the final filename yet. We will
+        // rename it when we're done.
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-
         let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
             "{}-XXX__{:016X}-{:016X}.temp",
             key_start,
             u64::from(lsn_range.start),
             u64::from(lsn_range.end)
         ));
-        info!("temp deltalayer path {}", path.display());
         let file = VirtualFile::create(&path)?;
         let buf_writer = BufWriter::new(file);
         let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
@@ -581,8 +581,6 @@ impl DeltaLayerWriter {
 
     ///
     /// Finish writing the delta layer.
-    ///
-    /// 'seg_sizes' is a list of size changes to store with the actual data.
     ///
     pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         // Close the values chapter
