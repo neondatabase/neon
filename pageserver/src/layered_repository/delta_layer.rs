@@ -40,7 +40,7 @@ use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::DELTA_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 use bookfile::{Book, BookWriter, ChapterWriter};
 
@@ -150,10 +150,10 @@ impl Layer for DeltaLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
+    ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.key_range.contains(&key));
+        ensure!(self.key_range.contains(&key));
 
         {
             // Open the file and lock the metadata in memory
@@ -213,7 +213,7 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + '_> {
         let inner = self.load().unwrap();
 
         match DeltaValueIter::new(inner) {
@@ -237,14 +237,17 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        if let Ok(mut inner) = self.inner.try_write() {
-            inner.index = HashMap::default();
-            inner.loaded = false;
+        let mut inner = match self.inner.try_write() {
+            Ok(inner) => inner,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => panic!("DeltaLayer lock was poisoned"),
+        };
+        inner.index = HashMap::default();
+        inner.loaded = false;
 
-            // Note: we keep the Book open. Is that a good idea? The virtual file
-            // machinery has its own rules for closing the file descriptor if it's not
-            // needed, but the Book struct uses up some memory, too.
-        }
+        // Note: we keep the Book open. Is that a good idea? The virtual file
+        // machinery has its own rules for closing the file descriptor if it's not
+        // needed, but the Book struct uses up some memory, too.
 
         Ok(())
     }
@@ -334,63 +337,79 @@ impl DeltaLayer {
     }
 
     ///
-    /// Load the contents of the file into memory
+    /// Open the underlying file and read the metadata into memory, if it's
+    /// not loaded already.
     ///
     fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
         loop {
-            // quick exit if already loaded
-            {
-                let inner = self.inner.read().unwrap();
-
-                if inner.loaded {
-                    return Ok(inner);
-                }
-            }
-            // need to upgrade to write lock
-            let mut inner = self.inner.write().unwrap();
-
-            let path = self.path();
-
-            // Open the file if it's not open already.
-            if inner.book.is_none() {
-                let file = VirtualFile::open(&path)?;
-                inner.book = Some(Book::new(file)?);
-            }
-            let book = inner.book.as_ref().unwrap();
-
-            match &self.path_or_conf {
-                PathOrConf::Conf(_) => {
-                    let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
-                    let actual_summary = Summary::des(&chapter)?;
-
-                    let expected_summary = Summary::from(self);
-
-                    if actual_summary != expected_summary {
-                        bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                    }
-                }
-                PathOrConf::Path(path) => {
-                    let actual_filename = Path::new(path.file_name().unwrap());
-                    let expected_filename = self.filename();
-
-                    if actual_filename != expected_filename {
-                        println!(
-                            "warning: filename does not match what is expected from in-file summary"
-                        );
-                        println!("actual: {:?}", actual_filename);
-                        println!("expected: {:?}", expected_filename);
-                    }
-                }
+            // Quick exit if already loaded
+            let inner = self.inner.read().unwrap();
+            if inner.loaded {
+                return Ok(inner);
             }
 
-            let chapter = book.read_chapter(INDEX_CHAPTER)?;
-            let index = HashMap::des(&chapter)?;
+            // Need to open the file and load the metadata. Upgrade our lock to
+            // a write lock. (Or rather, release and re-lock in write mode.)
+            drop(inner);
+            let inner = self.inner.write().unwrap();
+            if !inner.loaded {
+                self.load_inner(inner)?;
+            } else {
+                // Another thread loaded it while we were not holding the lock.
+            }
 
-            debug!("loaded from {}", &path.display());
-
-            inner.index = index;
-            inner.loaded = true;
+            // We now have the file open and loaded. There's no function to do
+            // that in the std library RwLock, so we have to release and re-lock
+            // in read mode. (To be precise, the lock guard was moved in the
+            // above call to `load_inner`, so it's already been released). And
+            // while we do that, another thread could unload again, so we have
+            // to re-check and retry if that happens.
         }
+    }
+
+    fn load_inner(&self, mut inner: RwLockWriteGuard<DeltaLayerInner>) -> Result<()> {
+        let path = self.path();
+
+        // Open the file if it's not open already.
+        if inner.book.is_none() {
+            let file = VirtualFile::open(&path)?;
+            inner.book = Some(Book::new(file)?);
+        }
+        let book = inner.book.as_ref().unwrap();
+
+        match &self.path_or_conf {
+            PathOrConf::Conf(_) => {
+                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
+                let actual_summary = Summary::des(&chapter)?;
+
+                let expected_summary = Summary::from(self);
+
+                if actual_summary != expected_summary {
+                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
+                }
+            }
+            PathOrConf::Path(path) => {
+                let actual_filename = Path::new(path.file_name().unwrap());
+                let expected_filename = self.filename();
+
+                if actual_filename != expected_filename {
+                    println!(
+                        "warning: filename does not match what is expected from in-file summary"
+                    );
+                    println!("actual: {:?}", actual_filename);
+                    println!("expected: {:?}", expected_filename);
+                }
+            }
+        }
+
+        let chapter = book.read_chapter(INDEX_CHAPTER)?;
+        let index = HashMap::des(&chapter)?;
+
+        debug!("loaded from {}", &path.display());
+
+        inner.index = index;
+        inner.loaded = true;
+        Ok(())
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -565,7 +584,7 @@ impl DeltaLayerWriter {
     ///
     /// 'seg_sizes' is a list of size changes to store with the actual data.
     ///
-    pub fn finish(self, key_end: Key) -> Result<DeltaLayer> {
+    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         // Close the values chapter
         let book = self.values_writer.close()?;
 

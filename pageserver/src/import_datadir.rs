@@ -71,11 +71,11 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
         let direntry = direntry?;
 
         //skip all temporary files
-        if direntry.file_name().to_str().unwrap() == "pgsql_tmp" {
+        if direntry.file_name().to_string_lossy() == "pgsql_tmp" {
             continue;
         }
 
-        let dboid = direntry.file_name().to_str().unwrap().parse::<u32>()?;
+        let dboid = direntry.file_name().to_string_lossy().parse::<u32>()?;
 
         let mut relfiles: Vec<PathBuf> = Vec::new();
         for direntry in fs::read_dir(direntry.path())? {
@@ -120,7 +120,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     }
     for entry in fs::read_dir(path.join("pg_twophase"))? {
         let entry = entry?;
-        let xid = u32::from_str_radix(entry.path().to_str().unwrap(), 16)?;
+        let xid = u32::from_str_radix(&entry.path().to_string_lossy(), 16)?;
         import_twophase_file(&mut writer, xid, &entry.path())?;
     }
     // TODO: Scan pg_tblspc
@@ -158,16 +158,15 @@ fn import_relfile<R: Repository>(
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
 
-    let p = parse_relfilename(path.file_name().unwrap().to_str().unwrap());
-    if let Err(e) = p {
-        warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
-        return Err(e.into());
-    }
-    let (relnode, forknum, segno) = p.unwrap();
+    let (relnode, forknum, segno) = parse_relfilename(&path.file_name().unwrap().to_string_lossy())
+        .map_err(|e| {
+            warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
+            e
+        })?;
 
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
@@ -288,7 +287,7 @@ fn import_slru_file<R: Repository>(
 
     let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
-    let segno = u32::from_str_radix(path.file_name().unwrap().to_str().unwrap(), 16)?;
+    let segno = u32::from_str_radix(&path.file_name().unwrap().to_string_lossy(), 16)?;
 
     let len = file.metadata().unwrap().len();
     ensure!(len % pg_constants::BLCKSZ as u64 == 0); // we assume SLRU block size is the same as BLCKSZ

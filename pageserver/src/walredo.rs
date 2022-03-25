@@ -344,7 +344,10 @@ impl PostgresRedoManager {
             ZenithWalRecord::Postgres {
                 will_init: _,
                 rec: _,
-            } => panic!("tried to pass postgres wal record to zenith WAL redo"),
+            } => {
+                error!("tried to pass postgres wal record to zenith WAL redo");
+                return Err(WalRedoError::InvalidRequest);
+            }
             ZenithWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,
@@ -563,20 +566,23 @@ impl PostgresRedoProcess {
         }
         info!("running initdb in {:?}", datadir.display());
         let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
-            .args(&["-D", datadir.to_str().unwrap()])
+            .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .output()
-            .expect("failed to execute initdb");
+            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {}", e)))?;
 
         if !initdb.status.success() {
-            panic!(
-                "initdb failed: {}\nstderr:\n{}",
-                std::str::from_utf8(&initdb.stdout).unwrap(),
-                std::str::from_utf8(&initdb.stderr).unwrap()
-            );
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "initdb failed\nstdout: {}\nstderr:\n{}",
+                    String::from_utf8_lossy(&initdb.stdout),
+                    String::from_utf8_lossy(&initdb.stderr)
+                ),
+            ));
         } else {
             // Limit shared cache for wal-redo-postres
             let mut config = OpenOptions::new()
@@ -594,11 +600,16 @@ impl PostgresRedoProcess {
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("PGDATA", &datadir)
             .spawn()
-            .expect("postgres --wal-redo command failed to start");
+            .map_err(|e| {
+                Error::new(
+                    e.kind(),
+                    format!("postgres --wal-redo command failed to start: {}", e),
+                )
+            })?;
 
         info!(
             "launched WAL redo postgres process on {:?}",
@@ -658,7 +669,10 @@ impl PostgresRedoProcess {
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
-                panic!("tried to pass zenith wal record to postgres WAL redo");
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "tried to pass zenith wal record to postgres WAL redo",
+                ));
             }
         }
         build_get_page_msg(tag, &mut writebuf);

@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bookfile::Book;
 use bytes::Bytes;
 use fail::fail_point;
@@ -806,10 +806,10 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
+    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
-        assert!(
+        ensure!(
             !IS_WAL_RECEIVER.with(|c| c.get()),
             "wait_lsn called by WAL receiver thread"
         );
@@ -864,7 +864,7 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
                 self.freeze_inmem_layer(false);
@@ -1023,9 +1023,9 @@ impl LayeredTimeline {
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
             let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
+            let fname = fname.to_string_lossy();
 
-            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+            if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
                     warn!(
@@ -1043,7 +1043,7 @@ impl LayeredTimeline {
                 trace!("found layer {}", layer.filename().display());
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -1068,7 +1068,7 @@ impl LayeredTimeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if is_ephemeral_file(fname) {
+            } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
                 fs::remove_file(direntry.path())?;
@@ -1100,7 +1100,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1248,13 +1248,13 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
-        assert!(lsn.is_aligned());
+        ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        assert!(
+        ensure!(
             lsn > last_record_lsn,
             "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
@@ -1352,6 +1352,7 @@ impl LayeredTimeline {
                 Some(self.tenantid),
                 Some(self.timelineid),
                 "layer flush thread",
+                false,
                 move || self_clone.flush_frozen_layers(false),
             )?;
         }
@@ -2047,7 +2048,10 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
-    let filename = path.file_name().unwrap().to_str().unwrap();
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
+        .to_string_lossy();
     let mut new_path = path.clone();
 
     for i in 0u32.. {

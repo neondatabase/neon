@@ -100,7 +100,6 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Look up given page version.
     pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
-        ensure!(tag.dbnode != 0, "invalid dbnode");
         ensure!(tag.relnode != 0, "invalid relnode");
 
         let nblocks = self.get_rel_size(tag, lsn)?;
@@ -118,7 +117,6 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Get size of a relation file
     pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        ensure!(tag.dbnode != 0, "invalid dbnode");
         ensure!(tag.relnode != 0, "invalid relnode");
 
         if (tag.forknum == pg_constants::FSM_FORKNUM
@@ -139,7 +137,6 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Does relation exist?
     pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
-        ensure!(tag.dbnode != 0, "invalid dbnode");
         ensure!(tag.relnode != 0, "invalid relnode");
 
         // fetch directory listing
@@ -459,7 +456,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         rec: ZenithWalRecord,
     ) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
@@ -487,7 +483,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
@@ -584,7 +579,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
     ///
     /// 'nblocks' is the initial size.
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
@@ -627,7 +621,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Truncate relation
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
         let size_key = rel_size_to_key(rel);
 
@@ -645,7 +638,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Extend relation
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
 
         // Put size
@@ -661,7 +653,6 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Drop a relation.
     pub fn put_rel_drop(&mut self, rel: RelTag) -> Result<()> {
-        ensure!(rel.dbnode != 0, "invalid dbnode");
         ensure!(rel.relnode != 0, "invalid relnode");
 
         // Remove it from the directory entry

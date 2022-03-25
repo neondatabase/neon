@@ -230,6 +230,7 @@ pub fn thread_main(
                     None,
                     None,
                     "serving Page Service thread",
+                    false,
                     move || page_service_conn_main(conf, local_auth, socket, auth_type),
                 ) {
                     // Thread creation failed. Log the error and continue.
@@ -568,7 +569,6 @@ impl postgres_backend::Handler for PageServerHandler {
         // which requires auth to be present
         let data = self
             .auth
-            .as_ref()
             .as_ref()
             .unwrap()
             .decode(str::from_utf8(jwt_response)?)?;

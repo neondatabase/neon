@@ -13,7 +13,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use log::*;
 use std::collections::HashMap;
 // avoid binding to Write (conflicts with std::io::Write)
@@ -114,8 +114,8 @@ impl Layer for InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        assert!(lsn_range.start <= self.start_lsn);
+    ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start <= self.start_lsn);
         let mut need_image = true;
 
         let inner = self.inner.read().unwrap();
@@ -177,7 +177,7 @@ impl Layer for InMemoryLayer {
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {
-        panic!("can't delete an InMemoryLayer")
+        bail!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {

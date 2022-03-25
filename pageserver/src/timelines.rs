@@ -253,7 +253,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_output = Command::new(initdb_path)
-        .args(&["-D", initdbpath.to_str().unwrap()])
+        .args(&["-D", &initdbpath.to_string_lossy()])
         .args(&["-U", &conf.superuser])
         .args(&["-E", "utf8"])
         .arg("--no-instructions")
@@ -261,8 +261,8 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
         .stdout(Stdio::null())
         .output()
         .context("failed to execute initdb")?;
