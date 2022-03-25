@@ -146,11 +146,13 @@ jobs:
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
               cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+              CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
               cov_prefix=()
+              CARGO_FLAGS=--release
             fi
 
-            "${cov_prefix[@]}" cargo test
+            "${cov_prefix[@]}" cargo test $CARGO_FLAGS
 
         # Install the rust binaries, for use by test jobs
       - run:
