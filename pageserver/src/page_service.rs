@@ -67,25 +67,25 @@ enum PagestreamBeMessage {
 struct PagestreamExistsRequest {
     latest: bool,
     lsn: Lsn,
-    rel: RelTag,
     region: u32,
+    rel: RelTag,
 }
 
 #[derive(Debug)]
 struct PagestreamNblocksRequest {
     latest: bool,
     lsn: Lsn,
-    rel: RelTag,
     region: u32,
+    rel: RelTag,
 }
 
 #[derive(Debug)]
 struct PagestreamGetPageRequest {
     latest: bool,
     lsn: Lsn,
+    region: u32,
     rel: RelTag,
     blkno: u32,
-    region: u32,
 }
 
 #[derive(Debug)]
@@ -99,11 +99,11 @@ struct PagestreamDbSizeRequest {
 struct PagestreamGetSlruPageRequest {
     latest: bool,
     lsn: Lsn,
+    region: u32,
     kind: SlruKind,
     segno: u32,
     blkno: u32,
     check_exists_only: bool,
-    region: u32,
 }
 
 #[derive(Debug)]
@@ -150,28 +150,29 @@ impl PagestreamFeMessage {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
                 latest: body.get_u8() != 0,
                 lsn: Lsn::from(body.get_u64()),
+                region: body.get_u32(),
                 rel: RelTag {
                     spcnode: body.get_u32(),
                     dbnode: body.get_u32(),
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                 },
-                region: body.get_u32(),
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
                 latest: body.get_u8() != 0,
                 lsn: Lsn::from(body.get_u64()),
+                region: body.get_u32(),
                 rel: RelTag {
                     spcnode: body.get_u32(),
                     dbnode: body.get_u32(),
                     relnode: body.get_u32(),
                     forknum: body.get_u8(),
                 },
-                region: body.get_u32(),
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                 latest: body.get_u8() != 0,
                 lsn: Lsn::from(body.get_u64()),
+                region: body.get_u32(),
                 rel: RelTag {
                     spcnode: body.get_u32(),
                     dbnode: body.get_u32(),
@@ -179,7 +180,6 @@ impl PagestreamFeMessage {
                     forknum: body.get_u8(),
                 },
                 blkno: body.get_u32(),
-                region: body.get_u32(),
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
                 latest: body.get_u8() != 0,
@@ -190,11 +190,11 @@ impl PagestreamFeMessage {
                 PagestreamGetSlruPageRequest {
                     latest: body.get_u8() != 0,
                     lsn: Lsn::from(body.get_u64()),
+                    region: body.get_u32(),
                     kind: SlruKind::try_from(body.get_u8())?,
                     segno: body.get_u32(),
                     blkno: body.get_u32(),
                     check_exists_only: body.get_u8() != 0,
-                    region: body.get_u32(),
                 },
             )),
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
