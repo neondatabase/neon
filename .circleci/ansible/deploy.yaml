@@ -91,19 +91,20 @@
       tags:
       - pageserver
 
-    - name: update config
-      when: current_version > remote_version or force_deploy
-      lineinfile:
-        path: /storage/pageserver/data/pageserver.toml
-        line: "{{ item }}"
-      loop:
-        - "[remote_storage]"
-        - "bucket_name = '{{ bucket_name }}'"
-        - "bucket_region = '{{ bucket_region }}'"
-        - "prefix_in_bucket = '{{ inventory_hostname }}'"
-      become: true
-      tags:
-      - pageserver
+    # Temporary disabled until LSM storage rewrite lands
+    # - name: update config
+    #   when: current_version > remote_version or force_deploy
+    #   lineinfile:
+    #     path: /storage/pageserver/data/pageserver.toml
+    #     line: "{{ item }}"
+    #   loop:
+    #     - "[remote_storage]"
+    #     - "bucket_name = '{{ bucket_name }}'"
+    #     - "bucket_region = '{{ bucket_region }}'"
+    #     - "prefix_in_bucket = '{{ inventory_hostname }}'"
+    #   become: true
+    #   tags:
+    #   - pageserver
 
     - name: upload systemd service definition
       when: current_version > remote_version or force_deploy
