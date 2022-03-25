@@ -123,7 +123,10 @@ impl TimelineMetadata {
             "metadata checksum mismatch"
         );
         let body = TimelineMetadataBody::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
-        ensure!(body.disk_consistent_lsn.is_aligned(), "disk_consistent_lsn is not aligned");
+        ensure!(
+            body.disk_consistent_lsn.is_aligned(),
+            "disk_consistent_lsn is not aligned"
+        );
 
         Ok(TimelineMetadata { hdr, body })
     }
