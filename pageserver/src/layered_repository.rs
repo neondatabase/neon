@@ -805,6 +805,8 @@ struct GcInfo {
     ///
     /// This is calculated by subtracting 'gc_horizon' setting from
     /// last-record LSN
+    ///
+    /// FIXME: is this inclusive or exclusive?
     cutoff: Lsn,
 }
 
