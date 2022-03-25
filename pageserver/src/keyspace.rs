@@ -10,15 +10,15 @@ pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
 ///
 #[derive(Clone, Debug)]
 pub struct KeySpace {
-    // Contiguous ranges of keys that belong to the key space. In key order, and
-    // with no overlap.
+    /// Contiguous ranges of keys that belong to the key space. In key order,
+    /// and with no overlap.
     pub ranges: Vec<Range<Key>>,
 }
 
 impl KeySpace {
     ///
-    /// Partition a key space into roughly chunks of roughly 'target_size' bytes in
-    /// each patition.
+    /// Partition a key space into roughly chunks of roughly 'target_size' bytes
+    /// in each patition.
     ///
     pub fn partition(&self, target_size: u64) -> KeyPartitioning {
         // Assume that each value is 8k in size.

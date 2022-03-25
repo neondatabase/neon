@@ -788,8 +788,23 @@ pub struct LayeredTimeline {
     initdb_lsn: Lsn,
 }
 
+///
+/// Information about how much history needs to be retained, needed by
+/// Garbage Collection.
+///
 struct GcInfo {
+    /// Specific LSNs that are needed.
+    ///
+    /// Currently, this includes all points where child branches have
+    /// been forked off from. In the future, could also include
+    /// explicit user-defined snapshot points.
     retain_lsns: Vec<Lsn>,
+
+    /// In addition to 'retain_lsns', keep everything newer than this
+    /// point.
+    ///
+    /// This is calculated by subtracting 'gc_horizon' setting from
+    /// last-record LSN
     cutoff: Lsn,
 }
 
