@@ -7,10 +7,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tracing::*;
 use zenith_utils::{
     lsn::Lsn,
@@ -55,11 +57,14 @@ pub struct RemoteTimelineIndex {
     timeline_entries: HashMap<ZTenantTimelineId, TimelineIndexEntry>,
 }
 
-impl RemoteTimelineIndex {
+/// A wrapper to synchrnize access to the index, should be created and used before dealing with any [`RemoteTimelineIndex`].
+pub struct RemoteIndex(Arc<RwLock<RemoteTimelineIndex>>);
+
+impl RemoteIndex {
     pub fn empty() -> Self {
-        Self {
+        Self(Arc::new(RwLock::new(RemoteTimelineIndex {
             timeline_entries: HashMap::new(),
-        }
+        })))
     }
 
     /// Attempts to parse file paths (not checking the file contents) and find files
@@ -69,7 +74,9 @@ impl RemoteTimelineIndex {
         conf: &'static PageServerConf,
         paths: impl Iterator<Item = P>,
     ) -> Self {
-        let mut index = Self::empty();
+        let mut index = RemoteTimelineIndex {
+            timeline_entries: HashMap::new(),
+        };
         for path in paths {
             if let Err(e) = try_parse_index_entry(&mut index, conf, path.as_ref()) {
                 debug!(
@@ -79,9 +86,26 @@ impl RemoteTimelineIndex {
                 );
             }
         }
-        index
+
+        Self(Arc::new(RwLock::new(index)))
     }
 
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, RemoteTimelineIndex> {
+        self.0.read().await
+    }
+
+    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, RemoteTimelineIndex> {
+        self.0.write().await
+    }
+}
+
+impl Clone for RemoteIndex {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl RemoteTimelineIndex {
     pub fn timeline_entry(&self, id: &ZTenantTimelineId) -> Option<&TimelineIndexEntry> {
         self.timeline_entries.get(id)
     }

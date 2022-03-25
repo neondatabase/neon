@@ -15,13 +15,13 @@ use std::{
 use tracing::*;
 
 use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use zenith_utils::{crashsafe_dir, logging};
 
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::TimelineMetadata,
-    remote_storage::RemoteTimelineIndex,
+    remote_storage::RemoteIndex,
     repository::{LocalTimelineState, Repository},
 };
 use crate::{import_datadir, LOG_FILE_NAME};
@@ -127,22 +127,6 @@ pub struct TimelineInfo {
     pub remote: Option<RemoteTimelineInfo>,
 }
 
-pub fn extract_remote_timeline_info(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    remote_index: &RemoteTimelineIndex,
-) -> Option<RemoteTimelineInfo> {
-    remote_index
-        .timeline_entry(&ZTenantTimelineId {
-            tenant_id,
-            timeline_id,
-        })
-        .map(|remote_entry| RemoteTimelineInfo {
-            remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
-            awaits_download: remote_entry.get_awaits_download(),
-        })
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timeline_id: ZTimelineId,
@@ -179,7 +163,7 @@ pub fn init_pageserver(
 pub enum CreateRepo {
     Real {
         wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-        remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+        remote_index: RemoteIndex,
     },
     Dummy,
 }
@@ -207,8 +191,7 @@ pub fn create_repo(
             // anymore, but I think that could still happen.
             let wal_redo_manager = Arc::new(crate::walredo::DummyRedoManager {});
 
-            let remote_index = Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty()));
-            (wal_redo_manager as _, remote_index)
+            (wal_redo_manager as _, RemoteIndex::empty())
         }
     };
 
