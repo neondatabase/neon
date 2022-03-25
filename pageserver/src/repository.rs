@@ -144,12 +144,15 @@ impl Key {
     }
 }
 
-//
-// There are two kinds of values: incremental and non-incremental
-//
+/// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
+    /// An Image value contains a full copy of the value
     Image(Bytes),
+    /// A WalRecord value contains a WAL record that needs to be
+    /// replayed get the full value. Replaying the WAL record
+    /// might need a previous version of the value (if will_init()
+    /// returns false), or it may be replayed stand-alone (true).
     WalRecord(ZenithWalRecord),
 }
 
