@@ -21,18 +21,22 @@ def test_lsn_mapping(zenith_simple_env: ZenithEnv):
                 with ps_conn.cursor() as ps_cur:
                     # Create table, and insert the first 100 rows
                     cur.execute("CREATE TABLE foo (x integer)")
-                    cur.execute("INSERT INTO foo values (1)")
-                    cur.execute("SELECT txid_current()")
-                    xid = cur.fetchone()[0]
                     cur.execute("SELECT pg_current_wal_lsn()")
-                    lsn = int(cur.fetchone()[0][2:], 16)
+                    lsn_before = int(cur.fetchone()[0][2:], 16)
+                    cur.execute("INSERT INTO foo values (1)")
+                    cur.execute("SELECT pg_current_wal_lsn()")
+                    lsn_after = int(cur.fetchone()[0][2:], 16)
+                    cur.execute("SELECT xmin from foo")
+                    xid = cur.fetchone()[0]
                     time.sleep(1)
                     cur.execute("INSERT INTO foo values (2)")
 
                     ps_cur.execute(
                         f"get_lsn_by_xid {env.initial_tenant.hex} {new_timeline_id.hex} {xid}")
-                    assert ps_cur.fetchone() == (lsn, )
+                    lsn = ps_cur.fetchone()[0]
+                    assert lsn > lsn_before and lsn <= lsn_after
 
                     ps_cur.execute(
                         f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} 1sec")
-                    assert ps_cur.fetchone() == (lsn, )
+                    lsn = ps_cur.fetchone()[0]
+                    assert lsn > lsn_before and lsn <= lsn_after
