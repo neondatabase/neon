@@ -58,7 +58,7 @@ use std::io::{BufWriter, Write};
 use std::ops::Bound::Included;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 use bookfile::{Book, BookWriter, BoundedReader, ChapterWriter};
 
@@ -142,7 +142,7 @@ pub struct DeltaLayer {
 
     dropped: bool,
 
-    inner: Mutex<DeltaLayerInner>,
+    inner: RwLock<DeltaLayerInner>,
 }
 
 pub struct DeltaLayerInner {
@@ -316,7 +316,11 @@ impl Layer for DeltaLayer {
     /// it will need to be loaded back.
     ///
     fn unload(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = match self.inner.try_write() {
+            Ok(inner) => inner,
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Poisoned(_)) => panic!("DeltaLayer lock was poisoned"),
+        };
         inner.page_version_metas = VecMap::default();
         inner.seg_sizes = VecMap::default();
         inner.loaded = false;
@@ -406,16 +410,37 @@ impl DeltaLayer {
     }
 
     ///
-    /// Load the contents of the file into memory
+    /// Open the underlying file and read the metadata into memory, if it's
+    /// not loaded already.
     ///
-    fn load(&self) -> Result<MutexGuard<DeltaLayerInner>> {
-        // quick exit if already loaded
-        let mut inner = self.inner.lock().unwrap();
+    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
+        loop {
+            // Quick exit if already loaded
+            let inner = self.inner.read().unwrap();
+            if inner.loaded {
+                return Ok(inner);
+            }
 
-        if inner.loaded {
-            return Ok(inner);
+            // Need to open the file and load the metadata. Upgrade our lock to
+            // a write lock. (Or rather, release and re-lock in write mode.)
+            drop(inner);
+            let inner = self.inner.write().unwrap();
+            if !inner.loaded {
+                self.load_inner(inner)?;
+            } else {
+                // Another thread loaded it while we were not holding the lock.
+            }
+
+            // We now have the file open and loaded. There's no function to do
+            // that in the std library RwLock, so we have to release and re-lock
+            // in read mode. (To be precise, the lock guard was moved in the
+            // above call to `load_inner`, so it's already been released). And
+            // while we do that, another thread could unload again, so we have
+            // to re-check and retry if that happens.
         }
+    }
 
+    fn load_inner(&self, mut inner: RwLockWriteGuard<DeltaLayerInner>) -> Result<()> {
         let path = self.path();
 
         // Open the file if it's not open already.
@@ -462,7 +487,7 @@ impl DeltaLayer {
         inner.seg_sizes = seg_sizes;
         inner.loaded = true;
 
-        Ok(inner)
+        Ok(())
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -480,7 +505,7 @@ impl DeltaLayer {
             start_lsn: filename.start_lsn,
             end_lsn: filename.end_lsn,
             dropped: filename.dropped,
-            inner: Mutex::new(DeltaLayerInner {
+            inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
@@ -507,7 +532,7 @@ impl DeltaLayer {
             start_lsn: summary.start_lsn,
             end_lsn: summary.end_lsn,
             dropped: summary.dropped,
-            inner: Mutex::new(DeltaLayerInner {
+            inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
@@ -689,7 +714,7 @@ impl DeltaLayerWriter {
             start_lsn: self.start_lsn,
             end_lsn: self.end_lsn,
             dropped: self.dropped,
-            inner: Mutex::new(DeltaLayerInner {
+            inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 book: None,
                 page_version_metas: VecMap::default(),
