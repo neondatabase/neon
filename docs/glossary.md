@@ -43,6 +43,18 @@ Configuration parameter `checkpoint_distance` defines the distance
 from current LSN to perform checkpoint of in-memory layers.
 Default is `DEFAULT_CHECKPOINT_DISTANCE`.
 
+### Compaction
+
+A background operation on layer files. Compaction takes a number of L0
+layer files, each of which covers the whole key space and a range of
+LSN, and reshuffles the data in them into L1 files so that each file
+covers the whole LSN range, but only part of the key space.
+
+Compaction should also opportunistically leave obsolete page versions
+from the L1 files, and materialize other page versions for faster
+access. That hasn't been implemented as of this writing, though.
+
+
 ### Compute node
 
 Stateless Postgres node that stores data in pageserver.
