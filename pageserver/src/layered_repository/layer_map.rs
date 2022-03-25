@@ -61,12 +61,24 @@ pub struct LayerMap {
     historic_layers: Vec<Arc<dyn Layer>>,
 }
 
+/// Return value of LayerMap::search
 pub struct SearchResult {
     pub layer: Arc<dyn Layer>,
     pub lsn_floor: Lsn,
 }
 
 impl LayerMap {
+    ///
+    /// Find the latest layer that covers the given 'key', with lsn <
+    /// 'end_lsn'.
+    ///
+    /// Returns the layer, if any, and an 'lsn_floor' value that
+    /// indicates which portion of the layer the caller should
+    /// check. 'lsn_floor' is normally the start-LSN of the layer, but
+    /// can be greater if there is an overlapping layer that might
+    /// contain the version, even if it's missing from the returned
+    /// layer.
+    ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // linear search
         // Find the latest image layer that covers the given key
@@ -258,8 +270,9 @@ impl LayerMap {
         self.historic_layers.iter()
     }
 
+    /// Find the last image layer that covers 'key', ignoring any image layers
+    /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        // Find the last image layer that covers the key
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         for l in self.historic_layers.iter() {
@@ -334,6 +347,8 @@ impl LayerMap {
         Ok(ranges)
     }
 
+    /// Count how many L1 delta layers there are that overlap with the
+    /// given key and LSN range.
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
         let mut result = 0;
         for l in self.historic_layers.iter() {
@@ -360,6 +375,7 @@ impl LayerMap {
         Ok(result)
     }
 
+    /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
         let mut deltas = Vec::new();
         for l in self.historic_layers.iter() {
