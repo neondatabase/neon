@@ -123,7 +123,8 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 
-    /// Find latest LSN of wal record matching specified criteria
+    /// Find LSN of latest commit record matching specified criteria.
+    /// `lsn` parameter specified upper LSN boundary.
     fn find_record_lsn(
         &self,
         key: Key,

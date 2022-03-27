@@ -198,6 +198,7 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(exists)
     }
 
+    /// Locater latest commit record which timestamp greate or equal than specified or xid is equal to specified.
     pub fn lookup_lsn(
         &self,
         timestamp_opt: Option<TimestampTz>,
@@ -209,6 +210,7 @@ impl<R: Repository> DatadirTimeline<R> {
             .into_iter()
             .collect();
         segments.sort_unstable();
+        let mut latest_match: Option<(ZTimelineId, Lsn)> = None;
         for &segno in segments.iter().rev() {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, lsn)?;
             for blknum in (0..nblocks).rev() {
@@ -230,11 +232,17 @@ impl<R: Repository> DatadirTimeline<R> {
                         false
                     })?
                 {
-                    return Ok(Some((timeline_id, rec_lsn)));
+                    if let Some(pair) = latest_match {
+                        if pair.1 > rec_lsn {
+                            latest_match = Some((timeline_id, rec_lsn));
+                        }
+                    } else {
+                        latest_match = Some((timeline_id, rec_lsn));
+                    }
                 }
             }
         }
-        Ok(None)
+        Ok(latest_match)
     }
 
     /// Get a list of SLRU segments
