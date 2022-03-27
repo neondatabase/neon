@@ -618,7 +618,6 @@ class ZenithEnv:
         ps_connstr = self.pageserver.connstr()
         psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
         tenant_hex = self.initial_tenant.hex
-        print("AAAAAAAA", ps_connstr)
         args = [psbench_binpath, ps_log_filename, ps_connstr, tenant_hex, timeline]
         subprocess.run(args)
 

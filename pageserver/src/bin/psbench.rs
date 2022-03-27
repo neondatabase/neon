@@ -13,6 +13,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+const BYTES_IN_PAGE: usize = 8 * 1024;
+
 pub fn read_lines_buffered(file_name: &str) -> impl Iterator<Item = String> {
     BufReader::new(File::open(file_name).unwrap())
         .lines()
@@ -55,7 +57,7 @@ pub async fn get_page(
             102 => {
                 let mut page = Vec::<u8>::new();
                 cursor.read_to_end(&mut page).await?;
-                if page.len() != 8 * 1024 {
+                if page.len() != BYTES_IN_PAGE {
                     panic!("Expected 8kb page, got: {:?}", page.len());
                 }
                 page
@@ -174,7 +176,8 @@ async fn main() -> Result<()> {
         .iter().map(|(k, v)| (v, k)).collect();
     updates_per_page.sort();
     updates_per_page.reverse();
-    dbg!(&updates_per_page);
+    // dbg!(&updates_per_page);
+    dbg!(updates_per_page[0]);
 
     let hottest_page = updates_per_page[0].1;
     let first_update = lsn_page_pairs
@@ -208,35 +211,50 @@ async fn main() -> Result<()> {
     // TODO concurrent requests: multiple reads, also writes.
 
     // Do some warmup
-    let _page = get_page(&mut socket, &first_update, &hottest_page).await?;
+    let mut prev_page = get_page(&mut socket, &first_update, &hottest_page).await?;
 
-    let mut results: Vec<(Lsn, Duration)> = vec![];
+    let mut results: Vec<(Lsn, (Duration, usize))> = vec![];
     for (i, (lsn, _pages)) in writes_per_entry.iter().enumerate() {
         if lsn >= first_update {
 
             // Just to speed up things
-            if i % 1000 != 0 {
-                continue
-            }
+            // if i % 1000 != 0 {
+            //     continue
+            // }
 
             // println!("Running get_page {:?} at {:?}", hottest_page, lsn);
             let start = Instant::now();
-            let _page = get_page(&mut socket, &lsn, &hottest_page).await?;
+            let page = get_page(&mut socket, &lsn, &hottest_page).await?;
             let duration = start.elapsed();
-            results.push((lsn.clone(), duration));
+
+            // TODO why is most modified page constant? Is this test correct?
+            let modified_bits = {
+                let mut modified_bits = 0;
+                for byte_idx in 0..BYTES_IN_PAGE {
+                    let xor = page[byte_idx] ^ prev_page[byte_idx];
+                    modified_bits = xor.count_ones() as usize;
+                }
+                modified_bits
+            };
+            prev_page = page;
+
+            results.push((lsn.clone(), (duration, modified_bits)));
             // println!("Time: {:?}", duration);
         }
     }
     results.sort();
     let x: Vec<_> = results.iter().map(|(lsn, _)| lsn.0).collect();
-    let y: Vec<_> = results.iter().map(|(_, duration)| duration.as_micros()).collect();
+    let y: Vec<_> = results.iter().map(|(_, (duration, _))| duration.as_micros()).collect();
+    let z: Vec<_> = results.iter().map(|(_, (_, modified))| modified.clone()).collect();
 
     use plotly::{Plot, Scatter};
     use plotly::common::Mode;
-    let get_page_trace = Scatter::new(x, y).name("get_page").mode(Mode::Lines);
+    let get_page_trace = Scatter::new(x.clone(), y).name("get_page").mode(Mode::Lines);
+    let modified_bits_trace = Scatter::new(x, z).name("modified_bits").mode(Mode::Lines);
 
     let mut plot = Plot::new();
-    plot.add_trace(get_page_trace);
+    // plot.add_trace(get_page_trace);
+    plot.add_trace(modified_bits_trace);
     plot.show();
 
     Ok(())
