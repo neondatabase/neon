@@ -7,11 +7,11 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
-use crate::relish::*;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -69,23 +69,25 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(())
     }
 
-    /// Start updating a WAL record
+    /// Start ingesting a WAL record, or other atomic modification of
+    /// the timeline.
     ///
     /// This provides a transaction-like interface to perform a bunch
-    /// of modifications atomically, with one LSN.
+    /// of modifications atomically, all stamped with one LSN.
     ///
-    /// To ingest a WAL record, call begin_record(lsn) to get a writer
-    /// object. Use the functions in the writer-object to modify the
-    /// repository state, updating all the pages and metadata that the
-    /// WAL record affects. When you're done, call writer.finish() to
+    /// To ingest a WAL record, call begin_modification(lsn) to get a
+    /// DatadirModification object. Use the functions in the object to
+    /// modify the repository state, updating all the pages and metadata
+    /// that the WAL record affects. When you're done, call commit() to
     /// commit the changes.
     ///
-    /// Note that any pending modifications you make through the writer
-    /// won't be visible to calls to the get functions until you finish!
-    /// If you update the same page twice, the last update wins.
+    /// Note that any pending modifications you make through the
+    /// modification object won't be visible to calls to the 'get' and list
+    /// functions of the timeline until you finish! And if you update the
+    /// same page twice, the last update wins.
     ///
-    pub fn begin_record(&self, lsn: Lsn) -> DatadirTimelineWriter<R> {
-        DatadirTimelineWriter {
+    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification<R> {
+        DatadirModification {
             tline: self,
             lsn,
             pending_updates: HashMap::new(),
@@ -100,6 +102,8 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Look up given page version.
     pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         let nblocks = self.get_rel_size(tag, lsn)?;
         if blknum >= nblocks {
             debug!(
@@ -115,6 +119,8 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Get size of a relation file
     pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
@@ -133,6 +139,8 @@ impl<R: Repository> DatadirTimeline<R> {
 
     /// Does relation exist?
     pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
+        ensure!(tag.relnode != 0, "invalid relnode");
+
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.tline.get(key, lsn)?;
@@ -382,12 +390,15 @@ impl<R: Repository> DatadirTimeline<R> {
     }
 }
 
-/// DatadirTimelineWriter represents an operation to ingest an atomic set of
+/// DatadirModification represents an operation to ingest an atomic set of
 /// updates to the repository. It is created by the 'begin_record'
 /// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic
-pub struct DatadirTimelineWriter<'a, R: Repository> {
-    tline: &'a DatadirTimeline<R>,
+/// by a one WAL record appear atomic.
+pub struct DatadirModification<'a, R: Repository> {
+    /// The timeline this modification applies to. You can access this to
+    /// read the state, but note that any pending updates are *not* reflected
+    /// in the state in 'tline' yet.
+    pub tline: &'a DatadirTimeline<R>,
 
     lsn: Lsn,
 
@@ -399,19 +410,7 @@ pub struct DatadirTimelineWriter<'a, R: Repository> {
     pending_nblocks: isize,
 }
 
-// TODO Currently, Deref is used to allow easy access to read methods from this trait.
-// This is probably considered a bad practice in Rust and should be fixed eventually,
-// but will cause large code changes.
-impl<'a, R: Repository> std::ops::Deref for DatadirTimelineWriter<'a, R> {
-    type Target = DatadirTimeline<R>;
-
-    fn deref(&self) -> &Self::Target {
-        self.tline
-    }
-}
-
-/// Various functions to mutate the repository state.
-impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
+impl<'a, R: Repository> DatadirModification<'a, R> {
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -450,6 +449,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         rec: ZenithWalRecord,
     ) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -476,6 +476,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -491,6 +492,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
+    /// Store a relmapper file (pg_filenode.map) in the repository
     pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> Result<()> {
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY)?;
@@ -566,22 +568,11 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    // When a new relation is created:
-    // - create/update the directory entry to remember that it exists
-    // - create relish header to indicate the size (0)
-
-    // When a relation is extended:
-    // - update relish header with new size
-    // - insert the block
-
-    // when a relation is truncated:
-    // - delete truncated blocks
-    // - update relish header with size
-
     /// Create a relation fork.
     ///
     /// 'nblocks' is the initial size.
     pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY)?)?;
@@ -623,6 +614,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Truncate relation
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
         let size_key = rel_size_to_key(rel);
 
         // Fetch the old size first
@@ -639,6 +631,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Extend relation
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
+
         // Put size
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
@@ -652,6 +646,8 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
 
     /// Drop a relation.
     pub fn put_rel_drop(&mut self, rel: RelTag) -> Result<()> {
+        ensure!(rel.relnode != 0, "invalid relnode");
+
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let buf = self.get(dir_key)?;
@@ -738,7 +734,7 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    /// This method is used for marking dropped relations and truncated SLRU files and aborted two phase records
+    /// Drop a relmapper file (pg_filenode.map)
     pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> Result<()> {
         // TODO
         Ok(())
@@ -764,10 +760,14 @@ impl<'a, R: Repository> DatadirTimelineWriter<'a, R> {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<()> {
+    ///
+    /// Finish this atomic update, writing all the updated keys to the
+    /// underlying timeline.
+    ///
+    pub fn commit(self) -> Result<()> {
         let writer = self.tline.tline.writer();
 
-        let last_partitioning = self.last_partitioning.load();
+        let last_partitioning = self.tline.last_partitioning.load();
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
@@ -915,7 +915,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usiz
 // 00 SPCNODE  DBNODE   00000000 00   00000000
 //
 // RelDir:
-// 00 SPCNODE  DBNODE   00000000 00   00000001
+// 00 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
 //
 // RelBlock:
 // 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
@@ -1214,10 +1214,9 @@ pub fn create_test_timeline<R: Repository>(
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let tline = DatadirTimeline::new(tline, crate::layered_repository::tests::TEST_FILE_SIZE / 10);
-    let mut writer = tline.begin_record(Lsn(8));
-    writer.init_empty()?;
-
-    writer.finish()?;
+    let mut m = tline.begin_modification(Lsn(8));
+    m.init_empty()?;
+    m.commit()?;
     Ok(Arc::new(tline))
 }
 

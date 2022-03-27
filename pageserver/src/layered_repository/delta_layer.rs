@@ -44,7 +44,7 @@ use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::DELTA_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -56,7 +56,7 @@ use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
@@ -197,10 +197,10 @@ impl Layer for DeltaLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
+    ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
 
-        assert!(self.key_range.contains(&key));
+        ensure!(self.key_range.contains(&key));
 
         // Open the file and lock the metadata in memory
         let inner = self.load()?;
@@ -258,7 +258,7 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + '_> {
         let inner = self.load().unwrap();
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
@@ -369,61 +369,77 @@ impl DeltaLayer {
     }
 
     ///
-    /// Load the contents of the file into memory
+    /// Open the underlying file and read the metadata into memory, if it's
+    /// not loaded already.
     ///
     fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
         loop {
-            // quick exit if already loaded
-            {
-                let inner = self.inner.read().unwrap();
-
-                if inner.loaded {
-                    return Ok(inner);
-                }
-            }
-            // need to upgrade to write lock
-            let mut inner = self.inner.write().unwrap();
-
-            let path = self.path();
-
-            // Open the file
-            let mut file = VirtualFile::open(&path)
-                .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-
-            let actual_summary = Summary::des_from(&mut file)?;
-
-            match &self.path_or_conf {
-                PathOrConf::Conf(_) => {
-                    let mut expected_summary = Summary::from(self);
-                    expected_summary.index_start_blk = actual_summary.index_start_blk;
-                    expected_summary.index_root_blk = actual_summary.index_root_blk;
-
-                    if actual_summary != expected_summary {
-                        bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                    }
-                }
-                PathOrConf::Path(path) => {
-                    let actual_filename = Path::new(path.file_name().unwrap());
-                    let expected_filename = self.filename();
-
-                    if actual_filename != expected_filename {
-                        println!(
-                            "warning: filename does not match what is expected from in-file summary"
-                        );
-                        println!("actual: {:?}", actual_filename);
-                        println!("expected: {:?}", expected_filename);
-                    }
-                }
+            // Quick exit if already loaded
+            let inner = self.inner.read().unwrap();
+            if inner.loaded {
+                return Ok(inner);
             }
 
-            inner.index_start_blk = actual_summary.index_start_blk;
-            inner.index_root_blk = actual_summary.index_root_blk;
-            inner.reader = Some(BlockyReader::new(file));
+            // Need to open the file and load the metadata. Upgrade our lock to
+            // a write lock. (Or rather, release and re-lock in write mode.)
+            drop(inner);
+            let inner = self.inner.write().unwrap();
+            if !inner.loaded {
+                self.load_inner(inner)?;
+            } else {
+                // Another thread loaded it while we were not holding the lock.
+            }
 
-            debug!("loaded from {}", &path.display());
-
-            inner.loaded = true;
+            // We now have the file open and loaded. There's no function to do
+            // that in the std library RwLock, so we have to release and re-lock
+            // in read mode. (To be precise, the lock guard was moved in the
+            // above call to `load_inner`, so it's already been released). And
+            // while we do that, another thread could unload again, so we have
+            // to re-check and retry if that happens.
         }
+    }
+
+    fn load_inner(&self, mut inner: RwLockWriteGuard<DeltaLayerInner>) -> Result<()> {
+        let path = self.path();
+
+        // Open the file
+        let mut file = VirtualFile::open(&path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+
+        let actual_summary = Summary::des_from(&mut file)?;
+
+        match &self.path_or_conf {
+            PathOrConf::Conf(_) => {
+                let mut expected_summary = Summary::from(self);
+                expected_summary.index_start_blk = actual_summary.index_start_blk;
+                expected_summary.index_root_blk = actual_summary.index_root_blk;
+
+                if actual_summary != expected_summary {
+                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
+                }
+            }
+            PathOrConf::Path(path) => {
+                let actual_filename = Path::new(path.file_name().unwrap());
+                let expected_filename = self.filename();
+
+                if actual_filename != expected_filename {
+                    println!(
+                        "warning: filename does not match what is expected from in-file summary"
+                    );
+                    println!("actual: {:?}", actual_filename);
+                    println!("expected: {:?}", expected_filename);
+                }
+            }
+        }
+
+        inner.index_start_blk = actual_summary.index_start_blk;
+        inner.index_root_blk = actual_summary.index_root_blk;
+        inner.reader = Some(BlockyReader::new(file));
+
+        debug!("loaded from {}", &path.display());
+
+        inner.loaded = true;
+        Ok(())
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -528,18 +544,18 @@ impl DeltaLayerWriter {
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> Result<DeltaLayerWriter> {
-        // Create the file
+        // Create the file initially with a temporary filename. We don't know
+        // the end key yet, so we cannot form the final filename yet. We will
+        // rename it when we're done.
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-
         let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
             "{}-XXX__{:016X}-{:016X}.temp",
             key_start,
             u64::from(lsn_range.start),
             u64::from(lsn_range.end)
         ));
-        info!("temp deltalayer path {}", path.display());
         let file = VirtualFile::create(&path)?;
         let mut bufwriter = BufWriter::new(file);
 
@@ -596,9 +612,7 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    /// 'seg_sizes' is a list of size changes to store with the actual data.
-    ///
-    pub fn finish(self, key_end: Key) -> Result<DeltaLayer> {
+    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         // Pad the last page.
         let mut end_offset = self.blob_writer.offset;
 

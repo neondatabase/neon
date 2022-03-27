@@ -341,10 +341,10 @@ pub struct RemoteStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
-    /// Specify a root folder to place all stored relish data into.
+    /// Specify a root folder to place all stored files into.
     LocalFs(PathBuf),
-    /// AWS S3 based storage, storing all relishes into the root
-    /// of the S3 bucket from the config.
+    /// AWS S3 based storage, storing all files in the S3 bucket
+    /// specified by the config
     AwsS3(S3Config),
 }
 

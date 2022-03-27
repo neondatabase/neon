@@ -11,7 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -122,7 +122,7 @@ pub struct LayeredRepository {
     remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
 
     /// Makes every timeline to backup their files to remote storage.
-    upload_relishes: bool,
+    upload_layers: bool,
 }
 
 /// Public interface
@@ -180,7 +180,7 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline.layers.lock().unwrap().next_open_layer_at = Some(initdb_lsn);
 
@@ -518,7 +518,7 @@ impl LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline
             .load_layer_map(disk_consistent_lsn)
@@ -532,7 +532,7 @@ impl LayeredRepository {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
         remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
-        upload_relishes: bool,
+        upload_layers: bool,
     ) -> LayeredRepository {
         LayeredRepository {
             tenantid,
@@ -541,7 +541,7 @@ impl LayeredRepository {
             gc_cs: Mutex::new(()),
             walredo_mgr,
             remote_index,
-            upload_relishes,
+            upload_layers,
         }
     }
 
@@ -755,7 +755,7 @@ pub struct LayeredTimeline {
     create_images_time_histo: Histogram,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
-    upload_relishes: AtomicBool,
+    upload_layers: AtomicBool,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
@@ -791,8 +791,25 @@ pub struct LayeredTimeline {
     initdb_lsn: Lsn,
 }
 
+///
+/// Information about how much history needs to be retained, needed by
+/// Garbage Collection.
+///
 struct GcInfo {
+    /// Specific LSNs that are needed.
+    ///
+    /// Currently, this includes all points where child branches have
+    /// been forked off from. In the future, could also include
+    /// explicit user-defined snapshot points.
     retain_lsns: Vec<Lsn>,
+
+    /// In addition to 'retain_lsns', keep everything newer than this
+    /// point.
+    ///
+    /// This is calculated by subtracting 'gc_horizon' setting from
+    /// last-record LSN
+    ///
+    /// FIXME: is this inclusive or exclusive?
     cutoff: Lsn,
 }
 
@@ -809,10 +826,10 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
+    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
-        assert!(
+        ensure!(
             !IS_WAL_RECEIVER.with(|c| c.get()),
             "wait_lsn called by WAL receiver thread"
         );
@@ -867,7 +884,7 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
                 self.freeze_inmem_layer(false);
@@ -942,7 +959,7 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        upload_relishes: bool,
+        upload_layers: bool,
     ) -> LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
@@ -994,7 +1011,7 @@ impl LayeredTimeline {
             compact_time_histo,
             create_images_time_histo,
 
-            upload_relishes: AtomicBool::new(upload_relishes),
+            upload_layers: AtomicBool::new(upload_layers),
 
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
@@ -1026,9 +1043,9 @@ impl LayeredTimeline {
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
             let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
+            let fname = fname.to_string_lossy();
 
-            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+            if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
                     warn!(
@@ -1046,7 +1063,7 @@ impl LayeredTimeline {
                 trace!("found layer {}", layer.filename().display());
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -1071,7 +1088,7 @@ impl LayeredTimeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if is_ephemeral_file(fname) {
+            } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
                 fs::remove_file(direntry.path())?;
@@ -1103,7 +1120,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1251,13 +1268,13 @@ impl LayeredTimeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
-        assert!(lsn.is_aligned());
+        ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        assert!(
+        ensure!(
             lsn > last_record_lsn,
             "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
@@ -1339,6 +1356,10 @@ impl LayeredTimeline {
         drop(layers);
     }
 
+    ///
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated
+    /// in the in-memory layer, and initiate flushing it if so.
+    ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
 
@@ -1355,6 +1376,7 @@ impl LayeredTimeline {
                 Some(self.tenantid),
                 Some(self.timelineid),
                 "layer flush thread",
+                false,
                 move || self_clone.flush_frozen_layers(false),
             )?;
         }
@@ -1495,7 +1517,7 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
-            if self.upload_relishes.load(atomic::Ordering::Relaxed) {
+            if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,
@@ -1879,6 +1901,8 @@ impl LayeredTimeline {
             // OK for a delta layer to have end LSN 101, but if the end LSN
             // is 102, then it might not have been fully flushed to disk
             // before crash.
+            //
+            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
             if !layers.newer_image_layer_exists(
                 &l.get_key_range(),
                 l.get_lsn_range().end,
@@ -2038,7 +2062,10 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
-    let filename = path.file_name().unwrap().to_str().unwrap();
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
+        .to_string_lossy();
     let mut new_path = path.clone();
 
     for i in 0u32.. {

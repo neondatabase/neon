@@ -780,15 +780,17 @@ impl PageCache {
             CacheKey::Materialized {
                 hash_key: _,
                 lsn: _,
-            } => {
-                panic!("unexpected dirty materialized page");
-            }
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty materialized page",
+            )),
             CacheKey::Blocky {
                 file_id: _,
                 blkno: _,
-            } => {
-                panic!("unexpected dirty blocky reader page");
-            }
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty blocky reader",
+            )),
             CacheKey::Ephemeral { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }

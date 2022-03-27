@@ -15,7 +15,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use log::*;
 use std::collections::HashMap;
 // avoid binding to Write (conflicts with std::io::Write)
@@ -112,8 +112,8 @@ impl Layer for InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        assert!(lsn_range.start <= self.start_lsn);
+    ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start <= self.start_lsn);
         let mut need_image = true;
 
         let inner = self.inner.read().unwrap();
@@ -167,7 +167,7 @@ impl Layer for InMemoryLayer {
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {
-        panic!("can't delete an InMemoryLayer")
+        bail!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {
@@ -303,12 +303,7 @@ impl InMemoryLayer {
 
     /// Write this frozen in-memory layer to disk.
     ///
-    /// Returns new layers that replace this one.
-    /// If not dropped and reconstruct_pages is true, returns a new image layer containing the page versions
-    /// at the `end_lsn`. Can also return a DeltaLayer that includes all the
-    /// WAL records between start and end LSN. (The delta layer is not needed
-    /// when a new relish is created with a single LSN, so that the start and
-    /// end LSN are the same.)
+    /// Returns a new delta layer with all the same data as this in-memory layer
     pub fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the

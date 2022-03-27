@@ -84,7 +84,7 @@ pub enum ValueReconstructResult {
 pub trait Layer: Send + Sync {
     fn get_tenant_id(&self) -> ZTenantId;
 
-    /// Identify the timeline this relish belongs to
+    /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 
     /// Range of segments that this layer covers

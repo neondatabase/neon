@@ -1,40 +1,42 @@
 # Overview
 
-The on-disk format is based on immutable files. The page server receives a
-stream of incoming WAL, parses the WAL records to determine which pages they
-apply to, and accumulates the incoming changes in memory. Every now and then,
-the accumulated changes are written out to new immutable files. This process is
-called checkpointing. Old versions of on-disk files that are not needed by any
-timeline are removed by GC process.
-
 The main responsibility of the Page Server is to process the incoming WAL, and
 reprocess it into a format that allows reasonably quick access to any page
-version.
+version. The page server slices the incoming WAL per relation and page, and
+packages the sliced WAL into suitably-sized "layer files". The layer files
+contain all the history of the database, back to some reasonable retention
+period. This system replaces the base backups and the WAL archive used in a
+traditional PostgreSQL installation. The layer files are immutable, they are not
+modified in-place after creation. New layer files are created for new incoming
+WAL, and old layer files are removed when they are no longer needed.
+
+The on-disk format is based on immutable files. The page server receives a
+stream of incoming WAL, parses the WAL records to determine which pages they
+apply to, and accumulates the incoming changes in memory. Whenever enough WAL
+has been accumulated in memory, it is written out to a new immutable file. That
+process accumulates "L0 delta files" on disk. When enough L0 files have been
+accumulated, they are merged and re-partitioned into L1 files, and old files
+that are no longer needed are removed by Garbage Collection (GC).
 
 The incoming WAL contains updates to arbitrary pages in the system. The
 distribution depends on the workload: the updates could be totally random, or
 there could be a long stream of updates to a single relation when data is bulk
-loaded, for example, or something in between. The page server slices the
-incoming WAL per relation and page, and packages the sliced WAL into
-suitably-sized "layer files". The layer files contain all the history of the
-database, back to some reasonable retention period. This system replaces the
-base backups and the WAL archive used in a traditional PostgreSQL
-installation. The layer files are immutable, they are not modified in-place
-after creation. New layer files are created for new incoming WAL, and old layer
-files are removed when they are no longer needed. We could also replace layer
-files with new files that contain the same information, merging small files for
-example, but that hasn't been implemented yet.
+loaded, for example, or something in between.
 
+Cloud Storage                   Page Server                           Safekeeper
+                        L1               L0             Memory            WAL
 
-Cloud Storage                   Page Server                   Safekeeper
-                     Local disk                Memory            WAL
-
-|AAAA|               |AAAA|AAAA|               |AA
-|BBBB|               |BBBB|BBBB|               |
-|CCCC|CCCC|  <----   |CCCC|CCCC|CCCC|   <---   |CC     <----   ADEBAABED
-|DDDD|DDDD|          |DDDD|DDDD|               |DDD
-|EEEE|               |EEEE|EEEE|EEEE|          |E
-
++----+               +----+----+
+|AAAA|               |AAAA|AAAA|      +---+-----+         |
++----+               +----+----+      |   |     |         |AA
+|BBBB|               |BBBB|BBBB|      |BB | AA  |         |BB
++----+----+          +----+----+      |C  | BB  |         |CC
+|CCCC|CCCC|  <----   |CCCC|CCCC| <--- |D  | CC  |  <---   |DDD     <----   ADEBAABED
++----+----+          +----+----+      |   | DDD |         |E
+|DDDD|DDDD|          |DDDD|DDDD|      |E  |     |         |
++----+----+          +----+----+      |   |     |
+|EEEE|               |EEEE|EEEE|      +---+-----+
++----+               +----+----+
 
 In this illustration, WAL is received as a stream from the Safekeeper, from the
 right.  It is immediately captured by the page server and stored quickly in
@@ -42,39 +44,29 @@ memory. The page server memory can be thought of as a quick "reorder buffer",
 used to hold the incoming WAL and reorder it so that we keep the WAL records for
 the same page and relation close to each other.
 
-From the page server memory, whenever enough WAL has been accumulated for one
-relation segment, it is moved to local disk, as a new layer file, and the memory
-is released.
+From the page server memory, whenever enough WAL has been accumulated, it is flushed
+to disk into a new L0 layer file, and the memory is released.
+
+When enough L0 files have been accumulated, they are merged together rand sliced
+per key-space, producing a new set of files where each file contains a more
+narrow key range, but larger LSN range.
 
 From the local disk, the layers are further copied to Cloud Storage, for
 long-term archival. After a layer has been copied to Cloud Storage, it can be
 removed from local disk, although we currently keep everything locally for fast
 access. If a layer is needed that isn't found locally, it is fetched from Cloud
-Storage and stored in local disk.
-
-# Terms used in layered repository
-
-- Relish - one PostgreSQL relation or similarly treated file.
-- Segment - one slice of a Relish that is stored in a LayeredTimeline.
-- Layer -  specific version of a relish Segment in a range of LSNs.
+Storage and stored in local disk. L0 and L1 files are both uploaded to Cloud
+Storage.
 
 # Layer map
 
-The LayerMap tracks what layers exist for all the relishes in a timeline.
+The LayerMap tracks what layers exist in a timeline.
 
-LayerMap consists of two data structures:
-- segs - All the layers keyed by segment tag
-- open_layers - data structure that hold all open layers ordered by oldest_pending_lsn for quick access during checkpointing. oldest_pending_lsn is the LSN of the oldest page version stored in this layer.
-
-All operations that update InMemory Layers should update both structures to keep them up-to-date.
-
-- LayeredTimeline - implements Timeline interface.
-
-All methods of LayeredTimeline are aware of its ancestors and return data taking them into account.
-TODO: Are there any exceptions to this?
-For example, timeline.list_rels(lsn) will return all segments that are visible in this timeline at the LSN,
-including ones that were not modified in this timeline and thus don't have a layer in the timeline's LayerMap.
-
+Currently, the layer map is just a resizeable array (Vec). On a GetPage@LSN or
+other read request, the layer map scans through the array to find the right layer
+that contains the data for the requested page. The read-code in LayeredTimeline
+is aware of the ancestor, and returns data from the ancestor timeline if it's
+not found on the current timeline.
 
 # Different kinds of layers
 
@@ -92,11 +84,11 @@ To avoid OOM errors, InMemory layers can be spilled to disk into ephemeral file.
 TODO: Clarify the difference between Closed, Historic and Frozen.
 
 There are two kinds of OnDisk layers:
-- ImageLayer represents an image or a snapshot of a 10 MB relish segment, at one particular LSN.
-- DeltaLayer represents a collection of WAL records or page images in a range of LSNs, for one
-  relish segment.
-
-Dropped segments are always represented on disk by DeltaLayer.
+- ImageLayer represents a snapshot of all the keys in a particular range, at one
+  particular LSN. Any keys that are not present in the ImageLayer are known not
+  to exist at that LSN.
+- DeltaLayer represents a collection of WAL records or page images in a range of
+  LSNs, for a range of keys.
 
 # Layer life cycle
 
@@ -109,70 +101,70 @@ layer or a delta layer, it is a valid end bound. An image layer represents
 snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
 
 Every layer starts its life as an Open In-Memory layer. When the page server
-receives the first WAL record for a segment, it creates a new In-Memory layer
-for it, and puts it to the layer map. Later, the layer is old enough, its
-contents are written to disk, as On-Disk layers. This process is called
-"evicting" a layer.
+receives the first WAL record for a timeline, it creates a new In-Memory layer
+for it, and puts it to the layer map. Later, when the layer becomes full, its
+contents are written to disk, as an on-disk layers.
 
-Layer eviction is a two-step process: First, the layer is marked as closed, so
-that it no longer accepts new WAL records, and the layer map is updated
-accordingly. If a new WAL record for that segment arrives after this step, a new
-Open layer is created to hold it. After this first step, the layer is a Closed
+Flushing a layer is a two-step process: First, the layer is marked as closed, so
+that it no longer accepts new WAL records, and a new in-memory layer is created
+to hold any WAL after that point. After this first step, the layer is a Closed
 InMemory state. This first step is called "freezing" the layer.
 
-In the second step, new Delta and Image layers are created, containing all the
-data in the Frozen InMemory layer. When the new layers are ready, the original
-frozen layer is replaced with the new layers in the layer map, and the original
-frozen layer is dropped, releasing the memory.
+In the second step, a new Delta layers is created, containing all the data from
+the Frozen InMemory layer. When it has been created and flushed to disk, the
+original frozen layer is replaced with the new layers in the layer map, and the
+original frozen layer is dropped, releasing the memory.
 
 # Layer files (On-disk layers)
 
-The files are called "layer files". Each layer file corresponds
-to one RELISH_SEG_SIZE slice of a PostgreSQL relation fork or
-non-rel file in a range of LSNs. The layer files
-for each timeline are stored in the timeline's subdirectory under
+The files are called "layer files". Each layer file covers a range of keys, and
+a range of LSNs (or a single LSN, in case of image layers). You can think of it
+as a rectangle in the two-dimensional key-LSN space. The layer files for each
+timeline are stored in the timeline's subdirectory under
 .zenith/tenants/<tenantid>/timelines.
 
-There are two kind of layer file: base images, and deltas. A base
-image file contains a layer of a segment as it was at one LSN,
-whereas a delta file contains modifications to a segment - mostly in
-the form of WAL records - in a range of LSN
+There are two kind of layer files: images, and delta layers. An image file
+contains a snapshot of all keys at a particular LSN, whereas a delta file
+contains modifications to a segment - mostly in the form of WAL records - in a
+range of LSN.
 
-base image file:
+image file:
 
-    rel_<spcnode>_<dbnode>_<relnode>_<forknum>_<segno>_<start LSN>
+    000000067F000032BE0000400000000070B6-000000067F000032BE0000400000000080B6__00000000346BC568
+              start key                          end key                           LSN
+
+The first parts define the key range that the layer covers. See
+pgdatadir_mapping.rs for how the key space is used. The last part is the LSN.
 
 delta file:
 
-    rel_<spcnode>_<dbnode>_<relnode>_<forknum>_<segno>_<start LSN>_<end LSN>
+Delta files are named similarly, but they cover a range of LSNs:
 
-For example:
+    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
+              start key                          end key                          start LSN     end LSN
 
-    rel_1663_13990_2609_0_10_000000000169C348
-    rel_1663_13990_2609_0_10_000000000169C348_0000000001702000
+A delta file contains all the key-values in the key-range that were updated in
+the LSN range. If a key has not been modified, there is no trace of it in the
+delta layer.
 
-In addition to the relations, with "rel_*" prefix, we use the same
-format for storing various smaller files from the PostgreSQL data
-directory. They will use different suffixes and the naming scheme up
-to the LSNs vary. The Zenith source code uses the term "relish" to
-mean "a relation, or other file that's treated like a relation in the
-storage" For example, a base image of a CLOG segment would be named
-like this:
 
-    pg_xact_0000_0_00000000198B06B0
+A delta layer file can cover a part of the overall key space, as in the previous
+example, or the whole key range like this:
 
-There is no difference in how the relation and non-relation files are
-managed, except that the first part of file names is different.
-Internally, the relations and non-relation files that are managed in
-the versioned store are together called "relishes".
+    000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000578C6B29-0000000057A50051
 
-If a file has been dropped, the last layer file for it is created
-with the _DROPPED suffix, e.g.
-
-    rel_1663_13990_2609_0_10_000000000169C348_0000000001702000_DROPPED
+A file that covers the whole key range is called a L0 file (Level 0), while a
+file that covers only part of the key range is called a L1 file. The "level" of
+a file is not explicitly stored anywhere, you can only distinguish them by
+looking at the key range that a file covers. The read-path doesn't need to
+treat L0 and L1 files any differently.
 
 
 ## Notation used in this document
+
+FIXME: This is somewhat obsolete, the layer files cover a key-range rather than
+a particular relation nowadays. However, the description on how you find a page
+version, and how branching and GC works is still valid.
 
 The full path of a delta file looks like this:
 

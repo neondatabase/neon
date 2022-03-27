@@ -26,7 +26,7 @@
 //! * the rest of the remote timelines are reported to pageserver, but not downloaded before they are actually accessed in pageserver,
 //! it may schedule the download on such occasions.
 //!
-//! The synchronization unit is an archive: a set of timeline files (or relishes) and a special metadata file, all compressed into a blob.
+//! The synchronization unit is an archive: a set of layer files and a special metadata file, all compressed into a blob.
 //! Currently, there's no way to process an archive partially, if the archive processing fails, it has to be started from zero next time again.
 //! An archive contains set of files of a certain timeline, added during checkpoint(s) and the timeline metadata at that moment.
 //! The archive contains that metadata's `disk_consistent_lsn` in its name, to be able to restore partial index information from just a remote storage file list.
@@ -283,7 +283,7 @@ impl SyncKind {
 /// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
 #[derive(Debug, Clone)]
 pub struct NewCheckpoint {
-    /// Relish file paths in the pageserver workdir, that were added for the corresponding checkpoint.
+    /// layer file paths in the pageserver workdir, that were added for the corresponding checkpoint.
     layers: Vec<PathBuf>,
     metadata: TimelineMetadata,
 }
@@ -404,6 +404,7 @@ pub(super) fn spawn_storage_sync_thread<
         None,
         None,
         "Remote storage sync thread",
+        false,
         move || {
             storage_sync_loop(
                 runtime,
@@ -413,7 +414,8 @@ pub(super) fn spawn_storage_sync_thread<
                 storage,
                 max_concurrent_sync,
                 max_sync_errors,
-            )
+            );
+            Ok(())
         },
     )
     .context("Failed to spawn remote storage sync thread")?;
@@ -440,7 +442,7 @@ fn storage_sync_loop<
     storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> anyhow::Result<()> {
+) {
     let remote_assets = Arc::new((storage, Arc::clone(&index)));
     loop {
         let index = Arc::clone(&index);
@@ -470,8 +472,6 @@ fn storage_sync_loop<
             }
         }
     }
-
-    Ok(())
 }
 
 async fn loop_step<

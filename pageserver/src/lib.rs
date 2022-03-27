@@ -7,7 +7,7 @@ pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
-pub mod relish;
+pub mod reltag;
 pub mod remote_storage;
 pub mod repository;
 pub mod tenant_mgr;
@@ -21,8 +21,14 @@ pub mod walrecord;
 pub mod walredo;
 
 use lazy_static::lazy_static;
+use tracing::info;
 use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::{
+    postgres_backend,
+    zid::{ZTenantId, ZTimelineId},
+};
+
+use crate::thread_mgr::ThreadKind;
 
 use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;
@@ -61,3 +67,33 @@ pub enum CheckpointConfig {
 pub type RepositoryImpl = LayeredRepository;
 
 pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;
+
+pub fn shutdown_pageserver() {
+    // Shut down the libpq endpoint thread. This prevents new connections from
+    // being accepted.
+    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
+
+    // Shut down any page service threads.
+    postgres_backend::set_pgbackend_shutdown_requested();
+    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
+
+    // Shut down all the tenants. This flushes everything to disk and kills
+    // the checkpoint and GC threads.
+    tenant_mgr::shutdown_all_tenants();
+
+    // Stop syncing with remote storage.
+    //
+    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
+    // Should it?
+    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
+
+    // Shut down the HTTP endpoint last, so that you can still check the server's
+    // status while it's shutting down.
+    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
+
+    // There should be nothing left, but let's be sure
+    thread_mgr::shutdown_threads(None, None, None);
+
+    info!("Shut down successfully completed");
+    std::process::exit(0);
+}

@@ -79,9 +79,11 @@ pub fn launch_wal_receiver(
                 Some(tenantid),
                 Some(timelineid),
                 "WAL receiver thread",
+                false,
                 move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
-                    thread_main(conf, tenantid, timelineid)
+                    thread_main(conf, tenantid, timelineid);
+                    Ok(())
                 },
             )?;
 
@@ -111,11 +113,7 @@ fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> Str
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> Result<()> {
+fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id: ZTimelineId) {
     let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
@@ -139,7 +137,6 @@ fn thread_main(
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
     drop_wal_receiver(tenant_id, timeline_id);
-    Ok(())
 }
 
 fn walreceiver_main(
@@ -147,7 +144,7 @@ fn walreceiver_main(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
-) -> Result<(), Error> {
+) -> anyhow::Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!(
@@ -186,8 +183,6 @@ fn walreceiver_main(
 
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
-    let remote_index = repo.get_remote_index();
-
     let timeline =
         tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).with_context(|| {
             format!(
@@ -195,6 +190,7 @@ fn walreceiver_main(
                 timeline_id, tenant_id
             )
         })?;
+    let remote_index = repo.get_remote_index();
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -257,7 +253,7 @@ fn walreceiver_main(
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
                     // at risk of hitting a deadlock.
-                    assert!(lsn.is_aligned());
+                    anyhow::ensure!(lsn.is_aligned());
 
                     walingest.ingest_record(&timeline, recdata, lsn)?;
 

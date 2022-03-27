@@ -39,7 +39,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::IMAGE_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
@@ -108,7 +108,7 @@ pub struct ImageLayer {
     // This entry contains an image of all pages as of this LSN
     pub lsn: Lsn,
 
-    inner: Mutex<ImageLayerInner>,
+    inner: RwLock<ImageLayerInner>,
 }
 
 pub struct ImageLayerInner {
@@ -152,7 +152,7 @@ impl Layer for ImageLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
+    ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.key_range.contains(&key));
         assert!(lsn_range.end >= self.lsn);
 
@@ -237,16 +237,38 @@ impl ImageLayer {
     }
 
     ///
-    /// Load the contents of the file into memory
+    /// Open the underlying file and read the metadata into memory, if it's
+    /// not loaded already.
     ///
-    fn load(&self) -> Result<MutexGuard<ImageLayerInner>> {
-        // quick exit if already loaded
-        let mut inner = self.inner.lock().unwrap();
+    fn load(&self) -> Result<RwLockReadGuard<ImageLayerInner>> {
+        loop {
+            // Quick exit if already loaded
+            let inner = self.inner.read().unwrap();
+            if inner.loaded {
+                return Ok(inner);
+            }
 
-        if inner.loaded {
-            return Ok(inner);
+            // Need to open the file and load the metadata. Upgrade our lock to
+            // a write lock. (Or rather, release and re-lock in write mode.)
+            drop(inner);
+            let mut inner = self.inner.write().unwrap();
+            if !inner.loaded {
+                self.load_inner(&mut inner)?;
+            } else {
+                // Another thread loaded it while we were not holding the lock.
+            }
+
+            // We now have the file open and loaded. There's no function to do
+            // that in the std library RwLock, so we have to release and re-lock
+            // in read mode. (To be precise, the lock guard was moved in the
+            // above call to `load_inner`, so it's already been released). And
+            // while we do that, another thread could unload again, so we have
+            // to re-check and retry if that happens.
+            drop(inner);
         }
+    }
 
+    fn load_inner(&self, inner: &mut ImageLayerInner) -> Result<()> {
         let path = self.path();
 
         // Open the file
@@ -285,7 +307,7 @@ impl ImageLayer {
 
         inner.loaded = true;
 
-        Ok(inner)
+        Ok(())
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -301,7 +323,7 @@ impl ImageLayer {
             tenantid,
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
-            inner: Mutex::new(ImageLayerInner {
+            inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 reader: None,
                 index_start_blk: 0,
@@ -328,7 +350,7 @@ impl ImageLayer {
             tenantid: summary.tenantid,
             key_range: summary.key_range,
             lsn: summary.lsn,
-            inner: Mutex::new(ImageLayerInner {
+            inner: RwLock::new(ImageLayerInner {
                 reader: None,
                 loaded: false,
                 index_start_blk: 0,
@@ -385,7 +407,7 @@ impl ImageLayerWriter {
         tenantid: ZTenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<ImageLayerWriter> {
+    ) -> anyhow::Result<ImageLayerWriter> {
         // Create the file
         //
         // Note: This overwrites any existing file. There shouldn't be any.
@@ -432,7 +454,7 @@ impl ImageLayerWriter {
     /// The page versions must be appended in blknum order.
     ///
     pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
-        assert!(self.key_range.contains(&key));
+        ensure!(self.key_range.contains(&key));
 
         // Remember the offset and size metadata. The metadata is written
         // to a separate chapter, in `finish`.
@@ -445,7 +467,7 @@ impl ImageLayerWriter {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<ImageLayer> {
+    pub fn finish(self) -> anyhow::Result<ImageLayer> {
         // Pad the last page.
         let mut end_offset = self.blob_writer.offset;
         let mut bufwriter = self.blob_writer.writer;
@@ -488,7 +510,7 @@ impl ImageLayerWriter {
             tenantid: self.tenantid,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
-            inner: Mutex::new(ImageLayerInner {
+            inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 reader: None,
                 index_start_blk: 0, // will be set in load()
