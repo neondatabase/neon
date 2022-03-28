@@ -3,7 +3,7 @@
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use anyhow::{ensure, Context};
-use tokio::{fs, sync::RwLock};
+use tokio::fs;
 use tracing::{debug, error, trace, warn};
 use zenith_utils::zid::ZTenantId;
 
@@ -20,8 +20,8 @@ use crate::{
 };
 
 use super::{
-    index::{ArchiveId, RemoteTimeline, RemoteTimelineIndex},
-    TimelineDownload,
+    index::{ArchiveId, RemoteTimeline},
+    RemoteIndex, TimelineDownload,
 };
 
 /// Timeline download result, with extra data, needed for downloading.
@@ -47,7 +47,7 @@ pub(super) async fn download_timeline<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     conf: &'static PageServerConf,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     mut download: TimelineDownload,
     retries: u32,
@@ -167,7 +167,7 @@ async fn try_download_archive<
         tenant_id,
         timeline_id,
     }: ZTenantTimelineId,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     remote_timeline: &RemoteTimeline,
     archive_id: ArchiveId,
     files_to_skip: Arc<BTreeSet<PathBuf>>,
@@ -255,16 +255,14 @@ mod tests {
         let repo_harness = RepoHarness::create("test_download_timeline")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = Arc::new(RwLock::new(
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
-                repo_harness.conf,
-                storage
-                    .list()
-                    .await?
-                    .into_iter()
-                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-            ),
-        ));
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
+            repo_harness.conf,
+            storage
+                .list()
+                .await?
+                .into_iter()
+                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        );
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;
         let index = &remote_assets.1;
@@ -314,7 +312,7 @@ mod tests {
         .await;
         assert_index_descriptions(
             index,
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+            &RemoteIndex::try_parse_descriptions_from_paths(
                 repo_harness.conf,
                 remote_assets
                     .0

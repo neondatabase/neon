@@ -3,7 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
-use crate::remote_storage::RemoteTimelineIndex;
+use crate::remote_storage::RemoteIndex;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -68,7 +68,7 @@ fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
 pub fn load_local_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
-    remote_index: &Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+    remote_index: &RemoteIndex,
 ) -> Arc<RepositoryImpl> {
     let mut m = access_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
@@ -80,7 +80,7 @@ pub fn load_local_repo(
             conf,
             Arc::new(walredo_mgr),
             tenant_id,
-            Arc::clone(remote_index),
+            remote_index.clone(),
             conf.remote_storage_config.is_some(),
         ));
         Tenant {
@@ -95,7 +95,7 @@ pub fn load_local_repo(
 /// Updates tenants' repositories, changing their timelines state in memory.
 pub fn apply_timeline_sync_status_updates(
     conf: &'static PageServerConf,
-    remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+    remote_index: RemoteIndex,
     sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
 ) {
     if sync_status_updates.is_empty() {
@@ -175,7 +175,7 @@ pub fn shutdown_all_tenants() {
 pub fn create_tenant_repository(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
-    remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+    remote_index: RemoteIndex,
 ) -> Result<Option<ZTenantId>> {
     match access_tenants().entry(tenantid) {
         Entry::Occupied(_) => {

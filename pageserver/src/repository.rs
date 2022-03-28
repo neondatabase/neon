@@ -1,6 +1,6 @@
 use crate::keyspace::KeyPartitioning;
 use crate::layered_repository::metadata::TimelineMetadata;
-use crate::remote_storage::RemoteTimelineIndex;
+use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
@@ -264,7 +264,7 @@ pub trait Repository: Send + Sync {
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
-    fn get_remote_index(&self) -> &tokio::sync::RwLock<RemoteTimelineIndex>;
+    fn get_remote_index(&self) -> &RemoteIndex;
 }
 
 /// A timeline, that belongs to the current repository.
@@ -524,7 +524,7 @@ pub mod repo_harness {
                 self.conf,
                 walredo_mgr,
                 self.tenant_id,
-                Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty())),
+                RemoteIndex::empty(),
                 false,
             );
             // populate repo with locally available timelines
