@@ -83,6 +83,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ) -> Result<()> {
         let mut writer = timeline.begin_record(lsn);
 
+        let recdata_len = recdata.len();
         let mut decoded = decode_wal_record(recdata);
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -264,7 +265,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 page.put_u32(blk.blkno);
                 hex::encode(page.freeze())
             };
-            println!("wal-at-lsn-modified-page {} {}", lsn_hex, page_hex);
+            println!("wal-at-lsn-modified-page {} {} {}", lsn_hex, page_hex, recdata_len);
 
             self.ingest_decoded_block(&mut writer, lsn, &decoded, blk)?;
         }
