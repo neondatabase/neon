@@ -29,9 +29,9 @@ const_format = "0.2.21"
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 
 postgres_ffi = { path = "../postgres_ffi" }
-workspace_hack = { path = "../workspace_hack" }
 zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 tempfile = "3.2"

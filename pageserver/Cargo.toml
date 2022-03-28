@@ -50,7 +50,7 @@ async-compression = {version = "0.3", features = ["zstd", "tokio"]}
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { path = "../workspace_hack" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 hex-literal = "0.3"
