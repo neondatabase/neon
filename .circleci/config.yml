@@ -222,12 +222,12 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
@@ -281,12 +281,12 @@ jobs:
             - run: git submodule update --init --depth 1
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
