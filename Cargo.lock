@@ -407,6 +407,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tokio",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -1803,6 +1804,7 @@ dependencies = [
  "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
  "tokio-postgres-rustls",
  "tokio-rustls 0.22.0",
+ "workspace_hack",
  "zenith_metrics",
  "zenith_utils",
 ]
@@ -3041,7 +3043,14 @@ dependencies = [
 name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytes",
+ "cc",
+ "clap 2.34.0",
+ "either",
+ "hashbrown 0.11.2",
  "libc",
+ "log",
  "memchr",
  "num-integer",
  "num-traits",
@@ -3049,8 +3058,13 @@ dependencies = [
  "quote",
  "regex",
  "regex-syntax",
+ "reqwest",
+ "scopeguard",
  "serde",
  "syn",
+ "tokio",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]
@@ -3101,6 +3115,7 @@ dependencies = [
  "libc",
  "once_cell",
  "prometheus",
+ "workspace_hack",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ tokio-rustls = "0.22.0"
 
 zenith_utils = { path = "../zenith_utils" }
 zenith_metrics = { path = "../zenith_metrics" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 tokio-postgres-rustls = "0.8.0"

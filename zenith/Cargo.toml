@@ -15,4 +15,4 @@ control_plane = { path = "../control_plane" }
 walkeeper = { path = "../walkeeper" }
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { path = "../workspace_hack" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }

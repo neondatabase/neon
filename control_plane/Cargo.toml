@@ -20,4 +20,4 @@ reqwest = { version = "0.11", default-features = false, features = ["blocking", 
 pageserver = { path = "../pageserver" }
 walkeeper = { path = "../walkeeper" }
 zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { path = "../workspace_hack" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
