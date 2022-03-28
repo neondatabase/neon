@@ -64,7 +64,6 @@
       - pageserver
 
     - name: update remote storage (s3) config
-      when: current_version > remote_version or force_deploy
       lineinfile:
         path: /storage/pageserver/data/pageserver.toml
         line: "{{ item }}"
