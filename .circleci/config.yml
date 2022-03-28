@@ -618,7 +618,7 @@ jobs:
             ssh-add ssh-key
             rm -f ssh-key ssh-key-cert.pub
 
-            ansible-playbook deploy.yaml -i production.hosts -e console_mgmt_base_url=http://console-release.local
+            ansible-playbook deploy.yaml -i production.hosts
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-release-proxy:

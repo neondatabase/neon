@@ -53,7 +53,7 @@ use zenith_utils::{
 };
 
 use crate::layered_repository::writeback_ephemeral_file;
-use crate::relish::RelTag;
+use crate::repository::Key;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 10;
@@ -105,8 +105,7 @@ enum CacheKey {
 struct MaterializedPageHashKey {
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-    rel_tag: RelTag,
-    blknum: u32,
+    key: Key,
 }
 
 #[derive(Clone)]
@@ -291,16 +290,14 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key: *key,
             },
             lsn,
         };
@@ -323,8 +320,7 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         img: &[u8],
     ) {
@@ -332,8 +328,7 @@ impl PageCache {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key,
             },
             lsn,
         };

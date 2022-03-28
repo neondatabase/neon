@@ -20,7 +20,7 @@ use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service,
     remote_storage::{self, SyncStartupData},
-    repository::TimelineSyncStatusUpdate,
+    repository::{Repository, TimelineSyncStatusUpdate},
     tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
     timelines, virtual_file, LOG_FILE_NAME,

@@ -94,13 +94,16 @@ pub enum ThreadKind {
     // Thread that connects to a safekeeper to fetch WAL for one timeline.
     WalReceiver,
 
-    // Thread that handles checkpointing of all timelines for a tenant.
-    Checkpointer,
+    // Thread that handles compaction of all timelines for a tenant.
+    Compactor,
 
     // Thread that handles GC of a tenant
     GarbageCollector,
 
-    // Thread for synchronizing pageserver relish data with the remote storage.
+    // Thread that flushes frozen in-memory layers to disk
+    LayerFlushThread,
+
+    // Thread for synchronizing pageserver layer files with the remote storage.
     // Shared by all tenants.
     StorageSync,
 }
