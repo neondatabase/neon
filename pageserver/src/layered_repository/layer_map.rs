@@ -71,12 +71,7 @@ impl PartialEq for LayerEnvelope {
         #[allow(clippy::vtable_address_comparisons)]
         Arc::ptr_eq(&self.layer, &other.layer)
     }
-    fn ne(&self, other: &Self) -> bool {
-        !self.eq(other)
-    }
 }
-
-impl Eq for LayerEnvelope {}
 
 impl RTreeObject for LayerEnvelope {
     type Envelope = AABB<[i128; 2]>;
