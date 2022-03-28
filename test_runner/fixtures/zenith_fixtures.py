@@ -257,7 +257,8 @@ class PgProtocol:
                 dbname: Optional[str] = None,
                 schema: Optional[str] = None,
                 username: Optional[str] = None,
-                password: Optional[str] = None) -> str:
+                password: Optional[str] = None,
+                statement_timeout_ms: Optional[int] = None) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
@@ -277,16 +278,23 @@ class PgProtocol:
         if schema:
             res = f"{res} options='-c search_path={schema}'"
 
+        if statement_timeout_ms:
+            res = f"{res} options='-c statement_timeout={statement_timeout_ms}'"
+
         return res
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self,
-                *,
-                autocommit=True,
-                dbname: Optional[str] = None,
-                schema: Optional[str] = None,
-                username: Optional[str] = None,
-                password: Optional[str] = None) -> PgConnection:
+    def connect(
+        self,
+        *,
+        autocommit=True,
+        dbname: Optional[str] = None,
+        schema: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        # individual statement timeout in seconds, 2 minutes should be enough for our tests
+        statement_timeout: Optional[int] = 120
+    ) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
@@ -294,12 +302,12 @@ class PgProtocol:
         """
 
         conn = psycopg2.connect(
-            self.connstr(
-                dbname=dbname,
-                schema=schema,
-                username=username,
-                password=password,
-            ))
+            self.connstr(dbname=dbname,
+                         schema=schema,
+                         username=username,
+                         password=password,
+                         statement_timeout_ms=statement_timeout *
+                         1000 if statement_timeout else None))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
