@@ -1,0 +1,113 @@
+# A separate file for mac builds, due to different installation runs, absence of tools (code coverage, mold, etc.)
+# and inability to specify the _same_ job to run the same steps both for "ubuntu + some image" and "macos + no image" set ups.
+#
+# Keep its rustc versions the same as in the main testing pipeline file.
+name: Build and Test (macOs)
+
+on: push
+
+jobs:
+  regression-check:
+    strategy:
+      matrix:
+        rust_toolchain: [1.56]
+        build_type: [debug, release]
+    timeout-minutes: 30
+    name: run regression test suite (macOs)
+    runs-on: macos-latest
+
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_INCREMENTAL: 0
+      BUILD_TYPE: ${{ matrix.build_type }}
+      COPT: '-Werror'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_toolchain }}
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+
+      - name: Install system dependencies
+        run: |
+          brew install flex bison poetry
+
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v2
+        with:
+          path: |
+            tmp_install/
+          key: ${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          make postgres -j$(nproc)
+
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check Rust code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: ./run_clippy.sh
+
+      - name: Run cargo build
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            CARGO_FLAGS=--release
+          fi
+          cargo build $CARGO_FLAGS --workspace --bins --examples --tests
+
+      - name: Run cargo test
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            CARGO_FLAGS=--release
+          fi
+          cargo test $CARGO_FLAGS
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-v1-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Check Python codestyle
+        run: |
+          poetry run yapf --recursive --diff .
+          poetry run mypy .
+

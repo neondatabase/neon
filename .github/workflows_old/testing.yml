@@ -37,7 +37,7 @@ jobs:
       - name: Install macOs postgres dependencies
         if: matrix.os == 'macos-latest'
         run: |
-          brew install flex bison
+          brew install flex bison poetry
 
       - name: Set pg revision for caching
         id: pg_ver

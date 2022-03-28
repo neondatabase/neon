@@ -1,0 +1,124 @@
+name: Build and Test (Linux)
+
+on: push
+
+jobs:
+  regression-check:
+    strategy:
+      matrix:
+        rust_toolchain: [1.56]
+        build_type: [debug, release]
+    timeout-minutes: 30
+    name: run regression test suite (Ubuntu)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_INCREMENTAL: 0
+      BUILD_TYPE: ${{ matrix.build_type }}
+      COPT: '-Werror'
+      AWS_ACCESS_KEY_ID: ${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}
+      CACHEPOT_BUCKET: zenith-rust-cachepot
+      RUSTC_WRAPPER: cachepot
+
+    container:
+      image: zimg/rust:${{ matrix.rust_toolchain }}
+      options: --user circleci
+
+    steps:
+      # Cannot override workdir properly for the whole container
+      # https://github.com/actions/runner/issues/878
+      # So use GitHub's one with fixed access for the user
+      - name: Fix permissions
+        run: sudo chmod -R a+rwx /__w/
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
+        run: rustup default ${{ matrix.rust_toolchain }}
+
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v2
+        with:
+          path: |
+            tmp_install/
+          key: ${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: |
+          mold -run make postgres -j$(nproc)
+
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check Rust code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+          fi
+          "${cov_prefix[@]}" ./run_clippy.sh
+
+      - name: Run cargo build
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+            CARGO_FLAGS=--release
+          fi
+          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --workspace --bins --examples --tests
+          cachepot -s
+
+      - name: Run cargo test
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+            CARGO_FLAGS=--release
+          fi
+          "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-v1-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Check Python codestyle
+        run: |
+          poetry run yapf --recursive --diff .
+          poetry run mypy .
