@@ -36,7 +36,7 @@ use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::page_cache;
-use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteTimelineIndex};
+use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
 };
@@ -116,7 +116,7 @@ pub struct LayeredRepository {
 
     // provides access to timeline data sitting in the remote storage
     // supposed to be used for retrieval of remote consistent lsn in walreceiver
-    remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+    remote_index: RemoteIndex,
 
     /// Makes every timeline to backup their files to remote storage.
     upload_layers: bool,
@@ -374,8 +374,8 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn get_remote_index(&self) -> &tokio::sync::RwLock<RemoteTimelineIndex> {
-        self.remote_index.as_ref()
+    fn get_remote_index(&self) -> &RemoteIndex {
+        &self.remote_index
     }
 }
 
@@ -528,7 +528,7 @@ impl LayeredRepository {
         conf: &'static PageServerConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
-        remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+        remote_index: RemoteIndex,
         upload_layers: bool,
     ) -> LayeredRepository {
         LayeredRepository {

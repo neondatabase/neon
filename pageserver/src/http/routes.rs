@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use tokio::sync::RwLock;
 use tracing::*;
 use zenith_utils::auth::JwtAuth;
 use zenith_utils::http::endpoint::attach_openapi_ui;
@@ -22,18 +21,15 @@ use zenith_utils::zid::{ZTenantTimelineId, ZTimelineId};
 use super::models::{
     StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
 };
-use crate::remote_storage::{schedule_timeline_download, RemoteTimelineIndex};
+use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
 use crate::repository::Repository;
-use crate::timelines::{
-    extract_remote_timeline_info, LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo,
-};
+use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
-#[derive(Debug)]
 struct State {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
-    remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    remote_index: RemoteIndex,
     allowlist_routes: Vec<Uri>,
 }
 
@@ -41,7 +37,7 @@ impl State {
     fn new(
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
-        remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+        remote_index: RemoteIndex,
     ) -> Self {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -114,14 +110,24 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     .await
     .map_err(ApiError::from_err)??;
 
-    let remote_index = get_state(&request).remote_index.read().await;
     let mut response_data = Vec::with_capacity(local_timeline_infos.len());
     for (timeline_id, local_timeline_info) in local_timeline_infos {
         response_data.push(TimelineInfo {
             tenant_id,
             timeline_id,
             local: Some(local_timeline_info),
-            remote: extract_remote_timeline_info(tenant_id, timeline_id, &remote_index),
+            remote: get_state(&request)
+                .remote_index
+                .read()
+                .await
+                .timeline_entry(&ZTenantTimelineId {
+                    tenant_id,
+                    timeline_id,
+                })
+                .map(|remote_entry| RemoteTimelineInfo {
+                    remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
+                    awaits_download: remote_entry.get_awaits_download(),
+                }),
         })
     }
 
@@ -281,7 +287,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
-    let remote_index = Arc::clone(&get_state(&request).remote_index);
+    let remote_index = get_state(&request).remote_index.clone();
 
     let target_tenant_id = request_data
         .new_tenant_id
@@ -312,7 +318,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 pub fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
-    remote_index: Arc<RwLock<RemoteTimelineIndex>>,
+    remote_index: RemoteIndex,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
