@@ -34,10 +34,13 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
-          command: git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+          command: |
+              git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+              cat Makefile >> /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
@@ -78,8 +81,8 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
-        # Append makefile as it could change the way postgres is built
       - run:
           name: Get postgres cache key
           command: |
