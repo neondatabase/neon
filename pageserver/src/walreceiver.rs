@@ -70,7 +70,7 @@ pub fn launch_wal_receiver(
 
     match receivers.get_mut(&(tenantid, timelineid)) {
         Some(receiver) => {
-            info!("wal receiver already running, updating connection string");
+            debug!("wal receiver already running, updating connection string");
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
