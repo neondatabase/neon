@@ -1594,7 +1594,7 @@ impl LayeredTimeline {
             self.compact_level0(target_file_size)?;
             timer.stop_and_record();
         } else {
-            info!("Could not compact because no partitioning specified yet");
+            debug!("Could not compact because no partitioning specified yet");
         }
 
         // Call unload() on all frozen layers, to release memory.
