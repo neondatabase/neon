@@ -22,6 +22,7 @@ use super::models::{
     StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
 };
 use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
+use crate::repository::Repository;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
@@ -162,8 +163,11 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let local_timeline = {
             repo.get_timeline(timeline_id)
+                .as_ref()
                 .map(|timeline| {
                     LocalTimelineInfo::from_repo_timeline(
+                        tenant_id,
+                        timeline_id,
                         timeline,
                         include_non_incremental_logical_size,
                     )

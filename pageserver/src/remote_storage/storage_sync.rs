@@ -27,7 +27,7 @@
 //! it may schedule the download on such occasions.
 //! Then, the index is shared across pageserver under [`RemoteIndex`] guard to ensure proper synchronization.
 //!
-//! The synchronization unit is an archive: a set of timeline files (or relishes) and a special metadata file, all compressed into a blob.
+//! The synchronization unit is an archive: a set of layer files and a special metadata file, all compressed into a blob.
 //! Currently, there's no way to process an archive partially, if the archive processing fails, it has to be started from zero next time again.
 //! An archive contains set of files of a certain timeline, added during checkpoint(s) and the timeline metadata at that moment.
 //! The archive contains that metadata's `disk_consistent_lsn` in its name, to be able to restore partial index information from just a remote storage file list.
@@ -281,7 +281,7 @@ impl SyncKind {
 /// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
 #[derive(Debug, Clone)]
 pub struct NewCheckpoint {
-    /// Relish file paths in the pageserver workdir, that were added for the corresponding checkpoint.
+    /// layer file paths in the pageserver workdir, that were added for the corresponding checkpoint.
     layers: Vec<PathBuf>,
     metadata: TimelineMetadata,
 }
@@ -854,7 +854,7 @@ mod test_utils {
 
     #[track_caller]
     pub async fn ensure_correct_timeline_upload(
-        harness: &RepoHarness,
+        harness: &RepoHarness<'_>,
         remote_assets: Arc<(LocalFs, RemoteIndex)>,
         timeline_id: ZTimelineId,
         new_upload: NewCheckpoint,

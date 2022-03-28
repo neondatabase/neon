@@ -17,7 +17,7 @@ This way, the backups are managed in background, not affecting directly other pa
 Current implementation
 * provides remote storage wrappers for AWS S3 and local FS
 * synchronizes the differences with local timelines and remote states as fast as possible
-* uploads new relishes, frozen by pageserver checkpoint thread
+* uploads new layer files
 * downloads and registers timelines, found on the remote storage, but missing locally, if those are requested somehow via pageserver (e.g. http api, gc)
 * uses compression when deals with files, for better S3 usage
 * maintains an index of what's stored remotely

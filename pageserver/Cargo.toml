@@ -12,6 +12,7 @@ bytes = { version = "1.0.1", features = ['serde'] }
 byteorder = "1.4.3"
 futures = "0.3.13"
 hyper = "0.14"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "3.0"
