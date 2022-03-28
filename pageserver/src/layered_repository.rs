@@ -2487,7 +2487,7 @@ pub mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         #[allow(non_snake_case)]
-        let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+        let TEST_KEY: Key = Key::from_hex("110000222233333333444444445500000001").unwrap();
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -2543,7 +2543,7 @@ pub mod tests {
 
         let mut keyspace = KeySpaceAccum::new();
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000222233333333444444445500000000").unwrap();
         let mut blknum = 0;
         for _ in 0..50 {
             for _ in 0..10000 {
@@ -2581,7 +2581,7 @@ pub mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000222233333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -2651,7 +2651,7 @@ pub mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000222233333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 

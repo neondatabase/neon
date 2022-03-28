@@ -620,7 +620,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
+        static ref TEST_KEY: Key = Key::from_slice(hex!("110000222233333333444444445500000001"));
     }
 
     #[test]
@@ -663,9 +663,9 @@ mod tests {
         use std::str::from_utf8;
 
         #[allow(non_snake_case)]
-        let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+        let TEST_KEY_A: Key = Key::from_hex("110000222233333333444444445500000001").unwrap();
         #[allow(non_snake_case)]
-        let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
+        let TEST_KEY_B: Key = Key::from_hex("110000222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
         writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
