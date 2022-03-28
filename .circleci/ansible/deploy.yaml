@@ -63,18 +63,21 @@
       tags:
       - pageserver
 
-    - name: update remote storage (s3) config
-      lineinfile:
-        path: /storage/pageserver/data/pageserver.toml
-        line: "{{ item }}"
-      loop:
-        - "[remote_storage]"
-        - "bucket_name = '{{ bucket_name }}'"
-        - "bucket_region = '{{ bucket_region }}'"
-        - "prefix_in_bucket = '{{ inventory_hostname }}'"
-      become: true
-      tags:
-      - pageserver
+    # It seems that currently S3 integration does not play well
+    # even with fresh pageserver without a burden of old data.
+    # TODO: turn this back on once the issue is solved.
+    # - name: update remote storage (s3) config
+    #   lineinfile:
+    #     path: /storage/pageserver/data/pageserver.toml
+    #     line: "{{ item }}"
+    #   loop:
+    #     - "[remote_storage]"
+    #     - "bucket_name = '{{ bucket_name }}'"
+    #     - "bucket_region = '{{ bucket_region }}'"
+    #     - "prefix_in_bucket = '{{ inventory_hostname }}'"
+    #   become: true
+    #   tags:
+    #   - pageserver
 
     - name: upload systemd service definition
       ansible.builtin.template:
