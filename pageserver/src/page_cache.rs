@@ -39,13 +39,12 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
-    sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
-    },
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 
+use dashmap::DashMap;
 use once_cell::sync::OnceCell;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::error;
 use zenith_utils::{
     lsn::Lsn,
@@ -119,14 +118,14 @@ struct Version {
 }
 
 struct Slot {
-    inner: RwLock<SlotInner>,
     usage_count: AtomicU8,
+    inner: RwLock<SlotInner>,
 }
 
 struct SlotInner {
+    dirty: bool,
     key: Option<CacheKey>,
     buf: &'static mut [u8; PAGE_SZ],
-    dirty: bool,
 }
 
 impl Slot {
@@ -175,9 +174,9 @@ pub struct PageCache {
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    ephemeral_page_map: DashMap<(u64, u32), usize>,
 
-    blocky_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    blocky_page_map: DashMap<(u64, u32), usize>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -375,7 +374,7 @@ impl PageCache {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
-            let mut inner = slot.inner.write().unwrap();
+            let mut inner = slot.inner.write();
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::Ephemeral { file_id, blkno: _ } if *file_id == drop_file_id => {
@@ -428,7 +427,7 @@ impl PageCache {
             // that it's still what we expected (because we released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.read().unwrap();
+            let inner = slot.inner.read();
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageReadGuard(inner));
@@ -517,7 +516,7 @@ impl PageCache {
             // that it's still what we expected (because we don't released the mapping
             // lock already, another thread could have evicted the page)
             let slot = &self.slots[slot_idx];
-            let inner = slot.inner.write().unwrap();
+            let inner = slot.inner.write();
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageWriteGuard { inner, valid: true });
@@ -585,7 +584,7 @@ impl PageCache {
     fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::Materialized { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read();
                 let versions = map.get(hash_key)?;
 
                 let version_idx = match versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -598,12 +597,10 @@ impl PageCache {
                 Some(version.slot_idx)
             }
             CacheKey::Ephemeral { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*self.ephemeral_page_map.get(&(*file_id, *blkno))?)
             }
             CacheKey::Blocky { file_id, blkno } => {
-                let map = self.blocky_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*self.blocky_page_map.get(&(*file_id, *blkno))?)
             }
         }
     }
@@ -615,7 +612,7 @@ impl PageCache {
     fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::Materialized { hash_key, lsn } => {
-                let map = self.materialized_page_map.read().unwrap();
+                let map = self.materialized_page_map.read();
                 let versions = map.get(hash_key)?;
 
                 if let Ok(version_idx) = versions.binary_search_by_key(lsn, |v| v.lsn) {
@@ -625,12 +622,10 @@ impl PageCache {
                 }
             }
             CacheKey::Ephemeral { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*self.ephemeral_page_map.get(&(*file_id, *blkno))?)
             }
             CacheKey::Blocky { file_id, blkno } => {
-                let map = self.blocky_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                Some(*self.blocky_page_map.get(&(*file_id, *blkno))?)
             }
         }
     }
@@ -644,7 +639,7 @@ impl PageCache {
                 hash_key: old_hash_key,
                 lsn: old_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write();
                 if let Entry::Occupied(mut old_entry) = map.entry(old_hash_key.clone()) {
                     let versions = old_entry.get_mut();
 
@@ -659,13 +654,13 @@ impl PageCache {
                 }
             }
             CacheKey::Ephemeral { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
+                self.ephemeral_page_map
+                    .remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
             CacheKey::Blocky { file_id, blkno } => {
-                let mut map = self.blocky_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
+                self.blocky_page_map
+                    .remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
         }
@@ -682,7 +677,7 @@ impl PageCache {
                 hash_key: new_key,
                 lsn: new_lsn,
             } => {
-                let mut map = self.materialized_page_map.write().unwrap();
+                let mut map = self.materialized_page_map.write();
                 let versions = map.entry(new_key.clone()).or_default();
                 match versions.binary_search_by_key(new_lsn, |v| v.lsn) {
                     Ok(version_idx) => Some(versions[version_idx].slot_idx),
@@ -699,20 +694,18 @@ impl PageCache {
                 }
             }
             CacheKey::Ephemeral { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
-                    Entry::Occupied(entry) => Some(*entry.get()),
-                    Entry::Vacant(entry) => {
+                match self.ephemeral_page_map.entry((*file_id, *blkno)) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => Some(*entry.get()),
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
                         None
                     }
                 }
             }
             CacheKey::Blocky { file_id, blkno } => {
-                let mut map = self.blocky_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
-                    Entry::Occupied(entry) => Some(*entry.get()),
-                    Entry::Vacant(entry) => {
+                match self.blocky_page_map.entry((*file_id, *blkno)) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => Some(*entry.get()),
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
                         None
                     }
@@ -738,12 +731,8 @@ impl PageCache {
 
             if slot.dec_usage_count() == 0 || iters >= iter_limit {
                 let mut inner = match slot.inner.try_write() {
-                    Ok(guard) => guard,
-                    Err(TryLockError::WouldBlock) => continue,
-                    Err(TryLockError::Poisoned(_)) => {
-                        error!("poisoned buffer lock");
-                        continue;
-                    }
+                    Some(guard) => guard,
+                    None => continue,
                 };
 
                 if let Some(old_key) = &inner.key {
