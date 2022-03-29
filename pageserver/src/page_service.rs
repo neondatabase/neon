@@ -108,21 +108,25 @@ struct PagestreamGetSlruPageRequest {
 
 #[derive(Debug)]
 struct PagestreamExistsResponse {
+    lsn: Lsn,
     exists: bool,
 }
 
 #[derive(Debug)]
 struct PagestreamNblocksResponse {
+    lsn: Lsn,
     n_blocks: u32,
 }
 
 #[derive(Debug)]
 struct PagestreamGetPageResponse {
+    lsn: Lsn,
     page: Bytes,
 }
 
 #[derive(Debug)]
 struct PagestreamGetSlruPageResponse {
+    lsn: Lsn,
     seg_exists: bool,
     page: Option<Bytes>,
 }
@@ -209,21 +213,25 @@ impl PagestreamBeMessage {
         match self {
             Self::Exists(resp) => {
                 bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u8(resp.exists as u8);
             }
 
             Self::Nblocks(resp) => {
                 bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u32(resp.n_blocks);
             }
 
             Self::GetPage(resp) => {
                 bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put(&resp.page[..]);
             }
 
             Self::GetSlruPage(resp) => {
                 bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u8(resp.seg_exists as u8);
                 if let Some(page) = &resp.page {
                     bytes.put_u8(1); // page exists
@@ -757,6 +765,7 @@ impl PageServerHandler {
         let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
+            lsn,
             exists,
         }))
     }
@@ -773,6 +782,7 @@ impl PageServerHandler {
         let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
+            lsn,
             n_blocks,
         }))
     }
@@ -816,6 +826,7 @@ impl PageServerHandler {
         let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+            lsn,
             page,
         }))
     }
@@ -856,7 +867,11 @@ impl PageServerHandler {
         }
 
         Ok(PagestreamBeMessage::GetSlruPage(
-            PagestreamGetSlruPageResponse { seg_exists, page },
+            PagestreamGetSlruPageResponse {
+                lsn,
+                seg_exists,
+                page,
+            },
         ))
     }
 
