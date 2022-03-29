@@ -48,7 +48,9 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
+use zenith_metrics::{
+    register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec, IntGauge, IntGaugeVec,
+};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
@@ -90,6 +92,15 @@ lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_time",
         "Time spent on storage operations",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+lazy_static! {
+    static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_last_record_lsn",
+        "Last record LSN grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
@@ -745,11 +756,12 @@ pub struct LayeredTimeline {
     ancestor_timeline: Option<LayeredTimelineEntry>,
     ancestor_lsn: Lsn,
 
-    // Metrics histograms
+    // Metrics
     reconstruct_time_histo: Histogram,
     flush_time_histo: Histogram,
     compact_time_histo: Histogram,
     create_images_time_histo: Histogram,
+    last_record_gauge: IntGauge,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_layers: AtomicBool,
@@ -982,6 +994,9 @@ impl LayeredTimeline {
                 &timelineid.to_string(),
             ])
             .unwrap();
+        let last_record_gauge = LAST_RECORD_LSN
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
 
         LayeredTimeline {
             conf,
@@ -1007,6 +1022,7 @@ impl LayeredTimeline {
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
+            last_record_gauge,
 
             upload_layers: AtomicBool::new(upload_layers),
 
@@ -1325,6 +1341,7 @@ impl LayeredTimeline {
     fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
+        self.last_record_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
