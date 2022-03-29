@@ -203,7 +203,8 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_wal_acceptors_restarts_under_load')
-    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load')
+    # Enable backpressure with 1MB maximal lag, because we don't want to spend in `wait_for_lsn()` more than 10 seconds
+    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load', config_lines=['max_replication_write_lag=1MB'])
 
     asyncio.run(run_restarts_under_load(pg, env.safekeepers))
 
