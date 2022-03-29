@@ -321,8 +321,8 @@ pub fn schedule_timeline_checkpoint_upload(
             tenant_id, timeline_id
         )
     } else {
-        warn!(
-            "Could not send an upload task for tenant {}, timeline {}: the sync queue is not initialized",
+        debug!(
+            "Upload task for tenant {}, timeline {} sent",
             tenant_id, timeline_id
         )
     }
@@ -455,7 +455,7 @@ fn storage_sync_loop<
                     max_concurrent_sync,
                     max_sync_errors,
                 )
-                .instrument(debug_span!("storage_sync_loop_step")) => step,
+                .instrument(info_span!("storage_sync_loop_step")) => step,
                 _ = thread_mgr::shutdown_watcher() => LoopStep::Shutdown,
             }
         });
@@ -528,7 +528,7 @@ async fn loop_step<
 
             let extra_step = match tokio::spawn(
                 process_task(conf, Arc::clone(&remote_assets), task, max_sync_errors).instrument(
-                    debug_span!("process_sync_task", sync_id = %sync_id, attempt, sync_name),
+                    info_span!("process_sync_task", sync_id = %sync_id, attempt, sync_name),
                 ),
             )
             .await
