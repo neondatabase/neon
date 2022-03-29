@@ -252,25 +252,25 @@ pub enum PagestreamBeMessage {
 pub struct PagestreamExistsRequest {
     pub latest: bool,
     pub lsn: Lsn,
-    pub rel: RelTag,
     pub region: u32,
+    pub rel: RelTag,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamNblocksRequest {
     pub latest: bool,
     pub lsn: Lsn,
-    pub rel: RelTag,
     pub region: u32,
+    pub rel: RelTag,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetPageRequest {
     pub latest: bool,
     pub lsn: Lsn,
+    pub region: u32,
     pub rel: RelTag,
     pub blkno: u32,
-    pub region: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -293,21 +293,25 @@ pub struct PagestreamGetSlruPageRequest {
 
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
+    pub lsn: Lsn,
     pub exists: bool,
 }
 
 #[derive(Debug)]
 pub struct PagestreamNblocksResponse {
+    pub lsn: Lsn,
     pub n_blocks: u32,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
+    pub lsn: Lsn,
     pub page: Bytes,
 }
 
 #[derive(Debug)]
 pub struct PagestreamGetSlruPageResponse {
+    pub lsn: Lsn,
     pub seg_exists: bool,
     pub page: Option<Bytes>,
 }
@@ -454,21 +458,25 @@ impl PagestreamBeMessage {
         match self {
             Self::Exists(resp) => {
                 bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u8(resp.exists as u8);
             }
 
             Self::Nblocks(resp) => {
                 bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u32(resp.n_blocks);
             }
 
             Self::GetPage(resp) => {
                 bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put(&resp.page[..]);
             }
 
             Self::GetSlruPage(resp) => {
                 bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u64(resp.lsn.0);
                 bytes.put_u8(resp.seg_exists as u8);
                 if let Some(page) = &resp.page {
                     bytes.put_u8(1); // page exists
