@@ -30,10 +30,6 @@ class BankClient(object):
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
 
-        # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
-        await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
-        await self.conn.execute('ALTER TABLE bank_log SET (autovacuum_enabled = false)')
-
     async def check_invariant(self):
         row = await self.conn.fetchrow('SELECT sum(amount) AS sum FROM bank_accs')
         assert row['sum'] == self.n_accounts * self.init_amount
@@ -207,6 +203,3 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load', config_lines=['max_replication_write_lag=1MB'])
 
     asyncio.run(run_restarts_under_load(pg, env.safekeepers))
-
-    # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
-    pg.stop()
