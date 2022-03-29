@@ -27,7 +27,6 @@ jobs:
 
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
-      options: --user circleci
 
     steps:
       # Cannot override workdir properly for the whole container
@@ -51,11 +50,11 @@ jobs:
 
       - name: Cache postgres build
         id: cache_pg
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             tmp_install/
-          key: ${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
@@ -64,13 +63,13 @@ jobs:
 
       - name: Cache cargo deps
         id: cache_cargo
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Check Rust code formatting
         run: cargo fmt --all -- --check
@@ -107,18 +106,143 @@ jobs:
           fi
           "${cov_prefix[@]}" cargo test $CARGO_FLAGS
 
+      - name: Install binaries
+        run: |
+          mkdir -p /tmp/zenith/pg_install/
+          cp -a tmp_install/ /tmp/zenith/pg_install/
+
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+          fi
+
+          binaries=$(
+            "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+            jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+          )
+
+          test_exe_paths=$(
+            "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+            jq -r '.executable | select(. != null)'
+          )
+
+          mkdir -p /tmp/zenith/bin/
+          mkdir -p /tmp/zenith/test_bin/
+          mkdir -p /tmp/zenith/etc/
+
+          # Install target binaries
+          for bin in $binaries; do
+            SRC=target/$BUILD_TYPE/$bin
+            DST=/tmp/zenith/bin/$bin
+            cp $SRC $DST
+            echo $DST >> /tmp/zenith/etc/binaries.list
+          done
+
+          # Install test executables (for code coverage)
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            for bin in $test_exe_paths; do
+              SRC=$bin
+              DST=/tmp/zenith/test_bin/$(basename $bin)
+              cp $SRC $DST
+              echo $DST >> /tmp/zenith/etc/binaries.list
+            done
+          fi
+
+      # TODO kb this now breaks
+      # - name: Merge coverage data
+      #   run: |
+      #     # This will speed up workspace uploads
+      #     if [[ $BUILD_TYPE == "debug" ]]; then
+      #       scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage merge
+      #     fi
+
       - name: Cache poetry deps
         id: cache_poetry
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.cache/pypoetry/virtualenvs
-          key: ${{ runner.os }}-v1-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
-      - name: Install Python deps
+      - name: Install poetry deps
         run: ./scripts/pysync
 
       - name: Check Python codestyle
         run: |
           poetry run yapf --recursive --diff .
           poetry run mypy .
+
+      - name: Pytest regress tests
+        env:
+          ZENITH_BIN: /tmp/zenith/bin/
+          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
+          TEST_OUTPUT: /tmp/test_output/
+          # this variable will be embedded in perf test report
+          # and is needed to distinguish different environments
+          PLATFORM: zenith-local-ci
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+          fi
+
+          echo '####################'
+          ls -lah /tmp/zenith/test_bin/
+          echo '----------'
+          ls -lah /tmp/zenith/pg_install/
+          echo '####################'
+
+          # Run the tests.
+          #
+          # TODO kb adjust
+          # The junit.xml file allows CircleCI to display more fine-grained test information
+          # in its "Tests" tab in the results page.
+          # --verbose prints name of each test (helpful when there are
+          # multiple tests in one file)
+          # -rA prints summary in the end
+          # -n4 uses four processes to run tests via pytest-xdist
+          # -s is not used to prevent pytest from capturing output, because tests are running
+          # in parallel and logs are mixed between different tests
+          "${cov_prefix[@]}" ./scripts/pytest \
+            --junitxml=$TEST_OUTPUT/junit.xml \
+            --tb=short \
+            --verbose \
+            -m "not remote_cluster" \
+            -rA test_runner/batch_pg_regress -n4
+
+      - name: Pytest other tests
+        env:
+          ZENITH_BIN: /tmp/zenith/bin/
+          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
+          TEST_OUTPUT: /tmp/test_output/
+          # this variable will be embedded in perf test report
+          # and is needed to distinguish different environments
+          PLATFORM: zenith-local-ci
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+          fi
+
+          # Run the tests.
+          #
+          # TODO kb adjust
+          # The junit.xml file allows CircleCI to display more fine-grained test information
+          # in its "Tests" tab in the results page.
+          # --verbose prints name of each test (helpful when there are
+          # multiple tests in one file)
+          # -rA prints summary in the end
+          # -n4 uses four processes to run tests via pytest-xdist
+          # -s is not used to prevent pytest from capturing output, because tests are running
+          # in parallel and logs are mixed between different tests
+          "${cov_prefix[@]}" ./scripts/pytest \
+            --junitxml=$TEST_OUTPUT/junit.xml \
+            --tb=short \
+            --verbose \
+            -m "not remote_cluster" \
+            -rA test_runner/batch_others -n4
+
+      # TODO kb add pytest benchmarks
