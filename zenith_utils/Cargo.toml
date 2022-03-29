@@ -27,9 +27,10 @@ hex = { version = "0.4.3", features = ["serde"] }
 rustls = "0.19.1"
 rustls-split = "0.2.1"
 git-version = "0.3.5"
+serde_with = "1.12.0"
 
 zenith_metrics = { path = "../zenith_metrics" }
-workspace_hack = { path = "../workspace_hack" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 byteorder = "1.4.3"
@@ -37,3 +38,8 @@ bytes = "1.0.1"
 hex-literal = "0.3"
 tempfile = "3.2"
 webpki = "0.21"
+criterion = "0.3"
+
+[[bench]]
+name = "benchmarks"
+harness = false

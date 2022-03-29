@@ -53,7 +53,7 @@ use zenith_utils::{
 };
 
 use crate::layered_repository::writeback_ephemeral_file;
-use crate::{config::PageServerConf, relish::RelTag};
+use crate::repository::Key;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 10;
@@ -61,11 +61,8 @@ const TEST_PAGE_CACHE_SIZE: usize = 10;
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(conf: &'static PageServerConf) {
-    if PAGE_CACHE
-        .set(PageCache::new(conf.page_cache_size))
-        .is_err()
-    {
+pub fn init(size: usize) {
+    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
         panic!("page cache already initialized");
     }
 }
@@ -108,8 +105,7 @@ enum CacheKey {
 struct MaterializedPageHashKey {
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-    rel_tag: RelTag,
-    blknum: u32,
+    key: Key,
 }
 
 #[derive(Clone)]
@@ -294,16 +290,14 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key: *key,
             },
             lsn,
         };
@@ -326,8 +320,7 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         img: &[u8],
     ) {
@@ -335,8 +328,7 @@ impl PageCache {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key,
             },
             lsn,
         };
@@ -735,9 +727,10 @@ impl PageCache {
             CacheKey::MaterializedPage {
                 hash_key: _,
                 lsn: _,
-            } => {
-                panic!("unexpected dirty materialized page");
-            }
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty materialized page",
+            )),
             CacheKey::EphemeralPage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }

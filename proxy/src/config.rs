@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -29,7 +29,7 @@ impl FromStr for ClientAuthMethod {
             "password" => Ok(Password),
             "link" => Ok(Link),
             "mixed" => Ok(Mixed),
-            _ => Err(anyhow::anyhow!("Invlid option for router")),
+            _ => bail!("Invalid option for router: `{}`", s),
         }
     }
 }
@@ -53,7 +53,7 @@ pub struct ProxyConfig {
     pub redirect_uri: String,
 
     /// control plane address where we would check auth.
-    pub auth_endpoint: String,
+    pub auth_endpoint: reqwest::Url,
 
     pub tls_config: Option<TlsConfig>,
 }

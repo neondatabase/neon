@@ -11,8 +11,7 @@ from fixtures.zenith_fixtures import ZenithEnv
 #
 def test_readonly_node(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_readonly_node", "empty")
-
+    env.zenith_cli.create_branch('test_readonly_node', 'empty')
     pgmain = env.postgres.create_start('test_readonly_node')
     log.info("postgres is running on 'test_readonly_node' branch")
 
@@ -53,12 +52,14 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     log.info('LSN after 400100 rows: ' + lsn_c)
 
     # Create first read-only node at the point where only 100 rows were inserted
-    pg_hundred = env.postgres.create_start("test_readonly_node_hundred",
-                                           branch=f'test_readonly_node@{lsn_a}')
+    pg_hundred = env.postgres.create_start(branch_name='test_readonly_node',
+                                           node_name='test_readonly_node_hundred',
+                                           lsn=lsn_a)
 
     # And another at the point where 200100 rows were inserted
-    pg_more = env.postgres.create_start("test_readonly_node_more",
-                                        branch=f'test_readonly_node@{lsn_b}')
+    pg_more = env.postgres.create_start(branch_name='test_readonly_node',
+                                        node_name='test_readonly_node_more',
+                                        lsn=lsn_b)
 
     # On the 'hundred' node, we should see only 100 rows
     hundred_pg_conn = pg_hundred.connect()
@@ -77,8 +78,9 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     assert main_cur.fetchone() == (400100, )
 
     # Check creating a node at segment boundary
-    pg = env.postgres.create_start("test_branch_segment_boundary",
-                                   branch="test_readonly_node@0/3000000")
+    pg = env.postgres.create_start(branch_name='test_readonly_node',
+                                   node_name='test_branch_segment_boundary',
+                                   lsn='0/3000000')
     cur = pg.connect().cursor()
     cur.execute('SELECT 1')
     assert cur.fetchone() == (1, )
@@ -86,5 +88,6 @@ def test_readonly_node(zenith_simple_env: ZenithEnv):
     # Create node at pre-initdb lsn
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
-        env.zenith_cli.pg_start("test_readonly_node_preinitdb",
-                                timeline_spec="test_readonly_node@0/42")
+        env.postgres.create_start(branch_name='test_readonly_node',
+                                  node_name='test_readonly_node_preinitdb',
+                                  lsn='0/42')

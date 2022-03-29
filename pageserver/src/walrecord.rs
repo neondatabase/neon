@@ -10,7 +10,47 @@ use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, Transacti
 use serde::{Deserialize, Serialize};
 use tracing::*;
 
-use crate::repository::ZenithWalRecord;
+/// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
+/// around a PostgreSQL WAL record, or a custom zenith-specific "record".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ZenithWalRecord {
+    /// Native PostgreSQL WAL record
+    Postgres { will_init: bool, rec: Bytes },
+
+    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
+    ClearVisibilityMapFlags {
+        new_heap_blkno: Option<u32>,
+        old_heap_blkno: Option<u32>,
+        flags: u8,
+    },
+    /// Mark transaction IDs as committed on a CLOG page
+    ClogSetCommitted { xids: Vec<TransactionId> },
+    /// Mark transaction IDs as aborted on a CLOG page
+    ClogSetAborted { xids: Vec<TransactionId> },
+    /// Extend multixact offsets SLRU
+    MultixactOffsetCreate {
+        mid: MultiXactId,
+        moff: MultiXactOffset,
+    },
+    /// Extend multixact members SLRU.
+    MultixactMembersCreate {
+        moff: MultiXactOffset,
+        members: Vec<MultiXactMember>,
+    },
+}
+
+impl ZenithWalRecord {
+    /// Does replaying this WAL record initialize the page from scratch, or does
+    /// it need to be applied over the previous image of the page?
+    pub fn will_init(&self) -> bool {
+        match self {
+            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+
+            // None of the special zenith record types currently initialize the page
+            _ => false,
+        }
+    }
+}
 
 /// DecodedBkpBlock represents per-page data contained in a WAL record.
 #[derive(Default)]
@@ -83,6 +123,28 @@ impl XlRelmapUpdate {
             dbid: buf.get_u32_le(),
             tsid: buf.get_u32_le(),
             nbytes: buf.get_i32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlSmgrCreate {
+    pub rnode: RelFileNode,
+    // FIXME: This is ForkNumber in storage_xlog.h. That's an enum. Does it have
+    // well-defined size?
+    pub forknum: u8,
+}
+
+impl XlSmgrCreate {
+    pub fn decode(buf: &mut Bytes) -> XlSmgrCreate {
+        XlSmgrCreate {
+            rnode: RelFileNode {
+                spcnode: buf.get_u32_le(), /* tablespace */
+                dbnode: buf.get_u32_le(),  /* database */
+                relnode: buf.get_u32_le(), /* relation */
+            },
+            forknum: buf.get_u32_le() as u8,
         }
     }
 }
@@ -268,12 +330,11 @@ impl XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
         // The record starts with time of commit/abort
         let xact_time = buf.get_i64_le();
-        let xinfo;
-        if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-            xinfo = buf.get_u32_le();
+        let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+            buf.get_u32_le()
         } else {
-            xinfo = 0;
-        }
+            0
+        };
         let db_id;
         let ts_id;
         if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
@@ -502,7 +563,6 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
             0..=pg_constants::XLR_MAX_BLOCK_ID => {
                 /* XLogRecordBlockHeader */
                 let mut blk = DecodedBkpBlock::new();
-                let fork_flags: u8;
 
                 if block_id <= max_block_id {
                     // TODO
@@ -515,7 +575,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
                 }
                 max_block_id = block_id;
 
-                fork_flags = buf.get_u8();
+                let fork_flags: u8 = buf.get_u8();
                 blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
                 blk.flags = fork_flags;
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;

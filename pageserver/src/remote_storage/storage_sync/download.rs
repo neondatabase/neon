@@ -1,29 +1,27 @@
 //! Timeline synchrnonization logic to put files from archives on remote storage into pageserver's local directory.
-//! Currently, tenant branch files are also downloaded, but this does not appear final.
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use anyhow::{ensure, Context};
-use futures::{stream::FuturesUnordered, StreamExt};
-use tokio::{fs, sync::RwLock};
+use tokio::fs;
 use tracing::{debug, error, trace, warn};
-use zenith_utils::{lsn::Lsn, zid::ZTenantId};
+use zenith_utils::zid::ZTenantId;
 
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::{metadata_path, TimelineMetadata},
     remote_storage::{
         storage_sync::{
-            compression, index::TimelineIndexEntry, sync_queue, tenant_branch_files,
-            update_index_description, SyncKind, SyncTask,
+            compression, fetch_full_index, index::TimelineIndexEntryInner, sync_queue, SyncKind,
+            SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
 };
 
 use super::{
-    index::{ArchiveId, RemoteTimeline, RemoteTimelineIndex},
-    TimelineDownload,
+    index::{ArchiveId, RemoteTimeline},
+    RemoteIndex, TimelineDownload,
 };
 
 /// Timeline download result, with extra data, needed for downloading.
@@ -32,17 +30,15 @@ pub(super) enum DownloadedTimeline {
     Abort,
     /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
     /// Initial download failed due to some error, the download task is rescheduled for another retry.
-    FailedAndRescheduled { disk_consistent_lsn: Lsn },
+    FailedAndRescheduled,
     /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
     /// Initial download successful.
-    Successful { disk_consistent_lsn: Lsn },
+    Successful,
 }
 
 /// Attempts to download and uncompress files from all remote archives for the timeline given.
 /// Timeline files that already exist locally are skipped during the download, but the local metadata file is
 /// updated in the end of every checkpoint archive extraction.
-///
-/// Before any archives are considered, the branch files are checked locally and remotely, all remote-only files are downloaded.
 ///
 /// On an error, bumps the retries count and reschedules the download, with updated archive skip list
 /// (for any new successful archive downloads and extractions).
@@ -51,7 +47,7 @@ pub(super) async fn download_timeline<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     conf: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     mut download: TimelineDownload,
     retries: u32,
@@ -62,19 +58,26 @@ pub(super) async fn download_timeline<
         tenant_id,
         timeline_id,
     } = sync_id;
-    let index_read = remote_assets.1.read().await;
+    let index = &remote_assets.1;
+
+    let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => {
-            error!("Cannot download: no timeline is present in the index for given ids");
+            error!("Cannot download: no timeline is present in the index for given id");
             return DownloadedTimeline::Abort;
         }
-        Some(index_entry) => match index_entry {
-            TimelineIndexEntry::Full(remote_timeline) => Cow::Borrowed(remote_timeline),
-            TimelineIndexEntry::Description(_) => {
+
+        Some(index_entry) => match index_entry.inner() {
+            TimelineIndexEntryInner::Full(remote_timeline) => Cow::Borrowed(remote_timeline),
+            TimelineIndexEntryInner::Description(_) => {
+                // we do not check here for awaits_download because it is ok
+                // to call this function while the download is in progress
+                // so it is not a concurrent download, it is the same one
+
                 let remote_disk_consistent_lsn = index_entry.disk_consistent_lsn();
                 drop(index_read);
                 debug!("Found timeline description for the given ids, downloading the full index");
-                match update_index_description(
+                match fetch_full_index(
                     remote_assets.as_ref(),
                     &conf.timeline_path(&timeline_id, &tenant_id),
                     sync_id,
@@ -84,16 +87,15 @@ pub(super) async fn download_timeline<
                     Ok(remote_timeline) => Cow::Owned(remote_timeline),
                     Err(e) => {
                         error!("Failed to download full timeline index: {:?}", e);
+
                         return match remote_disk_consistent_lsn {
-                            Some(disk_consistent_lsn) => {
+                            Some(_) => {
                                 sync_queue::push(SyncTask::new(
                                     sync_id,
                                     retries,
                                     SyncKind::Download(download),
                                 ));
-                                DownloadedTimeline::FailedAndRescheduled {
-                                    disk_consistent_lsn,
-                                }
+                                DownloadedTimeline::FailedAndRescheduled
                             }
                             None => {
                                 error!("Cannot download: no disk consistent Lsn is present for the index entry");
@@ -105,29 +107,10 @@ pub(super) async fn download_timeline<
             }
         },
     };
-    let disk_consistent_lsn = match remote_timeline.checkpoints().max() {
-        Some(lsn) => lsn,
-        None => {
-            debug!("Cannot download: no disk consistent Lsn is present for the remote timeline");
-            return DownloadedTimeline::Abort;
-        }
+    if remote_timeline.checkpoints().max().is_none() {
+        debug!("Cannot download: no disk consistent Lsn is present for the remote timeline");
+        return DownloadedTimeline::Abort;
     };
-
-    if let Err(e) = download_missing_branches(conf, remote_assets.as_ref(), sync_id.tenant_id).await
-    {
-        error!(
-            "Failed to download missing branches for sync id {}: {:?}",
-            sync_id, e
-        );
-        sync_queue::push(SyncTask::new(
-            sync_id,
-            retries,
-            SyncKind::Download(download),
-        ));
-        return DownloadedTimeline::FailedAndRescheduled {
-            disk_consistent_lsn,
-        };
-    }
 
     debug!("Downloading timeline archives");
     let archives_to_download = remote_timeline
@@ -145,7 +128,7 @@ pub(super) async fn download_timeline<
             conf,
             sync_id,
             Arc::clone(&remote_assets),
-            remote_timeline.as_ref(),
+            &remote_timeline,
             archive_id,
             Arc::clone(&download.files_to_skip),
         )
@@ -162,9 +145,7 @@ pub(super) async fn download_timeline<
                     retries,
                     SyncKind::Download(download),
                 ));
-                return DownloadedTimeline::FailedAndRescheduled {
-                    disk_consistent_lsn,
-                };
+                return DownloadedTimeline::FailedAndRescheduled;
             }
             Ok(()) => {
                 debug!("Successfully downloaded archive {:?}", archive_id);
@@ -174,9 +155,7 @@ pub(super) async fn download_timeline<
     }
 
     debug!("Finished downloading all timeline's archives");
-    DownloadedTimeline::Successful {
-        disk_consistent_lsn,
-    }
+    DownloadedTimeline::Successful
 }
 
 async fn try_download_archive<
@@ -188,7 +167,7 @@ async fn try_download_archive<
         tenant_id,
         timeline_id,
     }: ZTenantTimelineId,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     remote_timeline: &RemoteTimeline,
     archive_id: ArchiveId,
     files_to_skip: Arc<BTreeSet<PathBuf>>,
@@ -250,82 +229,6 @@ async fn read_local_metadata(
         .context("Failed to read local metadata files bytes")?)
 }
 
-async fn download_missing_branches<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    conf: &'static PageServerConf,
-    (storage, index): &(S, RwLock<RemoteTimelineIndex>),
-    tenant_id: ZTenantId,
-) -> anyhow::Result<()> {
-    let local_branches = tenant_branch_files(conf, tenant_id)
-        .await
-        .context("Failed to list local branch files for the tenant")?;
-    let local_branches_dir = conf.branches_path(&tenant_id);
-    if !local_branches_dir.exists() {
-        fs::create_dir_all(&local_branches_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to create local branches directory at path '{}'",
-                    local_branches_dir.display()
-                )
-            })?;
-    }
-
-    if let Some(remote_branches) = index.read().await.branch_files(tenant_id) {
-        let mut remote_only_branches_downloads = remote_branches
-            .difference(&local_branches)
-            .map(|remote_only_branch| async move {
-                let branches_dir = conf.branches_path(&tenant_id);
-                let remote_branch_path = remote_only_branch.as_path(&branches_dir);
-                let storage_path =
-                    storage.storage_path(&remote_branch_path).with_context(|| {
-                        format!(
-                            "Failed to derive a storage path for branch with local path '{}'",
-                            remote_branch_path.display()
-                        )
-                    })?;
-                let mut target_file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&remote_branch_path)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to create local branch file at '{}'",
-                            remote_branch_path.display()
-                        )
-                    })?;
-                storage
-                    .download(&storage_path, &mut target_file)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to download branch file from the remote path {:?}",
-                            storage_path
-                        )
-                    })?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        let mut branch_downloads_failed = false;
-        while let Some(download_result) = remote_only_branches_downloads.next().await {
-            if let Err(e) = download_result {
-                branch_downloads_failed = true;
-                error!("Failed to download a branch file: {:?}", e);
-            }
-        }
-        ensure!(
-            !branch_downloads_failed,
-            "Failed to download all branch files"
-        );
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -352,14 +255,14 @@ mod tests {
         let repo_harness = RepoHarness::create("test_download_timeline")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             storage
                 .list()
                 .await?
                 .into_iter()
                 .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-        ));
+        );
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;
         let index = &remote_assets.1;
@@ -409,7 +312,7 @@ mod tests {
         .await;
         assert_index_descriptions(
             index,
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+            &RemoteIndex::try_parse_descriptions_from_paths(
                 repo_harness.conf,
                 remote_assets
                     .0

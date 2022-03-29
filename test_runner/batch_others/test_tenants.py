@@ -10,27 +10,23 @@ def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_wal_acce
     if with_wal_acceptors:
         zenith_env_builder.num_safekeepers = 3
 
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
-    tenant_1 = env.create_tenant()
-    tenant_2 = env.create_tenant()
+    tenant_1 = env.zenith_cli.create_tenant()
+    tenant_2 = env.zenith_cli.create_tenant()
 
-    env.zenith_cli.create_branch(f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
-                                 "main",
-                                 tenant_id=tenant_1)
-    env.zenith_cli.create_branch(f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
-                                 "main",
-                                 tenant_id=tenant_2)
+    env.zenith_cli.create_timeline(
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}', tenant_id=tenant_1)
+    env.zenith_cli.create_timeline(
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}', tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
-        None,  # branch name, None means same as node name
-        tenant_1,
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}',
+        tenant_id=tenant_1,
     )
     pg_tenant2 = env.postgres.create_start(
-        f"test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}",
-        None,  # branch name, None means same as node name
-        tenant_2,
+        f'test_tenants_normal_work_with_wal_acceptors{with_wal_acceptors}',
+        tenant_id=tenant_2,
     )
 
     for pg in [pg_tenant1, pg_tenant2]:

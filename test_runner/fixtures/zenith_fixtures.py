@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
 import textwrap
 from cached_property import cached_property
 import asyncpg
@@ -27,13 +27,13 @@ from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
-import pytest
 
 import requests
+import backoff  # type: ignore
 
-from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
+from .utils import (etcd_path, get_self_dir, mkdir_if_needed, subprocess_capture, lsn_from_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -57,6 +57,7 @@ Fn = TypeVar('Fn', bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = 'test_output'
 DEFAULT_POSTGRES_DIR = 'tmp_install'
+DEFAULT_BRANCH_NAME = 'main'
 
 BASE_PORT = 15000
 WORKER_PORT_NUM = 100
@@ -218,7 +219,7 @@ def can_bind(host: str, port: int) -> bool:
 
 
 class PortDistributor:
-    def __init__(self, base_port: int, port_number: int) -> None:
+    def __init__(self, base_port: int, port_number: int):
         self.iterator = iter(range(base_port, base_port + port_number))
 
     def get_port(self) -> int:
@@ -237,21 +238,35 @@ def port_distributor(worker_base_port):
 
 class PgProtocol:
     """ Reusable connection logic """
-    def __init__(self, host: str, port: int, username: Optional[str] = None):
+    def __init__(self,
+                 host: str,
+                 port: int,
+                 username: Optional[str] = None,
+                 password: Optional[str] = None,
+                 dbname: Optional[str] = None,
+                 schema: Optional[str] = None):
         self.host = host
         self.port = port
         self.username = username
+        self.password = password
+        self.dbname = dbname
+        self.schema = schema
 
     def connstr(self,
                 *,
-                dbname: str = 'postgres',
+                dbname: Optional[str] = None,
+                schema: Optional[str] = None,
                 username: Optional[str] = None,
-                password: Optional[str] = None) -> str:
+                password: Optional[str] = None,
+                statement_timeout_ms: Optional[int] = None) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
 
         username = username or self.username
+        password = password or self.password
+        dbname = dbname or self.dbname or "postgres"
+        schema = schema or self.schema
         res = f'host={self.host} port={self.port} dbname={dbname}'
 
         if username:
@@ -260,26 +275,39 @@ class PgProtocol:
         if password:
             res = f'{res} password={password}'
 
+        if schema:
+            res = f"{res} options='-c search_path={schema}'"
+
+        if statement_timeout_ms:
+            res = f"{res} options='-c statement_timeout={statement_timeout_ms}'"
+
         return res
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self,
-                *,
-                autocommit=True,
-                dbname: str = 'postgres',
-                username: Optional[str] = None,
-                password: Optional[str] = None) -> PgConnection:
+    def connect(
+        self,
+        *,
+        autocommit=True,
+        dbname: Optional[str] = None,
+        schema: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        # individual statement timeout in seconds, 2 minutes should be enough for our tests
+        statement_timeout: Optional[int] = 120
+    ) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
 
-        conn = psycopg2.connect(self.connstr(
-            dbname=dbname,
-            username=username,
-            password=password,
-        ))
+        conn = psycopg2.connect(
+            self.connstr(dbname=dbname,
+                         schema=schema,
+                         username=username,
+                         password=password,
+                         statement_timeout_ms=statement_timeout *
+                         1000 if statement_timeout else None))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
@@ -401,15 +429,21 @@ class ZenithEnvBuilder:
                  repo_dir: Path,
                  port_distributor: PortDistributor,
                  pageserver_remote_storage: Optional[RemoteStorage] = None,
+                 pageserver_config_override: Optional[str] = None,
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
-                 rust_log_override: Optional[str] = None):
+                 rust_log_override: Optional[str] = None,
+                 default_branch_name=DEFAULT_BRANCH_NAME,
+                 broker: bool = False):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.pageserver_remote_storage = pageserver_remote_storage
+        self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
+        self.default_branch_name = default_branch_name
+        self.broker = broker
         self.env: Optional[ZenithEnv] = None
 
         self.s3_mock_server: Optional[MockS3Server] = None
@@ -424,6 +458,14 @@ class ZenithEnvBuilder:
         assert self.env is None, "environment already initialized"
         self.env = ZenithEnv(self)
         return self.env
+
+    def start(self):
+        self.env.start()
+
+    def init_start(self) -> ZenithEnv:
+        env = self.init()
+        self.start()
+        return env
 
     """
     Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.
@@ -477,6 +519,8 @@ class ZenithEnvBuilder:
             self.env.pageserver.stop(immediate=True)
             if self.s3_mock_server:
                 self.s3_mock_server.kill()
+            if self.env.broker is not None:
+                self.env.broker.stop()
 
 
 class ZenithEnv:
@@ -506,7 +550,7 @@ class ZenithEnv:
 
     initial_tenant - tenant ID of the initial tenant created in the repository
 
-    zenith_cli() - zenith_cli() can be used to run the 'zenith' CLI tool
+    zenith_cli - can be used to run the 'zenith' CLI tool
 
     create_tenant() - initializes a new tenant in the page server, returns
         the tenant id
@@ -517,9 +561,7 @@ class ZenithEnv:
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.s3_mock_server
         self.zenith_cli = ZenithCli(env=self)
-
         self.postgres = PostgresFactory(self)
-
         self.safekeepers: List[Safekeeper] = []
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
@@ -528,7 +570,17 @@ class ZenithEnv:
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(f"""
-            default_tenantid = '{self.initial_tenant.hex}'
+            default_tenant_id = '{self.initial_tenant.hex}'
+        """)
+
+        self.broker = None
+        if config.broker:
+            # keep etcd datadir inside 'repo'
+            self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
+                               port=self.port_distributor.get_port(),
+                               peer_port=self.port_distributor.get_port())
+            toml += textwrap.dedent(f"""
+            broker_endpoints = 'http://127.0.0.1:{self.broker.port}'
         """)
 
         # Create config for pageserver
@@ -540,6 +592,7 @@ class ZenithEnv:
 
         toml += textwrap.dedent(f"""
             [pageserver]
+            id=1
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
             auth_type = '{pageserver_auth_type}'
@@ -548,7 +601,8 @@ class ZenithEnv:
         # Create a corresponding ZenithPageserver object
         self.pageserver = ZenithPageserver(self,
                                            port=pageserver_port,
-                                           remote_storage=config.pageserver_remote_storage)
+                                           remote_storage=config.pageserver_remote_storage,
+                                           config_override=config.pageserver_config_override)
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -556,40 +610,33 @@ class ZenithEnv:
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-
-            if config.num_safekeepers == 1:
-                name = "single"
-            else:
-                name = f"sk{i}"
-            toml += f"""
-[[safekeepers]]
-name = '{name}'
-pg_port = {port.pg}
-http_port = {port.http}
-sync = false # Disable fsyncs to make the tests go faster
-            """
-            safekeeper = Safekeeper(env=self, name=name, port=port)
+            id = i  # assign ids sequentially
+            toml += textwrap.dedent(f"""
+                [[safekeepers]]
+                id = {id}
+                pg_port = {port.pg}
+                http_port = {port.http}
+                sync = false # Disable fsyncs to make the tests go faster
+            """)
+            safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
-
         self.zenith_cli.init(toml)
 
-        # Start up the page server and all the safekeepers
+    def start(self):
+        # Start up the page server, all the safekeepers and the broker
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
             safekeeper.start()
 
+        if self.broker is not None:
+            self.broker.start()
+
     def get_safekeeper_connstrs(self) -> str:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
-
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
-        if tenant_id is None:
-            tenant_id = uuid.uuid4()
-        self.zenith_cli.create_tenant(tenant_id)
-        return tenant_id
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -614,13 +661,11 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
-
-        env = builder.init()
+        env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.zenith_cli.create_branch("empty", "main")
+        env.zenith_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
 
-        # Return the builder to the caller
         yield env
 
 
@@ -649,7 +694,7 @@ def zenith_env_builder(test_output_dir, port_distributor) -> Iterator[ZenithEnvB
     To use, define 'zenith_env_builder' fixture in your test to get access to the
     builder object. Set properties on it to describe the environment.
     Finally, initialize and start up the environment by calling
-    zenith_env_builder.init().
+    zenith_env_builder.init_start().
 
     After the initialization, you can launch compute nodes by calling
     the functions in the 'env.postgres' factory object, stop/start the
@@ -669,7 +714,7 @@ class ZenithPageserverApiException(Exception):
 
 
 class ZenithPageserverHttpClient(requests.Session):
-    def __init__(self, port: int, auth_token: Optional[str] = None) -> None:
+    def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
@@ -692,38 +737,36 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def timeline_attach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/attach", )
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/attach",
+        )
         self.verbose_error(res)
 
     def timeline_detach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
         res = self.post(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}/detach", )
-        self.verbose_error(res)
-
-    def branch_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def branch_create(self, tenant_id: uuid.UUID, name: str, start_point: str) -> Dict[Any, Any]:
-        res = self.post(f"http://localhost:{self.port}/v1/branch",
-                        json={
-                            'tenant_id': tenant_id.hex,
-                            'name': name,
-                            'start_point': start_point,
-                        })
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def branch_detail(self, tenant_id: uuid.UUID, name: str) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/branch/{tenant_id.hex}/{name}?include-non-incremental-logical-size=1",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/detach",
         )
         self.verbose_error(res)
+
+    def timeline_create(
+        self,
+        tenant_id: uuid.UUID,
+        new_timeline_id: Optional[uuid.UUID] = None,
+        ancestor_timeline_id: Optional[uuid.UUID] = None,
+        ancestor_start_lsn: Optional[str] = None,
+    ) -> Dict[Any, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline",
+                        json={
+                            'new_timeline_id':
+                            new_timeline_id.hex if new_timeline_id else None,
+                            'ancestor_start_lsn':
+                            ancestor_start_lsn,
+                            'ancestor_timeline_id':
+                            ancestor_timeline_id.hex if ancestor_timeline_id else None,
+                        })
+        self.verbose_error(res)
+        if res.status_code == 409:
+            raise Exception(f'could not create timeline: already exists for id {new_timeline_id}')
+
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
@@ -735,18 +778,22 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, tenant_id: uuid.UUID):
+    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                'tenant_id': tenant_id.hex,
+                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
             },
         )
         self.verbose_error(res)
-        return res.json()
+        if res.status_code == 409:
+            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
+        new_tenant_id = res.json()
+        assert isinstance(new_tenant_id, str)
+        return uuid.UUID(new_tenant_id)
 
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[str]:
-        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}")
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -754,7 +801,8 @@ class ZenithPageserverHttpClient(requests.Session):
 
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
-            f"http://localhost:{self.port}/v1/timeline/{tenant_id.hex}/{timeline_id.hex}")
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -788,56 +836,154 @@ class S3Storage:
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
 
+CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                          re.MULTILINE)
+CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
+                                          re.MULTILINE)
+TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]",
+                                     re.MULTILINE)
+
 
 class ZenithCli:
     """
     A typed wrapper around the `zenith` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
-    def __init__(self, env: ZenithEnv) -> None:
+    def __init__(self, env: ZenithEnv):
         self.env = env
         pass
 
     def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+        """
+        Creates a new tenant, returns its id and its initial timeline's id.
+        """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
-        self.raw_cli(['tenant', 'create', tenant_id.hex])
+        res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        res.check_returncode()
         return tenant_id
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['tenant', 'list'])
+        res = self.raw_cli(['tenant', 'list'])
+        res.check_returncode()
+        return res
+
+    def create_timeline(self,
+                        new_branch_name: str,
+                        tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+        cmd = [
+            'timeline',
+            'create',
+            '--branch-name',
+            new_branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        return uuid.UUID(created_timeline_id)
+
+    def create_root_branch(self, branch_name: str, tenant_id: Optional[uuid.UUID] = None):
+        cmd = [
+            'timeline',
+            'create',
+            '--branch-name',
+            branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
 
     def create_branch(self,
-                      branch_name: str,
-                      starting_point: str,
-                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
-        args = ['branch']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
-        args.extend([branch_name, starting_point])
+                      new_branch_name: str = DEFAULT_BRANCH_NAME,
+                      ancestor_branch_name: Optional[str] = None,
+                      tenant_id: Optional[uuid.UUID] = None,
+                      ancestor_start_lsn: Optional[str] = None) -> uuid.UUID:
+        cmd = [
+            'timeline',
+            'branch',
+            '--branch-name',
+            new_branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+        if ancestor_branch_name is not None:
+            cmd.extend(['--ancestor-branch-name', ancestor_branch_name])
+        if ancestor_start_lsn is not None:
+            cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
 
-        return self.raw_cli(args)
+        res = self.raw_cli(cmd)
+        res.check_returncode()
 
-    def list_branches(self,
-                      tenant_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
-        args = ['branch']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
-        return self.raw_cli(args)
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
 
-    def init(self, config_toml: str) -> 'subprocess.CompletedProcess[str]':
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
+
+    def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[Tuple[str, str]]:
+        """
+        Returns a list of (branch_name, timeline_id) tuples out of parsed `zenith timeline list` CLI output.
+        """
+
+        # (L) main [b49f7954224a0ad25cc0013ea107b54b]
+        # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        res = self.raw_cli(
+            ['timeline', 'list', '--tenant-id', (tenant_id or self.env.initial_tenant).hex])
+        timelines_cli = sorted(
+            map(lambda branch_and_id: (branch_and_id[0], branch_and_id[1]),
+                TIMELINE_DATA_EXTRACTOR.findall(res.stdout)))
+        return timelines_cli
+
+    def init(self,
+             config_toml: str,
+             initial_timeline_id: Optional[uuid.UUID] = None) -> 'subprocess.CompletedProcess[str]':
         with tempfile.NamedTemporaryFile(mode='w+') as tmp:
             tmp.write(config_toml)
             tmp.flush()
 
             cmd = ['init', f'--config={tmp.name}']
-            append_pageserver_param_overrides(cmd, self.env.pageserver.remote_storage)
+            if initial_timeline_id:
+                cmd.extend(['--timeline-id', initial_timeline_id.hex])
+            append_pageserver_param_overrides(cmd,
+                                              self.env.pageserver.remote_storage,
+                                              self.env.pageserver.config_override)
 
-            return self.raw_cli(cmd)
+            res = self.raw_cli(cmd)
+            res.check_returncode()
+            return res
 
-    def pageserver_start(self) -> 'subprocess.CompletedProcess[str]':
-        start_args = ['pageserver', 'start']
-        append_pageserver_param_overrides(start_args, self.env.pageserver.remote_storage)
+    def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
+        start_args = ['pageserver', 'start', *overrides]
+        append_pageserver_param_overrides(start_args,
+                                          self.env.pageserver.remote_storage,
+                                          self.env.pageserver.config_override)
         return self.raw_cli(start_args)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
@@ -848,53 +994,69 @@ class ZenithCli:
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
-    def safekeeper_start(self, name: str) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['safekeeper', 'start', name])
+    def safekeeper_start(self, id: int) -> 'subprocess.CompletedProcess[str]':
+        return self.raw_cli(['safekeeper', 'start', str(id)])
 
     def safekeeper_stop(self,
-                        name: Optional[str] = None,
+                        id: Optional[int] = None,
                         immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
+        if id is not None:
+            args.extend(str(id))
         if immediate:
             args.extend(['-m', 'immediate'])
-        if name is not None:
-            args.append(name)
         return self.raw_cli(args)
 
     def pg_create(
         self,
-        node_name: str,
+        branch_name: str,
+        node_name: Optional[str] = None,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_spec: Optional[str] = None,
+        lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'create']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = [
+            'pg',
+            'create',
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+            '--branch-name',
+            branch_name,
+        ]
+        if lsn is not None:
+            args.extend(['--lsn', lsn])
         if port is not None:
-            args.append(f'--port={port}')
-        args.append(node_name)
-        if timeline_spec is not None:
-            args.append(timeline_spec)
-        return self.raw_cli(args)
+            args.extend(['--port', str(port)])
+        if node_name is not None:
+            args.append(node_name)
+
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def pg_start(
         self,
         node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
-        timeline_spec: Optional[str] = None,
+        lsn: Optional[str] = None,
         port: Optional[int] = None,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'start']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = [
+            'pg',
+            'start',
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+        if lsn is not None:
+            args.append(f'--lsn={lsn}')
         if port is not None:
             args.append(f'--port={port}')
-        args.append(node_name)
-        if timeline_spec is not None:
-            args.append(timeline_spec)
+        if node_name is not None:
+            args.append(node_name)
 
-        return self.raw_cli(args)
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def pg_stop(
         self,
@@ -902,12 +1064,16 @@ class ZenithCli:
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
     ) -> 'subprocess.CompletedProcess[str]':
-        args = ['pg', 'stop']
-        if tenant_id is not None:
-            args.extend(['--tenantid', tenant_id.hex])
+        args = [
+            'pg',
+            'stop',
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
         if destroy:
             args.append('--destroy')
-        args.append(node_name)
+        if node_name is not None:
+            args.append(node_name)
 
         return self.raw_cli(args)
 
@@ -982,21 +1148,23 @@ class ZenithPageserver(PgProtocol):
                  env: ZenithEnv,
                  port: PageserverPort,
                  remote_storage: Optional[RemoteStorage] = None,
-                 enable_auth=False):
+                 config_override: Optional[str] = None):
         super().__init__(host='localhost', port=port.pg, username='zenith_admin')
         self.env = env
         self.running = False
         self.service_port = port  # do not shadow PgProtocol.port which is just int
         self.remote_storage = remote_storage
+        self.config_override = config_override
 
-    def start(self) -> 'ZenithPageserver':
+    def start(self, overrides=()) -> 'ZenithPageserver':
         """
         Start the page server.
+        `overrides` allows to add some config to this pageserver start.
         Returns self.
         """
         assert self.running == False
 
-        self.env.zenith_cli.pageserver_start()
+        self.env.zenith_cli.pageserver_start(overrides=overrides)
         self.running = True
         return self
 
@@ -1008,7 +1176,6 @@ class ZenithPageserver(PgProtocol):
         if self.running:
             self.env.zenith_cli.pageserver_stop(immediate)
             self.running = False
-
         return self
 
     def __enter__(self):
@@ -1024,8 +1191,11 @@ class ZenithPageserver(PgProtocol):
         )
 
 
-def append_pageserver_param_overrides(params_to_update: List[str],
-                                      pageserver_remote_storage: Optional[RemoteStorage]):
+def append_pageserver_param_overrides(
+    params_to_update: List[str],
+    pageserver_remote_storage: Optional[RemoteStorage],
+    pageserver_config_override: Optional[str] = None,
+):
     if pageserver_remote_storage is not None:
         if isinstance(pageserver_remote_storage, LocalFsStorage):
             pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"
@@ -1051,6 +1221,12 @@ def append_pageserver_param_overrides(params_to_update: List[str],
             f'--pageserver-config-override={o.strip()}' for o in env_overrides.split(';')
         ]
 
+    if pageserver_config_override is not None:
+        params_to_update += [
+            f'--pageserver-config-override={o.strip()}'
+            for o in pageserver_config_override.split(';')
+        ]
+
 
 class PgBin:
     """ A helper class for executing postgres binaries """
@@ -1060,7 +1236,7 @@ class PgBin:
         self.env = os.environ.copy()
         self.env['LD_LIBRARY_PATH'] = os.path.join(str(pg_distrib_dir), 'lib')
 
-    def _fixpath(self, command: List[str]) -> None:
+    def _fixpath(self, command: List[str]):
         if '/' not in command[0]:
             command[0] = os.path.join(self.pg_bin_path, command[0])
 
@@ -1071,7 +1247,7 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None) -> None:
+    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None):
         """
         Run one of the postgres binaries.
 
@@ -1121,18 +1297,18 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
-    def configure(self, options: List[str]) -> None:
+    def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
             conf_file.writelines(options)
 
-    def start(self) -> None:
+    def start(self):
         assert not self.running
         self.running = True
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
 
-    def stop(self) -> None:
+    def stop(self):
         assert self.running
         self.running = False
         self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
@@ -1157,6 +1333,50 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
         yield vanilla_pg
 
 
+class ZenithProxy(PgProtocol):
+    def __init__(self, port: int):
+        super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
+        self.http_port = 7001
+        self._popen: Optional[subprocess.Popen[bytes]] = None
+
+    def start_static(self, addr="127.0.0.1:5432") -> None:
+        assert self._popen is None
+
+        # Start proxy
+        bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
+        args = [bin_proxy]
+        args.extend(["--http", f"{self.host}:{self.http_port}"])
+        args.extend(["--proxy", f"{self.host}:{self.port}"])
+        args.extend(["--auth-method", "password"])
+        args.extend(["--static-router", addr])
+        self._popen = subprocess.Popen(args)
+        self._wait_until_ready()
+
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        requests.get(f"http://{self.host}:{self.http_port}/v1/status")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._popen is not None:
+            # NOTE the process will die when we're done with tests anyway, because
+            # it's a child process. This is mostly to clean up in between different tests.
+            self._popen.kill()
+
+
+@pytest.fixture(scope='function')
+def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
+    """Zenith proxy that routes directly to vanilla postgres."""
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+
+    with ZenithProxy(4432) as proxy:
+        proxy.start_static()
+        yield proxy
+
+
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
@@ -1171,8 +1391,9 @@ class Postgres(PgProtocol):
 
     def create(
         self,
-        node_name: str,
-        branch: Optional[str] = None,
+        branch_name: str,
+        node_name: Optional[str] = None,
+        lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
@@ -1183,19 +1404,21 @@ class Postgres(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        if branch is None:
-            branch = node_name
-
-        self.env.zenith_cli.pg_create(node_name,
+        self.node_name = node_name or f'{branch_name}_pg_node'
+        self.env.zenith_cli.pg_create(branch_name,
+                                      node_name=self.node_name,
                                       tenant_id=self.tenant_id,
-                                      port=self.port,
-                                      timeline_spec=branch)
-        self.node_name = node_name
+                                      lsn=lsn,
+                                      port=self.port)
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
             config_lines = []
+
+        # set small 'max_replication_write_lag' to enable backpressure
+        # and make tests more stable.
+        config_lines = ['max_replication_write_lag=15MB'] + config_lines
         self.config(config_lines)
 
         return self
@@ -1282,7 +1505,7 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.zenith_cli.pg_stop(self.node_name, tenant_id=self.tenant_id)
+            self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id)
             self.running = False
 
         return self
@@ -1294,15 +1517,16 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, destroy=True)
+        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
 
         return self
 
     def create_start(
         self,
-        node_name: str,
-        branch: Optional[str] = None,
+        branch_name: str,
+        node_name: Optional[str] = None,
+        lsn: Optional[str] = None,
         config_lines: Optional[List[str]] = None,
     ) -> 'Postgres':
         """
@@ -1312,9 +1536,10 @@ class Postgres(PgProtocol):
         """
 
         self.create(
+            branch_name=branch_name,
             node_name=node_name,
-            branch=branch,
             config_lines=config_lines,
+            lsn=lsn,
         ).start()
 
         return self
@@ -1334,9 +1559,10 @@ class PostgresFactory:
         self.instances: List[Postgres] = []
 
     def create_start(self,
-                     node_name: str = "main",
-                     branch: Optional[str] = None,
+                     branch_name: str,
+                     node_name: Optional[str] = None,
                      tenant_id: Optional[uuid.UUID] = None,
+                     lsn: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1348,15 +1574,17 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create_start(
+            branch_name=branch_name,
             node_name=node_name,
-            branch=branch,
             config_lines=config_lines,
+            lsn=lsn,
         )
 
     def create(self,
-               node_name: str = "main",
-               branch: Optional[str] = None,
+               branch_name: str,
+               node_name: Optional[str] = None,
                tenant_id: Optional[uuid.UUID] = None,
+               lsn: Optional[str] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
 
         pg = Postgres(
@@ -1369,8 +1597,9 @@ class PostgresFactory:
         self.instances.append(pg)
 
         return pg.create(
+            branch_name=branch_name,
             node_name=node_name,
-            branch=branch,
+            lsn=lsn,
             config_lines=config_lines,
         )
 
@@ -1397,12 +1626,14 @@ class Safekeeper:
     """ An object representing a running safekeeper daemon. """
     env: ZenithEnv
     port: SafekeeperPort
-    name: str  # identifier for logging
+    id: int
     auth_token: Optional[str] = None
+    running: bool = False
 
     def start(self) -> 'Safekeeper':
-        self.env.zenith_cli.safekeeper_start(self.name)
-
+        assert self.running == False
+        self.env.zenith_cli.safekeeper_start(self.id)
+        self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()
         while True:
@@ -1420,8 +1651,9 @@ class Safekeeper:
         return self
 
     def stop(self, immediate=False) -> 'Safekeeper':
-        log.info('Stopping safekeeper {}'.format(self.name))
-        self.env.zenith_cli.safekeeper_stop(self.name, immediate)
+        log.info('Stopping safekeeper {}'.format(self.id))
+        self.env.zenith_cli.safekeeper_stop(self.id, immediate)
+        self.running = False
         return self
 
     def append_logical_message(self,
@@ -1459,6 +1691,7 @@ class Safekeeper:
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
+    remote_consistent_lsn: str
 
 
 @dataclass
@@ -1470,7 +1703,7 @@ class SafekeeperMetrics:
 
 
 class SafekeeperHttpClient(requests.Session):
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int):
         super().__init__()
         self.port = port
 
@@ -1482,7 +1715,8 @@ class SafekeeperHttpClient(requests.Session):
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
-                                        flush_lsn=resj['flush_lsn'])
+                                        flush_lsn=resj['flush_lsn'],
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
@@ -1501,6 +1735,54 @@ class SafekeeperHttpClient(requests.Session):
                 re.MULTILINE):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
+
+
+@dataclass
+class Etcd:
+    """ An object managing etcd instance """
+    datadir: str
+    port: int
+    peer_port: int
+    handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def check_status(self):
+        s = requests.Session()
+        s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
+        s.get(f"http://localhost:{self.port}/health").raise_for_status()
+
+    def start(self):
+        pathlib.Path(self.datadir).mkdir(exist_ok=True)
+        etcd_full_path = etcd_path()
+        if etcd_full_path is None:
+            raise Exception('etcd not found')
+
+        with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
+            args = [
+                etcd_full_path,
+                f"--data-dir={self.datadir}",
+                f"--listen-client-urls=http://localhost:{self.port}",
+                f"--advertise-client-urls=http://localhost:{self.port}",
+                f"--listen-peer-urls=http://localhost:{self.peer_port}"
+            ]
+            self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
+
+        # wait for start
+        started_at = time.time()
+        while True:
+            try:
+                self.check_status()
+            except Exception as e:
+                elapsed = time.time() - started_at
+                if elapsed > 5:
+                    raise RuntimeError(f"timed out waiting {elapsed:.0f}s for etcd start: {e}")
+                time.sleep(0.5)
+            else:
+                break  # success
+
+    def stop(self):
+        if self.handle is not None:
+            self.handle.terminate()
+            self.handle.wait()
 
 
 def get_test_output_dir(request: Any) -> str:
@@ -1588,7 +1870,7 @@ def list_files_to_compare(pgdata_dir: str):
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Postgres):
 
-    # Get the timeline ID of our branch. We need it for the 'basebackup' command
+    # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW zenith.zenith_timeline")
@@ -1656,3 +1938,63 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
+
+
+def wait_for(number_of_iterations: int, interval: int, func):
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
+                 tenant: uuid.UUID,
+                 timeline: uuid.UUID):
+    timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
+    assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
+    return timeline_detail
+
+
+def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['remote']['remote_consistent_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
+
+
+def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID,
+                    lsn: int):
+    """waits for local timeline upload up to specified lsn"""
+
+    wait_for(10, 1, lambda: remote_consistent_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+
+
+def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['local']['last_record_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
+
+
+def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                             tenant: uuid.UUID,
+                             timeline: uuid.UUID,
+                             lsn: int):
+    """waits for pageserver to catch up to a certain lsn"""
+
+    wait_for(10, 1, lambda: last_record_lsn(pageserver_http_client, tenant, timeline) >= lsn)

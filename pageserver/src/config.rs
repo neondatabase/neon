@@ -8,7 +8,7 @@ use anyhow::{bail, ensure, Context, Result};
 use toml_edit;
 use toml_edit::{Document, Item};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
 use std::convert::TryInto;
 use std::env;
@@ -31,13 +31,17 @@ pub mod defaults {
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-    pub const DEFAULT_CHECKPOINT_PERIOD: &str = "1 s";
+
+    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
 
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
+
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 100;
+    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 10;
     pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
@@ -54,10 +58,13 @@ pub mod defaults {
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
-#checkpoint_period = '{DEFAULT_CHECKPOINT_PERIOD}'
+#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
+
+#wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
+#wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
 #max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
 
@@ -72,6 +79,10 @@ pub mod defaults {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageServerConf {
+    // Identifier of that particular pageserver so e g safekeepers
+    // can safely distinguish different pageservers
+    pub id: ZNodeId,
+
     /// Example (default): 127.0.0.1:64000
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
@@ -81,10 +92,18 @@ pub struct PageServerConf {
     // This puts a backstop on how much WAL needs to be re-digested if the
     // page server crashes.
     pub checkpoint_distance: u64,
-    pub checkpoint_period: Duration,
+
+    // How often to check if there's compaction work to be done.
+    pub compaction_period: Duration,
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
+
+    // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
+    pub wait_lsn_timeout: Duration,
+    // How long to wait for WAL redo to complete.
+    pub wal_redo_timeout: Duration,
+
     pub superuser: String,
 
     pub page_cache_size: usize,
@@ -106,6 +125,207 @@ pub struct PageServerConf {
     pub remote_storage_config: Option<RemoteStorageConfig>,
 }
 
+// use dedicated enum for builder to better indicate the intention
+// and avoid possible confusion with nested options
+pub enum BuilderValue<T> {
+    Set(T),
+    NotSet,
+}
+
+impl<T> BuilderValue<T> {
+    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
+        match self {
+            Self::Set(v) => Ok(v),
+            Self::NotSet => Err(err),
+        }
+    }
+}
+
+// needed to simplify config construction
+struct PageServerConfigBuilder {
+    listen_pg_addr: BuilderValue<String>,
+
+    listen_http_addr: BuilderValue<String>,
+
+    checkpoint_distance: BuilderValue<u64>,
+
+    compaction_period: BuilderValue<Duration>,
+
+    gc_horizon: BuilderValue<u64>,
+    gc_period: BuilderValue<Duration>,
+
+    wait_lsn_timeout: BuilderValue<Duration>,
+    wal_redo_timeout: BuilderValue<Duration>,
+
+    superuser: BuilderValue<String>,
+
+    page_cache_size: BuilderValue<usize>,
+    max_file_descriptors: BuilderValue<usize>,
+
+    workdir: BuilderValue<PathBuf>,
+
+    pg_distrib_dir: BuilderValue<PathBuf>,
+
+    auth_type: BuilderValue<AuthType>,
+
+    //
+    auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
+    remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
+
+    id: BuilderValue<ZNodeId>,
+}
+
+impl Default for PageServerConfigBuilder {
+    fn default() -> Self {
+        use self::BuilderValue::*;
+        use defaults::*;
+        Self {
+            listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
+            listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            checkpoint_distance: Set(DEFAULT_CHECKPOINT_DISTANCE),
+            compaction_period: Set(humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
+                .expect("cannot parse default compaction period")),
+            gc_horizon: Set(DEFAULT_GC_HORIZON),
+            gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
+                .expect("cannot parse default gc period")),
+            wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
+                .expect("cannot parse default wait lsn timeout")),
+            wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
+                .expect("cannot parse default wal redo timeout")),
+            superuser: Set(DEFAULT_SUPERUSER.to_string()),
+            page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
+            max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
+            workdir: Set(PathBuf::new()),
+            pg_distrib_dir: Set(env::current_dir()
+                .expect("cannot access current directory")
+                .join("tmp_install")),
+            auth_type: Set(AuthType::Trust),
+            auth_validation_public_key_path: Set(None),
+            remote_storage_config: Set(None),
+            id: NotSet,
+        }
+    }
+}
+
+impl PageServerConfigBuilder {
+    pub fn listen_pg_addr(&mut self, listen_pg_addr: String) {
+        self.listen_pg_addr = BuilderValue::Set(listen_pg_addr)
+    }
+
+    pub fn listen_http_addr(&mut self, listen_http_addr: String) {
+        self.listen_http_addr = BuilderValue::Set(listen_http_addr)
+    }
+
+    pub fn checkpoint_distance(&mut self, checkpoint_distance: u64) {
+        self.checkpoint_distance = BuilderValue::Set(checkpoint_distance)
+    }
+
+    pub fn compaction_period(&mut self, compaction_period: Duration) {
+        self.compaction_period = BuilderValue::Set(compaction_period)
+    }
+
+    pub fn gc_horizon(&mut self, gc_horizon: u64) {
+        self.gc_horizon = BuilderValue::Set(gc_horizon)
+    }
+
+    pub fn gc_period(&mut self, gc_period: Duration) {
+        self.gc_period = BuilderValue::Set(gc_period)
+    }
+
+    pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
+        self.wait_lsn_timeout = BuilderValue::Set(wait_lsn_timeout)
+    }
+
+    pub fn wal_redo_timeout(&mut self, wal_redo_timeout: Duration) {
+        self.wal_redo_timeout = BuilderValue::Set(wal_redo_timeout)
+    }
+
+    pub fn superuser(&mut self, superuser: String) {
+        self.superuser = BuilderValue::Set(superuser)
+    }
+
+    pub fn page_cache_size(&mut self, page_cache_size: usize) {
+        self.page_cache_size = BuilderValue::Set(page_cache_size)
+    }
+
+    pub fn max_file_descriptors(&mut self, max_file_descriptors: usize) {
+        self.max_file_descriptors = BuilderValue::Set(max_file_descriptors)
+    }
+
+    pub fn workdir(&mut self, workdir: PathBuf) {
+        self.workdir = BuilderValue::Set(workdir)
+    }
+
+    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: PathBuf) {
+        self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
+    }
+
+    pub fn auth_type(&mut self, auth_type: AuthType) {
+        self.auth_type = BuilderValue::Set(auth_type)
+    }
+
+    pub fn auth_validation_public_key_path(
+        &mut self,
+        auth_validation_public_key_path: Option<PathBuf>,
+    ) {
+        self.auth_validation_public_key_path = BuilderValue::Set(auth_validation_public_key_path)
+    }
+
+    pub fn remote_storage_config(&mut self, remote_storage_config: Option<RemoteStorageConfig>) {
+        self.remote_storage_config = BuilderValue::Set(remote_storage_config)
+    }
+
+    pub fn id(&mut self, node_id: ZNodeId) {
+        self.id = BuilderValue::Set(node_id)
+    }
+
+    pub fn build(self) -> Result<PageServerConf> {
+        Ok(PageServerConf {
+            listen_pg_addr: self
+                .listen_pg_addr
+                .ok_or(anyhow::anyhow!("missing listen_pg_addr"))?,
+            listen_http_addr: self
+                .listen_http_addr
+                .ok_or(anyhow::anyhow!("missing listen_http_addr"))?,
+            checkpoint_distance: self
+                .checkpoint_distance
+                .ok_or(anyhow::anyhow!("missing checkpoint_distance"))?,
+            compaction_period: self
+                .compaction_period
+                .ok_or(anyhow::anyhow!("missing compaction_period"))?,
+            gc_horizon: self
+                .gc_horizon
+                .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
+            gc_period: self.gc_period.ok_or(anyhow::anyhow!("missing gc_period"))?,
+            wait_lsn_timeout: self
+                .wait_lsn_timeout
+                .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,
+            wal_redo_timeout: self
+                .wal_redo_timeout
+                .ok_or(anyhow::anyhow!("missing wal_redo_timeout"))?,
+            superuser: self.superuser.ok_or(anyhow::anyhow!("missing superuser"))?,
+            page_cache_size: self
+                .page_cache_size
+                .ok_or(anyhow::anyhow!("missing page_cache_size"))?,
+            max_file_descriptors: self
+                .max_file_descriptors
+                .ok_or(anyhow::anyhow!("missing max_file_descriptors"))?,
+            workdir: self.workdir.ok_or(anyhow::anyhow!("missing workdir"))?,
+            pg_distrib_dir: self
+                .pg_distrib_dir
+                .ok_or(anyhow::anyhow!("missing pg_distrib_dir"))?,
+            auth_type: self.auth_type.ok_or(anyhow::anyhow!("missing auth_type"))?,
+            auth_validation_public_key_path: self
+                .auth_validation_public_key_path
+                .ok_or(anyhow::anyhow!("missing auth_validation_public_key_path"))?,
+            remote_storage_config: self
+                .remote_storage_config
+                .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
+            id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
+        })
+    }
+}
+
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
@@ -121,10 +341,10 @@ pub struct RemoteStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
-    /// Specify a root folder to place all stored relish data into.
+    /// Specify a root folder to place all stored files into.
     LocalFs(PathBuf),
-    /// AWS S3 based storage, storing all relishes into the root
-    /// of the S3 bucket from the config.
+    /// AWS S3 based storage, storing all files in the S3 bucket
+    /// specified by the config
     AwsS3(S3Config),
 }
 
@@ -176,32 +396,12 @@ impl PageServerConf {
         self.tenants_path().join(tenantid.to_string())
     }
 
-    pub fn tags_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join("refs").join("tags")
-    }
-
-    pub fn tag_path(&self, tag_name: &str, tenantid: &ZTenantId) -> PathBuf {
-        self.tags_path(tenantid).join(tag_name)
-    }
-
-    pub fn branches_path(&self, tenantid: &ZTenantId) -> PathBuf {
-        self.tenant_path(tenantid).join("refs").join("branches")
-    }
-
-    pub fn branch_path(&self, branch_name: &str, tenantid: &ZTenantId) -> PathBuf {
-        self.branches_path(tenantid).join(branch_name)
-    }
-
     pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
         self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
     }
 
     pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
         self.timelines_path(tenantid).join(timelineid.to_string())
-    }
-
-    pub fn ancestor_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
-        self.timeline_path(timelineid, tenantid).join("ancestor")
     }
 
     //
@@ -221,56 +421,40 @@ impl PageServerConf {
     ///
     /// This leaves any options not present in the file in the built-in defaults.
     pub fn parse_and_validate(toml: &Document, workdir: &Path) -> Result<Self> {
-        use defaults::*;
-
-        let mut conf = PageServerConf {
-            workdir: workdir.to_path_buf(),
-
-            listen_pg_addr: DEFAULT_PG_LISTEN_ADDR.to_string(),
-            listen_http_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            checkpoint_distance: DEFAULT_CHECKPOINT_DISTANCE,
-            checkpoint_period: humantime::parse_duration(DEFAULT_CHECKPOINT_PERIOD)?,
-            gc_horizon: DEFAULT_GC_HORIZON,
-            gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)?,
-            page_cache_size: DEFAULT_PAGE_CACHE_SIZE,
-            max_file_descriptors: DEFAULT_MAX_FILE_DESCRIPTORS,
-
-            pg_distrib_dir: PathBuf::new(),
-            auth_validation_public_key_path: None,
-            auth_type: AuthType::Trust,
-
-            remote_storage_config: None,
-
-            superuser: DEFAULT_SUPERUSER.to_string(),
-        };
+        let mut builder = PageServerConfigBuilder::default();
+        builder.workdir(workdir.to_owned());
 
         for (key, item) in toml.iter() {
             match key {
-                "listen_pg_addr" => conf.listen_pg_addr = parse_toml_string(key, item)?,
-                "listen_http_addr" => conf.listen_http_addr = parse_toml_string(key, item)?,
-                "checkpoint_distance" => conf.checkpoint_distance = parse_toml_u64(key, item)?,
-                "checkpoint_period" => conf.checkpoint_period = parse_toml_duration(key, item)?,
-                "gc_horizon" => conf.gc_horizon = parse_toml_u64(key, item)?,
-                "gc_period" => conf.gc_period = parse_toml_duration(key, item)?,
-                "initial_superuser_name" => conf.superuser = parse_toml_string(key, item)?,
-                "page_cache_size" => conf.page_cache_size = parse_toml_u64(key, item)? as usize,
+                "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
+                "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
+                "checkpoint_distance" => builder.checkpoint_distance(parse_toml_u64(key, item)?),
+                "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
+                "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
+                "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
+                "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
+                "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
+                "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
+                "page_cache_size" => builder.page_cache_size(parse_toml_u64(key, item)? as usize),
                 "max_file_descriptors" => {
-                    conf.max_file_descriptors = parse_toml_u64(key, item)? as usize
+                    builder.max_file_descriptors(parse_toml_u64(key, item)? as usize)
                 }
                 "pg_distrib_dir" => {
-                    conf.pg_distrib_dir = PathBuf::from(parse_toml_string(key, item)?)
+                    builder.pg_distrib_dir(PathBuf::from(parse_toml_string(key, item)?))
                 }
-                "auth_validation_public_key_path" => {
-                    conf.auth_validation_public_key_path =
-                        Some(PathBuf::from(parse_toml_string(key, item)?))
-                }
-                "auth_type" => conf.auth_type = parse_toml_auth_type(key, item)?,
+                "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
+                    PathBuf::from(parse_toml_string(key, item)?),
+                )),
+                "auth_type" => builder.auth_type(parse_toml_auth_type(key, item)?),
                 "remote_storage" => {
-                    conf.remote_storage_config = Some(Self::parse_remote_storage_config(item)?)
+                    builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
                 }
+                "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
                 _ => bail!("unrecognized pageserver option '{}'", key),
             }
         }
+
+        let mut conf = builder.build().context("invalid config")?;
 
         if conf.auth_type == AuthType::ZenithJWT {
             let auth_validation_public_key_path = conf
@@ -285,9 +469,6 @@ impl PageServerConf {
             );
         }
 
-        if conf.pg_distrib_dir == PathBuf::new() {
-            conf.pg_distrib_dir = env::current_dir()?.join("tmp_install")
-        };
         if !conf.pg_distrib_dir.join("bin/postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
@@ -382,10 +563,13 @@ impl PageServerConf {
     #[cfg(test)]
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
+            id: ZNodeId(0),
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-            checkpoint_period: Duration::from_secs(10),
+            compaction_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
+            wait_lsn_timeout: Duration::from_secs(60),
+            wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
@@ -451,25 +635,30 @@ listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
 checkpoint_distance = 111 # in bytes
-checkpoint_period = '111 s'
+
+compaction_period = '111 s'
 
 gc_period = '222 s'
 gc_horizon = 222
+
+wait_lsn_timeout = '111 s'
+wal_redo_timeout = '111 s'
 
 page_cache_size = 444
 max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
+id = 10
 
-    "#;
+"#;
 
     #[test]
     fn parse_defaults() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         // we have to create dummy pathes to overcome the validation errors
-        let config_string = format!("pg_distrib_dir='{}'", pg_distrib_dir.display());
+        let config_string = format!("pg_distrib_dir='{}'\nid=10", pg_distrib_dir.display());
         let toml = config_string.parse()?;
 
         let parsed_config =
@@ -480,12 +669,15 @@ initial_superuser_name = 'zzzz'
         assert_eq!(
             parsed_config,
             PageServerConf {
+                id: ZNodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-                checkpoint_period: humantime::parse_duration(defaults::DEFAULT_CHECKPOINT_PERIOD)?,
+                compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
                 gc_horizon: defaults::DEFAULT_GC_HORIZON,
                 gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
+                wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
+                wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
                 page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
@@ -521,12 +713,15 @@ initial_superuser_name = 'zzzz'
         assert_eq!(
             parsed_config,
             PageServerConf {
+                id: ZNodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
                 checkpoint_distance: 111,
-                checkpoint_period: Duration::from_secs(111),
+                compaction_period: Duration::from_secs(111),
                 gc_horizon: 222,
                 gc_period: Duration::from_secs(222),
+                wait_lsn_timeout: Duration::from_secs(111),
+                wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,

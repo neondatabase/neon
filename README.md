@@ -57,12 +57,12 @@ pageserver init succeeded
 Starting pageserver at 'localhost:64000' in '.zenith'
 Pageserver started
 initializing for single for 7676
-Starting safekeeper at 'localhost:5454' in '.zenith/safekeepers/single'
+Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/single'
 Safekeeper started
 
 # start postgres compute node
 > ./target/debug/zenith pg start main
-Starting new postgres main on main...
+Starting new postgres main on timeline 5b014a9e41b4b63ce1a1febc04503636 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/c03ba6b7ad4c5e9cf556f059ade44229/main port=55432
 Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
 waiting for server to start.... done
@@ -70,8 +70,8 @@ server started
 
 # check list of running postgres instances
 > ./target/debug/zenith pg list
-BRANCH	ADDRESS		LSN		STATUS
-main	127.0.0.1:55432	0/1609610	running
+NODE	ADDRESS	TIMELINES	BRANCH NAME	LSN		STATUS
+main	127.0.0.1:55432	5b014a9e41b4b63ce1a1febc04503636	main	0/1609610	running
 ```
 
 4. Now it is possible to connect to postgres and run some queries:
@@ -91,13 +91,13 @@ postgres=# select * from t;
 5. And create branches and run postgres on them:
 ```sh
 # create branch named migration_check
-> ./target/debug/zenith branch migration_check main
-Created branch 'migration_check' at 0/1609610
+> ./target/debug/zenith timeline branch --branch-name migration_check
+Created timeline '0e9331cad6efbafe6a88dd73ae21a5c9' at Lsn 0/16F5830 for tenant: c03ba6b7ad4c5e9cf556f059ade44229. Ancestor timeline: 'main'
 
 # check branches tree
-> ./target/debug/zenith branch
- main
- ┗━ @0/1609610: migration_check
+> ./target/debug/zenith timeline list
+ main [5b014a9e41b4b63ce1a1febc04503636]
+ ┗━ @0/1609610: migration_check [0e9331cad6efbafe6a88dd73ae21a5c9]
 
 # start postgres on that branch
 > ./target/debug/zenith pg start migration_check
