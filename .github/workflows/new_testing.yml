@@ -50,16 +50,13 @@ jobs:
         id: cache_pg
         uses: actions/cache@v3
         with:
-          path: |
-            tmp_install/
+          path: tmp_install/
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: |
-          make postgres -j$(nproc)
+        run: make postgres -j$(nproc)
 
-      # TODO kb is it true still?
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
         run: tar -C tmp_install/ -cf ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz .
@@ -119,6 +116,7 @@ jobs:
       - name: Cache cargo clippy deps
         id: cache_cargo_clippy
         uses: actions/cache@v3
+        if: env.cargo_incremental != '0'
         with:
           path: |
             ~/.cargo/registry/
@@ -133,8 +131,7 @@ jobs:
         id: cache_poetry
         uses: actions/cache@v3
         with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
+          path: ~/.cache/pypoetry/virtualenvs
           key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
@@ -187,6 +184,7 @@ jobs:
       - name: Cache cargo deps
         id: cache_cargo
         uses: actions/cache@v3
+        if: env.cargo_incremental != '0'
         with:
           path: |
             ~/.cargo/registry/
@@ -286,80 +284,25 @@ jobs:
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
 
-    # TODO kb remove if does not help
-    env:
-      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
     steps:
       - name: Fix permissions
         run: sudo chmod -R a+rwx /__w/
       - name: Checkout
         uses: actions/checkout@v3
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
         with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
+          submodules: true
+          fetch-depth: 2
 
       - name: Pytest regress tests
         env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-          fi
-          # Run the tests.
-          #
-          # TODO kb adjust
-          # The junit.xml file allows CircleCI to display more fine-grained test information
-          # in its "Tests" tab in the results page.
-          # --verbose prints name of each test (helpful when there are
-          # multiple tests in one file)
-          # -rA prints summary in the end
-          # -n4 uses four processes to run tests via pytest-xdist
-          # -s is not used to prevent pytest from capturing output, because tests are running
-          # in parallel and logs are mixed between different tests
-          "${cov_prefix[@]}" ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/batch_pg_regress -n4
+          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_pg_regress
+
+
 
   python-other-tests:
     needs: build-zenith
@@ -380,59 +323,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
-
       - name: Pytest other tests
-        env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-          fi
-          "${cov_prefix[@]}" ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/batch_others -n4
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_others
 
   python-performance-tests:
     needs: build-zenith
@@ -447,85 +343,22 @@ jobs:
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
 
-    env:
-      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
-    # TODO kb how to reuse those init steps?
     steps:
       - name: Fix permissions
         run: sudo chmod -R a+rwx /__w/
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
-
       - name: Pytest performance tests
         env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
-          rm -rf $PERF_REPORT_DIR
-
-          if [[ $GITHUB_REF == "main" ]]; then
-            mkdir -p "$PERF_REPORT_DIR"
-            EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
-          else
-            EXTRA_PARAMS=
-          fi
-
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-          fi
-
-          "${cov_prefix[@]}" ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/performance $EXTRA_PARAMS
-
-          if [[ $GITHUB_REF == "main" ]]; then
-            export REPORT_FROM="$PERF_REPORT_DIR"
-            export REPORT_TO=local
-            scripts/generate_and_push_perf_report.sh
-          fi
+          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          save_perf_report: true
+          run_in_parallel: false
+          track_coverage: false
+          test_selection: performance
 
 # TODO kb upload all logs and bench results

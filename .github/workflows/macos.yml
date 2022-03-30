@@ -44,8 +44,7 @@ jobs:
         id: cache_pg
         uses: actions/cache@v3
         with:
-          path: |
-            tmp_install/
+          path: tmp_install/
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Install missing postgres system dependencies
@@ -65,81 +64,6 @@ jobs:
           name: postgres-artifact-cache
           path: ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz
 
-
-  check-codestyle:
-    needs: build-postgres
-    strategy:
-      matrix:
-        rust_toolchain: [1.56]
-        # XXX: Clippy does not really have a build type, but postgres does.
-        # Clippy needs the headers we produce from postgres build, so the configuration type does not matter,
-        # but we need to use some to get the cache with the headers.
-        build_type: [debug]
-    timeout-minutes: 30
-    name: check codestyle (macOs)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
-
-      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust_toolchain }}
-          profile: minimal
-          override: true
-          components: rustfmt, clippy
-
-      - name: Check Rust code formatting
-        run: cargo fmt --all -- --check
-
-      # cargo clippy checks FFI code that needs some pg specific headers
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir ./tmp_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C ./tmp_install/
-          rm -rf ./postgres-artifact/
-
-      - name: Cache cargo clippy deps
-        id: cache_cargo_clippy
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: v1-${{ runner.os }}-cargo-${{ matrix.rust_toolchain }}-clippy-${{ hashFiles('Cargo.lock') }}
-
-      - name: Run clippy
-        run: ./run_clippy.sh
-
-      - name: Install poetry
-        run: brew install poetry
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Check Python codestyle
-        run: |
-          poetry run yapf --recursive --diff ./test_runner/
-          poetry run mypy ./test_runner/
 
   build-zenith:
     needs: [build-postgres]
@@ -255,6 +179,7 @@ jobs:
           retention-days: 1
           path: ./zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz
 
+  # TOOD kb disable python tests for non-main branches (artifact uploads also?)
   python-regress-tests:
     needs: build-zenith
     strategy:
@@ -265,74 +190,22 @@ jobs:
     name: run python regression test suite (macOs)
     runs-on: macos-latest
 
-    env:
-      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
-      - name: Install poetry
-        run: brew install poetry
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
         with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
+          submodules: true
+          fetch-depth: 2
 
       - name: Pytest regress tests
         env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          # Run the tests.
-          #
-          # The junit.xml file allows CircleCI to display more fine-grained test information
-          # in its "Tests" tab in the results page.
-          # --verbose prints name of each test (helpful when there are
-          # multiple tests in one file)
-          # -rA prints summary in the end
-          # -n4 uses four processes to run tests via pytest-xdist
-          # -s is not used to prevent pytest from capturing output, because tests are running
-          # in parallel and logs are mixed between different tests
-          ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/batch_pg_regress -n4
+          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          track_coverage: false
+          test_selection: batch_pg_regress
 
   python-other-tests:
     needs: build-zenith
@@ -348,57 +221,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Install poetry
-        run: brew install poetry
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
-
       - name: Pytest other tests
-        env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/batch_others -n4
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          track_coverage: false
+          test_selection: batch_others
 
   python-performance-tests:
     needs: build-zenith
@@ -410,61 +239,17 @@ jobs:
     name: run python performance tests suite (macOs)
     runs-on: macos-latest
 
-    env:
-      PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Install poetry
-        run: brew install poetry
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Get zenith artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: zenith-artifact-cache
-          path: ./zenith-artifact/
-      - name: Extract zenith artifact
-        run: |
-          mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
-          rm -rf ./zenith-artifact/
-
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-artifact-cache
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
-          rm -rf ./postgres-artifact/
-
       - name: Pytest performance tests
         env:
-          ZENITH_BIN: /tmp/zenith/bin/
-          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
-          TEST_OUTPUT: /tmp/test_output/
-          # this variable will be embedded in perf test report
-          # and is needed to distinguish different environments
-          PLATFORM: zenith-local-ci
-        run: |
-          ./scripts/pytest \
-            --junitxml=$TEST_OUTPUT/junit.xml \
-            --tb=short \
-            --verbose \
-            -m "not remote_cluster" \
-            -rA test_runner/performance
+          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          save_perf_report: true
+          run_in_parallel: false
+          test_selection: performance

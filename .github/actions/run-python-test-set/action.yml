@@ -1,0 +1,136 @@
+name: 'Run python test'
+description: 'Runs a Zenith python test set, performing all the required preparations before'
+inputs:
+  build_type:
+    description: 'Build type to use when fetching the caches, debug/release'
+    required: true
+  rust_toolchain:
+    description: 'Rust toolchain version to fetch the caches'
+    required: true
+  test_selection:
+    description: 'A python test suite to run'
+    required: true
+  # Optional params:
+  track_coverage:
+    description: 'Whether to track coverage when testing'
+    required: false
+    default: 'true'
+  save_perf_report:
+    description: 'Whether to upload the performance report'
+    required: false
+    default: 'false'
+  run_in_parallel:
+    description: 'Whether to run tests in parallel'
+    required: false
+    default: 'true'
+
+runs:
+  using: "composite"
+  steps:
+      - name: Install system utils
+        if: runner.os == 'macOS'
+        shell: bash -ex {0}
+        run: brew install poetry coreutils
+
+      - name: Cache poetry deps
+        if: runner.os == 'macOS'
+        id: cache_poetry_mac
+        uses: actions/cache@v3
+        with:
+          path: ~/Library/Caches/pypoetry/virtualenvs/
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Cache poetry deps
+        if: runner.os == 'Linux'
+        id: cache_poetry_linux
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        shell: bash -ex {0}
+        run: ./scripts/pysync
+
+      - name: Get zenith artifact for restoration
+        uses: actions/download-artifact@v3
+        with:
+          name: zenith-artifact-cache
+          path: ./zenith-artifact/
+      - name: Extract zenith artifact
+        shell: bash -ex {0}
+        run: |
+          mkdir -p /tmp/zenith/
+          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
+          rm -rf ./zenith-artifact/
+
+      - name: Get postgres artifact for restoration
+        uses: actions/download-artifact@v3
+        with:
+          name: postgres-artifact-cache
+          path: ./postgres-artifact/
+      - name: Extract postgres artifact
+        shell: bash -ex {0}
+        run: |
+          mkdir -p /tmp/zenith/pg_install/
+          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ inputs.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
+          rm -rf ./postgres-artifact/
+
+      - name: Pytest performance tests
+        shell: bash -ex {0}
+        env:
+          ZENITH_BIN: /tmp/zenith/bin/
+          POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install/
+          TEST_OUTPUT: /tmp/test_output/
+          # this variable will be embedded in perf test report
+          # and is needed to distinguish different environments
+          PLATFORM: zenith-local-ci
+        run: |
+          PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+          rm -rf $PERF_REPORT_DIR
+
+          TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
+          if [ -z "$TEST_SELECTION" ]; then
+            echo "test_selection must be set"
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == "main" && "${{ inputs.build_type }}" == "true" ]]; then
+            mkdir -p "$PERF_REPORT_DIR"
+            EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
+          else
+            EXTRA_PARAMS=
+          fi
+
+          if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
+            EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+          fi
+
+          if [[ "${{ inputs.track_coverage }}" == "true" && "${{ inputs.build_type }}" == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          else
+            cov_prefix=()
+          fi
+
+          # Run the tests.
+          #
+          # The junit.xml file allowed CircleCI to display more fine-grained test information
+          # in its "Tests" tab in the results page, not really needed in GitHub Actions.
+          # --verbose prints name of each test (helpful when there are
+          # multiple tests in one file)
+          # -rA prints summary in the end
+          # -n4 uses four processes to run tests via pytest-xdist
+          # -s is not used to prevent pytest from capturing output, because tests are running
+          # in parallel (-n4) and logs are mixed between different tests
+          "${cov_prefix[@]}" ./scripts/pytest \
+            --junitxml=$TEST_OUTPUT/junit.xml \
+            --tb=short \
+            --verbose \
+            -m "not remote_cluster" \
+            -rA $TEST_SELECTION $EXTRA_PARAMS
+
+          if [[ "$GITHUB_REF" == "main" && "${{ inputs.save_perf_report }}" == "true" ]]; then
+            export REPORT_FROM="$PERF_REPORT_DIR"
+            export REPORT_TO=local
+            scripts/generate_and_push_perf_report.sh
+          fi
