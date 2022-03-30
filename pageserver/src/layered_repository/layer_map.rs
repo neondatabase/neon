@@ -120,14 +120,14 @@ impl Div for IntKey {
 impl Add for IntKey {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 + rhs.0)
+        IntKey(self.0.wrapping_add(rhs.0))
     }
 }
 
 impl Sub for IntKey {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
-        IntKey(self.0 - rhs.0)
+        IntKey(self.0.wrapping_sub(rhs.0))
     }
 }
 
@@ -504,6 +504,9 @@ impl LayerMap {
     /// given key and LSN range.
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
         let mut result = 0;
+        if lsn_range.start >= lsn_range.end {
+            return Ok(0);
+        }
         let envelope = AABB::from_corners(
             [
                 IntKey(key_range.start.to_i128()),
