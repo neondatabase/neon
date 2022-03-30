@@ -65,6 +65,7 @@ impl<'a> Basebackup<'a> {
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
+            info!("waiting for {}", req_lsn);
             timeline.tline.wait_lsn(req_lsn)?;
 
             // If the requested point is the end of the timeline, we can
