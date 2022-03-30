@@ -514,6 +514,7 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
+        info!("starting");
 
         // check that the timeline exists
         let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
@@ -536,7 +537,7 @@ impl PageServerHandler {
             basebackup.send_tarball()?;
         }
         pgb.write_message(&BeMessage::CopyDone)?;
-        debug!("CopyDone sent!");
+        info!("done");
 
         Ok(())
     }
