@@ -267,7 +267,7 @@ impl ImageLayer {
             // a write lock. (Or rather, release and re-lock in write mode.)
             drop(inner);
             let mut inner = self.inner.write().unwrap();
-            if inner.book.is_none() {
+            if !inner.loaded {
                 self.load_inner(&mut inner)?;
             } else {
                 // Another thread loaded it while we were not holding the lock.
@@ -279,7 +279,6 @@ impl ImageLayer {
             // above call to `load_inner`, so it's already been released). And
             // while we do that, another thread could unload again, so we have
             // to re-check and retry if that happens.
-            drop(inner);
         }
     }
 
