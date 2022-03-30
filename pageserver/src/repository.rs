@@ -37,12 +37,12 @@ impl Key {
     /// As far as Zenith is not supporting tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 < 0xFFFFF || self.field2 == !0u32);
-        (((self.field1 & 0x7f) as i128) << 120)
-            | ((self.field5 as i128) << 112)
-            | (((self.field2 & 0xFFFF) as i128) << 96)
-            | ((self.field3 as i128) << 64)
-            | ((self.field4 as i128) << 32)
+        assert!(self.field2 < 0xFFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
+        (((self.field1 & 0xf) as i128) << 120)
+            | (((self.field2 & 0xFFFF) as i128) << 104)
+            | ((self.field3 as i128) << 72)
+            | ((self.field4 as i128) << 40)
+            | ((self.field5 as i128) << 32)
             | self.field6 as i128
     }
 

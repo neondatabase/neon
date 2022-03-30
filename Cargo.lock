@@ -1833,6 +1833,7 @@ dependencies = [
  "lazy_static",
  "metrics",
  "nix",
+ "num-traits",
  "once_cell",
  "postgres",
  "postgres-protocol",
