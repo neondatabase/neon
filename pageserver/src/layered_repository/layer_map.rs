@@ -16,9 +16,12 @@ use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
 use lazy_static::lazy_static;
+use num_traits::identities::{One, Zero};
+use num_traits::{Bounded, Num, Signed};
 use rstar::{RTree, RTreeObject, AABB};
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use std::sync::Arc;
 use tracing::*;
 use zenith_metrics::{register_int_gauge, IntGauge};
@@ -54,12 +57,107 @@ pub struct LayerMap {
     /// All the historic layers are kept here
     historic_layers: RTree<LayerEnvelope>,
 
-    /// L0 layers has key range: (Key::MIN..Key::MAX) and locating them using R-Tree search is very inefficient
+    /// L0 layers has key range: (Key::MIN..Key::MAX) and locating them using R-Tree search is very inefficient.
+    /// So l) layers are also pushed in l0_layers vector.
     l0_layers: Vec<Arc<dyn Layer>>,
 }
 
 struct LayerEnvelope {
     layer: Arc<dyn Layer>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Debug)]
+struct IntKey(i128);
+
+impl Bounded for IntKey {
+    fn min_value() -> Self {
+        IntKey(i128::MIN)
+    }
+    fn max_value() -> Self {
+        IntKey(i128::MAX)
+    }
+}
+
+impl Signed for IntKey {
+    fn is_positive(&self) -> bool {
+        self.0 > 0
+    }
+    fn is_negative(&self) -> bool {
+        self.0 < 0
+    }
+    fn signum(&self) -> Self {
+        IntKey(self.0.signum())
+    }
+    fn abs(&self) -> Self {
+        IntKey(self.0.abs())
+    }
+    fn abs_sub(&self, other: &Self) -> Self {
+        IntKey(self.0.abs_sub(&other.0))
+    }
+}
+
+impl Neg for IntKey {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        IntKey(-self.0)
+    }
+}
+
+impl Rem for IntKey {
+    type Output = Self;
+    fn rem(self, rhs: Self) -> Self::Output {
+        IntKey(self.0 % rhs.0)
+    }
+}
+
+impl Div for IntKey {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self::Output {
+        IntKey(self.0 / rhs.0)
+    }
+}
+
+impl Add for IntKey {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        IntKey(self.0 + rhs.0)
+    }
+}
+
+impl Sub for IntKey {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        IntKey(self.0 - rhs.0)
+    }
+}
+
+impl Mul for IntKey {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        IntKey(self.0.wrapping_mul(rhs.0))
+    }
+}
+
+impl One for IntKey {
+    fn one() -> Self {
+        IntKey(1)
+    }
+}
+
+impl Zero for IntKey {
+    fn zero() -> Self {
+        IntKey(0)
+    }
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Num for IntKey {
+    type FromStrRadixErr = <i128 as Num>::FromStrRadixErr;
+    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        Ok(IntKey(i128::from_str_radix(str, radix)?))
+    }
 }
 
 impl PartialEq for LayerEnvelope {
@@ -74,13 +172,19 @@ impl PartialEq for LayerEnvelope {
 }
 
 impl RTreeObject for LayerEnvelope {
-    type Envelope = AABB<[i128; 2]>;
+    type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
         let key_range = self.layer.get_key_range();
         let lsn_range = self.layer.get_lsn_range();
         AABB::from_corners(
-            [key_range.start.to_i128(), lsn_range.start.0 as i128],
-            [key_range.end.to_i128(), lsn_range.end.0 as i128 - 1], // end is exlusive
+            [
+                IntKey(key_range.start.to_i128()),
+                IntKey(lsn_range.start.0 as i128),
+            ],
+            [
+                IntKey(key_range.end.to_i128() - 1),
+                IntKey(lsn_range.end.0 as i128 - 1),
+            ], // end is exlusive
         )
     }
 }
@@ -109,8 +213,8 @@ impl LayerMap {
         let mut latest_img: Option<Arc<dyn Layer>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
-            [key.to_i128(), 0i128],
-            [key.to_i128(), end_lsn.0 as i128 - 1],
+            [IntKey(key.to_i128()), IntKey(0i128)],
+            [IntKey(key.to_i128()), IntKey(end_lsn.0 as i128 - 1)],
         );
         for e in self
             .historic_layers
@@ -255,8 +359,11 @@ impl LayerMap {
         loop {
             let mut made_progress = false;
             let envelope = AABB::from_corners(
-                [range_remain.start.to_i128(), lsn.0 as i128],
-                [range_remain.end.to_i128(), disk_consistent_lsn.0 as i128],
+                [IntKey(range_remain.start.to_i128()), IntKey(lsn.0 as i128)],
+                [
+                    IntKey(range_remain.end.to_i128() - 1),
+                    IntKey(disk_consistent_lsn.0 as i128),
+                ],
             );
             for e in self
                 .historic_layers
@@ -312,7 +419,10 @@ impl LayerMap {
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
-        let envelope = AABB::from_corners([key.to_i128(), 0], [key.to_i128(), lsn.0 as i128]);
+        let envelope = AABB::from_corners(
+            [IntKey(key.to_i128()), IntKey(0)],
+            [IntKey(key.to_i128()), IntKey(lsn.0 as i128)],
+        );
         for e in self
             .historic_layers
             .locate_in_envelope_intersecting(&envelope)
@@ -353,8 +463,8 @@ impl LayerMap {
 
         points = vec![key_range.start];
         let envelope = AABB::from_corners(
-            [key_range.start.to_i128(), 0],
-            [key_range.end.to_i128(), lsn.0 as i128],
+            [IntKey(key_range.start.to_i128()), IntKey(0)],
+            [IntKey(key_range.end.to_i128()), IntKey(lsn.0 as i128)],
         );
         for e in self
             .historic_layers
@@ -395,8 +505,14 @@ impl LayerMap {
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
         let mut result = 0;
         let envelope = AABB::from_corners(
-            [key_range.start.to_i128(), lsn_range.start.0 as i128],
-            [key_range.end.to_i128(), lsn_range.end.0 as i128 - 1],
+            [
+                IntKey(key_range.start.to_i128()),
+                IntKey(lsn_range.start.0 as i128),
+            ],
+            [
+                IntKey(key_range.end.to_i128() - 1),
+                IntKey(lsn_range.end.0 as i128 - 1),
+            ],
         );
         for e in self
             .historic_layers
@@ -405,13 +521,6 @@ impl LayerMap {
             let l = &e.layer;
             if !l.is_incremental() {
                 continue;
-            }
-            if !range_overlaps(&l.get_lsn_range(), lsn_range) {
-                info!(
-                    "l.lsn_range={:?}, lsn_range={:?}",
-                    l.get_lsn_range(),
-                    lsn_range
-                );
             }
             assert!(range_overlaps(&l.get_lsn_range(), lsn_range));
             assert!(range_overlaps(&l.get_key_range(), key_range));
