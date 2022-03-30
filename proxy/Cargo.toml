@@ -38,5 +38,7 @@ zenith_metrics = { path = "../zenith_metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
-tokio-postgres-rustls = "0.8.0"
+async-trait = "0.1"
 rcgen = "0.8.14"
+rstest = "0.12"
+tokio-postgres-rustls = "0.8.0"

@@ -83,9 +83,14 @@ impl<'a, S> SaslStream<'a, S> {
 impl<S: AsyncRead + Unpin> SaslStream<'_, S> {
     // Receive a new SASL message from the client.
     async fn recv(&mut self) -> io::Result<&str> {
+        if let Some(first) = self.first.take() {
+            return Ok(first);
+        }
+
         self.current = self.stream.read_password_message().await?;
         let s = std::str::from_utf8(&self.current)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
+
         Ok(s)
     }
 }

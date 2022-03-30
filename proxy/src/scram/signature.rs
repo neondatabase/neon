@@ -1,9 +1,8 @@
 //! Tools for client/server signature management.
 
 use super::key::{ScramKey, SCRAM_KEY_LEN};
-use hmac::{Hmac, Mac, NewMac};
-use sha2::Sha256;
 
+/// A collection of messages needed to derive the client's signature.
 #[derive(Debug)]
 pub struct SignatureBuilder<'a> {
     pub client_first_message_bare: &'a str,
@@ -21,16 +20,12 @@ impl SignatureBuilder<'_> {
             self.client_final_message_without_proof.as_bytes(),
         ];
 
-        let mut mac = Hmac::<Sha256>::new_varkey(key.as_ref()).expect("bad key size");
-        parts.into_iter().for_each(|s| mac.update(s));
-
-        // TODO: maybe newer `hmac` et al already migrated to regular arrays?
-        let mut signature = [0u8; SCRAM_KEY_LEN];
-        signature.copy_from_slice(mac.finalize().into_bytes().as_slice());
-        signature.into()
+        super::hmac_sha256(key.as_ref(), parts).into()
     }
 }
 
+/// A computed value which, when xored with `ClientProof`,
+/// produces `ClientKey` that we need for authentication.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct Signature {
@@ -40,8 +35,6 @@ pub struct Signature {
 impl Signature {
     /// Derive ClientKey from client's signature and proof
     pub fn derive_client_key(&self, proof: &[u8; SCRAM_KEY_LEN]) -> ScramKey {
-        let signature = self.as_ref().iter();
-
         // This is how the proof is calculated:
         //
         // 1. sha256(ClientKey) -> StoredKey
@@ -51,12 +44,12 @@ impl Signature {
         // Step 3 implies that we can restore ClientKey from the proof
         // by xoring the latter with the ClientSignature again. Afterwards
         // we can check that the presumed ClientKey meets our expectations.
-        let mut bytes = [0u8; SCRAM_KEY_LEN];
-        for (i, value) in signature.zip(proof).map(|(x, y)| x ^ y).enumerate() {
-            bytes[i] = value;
+        let mut signature = self.bytes;
+        for (i, x) in proof.into_iter().enumerate() {
+            signature[i] ^= x;
         }
 
-        bytes.into()
+        signature.into()
     }
 }
 

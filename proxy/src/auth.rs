@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub use credentials::ClientCredentials;
+pub use flow::*;
 
 /// Common authentication error.
 #[derive(Debug, Error)]

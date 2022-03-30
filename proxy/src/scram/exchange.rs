@@ -1,5 +1,7 @@
 use super::channel_binding::ChannelBinding;
-use super::messages::{ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage};
+use super::messages::{
+    ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
+};
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use crate::sasl::{self, SaslError, SaslMechanism};
@@ -21,13 +23,15 @@ enum ExchangeState {
 pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
+    nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
 }
 
 impl<'a> Exchange<'a> {
-    pub fn new(secret: &'a ServerSecret) -> Self {
+    pub fn new(secret: &'a ServerSecret, nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN]) -> Self {
         Self {
             state: ExchangeState::Initial,
             secret,
+            nonce,
         }
     }
 }
@@ -41,8 +45,7 @@ impl SaslMechanism for Exchange<'_> {
                     ClientFirstMessage::parse(input).ok_or(SaslError::BadClientMessage)?;
 
                 let server_first_message = client_first_message.build_server_first_message(
-                    // TODO: use secure random
-                    &rand::random(),
+                    &(self.nonce)(),
                     &self.secret.salt_base64,
                     self.secret.iterations,
                 );

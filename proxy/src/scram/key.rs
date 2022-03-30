@@ -1,27 +1,18 @@
 //! Tools for client/server/stored keys management.
 
-use sha2::{Digest, Sha256};
-
 /// Faithfully taken from PostgreSQL.
 pub const SCRAM_KEY_LEN: usize = 32;
 
-/// Thin wrapper for byte array.
-#[derive(Debug, PartialEq, Eq)]
+/// Thin wrapper for a byte array.
+#[derive(Default, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
 }
 
 impl ScramKey {
-    pub fn sha256(&self) -> ScramKey {
-        let mut bytes = [0u8; SCRAM_KEY_LEN];
-        bytes.copy_from_slice({
-            let mut hash = Sha256::new();
-            hash.update(&self.bytes);
-            hash.finalize().as_slice()
-        });
-
-        bytes.into()
+    pub fn sha256(&self) -> Self {
+        super::sha256([self.as_ref()]).into()
     }
 }
 

@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Range;
 
 /// Faithfully taken from PostgreSQL.
-const SCRAM_RAW_NONCE_LEN: usize = 18;
+pub const SCRAM_RAW_NONCE_LEN: usize = 18;
 
 /// Although we ignore all extensions, we still have to validate the message.
 fn validate_sasl_extensions<'a>(parts: impl Iterator<Item = &'a str>) -> Option<()> {
