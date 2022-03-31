@@ -1,4 +1,3 @@
-use crate::keyspace::KeyPartitioning;
 use crate::layered_repository::metadata::TimelineMetadata;
 use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
@@ -371,19 +370,6 @@ pub trait Timeline: Send + Sync {
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
-
-    ///
-    /// Tell the implementation how the keyspace should be partitioned.
-    ///
-    /// FIXME: This is quite a hack. The code in pgdatadir_mapping.rs knows
-    /// which keys exist and what is the logical grouping of them. That's why
-    /// the code there (and in keyspace.rs) decides the partitioning, not the
-    /// layered_repository.rs implementation. That's a layering violation:
-    /// the Repository implementation ought to be responsible for the physical
-    /// layout, but currently it's more convenient to do it in pgdatadir_mapping.rs
-    /// rather than in layered_repository.rs.
-    ///
-    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()>;
 
     ///
     /// Check that it is valid to request operations with that lsn.

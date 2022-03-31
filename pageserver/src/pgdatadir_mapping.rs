@@ -6,7 +6,7 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use crate::keyspace::{KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
+use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
@@ -18,10 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
 use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::AtomicLsn;
 use zenith_utils::lsn::Lsn;
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
@@ -38,7 +37,7 @@ where
     pub tline: Arc<R::Timeline>,
 
     /// When did we last calculate the partitioning?
-    last_partitioning: AtomicLsn,
+    partitioning: RwLock<(KeyPartitioning, Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -51,7 +50,7 @@ impl<R: Repository> DatadirTimeline<R> {
     pub fn new(tline: Arc<R::Timeline>, repartition_threshold: u64) -> Self {
         DatadirTimeline {
             tline,
-            last_partitioning: AtomicLsn::new(0),
+            partitioning: RwLock::new((KeyPartitioning::new(), Lsn(0))),
             current_logical_size: AtomicIsize::new(0),
             repartition_threshold,
         }
@@ -389,15 +388,19 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(result.to_keyspace())
     }
 
-    pub fn repartition(&self, lsn: Lsn) -> Result<()> {
-        let last_partitioning = self.last_partitioning.load();
-        if last_partitioning == Lsn(0) || lsn.0 - last_partitioning.0 > self.repartition_threshold {
+    pub fn repartition(&self, lsn: Lsn) -> Result<(KeyPartitioning, Lsn)> {
+        let partitioning_guard = self.partitioning.read().unwrap();
+        if partitioning_guard.1 == Lsn(0)
+            || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
+        {
             let keyspace = self.collect_keyspace(lsn)?;
+            drop(partitioning_guard);
+            let mut partitioning_guard = self.partitioning.write().unwrap();
             let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
-            self.tline.hint_partitioning(partitioning, lsn)?;
-            self.last_partitioning.store(lsn);
+            *partitioning_guard = (partitioning, lsn);
+            return Ok((partitioning_guard.0.clone(), lsn));
         }
-        Ok(())
+        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 }
 
