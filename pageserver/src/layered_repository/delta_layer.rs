@@ -364,6 +364,7 @@ impl DeltaLayer {
             // above call to `load_inner`, so it's already been released). And
             // while we do that, another thread could unload again, so we have
             // to re-check and retry if that happens.
+            drop(inner);
         }
     }
 
