@@ -388,6 +388,17 @@ impl<R: Repository> DatadirTimeline<R> {
 
         Ok(result.to_keyspace())
     }
+
+    pub fn repartition(&self, lsn: Lsn) -> Result<()> {
+        let last_partitioning = self.last_partitioning.load();
+        if last_partitioning == Lsn(0) || lsn.0 - last_partitioning.0 > self.repartition_threshold {
+            let keyspace = self.collect_keyspace(lsn)?;
+            let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
+            self.tline.hint_partitioning(partitioning, lsn)?;
+            self.last_partitioning.store(lsn);
+        }
+        Ok(())
+    }
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
@@ -767,7 +778,6 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     pub fn commit(self) -> Result<()> {
         let writer = self.tline.tline.writer();
 
-        let last_partitioning = self.tline.last_partitioning.load();
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
@@ -778,15 +788,6 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         }
 
         writer.finish_write(self.lsn);
-
-        if last_partitioning == Lsn(0)
-            || self.lsn.0 - last_partitioning.0 > self.tline.repartition_threshold
-        {
-            let keyspace = self.tline.collect_keyspace(self.lsn)?;
-            let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
-            self.tline.tline.hint_partitioning(partitioning, self.lsn)?;
-            self.tline.last_partitioning.store(self.lsn);
-        }
 
         if pending_nblocks != 0 {
             self.tline.current_logical_size.fetch_add(
