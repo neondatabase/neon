@@ -41,6 +41,7 @@ use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
 };
 use crate::repository::{Key, Value};
+use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -1587,6 +1588,10 @@ impl LayeredTimeline {
         let _compaction_cs = self.compaction_cs.lock().unwrap();
 
         let target_file_size = self.conf.checkpoint_distance;
+
+        // Define partitioning schema if needed
+        tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)?
+            .repartition(self.get_last_record_lsn())?;
 
         // 1. The partitioning was already done by the code in
         // pgdatadir_mapping.rs. We just use it here.

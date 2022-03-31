@@ -286,7 +286,7 @@ fn bootstrap_timeline<R: Repository>(
     let timeline = repo.create_empty_timeline(tli, lsn)?;
     let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
-    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
+    page_tline.tline.checkpoint(CheckpointConfig::Flush)?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",
