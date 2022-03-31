@@ -16,6 +16,8 @@ use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
 use lazy_static::lazy_static;
+use num_bigint::BigInt;
+use num_traits::cast::ToPrimitive;
 use num_traits::identities::{One, Zero};
 use num_traits::{Bounded, Num, Signed};
 use rstar::{RTree, RTreeObject, AABB};
@@ -134,7 +136,15 @@ impl Sub for IntKey {
 impl Mul for IntKey {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.wrapping_mul(rhs.0))
+        // Use big integer arithmetic to avoid overflow.
+        // We have to cacluate sqrt of the result to be able to store result of operation as i128.
+        // As far as multiplication is used by R-Tree to calculate area and distance, it should not be a problem.
+        IntKey(
+            (BigInt::from(self.0) * BigInt::from(rhs.0))
+                .sqrt()
+                .to_i128()
+                .unwrap(),
+        )
     }
 }
 

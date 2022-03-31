@@ -46,6 +46,7 @@ crossbeam-utils = "0.8.5"
 fail = "0.5.0"
 rstar = "0.9.2"
 num-traits = "0.2.14"
+num-bigint = "0.4.3"
 
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
 async-compression = {version = "0.3", features = ["zstd", "tokio"]}
