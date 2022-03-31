@@ -2066,16 +2066,16 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 }
 
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
+pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     let file = File::open(path)?;
     let book = Book::new(file)?;
 
     match book.magic() {
         crate::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump()?;
+            DeltaLayer::new_for_path(path, &book)?.dump(verbose)?;
         }
         crate::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump()?;
+            ImageLayer::new_for_path(path, &book)?.dump(verbose)?;
         }
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
@@ -2216,7 +2216,7 @@ pub mod tests {
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
         let mut blknum = 0;
         for _ in 0..50 {
-            for _ in 0..1000 {
+            for _ in 0..10000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer();
                 writer.put(

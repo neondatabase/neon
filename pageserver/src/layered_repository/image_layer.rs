@@ -212,11 +212,15 @@ impl Layer for ImageLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self) -> Result<()> {
+    fn dump(&self, verbose: bool) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} ----",
             self.tenantid, self.timelineid, self.key_range.start, self.key_range.end, self.lsn
         );
+
+        if !verbose {
+            return Ok(());
+        }
 
         let inner = self.load()?;
 
