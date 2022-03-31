@@ -50,6 +50,10 @@ pub async fn thread_main(
         println!("proxy has shut down");
     }
 
+    // When set for the server socket, the keepalive setting
+    // will be inherited by all accepted client sockets.
+    socket2::SockRef::from(&listener).set_keepalive(true)?;
+
     let cancel_map = Arc::new(CancelMap::default());
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -364,6 +368,26 @@ mod tests {
             .context("server shouldn't accept client")?;
 
         assert!(client_err.to_string().contains(&server_err.to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keepalive_is_inherited() -> anyhow::Result<()> {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        socket2::SockRef::from(&listener).set_keepalive(true)?;
+
+        let t = tokio::spawn(async move {
+            let (client, _) = listener.accept().await?;
+            let keepalive = socket2::SockRef::from(&client).keepalive()?;
+            anyhow::Ok(keepalive)
+        });
+
+        let _ = TcpStream::connect(("127.0.0.1", port)).await?;
+        assert!(t.await??, "keepalive should be inherited");
 
         Ok(())
     }

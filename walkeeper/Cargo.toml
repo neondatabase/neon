@@ -15,7 +15,7 @@ tracing = "0.1.27"
 clap = "3.0"
 daemonize = "0.4.1"
 rust-s3 = { version = "0.28", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls"] }
-tokio = { version = "1.11", features = ["macros"] }
+tokio = { version = "1.17", features = ["macros"] }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 anyhow = "1.0"
