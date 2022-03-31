@@ -1,9 +1,10 @@
 import asyncio
+import uuid
 import asyncpg
 import random
 import time
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder, Postgres, Safekeeper
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres, Safekeeper
 from fixtures.log_helper import getLogger
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
@@ -29,10 +30,6 @@ class BankClient(object):
             self.n_accounts - 1)
         await self.conn.execute('DROP TABLE IF EXISTS bank_log')
         await self.conn.execute('CREATE TABLE bank_log(from_uid int, to_uid int, amount int)')
-
-        # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
-        await self.conn.execute('ALTER TABLE bank_accs SET (autovacuum_enabled = false)')
-        await self.conn.execute('ALTER TABLE bank_log SET (autovacuum_enabled = false)')
 
     async def check_invariant(self):
         row = await self.conn.fetchrow('SELECT sum(amount) AS sum FROM bank_accs')
@@ -139,12 +136,15 @@ async def wait_for_lsn(safekeeper: Safekeeper,
 # On each iteration 1 acceptor is stopped, and 2 others should allow
 # background workers execute transactions. In the end, state should remain
 # consistent.
-async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_workers=10):
+async def run_restarts_under_load(env: ZenithEnv,
+                                  pg: Postgres,
+                                  acceptors: List[Safekeeper],
+                                  n_workers=10):
     n_accounts = 100
     init_amount = 100000
     max_transfer = 100
-    period_time = 10
-    iterations = 6
+    period_time = 4
+    iterations = 10
 
     # Set timeout for this test at 5 minutes. It should be enough for test to complete
     # and less than CircleCI's no_output_timeout, taking into account that this timeout
@@ -176,6 +176,11 @@ async def run_restarts_under_load(pg: Postgres, acceptors: List[Safekeeper], n_w
         flush_lsn = lsn_to_hex(flush_lsn)
         log.info(f'Postgres flush_lsn {flush_lsn}')
 
+        pageserver_lsn = env.pageserver.http_client().timeline_detail(
+            uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
+        sk_ps_lag = lsn_from_hex(flush_lsn) - lsn_from_hex(pageserver_lsn)
+        log.info(f'Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb')
+
         # Wait until alive safekeepers catch up with postgres
         for idx, safekeeper in enumerate(acceptors):
             if idx != victim_idx:
@@ -203,9 +208,8 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_wal_acceptors_restarts_under_load')
-    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load')
+    # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
+    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load',
+                                   config_lines=['max_replication_write_lag=1MB'])
 
-    asyncio.run(run_restarts_under_load(pg, env.safekeepers))
-
-    # TODO: Remove when https://github.com/zenithdb/zenith/issues/644 is fixed
-    pg.stop()
+    asyncio.run(run_restarts_under_load(env, pg, env.safekeepers))
