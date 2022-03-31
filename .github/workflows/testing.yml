@@ -143,7 +143,7 @@ jobs:
           poetry run mypy ./test_runner/
 
   build-zenith:
-    needs: [build-postgres]
+    needs: build-postgres
     strategy:
       matrix:
         build_type: [debug, release]
@@ -213,7 +213,7 @@ jobs:
             cov_prefix=()
             CARGO_FLAGS=--release
           fi
-          "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+          "${cov_prefix[@]}" mold -run cargo test $CARGO_FLAGS
 
       - name: Prepare zenith binaries for upload
         run: |
@@ -224,12 +224,12 @@ jobs:
           fi
 
           binaries=$(
-            cargo metadata --format-version=1 --no-deps |
+            mold -run cargo metadata --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
 
           test_exe_paths=$(
-            cargo test $CARGO_FLAGS --message-format=json --no-run |
+            mold -run cargo test $CARGO_FLAGS --message-format=json --no-run |
             jq -r '.executable | select(. != null)'
           )
 
@@ -302,8 +302,6 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_pg_regress
 
-
-
   python-other-tests:
     needs: build-zenith
     strategy:
@@ -342,6 +340,10 @@ jobs:
 
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
+      # performance tests generate a lot of data in /tmp/, exceeding docker limits
+      # use host's resources for that
+      volumes:
+        - /tmp/:/tmp/
 
     steps:
       - name: Fix permissions
@@ -360,5 +362,40 @@ jobs:
           run_in_parallel: false
           track_coverage: false
           test_selection: performance
-
 # TODO kb upload all logs and bench results
+
+  e2e-tests:
+      needs: check-codestyle
+      name: trigger e2e cluster tests
+      runs-on: ubuntu-latest
+
+      steps:
+        - uses: actions/github-script@v6
+          with:
+            github-token: ${{ secrets.CI_ACCESS_TOKEN }}
+            script: |
+              const owner = '${{ github.repository_owner }}';
+              const commit_hash = '${{ github.sha }}';
+              const remote_repo = 'console';
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo: '${{ github.event.repository.name }}',
+                sha: commit_hash,
+                state: 'pending',
+                context: 'zenith-remote-ci',
+                description: `[${owner}/${remote_repo}] Remote CI job was queried`,
+              });
+
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo: remote_repo,
+                workflow_id: 'testing.yml',
+                ref: 'main',
+                inputs: {
+                  ci_job_name: 'zenith-remote-ci',
+                  remote_repo: '${{ github.repository }}',
+                  commit_hash,
+                },
+              })
+
