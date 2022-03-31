@@ -392,10 +392,22 @@ impl LayerMap {
 
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self) -> Result<()> {
+    pub fn dump(&self, verbose: bool) -> Result<()> {
         println!("Begin dump LayerMap");
+
+        println!("open_layer:");
+        if let Some(open_layer) = &self.open_layer {
+            open_layer.dump(verbose)?;
+        }
+
+        println!("frozen_layers:");
+        for frozen_layer in self.frozen_layers.iter() {
+            frozen_layer.dump(verbose)?;
+        }
+
+        println!("historic_layers:");
         for layer in self.historic_layers.iter() {
-            layer.dump()?;
+            layer.dump(verbose)?;
         }
         println!("End dump LayerMap");
         Ok(())

@@ -190,7 +190,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self) -> Result<()> {
+    fn dump(&self, verbose: bool) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
@@ -203,6 +203,10 @@ impl Layer for InMemoryLayer {
             "----- in-memory layer for tli {} LSNs {}-{} ----",
             self.timelineid, self.start_lsn, end_str,
         );
+
+        if !verbose {
+            return Ok(());
+        }
 
         let mut buf = Vec::new();
         for (key, vec_map) in inner.index.iter() {

@@ -143,7 +143,7 @@ pub trait Layer: Send + Sync {
     fn delete(&self) -> Result<()>;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self) -> Result<()>;
+    fn dump(&self, verbose: bool) -> Result<()>;
 }
 
 // Flag indicating that this version initialize the page

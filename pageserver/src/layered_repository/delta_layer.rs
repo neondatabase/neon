@@ -267,7 +267,7 @@ impl Layer for DeltaLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self) -> Result<()> {
+    fn dump(&self, verbose: bool) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
             self.tenantid,
@@ -277,6 +277,10 @@ impl Layer for DeltaLayer {
             self.lsn_range.start,
             self.lsn_range.end
         );
+
+        if !verbose {
+            return Ok(());
+        }
 
         let inner = self.load()?;
 
