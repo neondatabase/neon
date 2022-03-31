@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::keyspace::KeySpace;
 use crate::page_cache;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
 use crate::repository::{
@@ -792,8 +792,6 @@ pub struct LayeredTimeline {
     // garbage collecting data that is still needed by the child timelines.
     gc_info: RwLock<GcInfo>,
 
-    partitioning: RwLock<Option<(KeyPartitioning, Lsn)>>,
-
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
     // It is needed in checks when we want to error on some operations
@@ -943,14 +941,6 @@ impl Timeline for LayeredTimeline {
         self.disk_consistent_lsn.load()
     }
 
-    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()> {
-        self.partitioning
-            .write()
-            .unwrap()
-            .replace((partitioning, lsn));
-        Ok(())
-    }
-
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
             tl: self,
@@ -1037,7 +1027,6 @@ impl LayeredTimeline {
                 retain_lsns: Vec::new(),
                 cutoff: Lsn(0),
             }),
-            partitioning: RwLock::new(None),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
@@ -1592,23 +1581,11 @@ impl LayeredTimeline {
         // Define partitioning schema if needed
         if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
         {
-            pgdir.repartition(self.get_last_record_lsn())?;
-        }
-
-        // 1. The partitioning was already done by the code in
-        // pgdatadir_mapping.rs. We just use it here.
-        let partitioning_guard = self.partitioning.read().unwrap();
-        if let Some((partitioning, lsn)) = partitioning_guard.as_ref() {
+            let (partitioning, lsn) = pgdir.repartition(self.get_last_record_lsn())?;
             let timer = self.create_images_time_histo.start_timer();
-            // Make a copy of the partitioning, so that we can release
-            // the lock. Otherwise we could block the WAL receiver.
-            let lsn = *lsn;
-            let parts = partitioning.parts.clone();
-            drop(partitioning_guard);
-
             // 2. Create new image layers for partitions that have been modified
             // "enough".
-            for part in parts.iter() {
+            for part in partitioning.parts.iter() {
                 if self.time_for_new_image_layer(part, lsn, 3)? {
                     self.create_image_layer(part, lsn)?;
                 }
