@@ -630,6 +630,8 @@ impl LayeredRepository {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
+        let _span_guard =
+            info_span!("gc iteration", tenant = %self.tenantid, timeline = ?target_timelineid);
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
