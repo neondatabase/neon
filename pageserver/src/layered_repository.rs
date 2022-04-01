@@ -468,18 +468,20 @@ impl LayeredRepository {
         match timelines.get(&timelineid) {
             Some(entry) => match entry {
                 LayeredTimelineEntry::Loaded(local_timeline) => {
-                    trace!("timeline {} found loaded", &timelineid);
+                    debug!("timeline {} found loaded into memory", &timelineid);
                     return Ok(Some(Arc::clone(local_timeline)));
                 }
-                LayeredTimelineEntry::Unloaded { .. } => {
-                    trace!("timeline {} found unloaded", &timelineid)
-                }
+                LayeredTimelineEntry::Unloaded { .. } => {}
             },
             None => {
-                trace!("timeline {} not found", &timelineid);
+                debug!("timeline {} not found", &timelineid);
                 return Ok(None);
             }
         };
+        debug!(
+            "timeline {} found on a local disk, but not loaded into the memory, loading",
+            &timelineid
+        );
         let timeline = self.load_local_timeline(timelineid, timelines)?;
         let was_loaded = timelines.insert(
             timelineid,
@@ -516,9 +518,7 @@ impl LayeredRepository {
             .context("cannot load ancestor timeline")?
             .flatten()
             .map(LayeredTimelineEntry::Loaded);
-        let _enter =
-            info_span!("loading timeline", timeline = %timelineid, tenant = %self.tenantid)
-                .entered();
+        let _enter = info_span!("loading local timeline").entered();
         let timeline = LayeredTimeline::new(
             self.conf,
             metadata,
