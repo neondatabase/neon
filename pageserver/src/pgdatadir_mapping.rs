@@ -6,7 +6,7 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceAccum, TARGET_FILE_SIZE_BYTES};
+use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceAccum};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::repository::{Repository, Timeline};
@@ -388,13 +388,13 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(result.to_keyspace())
     }
 
-    pub fn repartition(&self, lsn: Lsn) -> Result<(KeyPartitioning, Lsn)> {
+    pub fn repartition(&self, lsn: Lsn, partition_size: u64) -> Result<(KeyPartitioning, Lsn)> {
         let mut partitioning_guard = self.partitioning.lock().unwrap();
         if partitioning_guard.1 == Lsn(0)
             || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
         {
             let keyspace = self.collect_keyspace(lsn)?;
-            let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
+            let partitioning = keyspace.partition(partition_size);
             *partitioning_guard = (partitioning, lsn);
             return Ok((partitioning_guard.0.clone(), lsn));
         }
@@ -1215,7 +1215,7 @@ pub fn create_test_timeline<R: Repository>(
     timeline_id: zenith_utils::zid::ZTimelineId,
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let tline = DatadirTimeline::new(tline, crate::layered_repository::tests::TEST_FILE_SIZE / 10);
+    let tline = DatadirTimeline::new(tline, tline.conf.compaction_target_size / 10);
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;

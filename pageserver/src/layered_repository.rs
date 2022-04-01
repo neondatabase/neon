@@ -1581,7 +1581,8 @@ impl LayeredTimeline {
         // Define partitioning schema if needed
         if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
         {
-            let (partitioning, lsn) = pgdir.repartition(self.get_last_record_lsn())?;
+            let (partitioning, lsn) =
+                pgdir.repartition(self.get_last_record_lsn(), self.conf.compaction_target_size)?;
             let timer = self.create_images_time_histo.start_timer();
             // 2. Create new image layers for partitions that have been modified
             // "enough".
