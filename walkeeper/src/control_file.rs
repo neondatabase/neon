@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use tracing::*;
@@ -37,9 +38,60 @@ lazy_static! {
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec");
 }
 
-pub trait Storage {
+pub trait StatePersister {
     /// Persist safekeeper state on disk.
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+}
+
+/// Storage should keep actual state inside of it. It should implement Deref
+/// trait to access state fields and have persist method for updating that state.
+pub trait Storage: Deref<Target = SafeKeeperState> + StatePersister {
+    /// Returns a guard which implements DeferMut trait and have persist method.
+    fn update_guard(&mut self) -> StateGuard<Self>
+    where
+        Self: Sized,
+    {
+        StateGuard::new(self.clone(), self)
+    }
+}
+
+/// A guard that allows safekeeper state to be updated atomically.
+pub struct StateGuard<'a, P: StatePersister> {
+    persister: &'a mut P,
+    state: SafeKeeperState,
+}
+
+impl<'a, P> StateGuard<'a, P>
+where
+    P: StatePersister,
+{
+    pub fn new(state: SafeKeeperState, persister: &'a mut P) -> Self {
+        StateGuard { persister, state }
+    }
+
+    pub fn persist(&mut self) -> Result<()> {
+        self.persister.persist(&self.state)
+    }
+}
+
+impl<'a, P> Deref for StateGuard<'a, P>
+where
+    P: StatePersister,
+{
+    type Target = SafeKeeperState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl<'a, P> DerefMut for StateGuard<'a, P>
+where
+    P: StatePersister,
+{
+    fn deref_mut(&mut self) -> &mut SafeKeeperState {
+        &mut self.state
+    }
 }
 
 #[derive(Debug)]
@@ -48,19 +100,48 @@ pub struct FileStorage {
     timeline_dir: PathBuf,
     conf: SafeKeeperConf,
     persist_control_file_seconds: Histogram,
+
+    /// Last state persisted to disk.
+    state: SafeKeeperState,
 }
 
 impl FileStorage {
-    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> FileStorage {
+    pub fn restore_new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
         let timeline_dir = conf.timeline_dir(zttid);
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
-        FileStorage {
+
+        let state = Self::load_control_file_conf(conf, zttid)
+            .context("failed to load from control file")?;
+
+        Ok(FileStorage {
             timeline_dir,
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                 .with_label_values(&[&tenant_id, &timeline_id]),
-        }
+            state,
+        })
+    }
+
+    pub fn create_new(
+        zttid: &ZTenantTimelineId,
+        conf: &SafeKeeperConf,
+        state: SafeKeeperState,
+    ) -> Result<FileStorage> {
+        let timeline_dir = conf.timeline_dir(zttid);
+        let tenant_id = zttid.tenant_id.to_string();
+        let timeline_id = zttid.timeline_id.to_string();
+
+        let mut store = FileStorage {
+            timeline_dir,
+            conf: conf.clone(),
+            persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
+                .with_label_values(&[&tenant_id, &timeline_id]),
+            state: state.clone(),
+        };
+
+        store.persist(&state)?;
+        Ok(store)
     }
 
     // Check the magic/version in the on-disk data and deserialize it, if possible.
@@ -141,7 +222,17 @@ impl FileStorage {
     }
 }
 
-impl Storage for FileStorage {
+impl Storage for FileStorage {}
+
+impl Deref for FileStorage {
+    type Target = SafeKeeperState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl StatePersister for FileStorage {
     // persists state durably to underlying storage
     // for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
@@ -201,6 +292,9 @@ impl Storage for FileStorage {
                 .and_then(|f| f.sync_all())
                 .context("failed to sync control file directory")?;
         }
+
+        // update internal state
+        self.state = s.clone();
         Ok(())
     }
 }
@@ -228,7 +322,7 @@ mod test {
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         Ok((
-            FileStorage::new(zttid, conf),
+            FileStorage::restore_new(zttid, conf)?,
             FileStorage::load_control_file_conf(conf, zttid)?,
         ))
     }
@@ -239,8 +333,7 @@ mod test {
     ) -> Result<(FileStorage, SafeKeeperState)> {
         fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
-        let mut storage = FileStorage::new(zttid, conf);
-        storage.persist(&state)?;
+        let storage = FileStorage::create_new(zttid, conf, state.clone())?;
         Ok((storage, state))
     }
 
