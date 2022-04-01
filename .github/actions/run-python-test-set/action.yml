@@ -148,3 +148,9 @@ runs:
           echo '----after cleanup'
           sudo df -h
           du -sh $TEST_OUTPUT/*
+
+      - name: Upload python test data artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact-cache
+          path: /tmp/test_output/

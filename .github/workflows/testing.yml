@@ -7,8 +7,6 @@ defaults:
     shell: bash -ex {0}
 env:
   RUST_BACKTRACE: 1
-  # TODO kb either remove this or remove the ./target/ caching
-  # CARGO_INCREMENTAL: 0
   COPT: '-Werror'
   AWS_ACCESS_KEY_ID: ${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}
@@ -383,7 +381,6 @@ jobs:
           run_in_parallel: false
           track_coverage: false
           test_selection: performance
-# TODO kb upload all logs and bench results
 
   e2e-tests:
       needs: check-codestyle
