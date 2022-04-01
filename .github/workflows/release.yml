@@ -1,0 +1,193 @@
+name: Release Zenith
+
+on:
+  workflow_run:
+    workflows: ["Build and Test (Linux)"]
+    types: [requested]
+    branches:
+      - 'main'
+      - 'release'
+
+defaults:
+  run:
+    shell: bash -ex {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zenith-image:
+    runs-on: ubuntu-latest
+    name: Build and push zenith Docker image (${{ github.base_ref }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_PWD }}
+
+      - name: Set Docker tag base for tagging
+        id: docker_tag_base
+        run: |
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            echo ::set-output name=base::latest
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            echo ::set-output name=base::release
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+      - name: Set git revision for tagging
+        id: docker_tag_revision
+        run: |
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            echo ::set-output name=revision::$(git log --oneline|wc -l)
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            echo ::set-output name=revision::release-$(git log --oneline|wc -l)
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          tags: |
+            zenithdb/zenith:${{ steps.docker_tag_revision.outputs.revision }}
+            zenithdb/zenith:${{ steps.docker_tag_base.outputs.base }}
+          build-args:
+            GIT_VERSION="${{ github.sha }}"
+            AWS_ACCESS_KEY_ID="${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}"
+            AWS_SECRET_ACCESS_KEY="${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}"
+
+  zenith-compute-tools-image:
+    runs-on: ubuntu-latest
+    name: Build and push zenith compute tools Docker image (${{ github.base_ref }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_PWD }}
+
+      - name: Set Docker tag base for tagging
+        id: docker_tag_base
+        run: |
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            echo ::set-output name=base::latest
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            echo ::set-output name=base::release
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+      - name: Set git revision for tagging
+        id: docker_tag_revision
+        run: |
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            echo ::set-output name=revision::$(git log --oneline|wc -l)
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            echo ::set-output name=revision::release-$(git log --oneline|wc -l)
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          file: Dockerfile.compute-tools
+          tags: zenithdb/compute-tools:${{ steps.docker_tag_base.outputs.base }}
+          build-args:
+            AWS_ACCESS_KEY_ID="${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}"
+            AWS_SECRET_ACCESS_KEY="${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}"
+
+      - name: Build and push postgres Docker image
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          context: ./vendor/postgres/
+          tags: |
+            zenithdb/compute-node:${{ steps.docker_tag_revision_compute.outputs.revision }}
+            zenithdb/compute-node:${{ steps.docker_tag_base.outputs.base }}
+
+  zenith-deploy:
+    runs-on: ubuntu-latest
+    needs: zenith-image
+    name: Redeploy zenith (${{ github.base_ref }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Deploy Zenith
+        run: |
+          pip install --progress-bar off --user ansible boto3
+
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            RELEASE=
+            HOSTS="staging.hosts"
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            RELEASE="RELEASE=true"
+            HOSTS="production.hosts"
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+          cd "./.github/ansible/"
+
+          $RELEASE ./get_binaries.sh
+
+          echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+          echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+          chmod 0600 ssh-key
+          ssh-add ssh-key
+          rm -f ssh-key ssh-key-cert.pub
+
+          ansible-playbook deploy.yaml -i $HOSTS
+          rm -f zenith_install.tar.gz .zenith_current_version
+
+      - name: Deploy proxy
+        env:
+          KUBECONFIG: .kubeconfig
+        run: |
+          if [[ $GITHUB_BASE_REF == "main" ]]; then
+            echo "${STAGING_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
+            DOCKER_TAG="$(git log --oneline|wc -l)"
+            HELM_FILE=".github/helm-values/staging.proxy.yaml"
+          elif [[ $GITHUB_BASE_REF == "release" ]]; then
+            echo "${PRODUCTION_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
+            DOCKER_TAG="release-$(git log --oneline|wc -l)"
+            HELM_FILE=".github/helm-values/production.proxy.yaml"
+          else
+            echo "GITHUB_BASE_REF (value '$GITHUB_BASE_REF') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+          chmod 0600 ${KUBECONFIG}
+
+          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm repo add zenithdb https://zenithdb.github.io/helm-charts
+
+          helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f $HELM_FILE --set image.tag=${DOCKER_TAG} --wait
