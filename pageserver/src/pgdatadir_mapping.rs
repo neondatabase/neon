@@ -1215,7 +1215,7 @@ pub fn create_test_timeline<R: Repository>(
     timeline_id: zenith_utils::zid::ZTimelineId,
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let tline = DatadirTimeline::new(tline, tline.conf.compaction_target_size / 10);
+    let tline = DatadirTimeline::new(tline, 256 * 1024);
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
