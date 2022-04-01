@@ -2,9 +2,6 @@ use crate::repository::{key_range_size, singleton_range, Key};
 use postgres_ffi::pg_constants;
 use std::ops::Range;
 
-// Target file size, when creating image and delta layers
-pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
-
 ///
 /// Represents a set of Keys, in a compact form.
 ///
