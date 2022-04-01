@@ -328,8 +328,31 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_others
 
-  python-performance-tests:
+  host-cleanup:
     needs: build-zenith
+    name: prepare for perfromance test by cleaning up the host
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cleanup the host
+        run: |
+          echo '----before cleanup'
+          sudo df -h
+
+          sudo apt clean
+          docker rmi $(docker image ls -aq)
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+          echo '----after cleanup'
+          sudo df -h
+
+
+  python-performance-tests:
+    needs: host-cleanup
     strategy:
       matrix:
         build_type: [release]
@@ -340,8 +363,6 @@ jobs:
 
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
-      # performance tests generate a lot of data in /tmp/, exceeding docker limits
-      # use host's resources for that
       volumes:
         - /tmp/:/tmp/
 

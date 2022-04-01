@@ -141,6 +141,10 @@ runs:
         env:
           TEST_OUTPUT: /tmp/test_output/
         run: |
+          echo '----before cleanup'
+          sudo df -h
           du -sh $TEST_OUTPUT/*
           find $TEST_OUTPUT -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
+          echo '----after cleanup'
+          sudo df -h
           du -sh $TEST_OUTPUT/*
