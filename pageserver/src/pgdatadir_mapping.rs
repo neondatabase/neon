@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
@@ -37,7 +37,7 @@ where
     pub tline: Arc<R::Timeline>,
 
     /// When did we last calculate the partitioning?
-    partitioning: RwLock<(KeyPartitioning, Lsn)>,
+    partitioning: Mutex<(KeyPartitioning, Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -50,7 +50,7 @@ impl<R: Repository> DatadirTimeline<R> {
     pub fn new(tline: Arc<R::Timeline>, repartition_threshold: u64) -> Self {
         DatadirTimeline {
             tline,
-            partitioning: RwLock::new((KeyPartitioning::new(), Lsn(0))),
+            partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             current_logical_size: AtomicIsize::new(0),
             repartition_threshold,
         }
@@ -389,13 +389,11 @@ impl<R: Repository> DatadirTimeline<R> {
     }
 
     pub fn repartition(&self, lsn: Lsn) -> Result<(KeyPartitioning, Lsn)> {
-        let partitioning_guard = self.partitioning.read().unwrap();
+        let mut partitioning_guard = self.partitioning.lock().unwrap();
         if partitioning_guard.1 == Lsn(0)
             || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
         {
             let keyspace = self.collect_keyspace(lsn)?;
-            drop(partitioning_guard);
-            let mut partitioning_guard = self.partitioning.write().unwrap();
             let partitioning = keyspace.partition(TARGET_FILE_SIZE_BYTES);
             *partitioning_guard = (partitioning, lsn);
             return Ok((partitioning_guard.0.clone(), lsn));
