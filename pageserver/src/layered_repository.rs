@@ -2220,12 +2220,6 @@ pub mod tests {
             }
 
             let cutoff = tline.get_last_record_lsn();
-            let parts = keyspace
-                .clone()
-                .to_keyspace()
-                .partition(TEST_FILE_SIZE as u64);
-            tline.hint_partitioning(parts.clone(), lsn)?;
-
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
@@ -2267,9 +2261,6 @@ pub mod tests {
 
             keyspace.add_key(test_key);
         }
-
-        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
-        tline.hint_partitioning(parts, lsn)?;
 
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {
@@ -2341,9 +2332,6 @@ pub mod tests {
 
             keyspace.add_key(test_key);
         }
-
-        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
-        tline.hint_partitioning(parts, lsn)?;
 
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
