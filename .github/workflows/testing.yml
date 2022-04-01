@@ -12,6 +12,7 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}
   CACHEPOT_BUCKET: zenith-rust-cachepot
   RUSTC_WRAPPER: cachepot
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -57,12 +58,14 @@ jobs:
 
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
-        run: tar -C tmp_install/ -cf ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz .
+        run: tar -C tmp_install/ -cf ./pg.tgz .
       - name: Upload postgres artifact
         uses: actions/upload-artifact@v3
         with:
-          name: postgres-artifact-cache
-          path: ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz
+          retention-days: 7
+          if-no-files-found: error
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          path: ./pg.tgz
 
 
   check-codestyle:
@@ -103,18 +106,17 @@ jobs:
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
-          name: postgres-artifact-cache
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: ./postgres-artifact/
       - name: Extract postgres artifact
         run: |
           mkdir ./tmp_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C ./tmp_install/
+          tar -xf ./postgres-artifact/pg.tgz -C ./tmp_install/
           rm -rf ./postgres-artifact/
 
       - name: Cache cargo clippy deps
         id: cache_cargo_clippy
         uses: actions/cache@v3
-        if: env.cargo_incremental != '0'
         with:
           path: |
             ~/.cargo/registry/
@@ -171,18 +173,17 @@ jobs:
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
-          name: postgres-artifact-cache
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: ./postgres-artifact/
       - name: Extract postgres artifact
         run: |
           mkdir ./tmp_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C ./tmp_install/
+          tar -xf ./postgres-artifact/pg.tgz -C ./tmp_install/
           rm -rf ./postgres-artifact/
 
       - name: Cache cargo deps
         id: cache_cargo
         uses: actions/cache@v3
-        if: env.cargo_incremental != '0'
         with:
           path: |
             ~/.cargo/registry/
@@ -199,7 +200,7 @@ jobs:
             cov_prefix=()
             CARGO_FLAGS=--release
           fi
-          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --workspace --bins --examples --tests
+          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --bins --tests
           cachepot -s
 
       - name: Run cargo test
@@ -252,14 +253,15 @@ jobs:
             done
           fi
 
-          tar -C /tmp/zenith/ -cf ./zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz ./bin/ ./test_bin/ ./etc/
+          tar -C /tmp/zenith/ -cf ./zenith.tgz ./bin/ ./test_bin/ ./etc/
 
       - name: Upload zenith binaries
         uses: actions/upload-artifact@v3
         with:
-          name: zenith-artifact-cache
-          retention-days: 1
-          path: ./zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz
+          retention-days: 7
+          if-no-files-found: error
+          name: zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: ./zenith.tgz
 
       # TODO kb this now breaks: enable + upload (probably missing env vars from the original Dockerfile?)
       # - name: Merge coverage data
@@ -328,7 +330,7 @@ jobs:
 
   host-cleanup:
     needs: build-zenith
-    name: prepare for perfromance test by cleaning up the host
+    name: prepare for performance test by cleaning up the host
     runs-on: ubuntu-latest
 
     steps:
@@ -361,8 +363,6 @@ jobs:
 
     container:
       image: zimg/rust:${{ matrix.rust_toolchain }}
-      volumes:
-        - /tmp/:/tmp/
 
     steps:
       - name: Fix permissions

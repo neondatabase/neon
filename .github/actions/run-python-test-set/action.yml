@@ -32,7 +32,7 @@ runs:
         shell: bash -ex {0}
         run: brew install poetry coreutils
 
-      - name: Cache poetry deps
+      - name: Restore poetry deps cache
         if: runner.os == 'macOS'
         id: cache_poetry_mac
         uses: actions/cache@v3
@@ -40,7 +40,7 @@ runs:
           path: ~/Library/Caches/pypoetry/virtualenvs/
           key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
-      - name: Cache poetry deps
+      - name: Restore poetry deps cache
         if: runner.os == 'Linux'
         id: cache_poetry_linux
         uses: actions/cache@v3
@@ -48,32 +48,32 @@ runs:
           path: ~/.cache/pypoetry/virtualenvs
           key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
-      - name: Install Python deps
+      - name: Install poetry deps
         shell: bash -ex {0}
         run: ./scripts/pysync
 
       - name: Get zenith artifact for restoration
         uses: actions/download-artifact@v3
         with:
-          name: zenith-artifact-cache
+          name: zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
           path: ./zenith-artifact/
       - name: Extract zenith artifact
         shell: bash -ex {0}
         run: |
           mkdir -p /tmp/zenith/
-          tar -xf ./zenith-artifact/zenith-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact.tgz -C /tmp/zenith/
+          tar -xf ./zenith-artifact/zenith.tgz -C /tmp/zenith/
           rm -rf ./zenith-artifact/
 
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
-          name: postgres-artifact-cache
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: ./postgres-artifact/
       - name: Extract postgres artifact
         shell: bash -ex {0}
         run: |
           mkdir -p /tmp/zenith/pg_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ inputs.build_type }}-artifact.tgz -C /tmp/zenith/pg_install/
+          tar -xf ./postgres-artifact/pg.tgz -C /tmp/zenith/pg_install/
           rm -rf ./postgres-artifact/
 
       - name: Pytest performance tests
@@ -138,19 +138,18 @@ runs:
       - name: Delete all data but logs
         shell: bash -ex {0}
         if: always()
-        env:
-          TEST_OUTPUT: /tmp/test_output/
         run: |
           echo '----before cleanup'
           sudo df -h
-          du -sh $TEST_OUTPUT/*
-          find $TEST_OUTPUT -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
+          find /tmp/test_output/ -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
           echo '----after cleanup'
           sudo df -h
-          du -sh $TEST_OUTPUT/*
 
       - name: Upload python test data artifact
+        if: always()
         uses: actions/upload-artifact@v3
         with:
-          name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact-cache
+          retention-days: 7
+          if-no-files-found: error
+          name: python-test-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
           path: /tmp/test_output/

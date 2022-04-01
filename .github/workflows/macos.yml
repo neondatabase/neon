@@ -12,8 +12,8 @@ defaults:
     shell: bash -ex {0}
 env:
   RUST_BACKTRACE: 1
-  # CARGO_INCREMENTAL: 0
   COPT: '-Werror'
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -57,12 +57,14 @@ jobs:
 
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
-        run: tar -C tmp_install/ -cf ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz .
+        run: tar -C tmp_install/ -cf ./pg.tgz .
       - name: Upload postgres artifact
         uses: actions/upload-artifact@v3
         with:
-          name: postgres-artifact-cache
-          path: ./postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz
+          retention-days: 7
+          if-no-files-found: error
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          path: ./pg.tgz
 
 
   build-zenith:
@@ -71,7 +73,7 @@ jobs:
       matrix:
         build_type: [debug, release]
         rust_toolchain: [1.56]
-    timeout-minutes: 30
+    timeout-minutes: 50
     name: build zenith (macOs)
     runs-on: macos-latest
 
@@ -95,12 +97,12 @@ jobs:
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
-          name: postgres-artifact-cache
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
           path: ./postgres-artifact/
       - name: Extract postgres artifact
         run: |
           mkdir ./tmp_install/
-          tar -xf ./postgres-artifact/postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact.tgz -C ./tmp_install/
+          tar -xf ./postgres-artifact/pg.tgz -C ./tmp_install/
           rm -rf ./postgres-artifact/
 
       - name: Cache cargo deps
@@ -120,7 +122,7 @@ jobs:
           elif [[ $BUILD_TYPE == "release" ]]; then
             CARGO_FLAGS=--release
           fi
-          cargo build $CARGO_FLAGS --workspace --bins --examples --tests
+          cargo build $CARGO_FLAGS --bins --tests
 
       - name: Run cargo test
         run: |
@@ -170,14 +172,15 @@ jobs:
             done
           fi
 
-          tar -C /tmp/zenith/ -cf ./zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz ./bin/ ./test_bin/ ./etc/
+          tar -C /tmp/zenith/ -cf ./zenith.tgz ./bin/ ./test_bin/ ./etc/
 
       - name: Upload zenith binaries
         uses: actions/upload-artifact@v3
         with:
-          name: zenith-artifact-cache
-          retention-days: 1
-          path: ./zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact.tgz
+          retention-days: 7
+          if-no-files-found: error
+          name: zenith-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: ./zenith.tgz
 
   # TOOD kb disable python tests for non-main branches (artifact uploads also?)
   python-regress-tests:
