@@ -1622,6 +1622,14 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
+
+            // HACK count files uploaded
+            for path in layer_paths.clone() {
+                let file = File::open(path)?;
+                let size_bytes = file.metadata()?.len();
+                println!("would-schedule-s3-upload {}", size_bytes);
+            }
+
             if self.upload_relishes.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
