@@ -683,6 +683,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let conf = repo.get_tenant_conf();
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"compaction_target_size"),
                 RowDescriptor::int8_col(b"compaction_period"),
                 RowDescriptor::int8_col(b"gc_horizon"),
                 RowDescriptor::int8_col(b"gc_period"),
@@ -690,6 +691,7 @@ impl postgres_backend::Handler for PageServerHandler {
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(conf.checkpoint_distance.to_string().as_bytes()),
+                Some(conf.compaction_target_size.to_string().as_bytes()),
                 Some(conf.compaction_period.as_secs().to_string().as_bytes()),
                 Some(conf.gc_horizon.to_string().as_bytes()),
                 Some(conf.gc_period.as_secs().to_string().as_bytes()),
