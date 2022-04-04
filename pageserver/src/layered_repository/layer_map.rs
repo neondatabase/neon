@@ -207,11 +207,11 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Is there a newer image layer for given segment?
+    /// Is there a newer image layer for given key-range?
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    /// We ignore segments newer than disk_consistent_lsn because they will be removed at restart
+    /// We ignore layers newer than disk_consistent_lsn because they will be removed at restart
     /// We also only look at historic layers
     //#[allow(dead_code)]
     pub fn newer_image_layer_exists(
@@ -249,22 +249,6 @@ impl LayerMap {
             }
         }
     }
-
-    /// Is there any layer for given segment that is alive at the lsn?
-    ///
-    /// This is a public wrapper for SegEntry fucntion,
-    /// used for garbage collection, to determine if some alive layer
-    /// exists at the lsn. If so, we shouldn't delete a newer dropped layer
-    /// to avoid incorrectly making it visible.
-    /*
-        pub fn layer_exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
-            Ok(if let Some(segentry) = self.historic_layers.get(&seg) {
-                segentry.exists_at_lsn(seg, lsn)?.unwrap_or(false)
-            } else {
-                false
-            })
-        }
-    */
 
     pub fn iter_historic_layers(&self) -> std::slice::Iter<Arc<dyn Layer>> {
         self.historic_layers.iter()

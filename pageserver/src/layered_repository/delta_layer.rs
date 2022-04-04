@@ -1,14 +1,11 @@
 //! A DeltaLayer represents a collection of WAL records or page images in a range of
 //! LSNs, and in a range of Keys. It is stored on a file on disk.
 //!
-//! Usually a delta layer only contains differences - in the form of WAL records against
-//! a base LSN. However, if a segment is newly created, by creating a new relation or
-//! extending an old one, there might be no base image. In that case, all the entries in
-//! the delta layer must be page images or WAL records with the 'will_init' flag set, so
-//! that they can be replayed without referring to an older page version. Also in some
-//! circumstances, the predecessor layer might actually be another delta layer. That
-//! can happen when you create a new branch in the middle of a delta layer, and the WAL
-//! records on the new branch are put in a new delta layer.
+//! Usually a delta layer only contains differences, in the form of WAL records
+//! against a base LSN. However, if a relation extended or a whole new relation
+//! is created, there would be no base for the new pages. The entries for them
+//! must be page images or WAL records with the 'will_init' flag set, so that
+//! they can be replayed without referring to an older page version.
 //!
 //! When a delta file needs to be accessed, we slurp the 'index' metadata
 //! into memory, into the DeltaLayerInner struct. See load() and unload() functions.

@@ -88,7 +88,7 @@ pub trait Layer: Send + Sync {
     /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> ZTimelineId;
 
-    /// Range of segments that this layer covers
+    /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
     /// Inclusive start bound of the LSN range that this layer holds
@@ -123,7 +123,7 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 
-    /// Does this layer only contain some data for the segment (incremental),
+    /// Does this layer only contain some data for the key-range (incremental),
     /// or does it contain a version of every page? This is important to know
     /// for garbage collecting old layers: an incremental layer depends on
     /// the previous non-incremental layer.

@@ -405,8 +405,8 @@ impl ImageLayer {
 ///
 /// 1. Create the ImageLayerWriter by calling ImageLayerWriter::new(...)
 ///
-/// 2. Write the contents by calling `put_page_image` for every page
-///    in the segment.
+/// 2. Write the contents by calling `put_page_image` for every key-value
+///    pair in the key range.
 ///
 /// 3. Call `finish`.
 ///
