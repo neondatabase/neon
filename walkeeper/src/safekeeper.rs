@@ -6,6 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::xlog_utils::TimeLineID;
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
@@ -15,6 +16,7 @@ use zenith_utils::zid::ZTenantTimelineId;
 
 use lazy_static::lazy_static;
 
+use crate::broker::SafekeeperInfo;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
@@ -497,6 +499,8 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     metrics: SafeKeeperMetrics,
 
     /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
+    /// Note: be careful to set only if we are sure our WAL (term history) matches
+    /// committed one.
     pub global_commit_lsn: Lsn,
     /// LSN since the proposer safekeeper currently talking to appends WAL;
     /// determines epoch switch point.
@@ -743,7 +747,9 @@ where
         let mut state = self.state.clone();
 
         state.commit_lsn = self.inmem.commit_lsn;
+        state.s3_wal_lsn = self.inmem.s3_wal_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
+        state.remote_consistent_lsn = self.inmem.remote_consistent_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
         self.state.persist(&state)
     }
@@ -788,10 +794,10 @@ where
             self.wal_store.flush_wal()?;
         }
 
-        // Update global_commit_lsn, verifying that it cannot decrease.
+        // Update global_commit_lsn
         if msg.h.commit_lsn != Lsn(0) {
-            assert!(msg.h.commit_lsn >= self.global_commit_lsn);
-            self.global_commit_lsn = msg.h.commit_lsn;
+            // We also obtain commit lsn from peers, so value arrived here might be stale (less)
+            self.global_commit_lsn = max(self.global_commit_lsn, msg.h.commit_lsn);
         }
 
         self.inmem.peer_horizon_lsn = msg.h.truncate_lsn;
@@ -834,6 +840,46 @@ where
         Ok(Some(AcceptorProposerMessage::AppendResponse(
             self.append_response(),
         )))
+    }
+
+    /// Update timeline state with peer safekeeper data.
+    pub fn record_safekeeper_info(&mut self, sk_info: &SafekeeperInfo) -> Result<()> {
+        let mut sync_control_file = false;
+        if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
+        {
+            // Note: the check is too restrictive, generally we can update local
+            // commit_lsn if our history matches (is part of) history of advanced
+            // commit_lsn provider.
+            if last_log_term == self.get_epoch() {
+                self.global_commit_lsn = max(commit_lsn, self.global_commit_lsn);
+                self.update_commit_lsn()?;
+            }
+        }
+        if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
+            let new_s3_wal_lsn = max(s3_wal_lsn, self.inmem.s3_wal_lsn);
+            sync_control_file |=
+                self.state.s3_wal_lsn + (self.state.server.wal_seg_size as u64) < new_s3_wal_lsn;
+            self.inmem.s3_wal_lsn = new_s3_wal_lsn;
+        }
+        if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
+            let new_remote_consistent_lsn =
+                max(remote_consistent_lsn, self.inmem.remote_consistent_lsn);
+            sync_control_file |= self.state.remote_consistent_lsn
+                + (self.state.server.wal_seg_size as u64)
+                < new_remote_consistent_lsn;
+            self.inmem.remote_consistent_lsn = new_remote_consistent_lsn;
+        }
+        if let Some(peer_horizon_lsn) = sk_info.peer_horizon_lsn {
+            let new_peer_horizon_lsn = max(peer_horizon_lsn, self.inmem.peer_horizon_lsn);
+            sync_control_file |= self.state.peer_horizon_lsn
+                + (self.state.server.wal_seg_size as u64)
+                < new_peer_horizon_lsn;
+            self.inmem.peer_horizon_lsn = new_peer_horizon_lsn;
+        }
+        if sync_control_file {
+            self.persist_control_file()?;
+        }
+        Ok(())
     }
 }
 

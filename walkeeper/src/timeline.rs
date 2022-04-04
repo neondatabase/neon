@@ -375,10 +375,9 @@ impl Timeline {
     }
 
     // Notify caught-up WAL senders about new WAL data received
-    pub fn notify_wal_senders(&self, commit_lsn: Lsn) {
-        let mut shared_state = self.mutex.lock().unwrap();
-        if shared_state.notified_commit_lsn < commit_lsn {
-            shared_state.notified_commit_lsn = commit_lsn;
+    fn notify_wal_senders(&self, shared_state: &mut MutexGuard<SharedState>) {
+        if shared_state.notified_commit_lsn < shared_state.sk.inmem.commit_lsn {
+            shared_state.notified_commit_lsn = shared_state.sk.inmem.commit_lsn;
             self.cond.notify_all();
         }
     }
@@ -389,13 +388,9 @@ impl Timeline {
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
         let mut rmsg: Option<AcceptorProposerMessage>;
-        let commit_lsn: Lsn;
         {
             let mut shared_state = self.mutex.lock().unwrap();
             rmsg = shared_state.sk.process_msg(msg)?;
-            // locally available commit lsn. flush_lsn can be smaller than
-            // commit_lsn if we are catching up safekeeper.
-            commit_lsn = shared_state.sk.inmem.commit_lsn;
 
             // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
@@ -405,9 +400,10 @@ impl Timeline {
                     resp.zenith_feedback = zenith_feedback;
                 }
             }
+
+            // Ping wal sender that new data might be available.
+            self.notify_wal_senders(&mut shared_state);
         }
-        // Ping wal sender that new data might be available.
-        self.notify_wal_senders(commit_lsn);
         Ok(rmsg)
     }
 
@@ -437,34 +433,8 @@ impl Timeline {
     /// Update timeline state with peer safekeeper data.
     pub fn record_safekeeper_info(&self, sk_info: &SafekeeperInfo, _sk_id: ZNodeId) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
-        // Note: the check is too restrictive, generally we can update local
-        // commit_lsn if our history matches (is part of) history of advanced
-        // commit_lsn provider.
-        if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
-        {
-            if last_log_term == shared_state.sk.get_epoch() {
-                shared_state.sk.global_commit_lsn =
-                    max(commit_lsn, shared_state.sk.global_commit_lsn);
-                shared_state.sk.update_commit_lsn()?;
-                let local_commit_lsn = min(commit_lsn, shared_state.sk.wal_store.flush_lsn());
-                shared_state.sk.inmem.commit_lsn =
-                    max(local_commit_lsn, shared_state.sk.inmem.commit_lsn);
-            }
-        }
-        if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
-            shared_state.sk.inmem.s3_wal_lsn = max(s3_wal_lsn, shared_state.sk.inmem.s3_wal_lsn);
-        }
-        if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
-            shared_state.sk.inmem.remote_consistent_lsn = max(
-                remote_consistent_lsn,
-                shared_state.sk.inmem.remote_consistent_lsn,
-            );
-        }
-        if let Some(peer_horizon_lsn) = sk_info.peer_horizon_lsn {
-            shared_state.sk.inmem.peer_horizon_lsn =
-                max(peer_horizon_lsn, shared_state.sk.inmem.peer_horizon_lsn);
-        }
-        // TODO: sync control file
+        shared_state.sk.record_safekeeper_info(sk_info)?;
+        self.notify_wal_senders(&mut shared_state);
         Ok(())
     }
 
