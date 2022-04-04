@@ -14,7 +14,8 @@ def test_tenant_config(zenith_env_builder: ZenithEnvBuilder):
             'gc_horizon': '1024',
             'pitr_interval': '3600sec',
             'checkpoint_distance': '10000',
-            'compaction_period': '60sec'
+            'compaction_period': '60sec',
+            'compaction_target_size': '1048576'
         })
 
     env.zenith_cli.create_timeline(f'test_tenant_conf', tenant_id=tenant)
@@ -27,4 +28,4 @@ def test_tenant_config(zenith_env_builder: ZenithEnvBuilder):
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor() as pscur:
             pscur.execute(f"show {tenant.hex}")
-            assert pscur.fetchone() == (10000, 60, 1024, 100, 3600)
+            assert pscur.fetchone() == (10000, 1048576, 60, 1024, 100, 3600)

@@ -26,6 +26,7 @@ pub struct TenantCreateRequest {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<ZTenantId>,
     pub checkpoint_distance: Option<u64>,
+    pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
@@ -47,6 +48,7 @@ impl TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
             checkpoint_distance: None,
+            compaction_target_size: None,
             compaction_period: None,
             gc_horizon: None,
             gc_period: None,

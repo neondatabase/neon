@@ -150,6 +150,7 @@ pub const TENANT_CONFIG_NAME: &str = "config";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     pub checkpoint_distance: u64,
+    pub compaction_target_size: u64,
     pub compaction_period: Duration,
     pub gc_horizon: u64,
     pub gc_period: Duration,
@@ -164,6 +165,7 @@ impl TenantConf {
             pitr_interval: conf.pitr_interval,
             checkpoint_distance: conf.checkpoint_distance,
             compaction_period: conf.compaction_period,
+            compaction_target_size: conf.compaction_target_size,
         }
     }
     pub fn save(&self, conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {

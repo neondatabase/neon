@@ -352,6 +352,9 @@ impl PageServerNode {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>().unwrap()),
+                compaction_target_size: settings
+                    .get("compaction_target_size")
+                    .map(|x| x.parse::<u64>().unwrap()),
                 compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
                 gc_horizon: settings
                     .get("gc_horizon")
