@@ -163,15 +163,11 @@ impl BlobRef {
     }
 
     pub fn pos(&self) -> u64 {
-        self.0 >> 32
+        self.0 >> 1
     }
 
-    pub fn size(&self) -> usize {
-        ((self.0 & 0xFFFFFFFF) >> 1) as usize
-    }
-
-    pub fn new(pos: u64, size: usize, will_init: bool) -> BlobRef {
-        let mut blob_ref = (pos << 32) | ((size as u64) << 1);
+    pub fn new(pos: u64, will_init: bool) -> BlobRef {
+        let mut blob_ref = pos << 1;
         if will_init {
             blob_ref |= WILL_INIT;
         }

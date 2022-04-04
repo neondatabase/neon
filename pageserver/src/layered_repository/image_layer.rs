@@ -13,63 +13,70 @@
 //!
 //!    000000067F000032BE0000400000000070B6-000000067F000032BE0000400000000080B6__00000000346BC568
 //!
-//! An image file is constructed using the 'bookfile' crate.
+//! Every image layer file consists of three parts: "summary",
+//! "index", and "values".  The summary is a fixed size header at the
+//! beginning of the file, and it contains basic information about the
+//! layer, and offsets to the other parts. The "index" is a serialized
+//! HashMap, mapping from Key to an offset in the "values" part.  The
+//! actual page images are stored in the "values" part.
 //!
-//! Only metadata is loaded into memory by the load function.
+//! Only the "index" is loaded into memory by the load function.
 //! When images are needed, they are read directly from disk.
 //!
 use crate::config::PageServerConf;
+use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::layered_repository::block_io::{BlockReader, FileBlockReader};
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
-use crate::IMAGE_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
+use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::Write;
+use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, TryLockError};
 
-use bookfile::{Book, BookWriter, ChapterWriter};
-
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-/// Mapping from (key, lsn) -> page/WAL record
-/// byte ranges in VALUES_CHAPTER
-static INDEX_CHAPTER: u64 = 1;
-
-/// Contains each block in block # order
-const VALUES_CHAPTER: u64 = 2;
-
-/// Contains the [`Summary`] struct
-const SUMMARY_CHAPTER: u64 = 3;
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
+    /// Magic value to identify this as a zenith image file. Always IMAGE_FILE_MAGIC.
+    magic: u16,
+    format_version: u16,
+
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
-
     lsn: Lsn,
+
+    /// Block number where the 'index' part of the file begins.
+    index_start_blk: u32,
 }
 
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
         Self {
+            magic: IMAGE_FILE_MAGIC,
+            format_version: STORAGE_FORMAT_VERSION,
             tenantid: layer.tenantid,
             timelineid: layer.timelineid,
             key_range: layer.key_range.clone(),
 
             lsn: layer.lsn,
+
+            index_start_blk: 0,
         }
     }
 }
@@ -97,12 +104,14 @@ pub struct ImageLayerInner {
     /// If false, the 'index' has not been loaded into memory yet.
     loaded: bool,
 
-    /// The underlying (virtual) file handle. None if the layer hasn't been loaded
-    /// yet.
-    book: Option<Book<VirtualFile>>,
-
     /// offset of each value
     index: HashMap<Key, BlobRef>,
+
+    // values copied from summary
+    index_start_blk: u32,
+
+    /// Reader object for reading blocks from the file. (None if not loaded yet)
+    file: Option<FileBlockReader<VirtualFile>>,
 }
 
 impl Layer for ImageLayer {
@@ -138,26 +147,21 @@ impl Layer for ImageLayer {
         assert!(lsn_range.end >= self.lsn);
 
         let inner = self.load()?;
-
         if let Some(blob_ref) = inner.index.get(&key) {
-            let chapter = inner
-                .book
+            let buf = inner
+                .file
                 .as_ref()
                 .unwrap()
-                .chapter_reader(VALUES_CHAPTER)?;
-
-            let mut blob = vec![0; blob_ref.size()];
-            chapter
-                .read_exact_at(&mut blob, blob_ref.pos())
+                .block_cursor()
+                .read_blob(blob_ref.pos())
                 .with_context(|| {
                     format!(
-                        "failed to read {} bytes from data file {} at offset {}",
-                        blob_ref.size(),
+                        "failed to read blob from data file {} at offset {}",
                         self.filename().display(),
                         blob_ref.pos()
                     )
                 })?;
-            let value = Bytes::from(blob);
+            let value = Bytes::from(buf);
 
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
@@ -228,12 +232,7 @@ impl Layer for ImageLayer {
         index_vec.sort_by_key(|x| x.1.pos());
 
         for (key, blob_ref) in index_vec {
-            println!(
-                "key: {} size {} offset {}",
-                key,
-                blob_ref.size(),
-                blob_ref.pos()
-            );
+            println!("key: {} offset {}", key, blob_ref.pos());
         }
 
         Ok(())
@@ -291,21 +290,19 @@ impl ImageLayer {
         let path = self.path();
 
         // Open the file if it's not open already.
-        if inner.book.is_none() {
+        if inner.file.is_none() {
             let file = VirtualFile::open(&path)
                 .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-            inner.book = Some(Book::new(file).with_context(|| {
-                format!("Failed to open file '{}' as a bookfile", path.display())
-            })?);
+            inner.file = Some(FileBlockReader::new(file));
         }
-        let book = inner.book.as_ref().unwrap();
+        let file = inner.file.as_mut().unwrap();
+        let summary_blk = file.read_blk(0)?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
-                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
-                let actual_summary = Summary::des(&chapter)?;
-
-                let expected_summary = Summary::from(self);
+                let mut expected_summary = Summary::from(self);
+                expected_summary.index_start_blk = actual_summary.index_start_blk;
 
                 if actual_summary != expected_summary {
                     bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
@@ -325,14 +322,18 @@ impl ImageLayer {
             }
         }
 
-        let chapter = book.read_chapter(INDEX_CHAPTER)?;
-        let index = HashMap::des(&chapter)?;
+        file.file.seek(SeekFrom::Start(
+            actual_summary.index_start_blk as u64 * PAGE_SZ as u64,
+        ))?;
+        let mut buf_reader = std::io::BufReader::new(&mut file.file);
+        let index = HashMap::des_from(&mut buf_reader)?;
+
+        inner.index_start_blk = actual_summary.index_start_blk;
 
         info!("loaded from {}", &path.display());
 
         inner.index = index;
         inner.loaded = true;
-
         Ok(())
     }
 
@@ -350,9 +351,10 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             inner: RwLock::new(ImageLayerInner {
-                book: None,
                 index: HashMap::new(),
                 loaded: false,
+                file: None,
+                index_start_blk: 0,
             }),
         }
     }
@@ -360,12 +362,14 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path<F>(path: &Path, book: &Book<F>) -> Result<ImageLayer>
+    pub fn new_for_path<F>(path: &Path, file: F) -> Result<ImageLayer>
     where
         F: std::os::unix::prelude::FileExt,
     {
-        let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
-        let summary = Summary::des(&chapter)?;
+        let mut summary_buf = Vec::new();
+        summary_buf.resize(PAGE_SZ, 0);
+        file.read_exact_at(&mut summary_buf, 0)?;
+        let summary = Summary::des_prefix(&summary_buf)?;
 
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -374,9 +378,10 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             inner: RwLock::new(ImageLayerInner {
-                book: None,
+                file: None,
                 index: HashMap::new(),
                 loaded: false,
+                index_start_blk: 0,
             }),
         })
     }
@@ -412,18 +417,15 @@ impl ImageLayer {
 ///
 pub struct ImageLayerWriter {
     conf: &'static PageServerConf,
-    path: PathBuf,
+    _path: PathBuf,
     timelineid: ZTimelineId,
     tenantid: ZTenantId,
     key_range: Range<Key>,
     lsn: Lsn,
 
-    values_writer: Option<ChapterWriter<BufWriter<VirtualFile>>>,
-    end_offset: u64,
-
     index: HashMap<Key, BlobRef>,
 
-    finished: bool,
+    blob_writer: WriteBlobWriter<VirtualFile>,
 }
 
 impl ImageLayerWriter {
@@ -449,24 +451,17 @@ impl ImageLayerWriter {
         );
         info!("new image layer {}", path.display());
         let file = VirtualFile::create(&path)?;
-        let buf_writer = BufWriter::new(file);
-        let book = BookWriter::new(buf_writer, IMAGE_FILE_MAGIC)?;
-
-        // Open the page-images chapter for writing. The calls to
-        // `put_image` will use this to write the contents.
-        let chapter = book.new_chapter(VALUES_CHAPTER);
+        let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
 
         let writer = ImageLayerWriter {
             conf,
-            path,
+            _path: path,
             timelineid,
             tenantid,
             key_range: key_range.clone(),
             lsn,
-            values_writer: Some(chapter),
             index: HashMap::new(),
-            end_offset: 0,
-            finished: false,
+            blob_writer,
         };
 
         Ok(writer)
@@ -479,49 +474,41 @@ impl ImageLayerWriter {
     ///
     pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.end_offset;
+        let off = self.blob_writer.write_blob(img)?;
 
-        if let Some(writer) = &mut self.values_writer {
-            let len = img.len();
-            writer.write_all(img)?;
-            self.end_offset += len as u64;
-
-            let old = self.index.insert(key, BlobRef::new(off, len, true));
-            assert!(old.is_none());
-        } else {
-            panic!()
-        }
+        let old = self.index.insert(key, BlobRef::new(off, true));
+        assert!(old.is_none());
 
         Ok(())
     }
 
-    pub fn finish(&mut self) -> anyhow::Result<ImageLayer> {
-        // Close the values chapter
-        let book = self.values_writer.take().unwrap().close()?;
+    pub fn finish(self) -> anyhow::Result<ImageLayer> {
+        let index_start_blk =
+            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+
+        let mut file = self.blob_writer.into_inner();
 
         // Write out the index
-        let mut chapter = book.new_chapter(INDEX_CHAPTER);
         let buf = HashMap::ser(&self.index)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.write_all(&buf)?;
 
-        // Write out the summary chapter
-        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        // Fill in the summary on blk 0
         let summary = Summary {
+            magic: IMAGE_FILE_MAGIC,
+            format_version: STORAGE_FORMAT_VERSION,
             tenantid: self.tenantid,
             timelineid: self.timelineid,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
+            index_start_blk,
         };
-        Summary::ser_into(&summary, &mut chapter)?;
-        let book = chapter.close()?;
-
-        // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        file.seek(SeekFrom::Start(0))?;
+        Summary::ser_into(&summary, &mut file)?;
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
-        // set inner.book here. The first read will have to re-open it.
+        // set inner.file here. The first read will have to re-open it.
         let layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(self.conf),
             timelineid: self.timelineid,
@@ -529,28 +516,14 @@ impl ImageLayerWriter {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             inner: RwLock::new(ImageLayerInner {
-                book: None,
                 loaded: false,
                 index: HashMap::new(),
+                file: None,
+                index_start_blk,
             }),
         };
         trace!("created image layer {}", layer.path().display());
 
-        self.finished = true;
-
         Ok(layer)
-    }
-}
-
-impl Drop for ImageLayerWriter {
-    fn drop(&mut self) {
-        if let Some(page_image_writer) = self.values_writer.take() {
-            if let Ok(book) = page_image_writer.close() {
-                let _ = book.close();
-            }
-        }
-        if !self.finished {
-            let _ = fs::remove_file(&self.path);
-        }
     }
 }
