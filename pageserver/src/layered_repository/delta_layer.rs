@@ -293,25 +293,31 @@ impl Layer for DeltaLayer {
             for (lsn, blob_ref) in versions.as_slice() {
                 let mut desc = String::new();
                 let mut buf = vec![0u8; blob_ref.size()];
-                chapter.read_exact_at(&mut buf, blob_ref.pos())?;
-                let val = Value::des(&buf);
+                match chapter.read_exact_at(&mut buf, blob_ref.pos()) {
+                    Ok(()) => {
+                        let val = Value::des(&buf);
 
-                match val {
-                    Ok(Value::Image(img)) => {
-                        write!(&mut desc, " img {} bytes", img.len())?;
-                    }
-                    Ok(Value::WalRecord(rec)) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec);
-                        write!(
-                            &mut desc,
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )?;
+                        match val {
+                            Ok(Value::Image(img)) => {
+                                write!(&mut desc, " img {} bytes", img.len())?;
+                            }
+                            Ok(Value::WalRecord(rec)) => {
+                                let wal_desc = walrecord::describe_wal_record(&rec);
+                                write!(
+                                    &mut desc,
+                                    " rec {} bytes will_init: {} {}",
+                                    buf.len(),
+                                    rec.will_init(),
+                                    wal_desc
+                                )?;
+                            }
+                            Err(err) => {
+                                write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
+                            }
+                        }
                     }
                     Err(err) => {
-                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
+                        write!(&mut desc, " READ ERROR: {}", err)?;
                     }
                 }
                 println!("  key {} at {}: {}", key, lsn, desc);
