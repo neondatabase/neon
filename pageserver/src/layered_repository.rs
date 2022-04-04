@@ -58,6 +58,7 @@ use zenith_utils::seqwait::SeqWait;
 mod blob_io;
 pub mod block_io;
 mod delta_layer;
+mod disk_btree;
 pub(crate) mod ephemeral_file;
 mod filename;
 mod image_layer;
@@ -1601,15 +1602,6 @@ impl LayeredTimeline {
         } else {
             debug!("Could not compact because no partitioning specified yet");
         }
-
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
 
         Ok(())
     }

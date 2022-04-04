@@ -3,6 +3,7 @@ use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
+use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -26,6 +27,8 @@ pub struct Key {
     pub field5: u8,
     pub field6: u32,
 }
+
+pub const KEY_SIZE: usize = 18;
 
 impl Key {
     pub fn next(&self) -> Key {
@@ -61,7 +64,7 @@ impl Key {
         key
     }
 
-    pub fn from_array(b: [u8; 18]) -> Self {
+    pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
             field2: u32::from_be_bytes(b[1..5].try_into().unwrap()),
@@ -70,6 +73,15 @@ impl Key {
             field5: b[13],
             field6: u32::from_be_bytes(b[14..18].try_into().unwrap()),
         }
+    }
+
+    pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
+        buf[0] = self.field1;
+        BE::write_u32(&mut buf[1..5], self.field2);
+        BE::write_u32(&mut buf[5..9], self.field3);
+        BE::write_u32(&mut buf[9..13], self.field4);
+        buf[13] = self.field5;
+        BE::write_u32(&mut buf[14..18], self.field6);
     }
 }
 
@@ -569,7 +581,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     lazy_static! {
-        static ref TEST_KEY: Key = Key::from_array(hex!("112222222233333333444444445500000001"));
+        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
     }
 
     #[test]

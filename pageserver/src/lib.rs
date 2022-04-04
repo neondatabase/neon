@@ -38,7 +38,7 @@ use pgdatadir_mapping::DatadirTimeline;
 /// This is embedded in the metadata file, and also in the header of all the
 /// layer files. If you make any backwards-incompatible changes to the storage
 /// format, bump this!
-pub const STORAGE_FORMAT_VERSION: u16 = 2;
+pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;

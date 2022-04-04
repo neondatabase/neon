@@ -6,6 +6,7 @@
 
 use crate::page_cache;
 use crate::page_cache::{ReadBufResult, PAGE_SZ};
+use bytes::Bytes;
 use lazy_static::lazy_static;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
@@ -172,5 +173,49 @@ where
                 }
             };
         }
+    }
+}
+
+///
+/// Trait for block-oriented output
+///
+pub trait BlockWriter {
+    ///
+    /// Write a page to the underlying storage.
+    ///
+    /// 'buf' must be of size PAGE_SZ. Returns the block number the page was
+    /// written to.
+    ///
+    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error>;
+}
+
+///
+/// A simple in-memory buffer of blocks.
+///
+pub struct BlockBuf {
+    pub blocks: Vec<Bytes>,
+}
+impl BlockWriter for BlockBuf {
+    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error> {
+        assert!(buf.len() == PAGE_SZ);
+        let blknum = self.blocks.len();
+        self.blocks.push(buf);
+        tracing::info!("buffered block {}", blknum);
+        Ok(blknum as u32)
+    }
+}
+
+impl BlockBuf {
+    pub fn new() -> Self {
+        BlockBuf { blocks: Vec::new() }
+    }
+
+    pub fn size(&self) -> u64 {
+        (self.blocks.len() * PAGE_SZ) as u64
+    }
+}
+impl Default for BlockBuf {
+    fn default() -> Self {
+        Self::new()
     }
 }
