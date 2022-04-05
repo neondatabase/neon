@@ -150,9 +150,7 @@ impl DeltaKey {
     }
 
     fn lsn(&self) -> Lsn {
-        let mut lsn_buf = [0u8; 8];
-        lsn_buf.copy_from_slice(&self.0[KEY_SIZE..]);
-        Lsn(u64::from_be_bytes(lsn_buf))
+        Lsn(u64::from_be_bytes(self.0[KEY_SIZE..].try_into().unwrap()))
     }
 
     fn extract_key_from_buf(buf: &[u8]) -> Key {
