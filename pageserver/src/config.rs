@@ -5,25 +5,19 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{bail, ensure, Context, Result};
-use serde::{Deserialize, Serialize};
 use toml_edit;
 use toml_edit::{Document, Item};
-use tracing::*;
-use zenith_utils::bin_ser::BeSer;
 use zenith_utils::postgres_backend::AuthType;
 use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
 use std::convert::TryInto;
 use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
-use crate::virtual_file::VirtualFile;
 
 pub mod defaults {
     use const_format::formatcp;
@@ -143,60 +137,6 @@ pub struct PageServerConf {
 
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
-}
-
-pub const TENANT_CONFIG_NAME: &str = "config";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TenantConf {
-    pub checkpoint_distance: u64,
-    pub compaction_target_size: u64,
-    pub compaction_period: Duration,
-    pub gc_horizon: u64,
-    pub gc_period: Duration,
-    pub pitr_interval: Duration,
-}
-
-impl TenantConf {
-    pub fn from(conf: &PageServerConf) -> TenantConf {
-        TenantConf {
-            gc_period: conf.gc_period,
-            gc_horizon: conf.gc_horizon,
-            pitr_interval: conf.pitr_interval,
-            checkpoint_distance: conf.checkpoint_distance,
-            compaction_period: conf.compaction_period,
-            compaction_target_size: conf.compaction_target_size,
-        }
-    }
-    pub fn save(&self, conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<()> {
-        let _enter = info_span!("saving tenant config").entered();
-        let path = conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME);
-        let mut file =
-            VirtualFile::open_with_options(&path, OpenOptions::new().write(true).create_new(true))?;
-        let config_bytes = self.ser()?;
-        if file.write(&config_bytes)? != config_bytes.len() {
-            bail!("Could not write all the metadata bytes in a single call");
-        }
-        file.sync_all()?;
-        let tenant_dir = File::open(
-            &path
-                .parent()
-                .expect("Tetant config should always have a parent dir"),
-        )?;
-        tenant_dir.sync_all()?;
-        Ok(())
-    }
-
-    pub fn load(conf: &'static PageServerConf, tenantid: ZTenantId) -> Result<TenantConf> {
-        let _enter = info_span!("loading tenant config").entered();
-        let path = conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME);
-        let content = std::fs::read(&path);
-        match content {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::from(conf)),
-            Ok(config_bytes) => Ok(TenantConf::des(&config_bytes)?),
-            Err(err) => bail!(err),
-        }
-    }
 }
 
 // use dedicated enum for builder to better indicate the intention

@@ -1,10 +1,11 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::config::{PageServerConf, TenantConf};
+use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteIndex;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
+use crate::tenant_config::TenantConf;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
@@ -63,7 +64,7 @@ fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
     TENANTS.lock().unwrap()
 }
 
-// Sets up wal redo manager and repository for tenant. Reduces code duplocation.
+// Sets up wal redo manager and repository for tenant. Reduces code duplication.
 // Used during pageserver startup, or when new tenant is attached to pageserver.
 pub fn load_local_repo(
     conf: &'static PageServerConf,
@@ -76,13 +77,9 @@ pub fn load_local_repo(
         let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
         // Try to load config file
-        let tenant_conf = match TenantConf::load(conf, tenant_id) {
-            Ok(tenant_conf) => tenant_conf,
-            Err(e) => {
-                error!("Failed to load tenant state: {:?}", e);
-                TenantConf::from(conf)
-            }
-        };
+        let tenant_conf = LayeredRepository::load_tenantconf(conf, tenant_id)
+            .with_context(|| format!("Failed to load tenant state for id {}", tenant_id))
+            .unwrap();
 
         // Set up an object repository, for actual data storage.
         let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(

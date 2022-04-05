@@ -23,8 +23,9 @@ use super::models::{
 };
 use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
 use crate::repository::Repository;
+use crate::tenant_config::TenantConf;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
-use crate::{config::PageServerConf, config::TenantConf, tenant_mgr, timelines, ZTenantId};
+use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
 struct State {
     conf: &'static PageServerConf,

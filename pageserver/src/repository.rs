@@ -1,6 +1,6 @@
-use crate::config::TenantConf;
 use crate::layered_repository::metadata::TimelineMetadata;
 use crate::remote_storage::RemoteIndex;
+use crate::tenant_config::TenantConf;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
@@ -499,6 +499,7 @@ pub mod repo_harness {
 
             let repo = LayeredRepository::new(
                 self.conf,
+                // Use default TenantConf in tests
                 TenantConf::from(self.conf),
                 walredo_mgr,
                 self.tenant_id,
