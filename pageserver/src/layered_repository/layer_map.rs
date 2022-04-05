@@ -256,7 +256,7 @@ impl LayerMap {
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    pub fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         for l in self.historic_layers.iter() {

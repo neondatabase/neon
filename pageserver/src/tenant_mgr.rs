@@ -142,6 +142,7 @@ pub fn shutdown_all_tenants() {
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::Reconstructor), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -233,6 +234,30 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 move || crate::tenant_threads::compact_loop(tenant_id, conf),
             )?;
 
+            let reconstruct_spawn_result = thread_mgr::spawn(
+                ThreadKind::Reconstructor,
+                Some(tenant_id),
+                None,
+                "Reconstruct thread",
+                true,
+                move || crate::tenant_threads::reconstruct_loop(tenant_id, conf),
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to launch reconstructC thread for tenant {}",
+                    tenant_id
+                )
+            });
+
+            if let Err(e) = &reconstruct_spawn_result {
+                error!(
+                    "Failed to start reconstruct thread for tenant {}, stopping its compact thread: {:?}",
+                    tenant_id, e
+                );
+                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
+                return reconstruct_spawn_result;
+            }
+
             let gc_spawn_result = thread_mgr::spawn(
                 ThreadKind::GarbageCollector,
                 Some(tenant_id),
@@ -245,10 +270,15 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
 
             if let Err(e) = &gc_spawn_result {
                 error!(
-                    "Failed to start GC thread for tenant {}, stopping its checkpointer thread: {:?}",
+                    "Failed to start GC thread for tenant {}, stopping its compact and reconstruct thread: {:?}",
                     tenant_id, e
                 );
                 thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
+                thread_mgr::shutdown_threads(
+                    Some(ThreadKind::Reconstructor),
+                    Some(tenant_id),
+                    None,
+                );
                 return gc_spawn_result;
             }
 

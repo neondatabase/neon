@@ -30,7 +30,7 @@ use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
@@ -308,6 +308,35 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
+    fn materialize_iteration(&self) -> Result<()> {
+        // Scan through the hashmap and collect a list of all the timelines,
+        // while holding the lock. Then drop the lock and actually perform the
+        // reconstructions.  We don't want to block everything else while the
+        // reconstruction runs.
+        let timelines = self.timelines.lock().unwrap();
+        let timelines_to_reconstruct = timelines
+            .iter()
+            .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
+            .collect::<Vec<_>>();
+        drop(timelines);
+
+        for (timelineid, timeline) in &timelines_to_reconstruct {
+            let _entered =
+                info_span!("reconstruct", timeline = %timelineid, tenant = %self.tenantid)
+                    .entered();
+            match timeline {
+                LayeredTimelineEntry::Loaded(timeline) => {
+                    timeline.reconstruct()?;
+                }
+                LayeredTimelineEntry::Unloaded { .. } => {
+                    debug!("Cannot reconstruct remote timeline {}", timelineid)
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     ///
     /// Flush all in-memory data to disk.
     ///
@@ -319,7 +348,7 @@ impl Repository for LayeredRepository {
         // checkpoints. We don't want to block everything else while the
         // checkpoint runs.
         let timelines = self.timelines.lock().unwrap();
-        let timelines_to_compact = timelines
+        let timelines_to_checkpoint = timelines
             .iter()
             // filter to get only loaded timelines
             .filter_map(|(timelineid, entry)| match entry {
@@ -333,7 +362,7 @@ impl Repository for LayeredRepository {
             .collect::<Vec<_>>();
         drop(timelines);
 
-        for (timelineid, timeline) in &timelines_to_compact {
+        for (timelineid, timeline) in &timelines_to_checkpoint {
             let _entered =
                 info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
             timeline.checkpoint(CheckpointConfig::Flush)?;
@@ -1539,11 +1568,11 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    pub fn compact(&self) -> Result<()> {
+    pub fn reconstruct(&self) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
         //
-        // 1. First, calculate the desired "partitioning" of the
+        // First, calculate the desired "partitioning" of the
         // currently in-use key space. The goal is to partition the
         // key space into roughly fixed-size chunks, but also take into
         // account any existing image layers, and try to align the
@@ -1557,27 +1586,6 @@ impl LayeredTimeline {
         // identify a relation. This is just an optimization,
         // though.
         //
-        // 2. Once we know the partitioning, for each partition,
-        // decide if it's time to create a new image layer. The
-        // criteria is: there has been too much "churn" since the last
-        // image layer? The "churn" is fuzzy concept, it's a
-        // combination of too many delta files, or too much WAL in
-        // total in the delta file. Or perhaps: if creating an image
-        // file would allow to delete some older files.
-        //
-        // 3. After that, we compact all level0 delta files if there
-        // are too many of them.  While compacting, we also garbage
-        // collect any page versions that are no longer needed because
-        // of the new image layers we created in step 2.
-        //
-        // TODO: This hight level strategy hasn't been implemented yet.
-        // Below are functions compact_level0() and create_image_layers()
-        // but they are a bit ad hoc and don't quite work like it's explained
-        // above. Rewrite it.
-        let _compaction_cs = self.compaction_cs.lock().unwrap();
-
-        let target_file_size = self.conf.checkpoint_distance;
-
         // Define partitioning schema if needed
         if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
         {
@@ -1592,14 +1600,25 @@ impl LayeredTimeline {
                 }
             }
             timer.stop_and_record();
-
-            // 3. Compact
-            let timer = self.compact_time_histo.start_timer();
-            self.compact_level0(target_file_size)?;
-            timer.stop_and_record();
         } else {
             debug!("Could not compact because no partitioning specified yet");
         }
+        Ok(())
+    }
+
+    pub fn compact(&self) -> Result<()> {
+        // Compact all level0 delta files if there are too many of them.
+        //
+        // TODO: This hight level strategy hasn't been implemented yet.
+        // Below are functions compact_level0() and create_image_layers()
+        // but they are a bit ad hoc and don't quite work like it's explained
+        // above. Rewrite it.
+        let _compaction_cs = self.compaction_cs.lock().unwrap();
+
+        let target_file_size = self.conf.checkpoint_distance;
+        let timer = self.compact_time_histo.start_timer();
+        self.compact_level0(target_file_size)?;
+        timer.stop_and_record();
 
         // Call unload() on all frozen layers, to release memory.
         // This shouldn't be much memory, as only metadata is slurped
@@ -1643,7 +1662,24 @@ impl LayeredTimeline {
             }
         }
 
-        Ok(false)
+        if let Some(last_level0_created) = layers
+            .get_level0_deltas()?
+            .iter()
+            .flat_map(|l| l.get_creation_time())
+            .max()
+        {
+            if let Some(image) =
+                layers.find_latest_image(partition.ranges.first().unwrap().start, lsn)
+            {
+                let image_created = image.get_creation_time()?;
+                Ok(image_created < last_level0_created
+                    && SystemTime::now() > image_created + self.conf.reconstruct_max_interval)
+            } else {
+                Ok(true)
+            }
+        } else {
+            Ok(false)
+        }
     }
 
     fn create_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<()> {
@@ -2007,6 +2043,7 @@ impl LayeredTimeline {
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
+                    info!("Put in cache key={:?} lsn={}", key, last_rec_lsn);
                     cache.memorize_materialized_page(
                         self.tenantid,
                         self.timelineid,

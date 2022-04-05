@@ -43,7 +43,41 @@ fn compact_loop_ext(tenantid: ZTenantId, conf: &'static PageServerConf) -> Resul
     Ok(())
 }
 
+////
+/// Reconstruction thread's main loop
 ///
+pub fn reconstruct_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+    if let Err(err) = reconstruct_loop_ext(tenantid, conf) {
+        error!("reconstruct loop terminated with error: {:?}", err);
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+fn reconstruct_loop_ext(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+    loop {
+        if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
+            break;
+        }
+
+        std::thread::sleep(conf.reconstruct_min_interval);
+        trace!("reconstruction thread for tenant {} waking up", tenantid);
+
+        // Reconstruct timelines
+        let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+        repo.materialize_iteration()?;
+    }
+
+    trace!(
+        "reconstruction thread stopped for tenant {} state is {:?}",
+        tenantid,
+        tenant_mgr::get_tenant_state(tenantid)
+    );
+    Ok(())
+}
+
+//
 /// GC thread's main loop
 ///
 pub fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {

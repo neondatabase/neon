@@ -38,6 +38,8 @@ pub mod defaults {
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
+    pub const DEFAULT_RECONSTRUCT_MIN_INTERVAL: &str = "10 s";
+    pub const DEFAULT_RECONSTRUCT_MAX_INTERVAL: &str = "100 s";
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
@@ -49,7 +51,10 @@ pub mod defaults {
     pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 10;
     pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 
-    pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
+    // It should not be smaller than DEFAULT_CHECKPOINT_DISTANCE because
+    // get_reconstruct_data looks first for open layers.
+    // So even if image layer will be generated, page server prefer to reconstruct page from inmem layer.
+    pub const DEFAULT_PAGE_CACHE_SIZE: usize = 128 * 1024; // 1Gb
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 
     ///
@@ -65,6 +70,8 @@ pub mod defaults {
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
 #compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
+#reconstruct_min_interval = '{DEFAULT_RECONSTRUCT_MIN_INTERVAL}'
+#reconstruct_max_interval = '{DEFAULT_RECONSTRUCT_MAX_INTERVAL}'
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
@@ -106,6 +113,10 @@ pub struct PageServerConf {
 
     // How often to check if there's compaction work to be done.
     pub compaction_period: Duration,
+
+    // How often to check if there's reconstruction work to be done.
+    pub reconstruct_min_interval: Duration,
+    pub reconstruct_max_interval: Duration,
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
@@ -162,6 +173,8 @@ struct PageServerConfigBuilder {
 
     compaction_target_size: BuilderValue<u64>,
     compaction_period: BuilderValue<Duration>,
+    reconstruct_min_interval: BuilderValue<Duration>,
+    reconstruct_max_interval: BuilderValue<Duration>,
 
     gc_horizon: BuilderValue<u64>,
     gc_period: BuilderValue<Duration>,
@@ -198,6 +211,14 @@ impl Default for PageServerConfigBuilder {
             compaction_target_size: Set(DEFAULT_COMPACTION_TARGET_SIZE),
             compaction_period: Set(humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period")),
+            reconstruct_min_interval: Set(humantime::parse_duration(
+                DEFAULT_RECONSTRUCT_MIN_INTERVAL,
+            )
+            .expect("cannot parse default reconstruct period")),
+            reconstruct_max_interval: Set(humantime::parse_duration(
+                DEFAULT_RECONSTRUCT_MAX_INTERVAL,
+            )
+            .expect("cannot parse default reconstruct period")),
             gc_horizon: Set(DEFAULT_GC_HORIZON),
             gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period")),
@@ -239,6 +260,14 @@ impl PageServerConfigBuilder {
 
     pub fn compaction_period(&mut self, compaction_period: Duration) {
         self.compaction_period = BuilderValue::Set(compaction_period)
+    }
+
+    pub fn reconstruct_min_interval(&mut self, reconstruct_period: Duration) {
+        self.reconstruct_min_interval = BuilderValue::Set(reconstruct_period)
+    }
+
+    pub fn reconstruct_max_interval(&mut self, reconstruct_period: Duration) {
+        self.reconstruct_max_interval = BuilderValue::Set(reconstruct_period)
     }
 
     pub fn gc_horizon(&mut self, gc_horizon: u64) {
@@ -313,6 +342,12 @@ impl PageServerConfigBuilder {
             compaction_period: self
                 .compaction_period
                 .ok_or(anyhow::anyhow!("missing compaction_period"))?,
+            reconstruct_min_interval: self
+                .reconstruct_min_interval
+                .ok_or(anyhow::anyhow!("missing reconstruct_min_interval"))?,
+            reconstruct_max_interval: self
+                .reconstruct_max_interval
+                .ok_or(anyhow::anyhow!("missing reconstruct_max_interval"))?,
             gc_horizon: self
                 .gc_horizon
                 .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
@@ -453,6 +488,12 @@ impl PageServerConf {
                     builder.compaction_target_size(parse_toml_u64(key, item)?)
                 }
                 "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
+                "reconstruct_min_interval" => {
+                    builder.reconstruct_min_interval(parse_toml_duration(key, item)?)
+                }
+                "reconstruct_max_interval" => {
+                    builder.reconstruct_max_interval(parse_toml_duration(key, item)?)
+                }
                 "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
                 "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
@@ -590,6 +631,8 @@ impl PageServerConf {
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
             compaction_target_size: 4 * 1024 * 1024,
             compaction_period: Duration::from_secs(10),
+            reconstruct_min_interval: Duration::from_secs(10),
+            reconstruct_max_interval: Duration::from_secs(100),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             wait_lsn_timeout: Duration::from_secs(60),
@@ -662,6 +705,8 @@ checkpoint_distance = 111 # in bytes
 
 compaction_target_size = 111 # in bytes
 compaction_period = '111 s'
+reconstruct_min_interval = '11 s'
+reconstruct_max_interval = '111 s'
 
 gc_period = '222 s'
 gc_horizon = 222
@@ -700,6 +745,12 @@ id = 10
                 checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
                 compaction_target_size: defaults::DEFAULT_COMPACTION_TARGET_SIZE,
                 compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
+                reconstruct_min_interval: humantime::parse_duration(
+                    defaults::DEFAULT_RECONSTRUCT_MIN_INTERVAL
+                )?,
+                reconstruct_max_interval: humantime::parse_duration(
+                    defaults::DEFAULT_RECONSTRUCT_MAX_INTERVAL
+                )?,
                 gc_horizon: defaults::DEFAULT_GC_HORIZON,
                 gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
@@ -745,6 +796,8 @@ id = 10
                 checkpoint_distance: 111,
                 compaction_target_size: 111,
                 compaction_period: Duration::from_secs(111),
+                reconstruct_min_interval: Duration::from_secs(11),
+                reconstruct_max_interval: Duration::from_secs(111),
                 gc_horizon: 222,
                 gc_period: Duration::from_secs(222),
                 wait_lsn_timeout: Duration::from_secs(111),
