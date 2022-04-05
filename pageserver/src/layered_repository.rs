@@ -2043,7 +2043,6 @@ impl LayeredTimeline {
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
-                    info!("Put in cache key={:?} lsn={}", key, last_rec_lsn);
                     cache.memorize_materialized_page(
                         self.tenantid,
                         self.timelineid,

@@ -92,7 +92,8 @@ pub trait Layer: Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
-    /// Get layer creation time
+    /// Get layer creation time. Right now we are using file creation time,
+    /// but it can be not so accurate, because layer can be evicted and reloaded from S3.
     fn get_creation_time(&self) -> Result<SystemTime> {
         Ok(std::fs::metadata(&self.path())?.created()?)
     }

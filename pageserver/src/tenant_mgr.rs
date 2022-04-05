@@ -244,7 +244,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
             )
             .with_context(|| {
                 format!(
-                    "Failed to launch reconstructC thread for tenant {}",
+                    "Failed to launch reconstruct thread for tenant {}",
                     tenant_id
                 )
             });
