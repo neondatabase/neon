@@ -98,9 +98,10 @@ impl From<&DeltaLayer> for Summary {
 const WILL_INIT: u64 = 1;
 
 ///
-/// Struct representing reference to BLOB in layers. Reference contains BLOB offset and size.
-/// For WAL records (delta layer) it also contains `will_init` flag which helps to determine range of records
-/// which needs to be applied without reading/deserializing records themselves.
+/// Struct representing reference to BLOB in layers. Reference contains BLOB
+/// offset, and for WAL records it also contains `will_init` flag. The flag
+/// helps to determine the range of records that needs to be applied, without
+/// reading/deserializing records themselves.
 ///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 struct BlobRef(u64);
