@@ -32,8 +32,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
-use crate::config::{PageServerConf, TenantConf};
+use crate::config::PageServerConf;
 use crate::keyspace::KeySpace;
+use crate::tenant_config::{TenantConf, TenantConfFile};
 
 use crate::page_cache;
 use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
@@ -564,6 +565,58 @@ impl LayeredRepository {
             remote_index,
             upload_layers,
         }
+    }
+
+    /// Save tenant's config to file
+    pub fn save_tenantconf(
+        conf: &'static PageServerConf,
+        tenantid: ZTenantId,
+        tenant_conf: TenantConf,
+        first_save: bool,
+    ) -> Result<()> {
+        let _enter = info_span!("saving tenantconf").entered();
+        let path = TenantConf::tenantconf_path(conf, tenantid);
+        info!("save tenantconf to {}", path.display());
+
+        // use OpenOptions to ensure file presence is consistent with first_save
+        let mut file = VirtualFile::open_with_options(
+            &path,
+            OpenOptions::new().write(true).create_new(first_save),
+        )?;
+
+        let data = TenantConfFile::from(tenant_conf);
+        let tenantconf_bytes = data.to_bytes().context("Failed to get tenantconf bytes")?;
+
+        if file.write(&tenantconf_bytes)? != tenantconf_bytes.len() {
+            bail!("Could not write all the tenantconf bytes in a single call");
+        }
+        file.sync_all()?;
+
+        // fsync the parent directory to ensure the directory entry is durable
+        if first_save {
+            let tenant_dir = File::open(
+                &path
+                    .parent()
+                    .expect("Tenantconf should always have a parent dir"),
+            )?;
+            tenant_dir.sync_all()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn load_tenantconf(
+        conf: &'static PageServerConf,
+        tenantid: ZTenantId,
+    ) -> Result<TenantConf> {
+        let path = TenantConf::tenantconf_path(conf, tenantid);
+        info!("loading tenantconf from {}", path.display());
+        let tenantconf_bytes = std::fs::read(&path)?;
+        let tenant_conf_file = TenantConfFile::from_bytes(&tenantconf_bytes);
+        match tenant_conf_file {
+            Ok(tenant_conf) => return Ok(tenant_conf.body),
+            Err(err) => return Err(err),
+        };
     }
 
     /// Save timeline metadata to file
@@ -2254,10 +2307,6 @@ pub mod tests {
             }
 
             let cutoff = tline.get_last_record_lsn();
-            let parts = keyspace
-                .clone()
-                .to_keyspace()
-                .partition(TEST_FILE_SIZE as u64);
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;

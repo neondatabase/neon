@@ -20,10 +20,10 @@ use zenith_utils::{crashsafe_dir, logging};
 
 use crate::{
     config::PageServerConf,
-    config::TenantConf,
     layered_repository::metadata::TimelineMetadata,
     remote_storage::RemoteIndex,
     repository::{LocalTimelineState, Repository},
+    tenant_config::TenantConf,
     DatadirTimeline, RepositoryImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
@@ -210,6 +210,9 @@ pub fn create_repo(
         .with_context(|| format!("could not create directory {}", repo_dir.display()))?;
     crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
     info!("created directory structure in {}", repo_dir.display());
+
+    // Save tenant's config
+    LayeredRepository::save_tenantconf(conf, tenant_id, tenant_conf, true)?;
 
     Ok(Arc::new(LayeredRepository::new(
         conf,
