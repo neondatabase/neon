@@ -85,8 +85,7 @@ impl Key {
     }
 
     pub fn is_rel_block(&self) -> bool {
-        false
-            && self.field1 == 0
+        self.field1 == 0
             && self.field2 != 0
             && self.field3 != 0
             && self.field4 != 0
