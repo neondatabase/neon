@@ -165,8 +165,12 @@ impl Layer for ImageLayer {
                     offset
                 )
             })?;
-            let value = Bytes::from(blob);
-
+            let value = Bytes::from(if key.is_rel_block() {
+                //lz4_flex::decompress(&blob, PAGE_SZ)?
+                zstd::bulk::decompress(&blob, PAGE_SZ)?
+            } else {
+                blob
+            });
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
         } else {
@@ -451,8 +455,14 @@ impl ImageLayerWriter {
     ///
     pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
-
+        let off = if key.is_rel_block() {
+            assert!(img.len() == PAGE_SZ);
+            //let compressed = lz4_flex::compress(img);
+            let compressed = zstd::bulk::compress(img, 0)?;
+            self.blob_writer.write_blob(&compressed)
+        } else {
+            self.blob_writer.write_blob(img)
+        }?;
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;

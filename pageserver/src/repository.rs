@@ -83,6 +83,15 @@ impl Key {
         buf[13] = self.field5;
         BE::write_u32(&mut buf[14..18], self.field6);
     }
+
+    pub fn is_rel_block(&self) -> bool {
+        false
+            && self.field1 == 0
+            && self.field2 != 0
+            && self.field3 != 0
+            && self.field4 != 0
+            && self.field6 != 0xffffffff
+    }
 }
 
 pub fn key_range_size(key_range: &Range<Key>) -> u32 {
