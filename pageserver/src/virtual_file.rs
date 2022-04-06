@@ -226,7 +226,8 @@ impl VirtualFile {
         path: &Path,
         open_options: &OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
-        let parts = path.to_str().unwrap().split('/').collect::<Vec<&str>>();
+        let path_str = path.to_string_lossy();
+        let parts = path_str.split('/').collect::<Vec<&str>>();
         let tenantid;
         let timelineid;
         if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {

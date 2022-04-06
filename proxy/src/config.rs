@@ -1,13 +1,45 @@
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 pub type TlsConfig = Arc<ServerConfig>;
 
+#[non_exhaustive]
+pub enum ClientAuthMethod {
+    Password,
+    Link,
+
+    /// Use password auth only if username ends with "@zenith"
+    Mixed,
+}
+
+pub enum RouterConfig {
+    Static { host: String, port: u16 },
+    Dynamic(ClientAuthMethod),
+}
+
+impl FromStr for ClientAuthMethod {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        use ClientAuthMethod::*;
+        match s {
+            "password" => Ok(Password),
+            "link" => Ok(Link),
+            "mixed" => Ok(Mixed),
+            _ => bail!("Invalid option for router: `{}`", s),
+        }
+    }
+}
+
 pub struct ProxyConfig {
     /// main entrypoint for users to connect to
     pub proxy_address: SocketAddr,
+
+    /// method of assigning compute nodes
+    pub router_config: RouterConfig,
 
     /// internally used for status and prometheus metrics
     pub http_address: SocketAddr,
@@ -21,7 +53,7 @@ pub struct ProxyConfig {
     pub redirect_uri: String,
 
     /// control plane address where we would check auth.
-    pub auth_endpoint: String,
+    pub auth_endpoint: reqwest::Url,
 
     pub tls_config: Option<TlsConfig>,
 }

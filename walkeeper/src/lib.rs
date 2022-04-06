@@ -1,10 +1,14 @@
 //
 use std::path::PathBuf;
 use std::time::Duration;
+use url::Url;
 
-use zenith_utils::zid::ZTenantTimelineId;
+use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
 
+pub mod broker;
 pub mod callmemaybe;
+pub mod control_file;
+pub mod control_file_upgrade;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
@@ -13,8 +17,8 @@ pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;
 pub mod timeline;
-pub mod upgrade;
 pub mod wal_service;
+pub mod wal_storage;
 
 pub mod defaults {
     use const_format::formatcp;
@@ -44,6 +48,8 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
+    pub my_id: ZNodeId,
+    pub broker_endpoints: Option<Vec<Url>>,
 }
 
 impl SafeKeeperConf {
@@ -67,6 +73,8 @@ impl Default for SafeKeeperConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
+            my_id: ZNodeId(0),
+            broker_endpoints: None,
         }
     }
 }

@@ -7,7 +7,7 @@ use zenith_utils::http::json::json_response;
 use zenith_utils::http::{RouterBuilder, RouterService};
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    Ok(json_response(StatusCode::OK, "")?)
+    json_response(StatusCode::OK, "")
 }
 
 fn make_router() -> RouterBuilder<hyper::Body, ApiError> {

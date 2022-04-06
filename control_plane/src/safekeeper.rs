@@ -14,7 +14,9 @@ use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use walkeeper::http::models::TimelineCreateRequest;
 use zenith_utils::http::error::HttpErrorBody;
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
@@ -61,7 +63,7 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct SafekeeperNode {
-    pub name: String,
+    pub id: ZNodeId,
 
     pub conf: SafekeeperConf,
 
@@ -71,22 +73,25 @@ pub struct SafekeeperNode {
     pub http_base_url: String,
 
     pub pageserver: Arc<PageServerNode>,
+
+    broker_endpoints: Option<String>,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
         let pageserver = Arc::new(PageServerNode::from_env(env));
 
-        println!("initializing for {} for {}", conf.name, conf.http_port);
+        println!("initializing for sk {} for {}", conf.id, conf.http_port);
 
         SafekeeperNode {
-            name: conf.name.clone(),
+            id: conf.id,
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(conf.pg_port),
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
+            broker_endpoints: env.broker_endpoints.clone(),
         }
     }
 
@@ -98,8 +103,12 @@ impl SafekeeperNode {
             .unwrap()
     }
 
+    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: ZNodeId) -> PathBuf {
+        env.safekeeper_data_dir(format!("sk{}", sk_id).as_ref())
+    }
+
     pub fn datadir_path(&self) -> PathBuf {
-        self.env.safekeeper_data_dir(&self.name)
+        SafekeeperNode::datadir_path_by_id(&self.env, self.id)
     }
 
     pub fn pid_file(&self) -> PathBuf {
@@ -120,6 +129,7 @@ impl SafekeeperNode {
         let mut cmd = Command::new(self.env.safekeeper_bin()?);
         fill_rust_env_vars(
             cmd.args(&["-D", self.datadir_path().to_str().unwrap()])
+                .args(&["--id", self.id.to_string().as_ref()])
                 .args(&["--listen-pg", &listen_pg])
                 .args(&["--listen-http", &listen_http])
                 .args(&["--recall", "1 second"])
@@ -127,6 +137,9 @@ impl SafekeeperNode {
         );
         if !self.conf.sync {
             cmd.arg("--no-sync");
+        }
+        if let Some(ref ep) = self.broker_endpoints {
+            cmd.args(&["--broker-endpoints", ep]);
         }
 
         if !cmd.status()?.success() {
@@ -183,7 +196,7 @@ impl SafekeeperNode {
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
-            println!("Safekeeper {} is already stopped", self.name);
+            println!("Safekeeper {} is already stopped", self.id);
             return Ok(());
         }
         let pid = read_pidfile(&pid_file)?;
@@ -254,5 +267,26 @@ impl SafekeeperNode {
             .send()?
             .error_from_body()?;
         Ok(())
+    }
+
+    pub fn timeline_create(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        peer_ids: Vec<ZNodeId>,
+    ) -> Result<()> {
+        Ok(self
+            .http_request(
+                Method::POST,
+                format!("{}/{}", self.http_base_url, "timeline"),
+            )
+            .json(&TimelineCreateRequest {
+                tenant_id,
+                timeline_id,
+                peer_ids,
+            })
+            .send()?
+            .error_from_body()?
+            .json()?)
     }
 }

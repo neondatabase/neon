@@ -41,7 +41,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
+        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
     },
 };
 
@@ -53,7 +53,7 @@ use zenith_utils::{
 };
 
 use crate::layered_repository::writeback_ephemeral_file;
-use crate::{config::PageServerConf, relish::RelTag};
+use crate::repository::Key;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 10;
@@ -61,11 +61,8 @@ const TEST_PAGE_CACHE_SIZE: usize = 10;
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(conf: &'static PageServerConf) {
-    if PAGE_CACHE
-        .set(PageCache::new(conf.page_cache_size))
-        .is_err()
-    {
+pub fn init(size: usize) {
+    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
         panic!("page cache already initialized");
     }
 }
@@ -108,8 +105,7 @@ enum CacheKey {
 struct MaterializedPageHashKey {
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-    rel_tag: RelTag,
-    blknum: u32,
+    key: Key,
 }
 
 #[derive(Clone)]
@@ -294,16 +290,14 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key: *key,
             },
             lsn,
         };
@@ -326,8 +320,7 @@ impl PageCache {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        rel_tag: RelTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         img: &[u8],
     ) {
@@ -335,8 +328,7 @@ impl PageCache {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
                 timeline_id,
-                rel_tag,
-                blknum,
+                key,
             },
             lsn,
         };
@@ -691,16 +683,33 @@ impl PageCache {
     ///
     /// On return, the slot is empty and write-locked.
     fn find_victim(&self) -> (usize, RwLockWriteGuard<SlotInner>) {
-        let iter_limit = self.slots.len() * 2;
+        let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
+            iters += 1;
             let slot_idx = self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
 
             let slot = &self.slots[slot_idx];
 
-            if slot.dec_usage_count() == 0 || iters >= iter_limit {
-                let mut inner = slot.inner.write().unwrap();
-
+            if slot.dec_usage_count() == 0 {
+                let mut inner = match slot.inner.try_write() {
+                    Ok(inner) => inner,
+                    Err(TryLockError::Poisoned(err)) => {
+                        panic!("buffer lock was poisoned: {:?}", err)
+                    }
+                    Err(TryLockError::WouldBlock) => {
+                        // If we have looped through the whole buffer pool 10 times
+                        // and still haven't found a victim buffer, something's wrong.
+                        // Maybe all the buffers were in locked. That could happen in
+                        // theory, if you have more threads holding buffers locked than
+                        // there are buffers in the pool. In practice, with a reasonably
+                        // large buffer pool it really shouldn't happen.
+                        if iters > iter_limit {
+                            panic!("could not find a victim buffer to evict");
+                        }
+                        continue;
+                    }
+                };
                 if let Some(old_key) = &inner.key {
                     if inner.dirty {
                         if let Err(err) = Self::writeback(old_key, inner.buf) {
@@ -725,8 +734,6 @@ impl PageCache {
                 }
                 return (slot_idx, inner);
             }
-
-            iters += 1;
         }
     }
 
@@ -735,9 +742,10 @@ impl PageCache {
             CacheKey::MaterializedPage {
                 hash_key: _,
                 lsn: _,
-            } => {
-                panic!("unexpected dirty materialized page");
-            }
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty materialized page",
+            )),
             CacheKey::EphemeralPage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }

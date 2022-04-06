@@ -17,7 +17,7 @@ This way, the backups are managed in background, not affecting directly other pa
 Current implementation
 * provides remote storage wrappers for AWS S3 and local FS
 * synchronizes the differences with local timelines and remote states as fast as possible
-* uploads new relishes, frozen by pageserver checkpoint thread
+* uploads new layer files
 * downloads and registers timelines, found on the remote storage, but missing locally, if those are requested somehow via pageserver (e.g. http api, gc)
 * uses compression when deals with files, for better S3 usage
 * maintains an index of what's stored remotely
@@ -62,11 +62,3 @@ Based on previous evaluation, even `rusoto-s3` could be a better choice over thi
 
 So far, we don't adjust the remote storage based on GC thread loop results, only checkpointer loop affects the remote storage.
 Index module could be used as a base to implement a deferred GC mechanism, a "defragmentation" that repacks archives into new ones after GC is done removing the files from the archives.
-
-* bracnhes implementaion could be improved
-
-Currently, there's a code to sync the branches along with the timeline files: on upload, every local branch files that are missing remotely are uploaded,
-on the timeline download, missing remote branch files are downlaoded.
-
-A branch is a per-tenant entity, yet a current implementaion requires synchronizing a timeline first to get the branch files locally.
-Currently, there's no other way to know about the remote branch files, neither the file contents is verified and updated.

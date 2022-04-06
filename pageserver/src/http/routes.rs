@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use hyper::header;
+use anyhow::Result;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use serde::Serialize;
 use tracing::*;
 use zenith_utils::auth::JwtAuth;
 use zenith_utils::http::endpoint::attach_openapi_ui;
@@ -15,29 +13,32 @@ use zenith_utils::http::{
     endpoint,
     error::HttpErrorBody,
     json::{json_request, json_response},
-    request::get_request_param,
     request::parse_request_param,
 };
 use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{opt_display_serde, ZTimelineId};
+use zenith_utils::zid::{ZTenantTimelineId, ZTimelineId};
 
-use super::models::BranchCreateRequest;
-use super::models::TenantCreateRequest;
-use crate::branches::BranchInfo;
-use crate::repository::RepositoryTimeline;
-use crate::repository::TimelineSyncState;
-use crate::{branches, config::PageServerConf, tenant_mgr, ZTenantId};
+use super::models::{
+    StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
+};
+use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
+use crate::repository::Repository;
+use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
+use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
-#[derive(Debug)]
 struct State {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
+    remote_index: RemoteIndex,
     allowlist_routes: Vec<Uri>,
 }
 
 impl State {
-    fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
+    fn new(
+        conf: &'static PageServerConf,
+        auth: Option<Arc<JwtAuth>>,
+        remote_index: RemoteIndex,
+    ) -> Self {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -46,6 +47,7 @@ impl State {
             conf,
             auth,
             allowlist_routes,
+            remote_index,
         }
     }
 }
@@ -64,31 +66,72 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 }
 
 // healthcheck handler
-async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{}"))
-        .map_err(ApiError::from_err)?)
+async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let config = get_config(&request);
+    Ok(json_response(
+        StatusCode::OK,
+        StatusResponse { id: config.id },
+    )?)
 }
 
-async fn branch_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let request_data: BranchCreateRequest = json_request(&mut request).await?;
+async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
-    check_permission(&request, Some(request_data.tenant_id))?;
+    check_permission(&request, Some(tenant_id))?;
 
-    let response_data = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("/branch_create", name = %request_data.name, tenant = %request_data.tenant_id, startpoint=%request_data.start_point).entered();
-        branches::create_branch(
+    let new_timeline_info = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
+        timelines::create_timeline(
             get_config(&request),
-            &request_data.name,
-            &request_data.start_point,
-            &request_data.tenant_id,
+            tenant_id,
+            request_data.new_timeline_id.map(ZTimelineId::from),
+            request_data.ancestor_timeline_id.map(ZTimelineId::from),
+            request_data.ancestor_start_lsn,
         )
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::CREATED, response_data)?)
+
+    Ok(match new_timeline_info {
+        Some(info) => json_response(StatusCode::CREATED, info)?,
+        None => json_response(StatusCode::CONFLICT, ())?,
+    })
+}
+
+async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
+    let local_timeline_infos = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
+        crate::timelines::get_local_timelines(tenant_id, include_non_incremental_logical_size)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    let mut response_data = Vec::with_capacity(local_timeline_infos.len());
+    for (timeline_id, local_timeline_info) in local_timeline_infos {
+        response_data.push(TimelineInfo {
+            tenant_id,
+            timeline_id,
+            local: Some(local_timeline_info),
+            remote: get_state(&request)
+                .remote_index
+                .read()
+                .await
+                .timeline_entry(&ZTenantTimelineId {
+                    tenant_id,
+                    timeline_id,
+                })
+                .map(|remote_entry| RemoteTimelineInfo {
+                    remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
+                    awaits_download: remote_entry.get_awaits_download(),
+                }),
+        })
+    }
+
+    Ok(json_response(StatusCode::OK, response_data)?)
 }
 
 // Gate non incremental logical size calculation behind a flag
@@ -106,144 +149,65 @@ fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
         .unwrap_or(false)
 }
 
-async fn branch_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
-
-    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
-
-    check_permission(&request, Some(tenantid))?;
-
-    let response_data = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("branch_list", tenant = %tenantid).entered();
-        crate::branches::get_branches(
-            get_config(&request),
-            &tenantid,
-            include_non_incremental_logical_size,
-        )
-    })
-    .await
-    .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::OK, response_data)?)
-}
-
-async fn branch_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenantid: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    let branch_name: String = get_request_param(&request, "branch_name")?.to_string();
-    let conf = get_state(&request).conf;
-    let path = conf.branch_path(&branch_name, &tenantid);
-
-    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
-
-    let response_data = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("branch_detail", tenant = %tenantid, branch=%branch_name).entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        BranchInfo::from_path(path, &repo, include_non_incremental_logical_size)
-    })
-    .await
-    .map_err(ApiError::from_err)??;
-
-    Ok(json_response(StatusCode::OK, response_data)?)
-}
-
-async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let conf = get_state(&request).conf;
-    let timelines_dir = conf.timelines_path(&tenant_id);
-
-    let mut timelines_dir_contents =
-        tokio::fs::read_dir(&timelines_dir).await.with_context(|| {
-            format!(
-                "Failed to list timelines dir '{}' contents",
-                timelines_dir.display()
-            )
-        })?;
-
-    let mut local_timelines = Vec::new();
-    while let Some(entry) = timelines_dir_contents.next_entry().await.with_context(|| {
-        format!(
-            "Failed to list timelines dir '{}' contents",
-            timelines_dir.display()
-        )
-    })? {
-        let entry_path = entry.path();
-        let entry_type = entry.file_type().await.with_context(|| {
-            format!(
-                "Failed to get file type of timeline dirs' entry '{}'",
-                entry_path.display()
-            )
-        })?;
-
-        if entry_type.is_dir() {
-            match entry.file_name().to_string_lossy().parse::<ZTimelineId>() {
-                Ok(timeline_id) => local_timelines.push(timeline_id.to_string()),
-                Err(e) => error!(
-                    "Failed to get parse timeline id from timeline dirs' entry '{}': {}",
-                    entry_path.display(),
-                    e
-                ),
-            }
-        }
-    }
-
-    Ok(json_response(StatusCode::OK, local_timelines)?)
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum TimelineInfo {
-    Local {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-        #[serde(with = "opt_display_serde")]
-        ancestor_timeline_id: Option<ZTimelineId>,
-        last_record_lsn: Lsn,
-        prev_record_lsn: Lsn,
-        disk_consistent_lsn: Lsn,
-        timeline_state: Option<TimelineSyncState>,
-    },
-    Remote {
-        #[serde(with = "hex")]
-        timeline_id: ZTimelineId,
-        #[serde(with = "hex")]
-        tenant_id: ZTenantId,
-    },
-}
-
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
 
-    let response_data = tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
+    let span = info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id);
+
+    let (local_timeline_info, span) = tokio::task::spawn_blocking(move || {
+        let entered = span.entered();
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        Ok::<_, anyhow::Error>(match repo.get_timeline(timeline_id)?.local_timeline() {
-            None => TimelineInfo::Remote {
-                timeline_id,
-                tenant_id,
-            },
-            Some(timeline) => TimelineInfo::Local {
-                timeline_id,
-                tenant_id,
-                ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
-                disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-                last_record_lsn: timeline.get_last_record_lsn(),
-                prev_record_lsn: timeline.get_prev_record_lsn(),
-                timeline_state: repo.get_timeline_state(timeline_id),
-            },
-        })
+        let local_timeline = {
+            repo.get_timeline(timeline_id)
+                .as_ref()
+                .map(|timeline| {
+                    LocalTimelineInfo::from_repo_timeline(
+                        tenant_id,
+                        timeline_id,
+                        timeline,
+                        include_non_incremental_logical_size,
+                    )
+                })
+                .transpose()?
+        };
+        Ok::<_, anyhow::Error>((local_timeline, entered.exit()))
     })
     .await
     .map_err(ApiError::from_err)??;
 
-    Ok(json_response(StatusCode::OK, response_data)?)
+    let remote_timeline_info = {
+        let remote_index_read = get_state(&request).remote_index.read().await;
+        remote_index_read
+            .timeline_entry(&ZTenantTimelineId {
+                tenant_id,
+                timeline_id,
+            })
+            .map(|remote_entry| RemoteTimelineInfo {
+                remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
+                awaits_download: remote_entry.get_awaits_download(),
+            })
+    };
+
+    let _enter = span.entered();
+
+    if local_timeline_info.is_none() && remote_timeline_info.is_none() {
+        return Err(ApiError::NotFound(
+            "Timeline is not found neither locally nor remotely".to_string(),
+        ));
+    }
+
+    let timeline_info = TimelineInfo {
+        tenant_id,
+        timeline_id,
+        local: local_timeline_info,
+        remote: remote_timeline_info,
+    };
+
+    Ok(json_response(StatusCode::OK, timeline_info)?)
 }
 
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -251,30 +215,37 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let span = info_span!("timeline_attach_handler", tenant = %tenant_id, timeline = %timeline_id);
 
-    tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_attach_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        match repo.get_timeline(timeline_id)? {
-            RepositoryTimeline::Local(_) => {
-                anyhow::bail!("Timeline with id {} is already local", timeline_id)
-            }
-            RepositoryTimeline::Remote {
-                id: _,
-                disk_consistent_lsn: _,
-            } => {
-                // FIXME (rodionov) get timeline already schedules timeline for download, and duplicate tasks can cause errors
-                //  first should be fixed in https://github.com/zenithdb/zenith/issues/997
-                // TODO (rodionov) change timeline state to awaits download (incapsulate it somewhere in the repo)
-                // TODO (rodionov) can we safely request replication on the timeline before sync is completed? (can be implemented on top of the #997)
-                Ok(())
-            }
-        }
+    let span = tokio::task::spawn_blocking(move || {
+        let entered = span.entered();
+        if tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).is_ok() {
+            // TODO: maybe answer with 309 Not Modified here?
+            anyhow::bail!("Timeline is already present locally")
+        };
+        Ok(entered.exit())
     })
     .await
     .map_err(ApiError::from_err)??;
+
+    let mut remote_index_write = get_state(&request).remote_index.write().await;
+
+    let _enter = span.entered(); // entered guard cannot live across awaits (non Send)
+    let index_entry = remote_index_write
+        .timeline_entry_mut(&ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        })
+        .ok_or_else(|| ApiError::NotFound("Unknown remote timeline".to_string()))?;
+
+    if index_entry.get_awaits_download() {
+        return Err(ApiError::Conflict(
+            "Timeline download is already in progress".to_string(),
+        ));
+    }
+
+    index_entry.set_awaits_download(true);
+    schedule_timeline_download(tenant_id, timeline_id);
 
     Ok(json_response(StatusCode::ACCEPTED, ())?)
 }
@@ -317,14 +288,25 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    let remote_index = get_state(&request).remote_index.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_create", tenant = %request_data.tenant_id).entered();
-        tenant_mgr::create_repository_for_tenant(get_config(&request), request_data.tenant_id)
+    let target_tenant_id = request_data
+        .new_tenant_id
+        .map(ZTenantId::from)
+        .unwrap_or_else(ZTenantId::generate);
+
+    let new_tenant_id = tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
+
+        tenant_mgr::create_tenant_repository(get_config(&request), target_tenant_id, remote_index)
     })
     .await
     .map_err(ApiError::from_err)??;
-    Ok(json_response(StatusCode::CREATED, ())?)
+
+    Ok(match new_tenant_id {
+        Some(id) => json_response(StatusCode::CREATED, TenantCreateResponse(id))?,
+        None => json_response(StatusCode::CONFLICT, ())?,
+    })
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -337,6 +319,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 pub fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
+    remote_index: RemoteIndex,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -352,25 +335,23 @@ pub fn make_router(
     }
 
     router
-        .data(Arc::new(State::new(conf, auth)))
+        .data(Arc::new(State::new(conf, auth, remote_index)))
         .get("/v1/status", status_handler)
-        .get("/v1/timeline/:tenant_id", timeline_list_handler)
+        .get("/v1/tenant", tenant_list_handler)
+        .post("/v1/tenant", tenant_create_handler)
+        .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
+        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .get(
-            "/v1/timeline/:tenant_id/:timeline_id",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
         )
         .post(
-            "/v1/timeline/:tenant_id/:timeline_id/attach",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",
             timeline_attach_handler,
         )
         .post(
-            "/v1/timeline/:tenant_id/:timeline_id/detach",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
             timeline_detach_handler,
         )
-        .get("/v1/branch/:tenant_id", branch_list_handler)
-        .get("/v1/branch/:tenant_id/:branch_name", branch_detail_handler)
-        .post("/v1/branch", branch_create_handler)
-        .get("/v1/tenant", tenant_list_handler)
-        .post("/v1/tenant", tenant_create_handler)
         .any(handler_404)
 }

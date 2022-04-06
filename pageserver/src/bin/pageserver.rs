@@ -2,7 +2,14 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{auth::JwtAuth, logging, postgres_backend::AuthType, tcp_listener, GIT_VERSION};
+use zenith_utils::{
+    auth::JwtAuth,
+    logging,
+    postgres_backend::AuthType,
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
 
 use anyhow::{bail, Context, Result};
 
@@ -10,18 +17,19 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use pageserver::{
-    branches,
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, remote_storage, tenant_mgr, thread_mgr,
+    http, page_cache, page_service,
+    remote_storage::{self, SyncStartupData},
+    repository::{Repository, TimelineSyncStatusUpdate},
+    tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
-    virtual_file, LOG_FILE_NAME,
+    timelines, virtual_file, LOG_FILE_NAME,
 };
 use zenith_utils::http::endpoint;
-use zenith_utils::postgres_backend;
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals::{self, Signal};
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
@@ -37,7 +45,7 @@ fn main() -> Result<()> {
             Arg::new("init")
                 .long("init")
                 .takes_value(false)
-                .help("Initialize pageserver repo"),
+                .help("Initialize pageserver service: creates an initial config, tenant and timeline, if specified"),
         )
         .arg(
             Arg::new("workdir")
@@ -53,6 +61,13 @@ fn main() -> Result<()> {
                 .help("Create tenant during init")
                 .requires("init"),
         )
+        .arg(
+            Arg::new("initial-timeline-id")
+                .long("initial-timeline-id")
+                .takes_value(true)
+                .help("Use a specific timeline id during init and tenant creation")
+                .requires("create-tenant"),
+        )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
@@ -61,7 +76,7 @@ fn main() -> Result<()> {
                 .number_of_values(1)
                 .multiple_occurrences(true)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
-                Any option has to be a valid toml document, example: `-c \"foo='hey'\"` `-c \"foo={value=1}\"`"),
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .get_matches();
 
@@ -72,7 +87,16 @@ fn main() -> Result<()> {
     let cfg_file_path = workdir.join("pageserver.toml");
 
     let init = arg_matches.is_present("init");
-    let create_tenant = arg_matches.value_of("create-tenant");
+    let create_tenant = arg_matches
+        .value_of("create-tenant")
+        .map(ZTenantId::from_str)
+        .transpose()
+        .context("Failed to parse tenant id from the arguments")?;
+    let initial_timeline_id = arg_matches
+        .value_of("initial-timeline-id")
+        .map(ZTimelineId::from_str)
+        .transpose()
+        .context("Failed to parse timeline id from the arguments")?;
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
@@ -91,7 +115,7 @@ fn main() -> Result<()> {
         // We're initializing the repo, so there's no config file yet
         DEFAULT_CONFIG_FILE
             .parse::<toml_edit::Document>()
-            .expect("could not parse built-in config file")
+            .context("could not parse built-in config file")?
     } else {
         // Supplement the CLI arguments with the config file
         let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)
@@ -115,7 +139,14 @@ fn main() -> Result<()> {
                     option_line
                 )
             })?;
+
             for (key, item) in doc.iter() {
+                if key == "id" {
+                    anyhow::ensure!(
+                        init,
+                        "node id can only be set during pageserver init and cannot be overridden"
+                    );
+                }
                 toml.insert(key, item.clone());
             }
         }
@@ -131,12 +162,12 @@ fn main() -> Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
-
-    page_cache::init(conf);
+    page_cache::init(conf.page_cache_size);
 
     // Create repo and exit if init was requested
     if init {
-        branches::init_pageserver(conf, create_tenant).context("Failed to init pageserver")?;
+        timelines::init_pageserver(conf, create_tenant, initial_timeline_id)
+            .context("Failed to init pageserver")?;
         // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(
@@ -177,7 +208,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
         // There shouldn't be any logging to stdin/stdout. Redirect it to the main log so
         // that we will see any accidental manual fprintf's or backtraces.
-        let stdout = log_file.try_clone().unwrap();
+        let stdout = log_file
+            .try_clone()
+            .with_context(|| format!("Failed to clone log file '{:?}'", log_file))?;
         let stderr = log_file;
 
         let daemonize = Daemonize::new()
@@ -197,11 +230,47 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     let signals = signals::install_shutdown_handlers()?;
-    let sync_startup = remote_storage::start_local_timeline_sync(conf)
+
+    // Initialize repositories with locally available timelines.
+    // Timelines that are only partially available locally (remote storage has more data than this pageserver)
+    // are scheduled for download and added to the repository once download is completed.
+    let SyncStartupData {
+        remote_index,
+        local_timeline_init_statuses,
+    } = remote_storage::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
 
-    // Initialize tenant manager.
-    tenant_mgr::set_timeline_states(conf, sync_startup.initial_timeline_states);
+    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
+        // initialize local tenant
+        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index);
+        for (timeline_id, init_status) in local_timeline_init_statuses {
+            match init_status {
+                remote_storage::LocalTimelineInitStatus::LocallyComplete => {
+                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", tenant_id, timeline_id);
+                    // Lets fail here loudly to be on the safe side.
+                    // XXX: It may be a better api to actually distinguish between repository startup
+                    //   and processing of newly downloaded timelines.
+                    repo.apply_timeline_remote_sync_status_update(
+                        timeline_id,
+                        TimelineSyncStatusUpdate::Downloaded,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Failed to bootstrap timeline {} for tenant {}",
+                            timeline_id, tenant_id
+                        )
+                    })?
+                }
+                remote_storage::LocalTimelineInitStatus::NeedsSync => {
+                    debug!(
+                        "timeline {} for tenant {} needs sync, \
+                         so skipped for adding into repository until sync is finished",
+                        tenant_id, timeline_id
+                    );
+                }
+            }
+        }
+    }
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -222,8 +291,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "http_endpoint_thread",
+        false,
         move || {
-            let router = http::make_router(conf, auth_cloned);
+            let router = http::make_router(conf, auth_cloned, remote_index);
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;
@@ -235,6 +305,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "libpq endpoint thread",
+        false,
         move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
     )?;
 
@@ -252,38 +323,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            shutdown_pageserver();
+            pageserver::shutdown_pageserver();
             unreachable!()
         }
     })
-}
-
-fn shutdown_pageserver() {
-    // Shut down the libpq endpoint thread. This prevents new connections from
-    // being accepted.
-    thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
-
-    // Shut down any page service threads.
-    postgres_backend::set_pgbackend_shutdown_requested();
-    thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
-
-    // Shut down all the tenants. This flushes everything to disk and kills
-    // the checkpoint and GC threads.
-    tenant_mgr::shutdown_all_tenants();
-
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync thread to finish syncing what's queued up?
-    // Should it?
-    thread_mgr::shutdown_threads(Some(ThreadKind::StorageSync), None, None);
-
-    // Shut down the HTTP endpoint last, so that you can still check the server's
-    // status while it's shutting down.
-    thread_mgr::shutdown_threads(Some(ThreadKind::HttpEndpointListener), None, None);
-
-    // There should be nothing left, but let's be sure
-    thread_mgr::shutdown_threads(None, None, None);
-
-    info!("Shut down successfully completed");
-    std::process::exit(0);
 }

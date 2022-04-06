@@ -12,7 +12,7 @@ from fixtures.log_helper import log
 #
 def test_clog_truncate(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
-    env.zenith_cli.create_branch("test_clog_truncate", "empty")
+    env.zenith_cli.create_branch('test_clog_truncate', 'empty')
 
     # set agressive autovacuum to make sure that truncation will happen
     config = [
@@ -62,9 +62,9 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
-    env.zenith_cli.create_branch("test_clog_truncate_new",
-                                 "test_clog_truncate@" + lsn_after_truncation)
-
+    env.zenith_cli.create_branch('test_clog_truncate_new',
+                                 'test_clog_truncate',
+                                 ancestor_start_lsn=lsn_after_truncation)
     pg2 = env.postgres.create_start('test_clog_truncate_new')
     log.info('postgres is running on test_clog_truncate_new branch')
 

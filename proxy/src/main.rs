@@ -13,18 +13,21 @@ use std::future::Future;
 use tokio::{net::TcpListener, task::JoinError};
 use zenith_utils::GIT_VERSION;
 
+use crate::config::{ClientAuthMethod, RouterConfig};
+
 mod auth;
 mod cancellation;
 mod compute;
 mod config;
 mod cplane_api;
+mod error;
 mod http;
 mod mgmt;
 mod proxy;
 mod stream;
 mod waiters;
 
-/// Flattens Result<Result<T>> into Result<T>.
+/// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
     f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
 ) -> anyhow::Result<()> {
@@ -43,6 +46,20 @@ async fn main() -> anyhow::Result<()> {
                 .takes_value(true)
                 .help("listen for incoming client connections on ip:port")
                 .default_value("127.0.0.1:4432"),
+        )
+        .arg(
+            Arg::new("auth-method")
+                .long("auth-method")
+                .takes_value(true)
+                .help("Possible values: password | link | mixed")
+                .default_value("mixed"),
+        )
+        .arg(
+            Arg::new("static-router")
+                .short('s')
+                .long("static-router")
+                .takes_value(true)
+                .help("Route all clients to host:port"),
         )
         .arg(
             Arg::new("mgmt")
@@ -101,7 +118,24 @@ async fn main() -> anyhow::Result<()> {
         _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
     };
 
+    let auth_method = arg_matches.value_of("auth-method").unwrap().parse()?;
+    let router_config = match arg_matches.value_of("static-router") {
+        None => RouterConfig::Dynamic(auth_method),
+        Some(addr) => {
+            if let ClientAuthMethod::Password = auth_method {
+                let (host, port) = addr.split_once(':').unwrap();
+                RouterConfig::Static {
+                    host: host.to_string(),
+                    port: port.parse().unwrap(),
+                }
+            } else {
+                bail!("static-router requires --auth-method password")
+            }
+        }
+    };
+
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
+        router_config,
         proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
         mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
         http_address: arg_matches.value_of("http").unwrap().parse()?,

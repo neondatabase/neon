@@ -37,7 +37,7 @@ impl ComputeControlPlane {
     // pgdatadirs
     // |- tenants
     // |  |- <tenant_id>
-    // |  |   |- <branch name>
+    // |  |   |- <node name>
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
@@ -52,7 +52,7 @@ impl ComputeControlPlane {
                 .with_context(|| format!("failed to list {}", tenant_dir.path().display()))?
             {
                 let node = PostgresNode::from_dir_entry(timeline_dir?, &env, &pageserver)?;
-                nodes.insert((node.tenantid, node.name.clone()), Arc::new(node));
+                nodes.insert((node.tenant_id, node.name.clone()), Arc::new(node));
             }
         }
 
@@ -73,40 +73,14 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
-    // FIXME: see also parse_point_in_time in branches.rs.
-    fn parse_point_in_time(
-        &self,
-        tenantid: ZTenantId,
-        s: &str,
-    ) -> Result<(ZTimelineId, Option<Lsn>)> {
-        let mut strings = s.split('@');
-        let name = strings.next().unwrap();
-
-        let lsn = strings
-            .next()
-            .map(Lsn::from_str)
-            .transpose()
-            .context("invalid LSN in point-in-time specification")?;
-
-        // Resolve the timeline ID, given the human-readable branch name
-        let timeline_id = self
-            .pageserver
-            .branch_get_by_name(&tenantid, name)?
-            .timeline_id;
-
-        Ok((timeline_id, lsn))
-    }
-
     pub fn new_node(
         &mut self,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
         name: &str,
-        timeline_spec: &str,
+        timeline_id: ZTimelineId,
+        lsn: Option<Lsn>,
         port: Option<u16>,
     ) -> Result<Arc<PostgresNode>> {
-        // Resolve the human-readable timeline spec into timeline ID and LSN
-        let (timelineid, lsn) = self.parse_point_in_time(tenantid, timeline_spec)?;
-
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
             name: name.to_owned(),
@@ -114,9 +88,9 @@ impl ComputeControlPlane {
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             is_test: false,
-            timelineid,
+            timeline_id,
             lsn,
-            tenantid,
+            tenant_id,
             uses_wal_proposer: false,
         });
 
@@ -124,7 +98,7 @@ impl ComputeControlPlane {
         node.setup_pg_conf(self.env.pageserver.auth_type)?;
 
         self.nodes
-            .insert((tenantid, node.name.clone()), Arc::clone(&node));
+            .insert((tenant_id, node.name.clone()), Arc::clone(&node));
 
         Ok(node)
     }
@@ -139,9 +113,9 @@ pub struct PostgresNode {
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
     is_test: bool,
-    pub timelineid: ZTimelineId,
+    pub timeline_id: ZTimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
-    pub tenantid: ZTenantId,
+    pub tenant_id: ZTenantId,
     uses_wal_proposer: bool,
 }
 
@@ -173,8 +147,8 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timelineid: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
-        let tenantid: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
+        let timeline_id: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
+        let tenant_id: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
         let uses_wal_proposer = conf.get("wal_acceptors").is_some();
 
         // parse recovery_target_lsn, if any
@@ -188,9 +162,9 @@ impl PostgresNode {
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
             is_test: false,
-            timelineid,
+            timeline_id,
             lsn: recovery_target_lsn,
-            tenantid,
+            tenant_id,
             uses_wal_proposer,
         })
     }
@@ -241,9 +215,9 @@ impl PostgresNode {
         );
 
         let sql = if let Some(lsn) = lsn {
-            format!("basebackup {} {} {}", self.tenantid, self.timelineid, lsn)
+            format!("basebackup {} {} {}", self.tenant_id, self.timeline_id, lsn)
         } else {
-            format!("basebackup {} {}", self.tenantid, self.timelineid)
+            format!("basebackup {} {}", self.tenant_id, self.timeline_id)
         };
 
         let mut client = self
@@ -329,19 +303,31 @@ impl PostgresNode {
         conf.append("shared_preload_libraries", "zenith");
         conf.append_line("");
         conf.append("zenith.page_server_connstring", &pageserver_connstr);
-        conf.append("zenith.zenith_tenant", &self.tenantid.to_string());
-        conf.append("zenith.zenith_timeline", &self.timelineid.to_string());
+        conf.append("zenith.zenith_tenant", &self.tenant_id.to_string());
+        conf.append("zenith.zenith_timeline", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
+
         conf.append_line("");
+        // Configure backpressure
+        // - Replication write lag depends on how fast the walreceiver can process incoming WAL.
+        //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10MB/sec,
+        //   so to avoid expiration of 1 minute timeout, this lag should not be larger than 600MB.
+        //   Actually latency should be much smaller (better if < 1sec). But we assume that recently
+        //   updates pages are not requested from pageserver.
+        // - Replication flush lag depends on speed of persisting data by checkpointer (creation of
+        //   delta/image layers) and advancing disk_consistent_lsn. Safekeepers are able to
+        //   remove/archive WAL only beyond disk_consistent_lsn. Too large a lag can cause long
+        //   recovery time (in case of pageserver crash) and disk space overflow at safekeepers.
+        // - Replication apply lag depends on speed of uploading changes to S3 by uploader thread.
+        //   To be able to restore database in case of pageserver node crash, safekeeper should not
+        //   remove WAL beyond this point. Too large lag can cause space exhaustion in safekeepers
+        //   (if they are not able to upload WAL to S3).
+        conf.append("max_replication_write_lag", "500MB");
+        conf.append("max_replication_flush_lag", "10GB");
 
         if !self.env.safekeepers.is_empty() {
-            // Configure backpressure
-            // In setup with safekeepers apply_lag depends on
-            // speed of data checkpointing on pageserver (see disk_consistent_lsn).
-            conf.append("max_replication_apply_lag", "1500MB");
-
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
@@ -354,11 +340,6 @@ impl PostgresNode {
                 .join(",");
             conf.append("wal_acceptors", &wal_acceptors);
         } else {
-            // Configure backpressure
-            // In setup without safekeepers, flush_lag depends on
-            // speed of of data checkpointing on pageserver (see disk_consistent_lsn)
-            conf.append("max_replication_flush_lag", "1500MB");
-
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
             // so set more relaxed synchronous_commit.
@@ -401,7 +382,7 @@ impl PostgresNode {
     }
 
     pub fn pgdata(&self) -> PathBuf {
-        self.env.pg_data_dir(&self.tenantid, &self.name)
+        self.env.pg_data_dir(&self.tenant_id, &self.name)
     }
 
     pub fn status(&self) -> &str {

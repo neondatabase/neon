@@ -215,7 +215,7 @@ pub fn handle_databases(spec: &ClusterSpec, client: &mut Client) -> Result<()> {
         if let Some(r) = pg_db {
             // XXX: db owner name is returned as quoted string from Postgres,
             // when quoting is needed.
-            let new_owner = if r.owner.starts_with('\"') {
+            let new_owner = if r.owner.starts_with('"') {
                 db.owner.quote()
             } else {
                 db.owner.clone()
