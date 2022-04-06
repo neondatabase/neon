@@ -18,7 +18,9 @@ def test_get_page(zenith_simple_env: ZenithEnv,
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            workload = "pgbench"
+            workload = "pgbench long"
+
+            print(f"Running workload {workload}")
             if workload == "hot page":
                 cur.execute('create table t (i integer);')
                 cur.execute('insert into t values (0);')
@@ -27,6 +29,12 @@ def test_get_page(zenith_simple_env: ZenithEnv,
             elif workload == "pgbench":
                 pg_bin.run_capture(['pgbench', '-s5', '-i', pg.connstr()])
                 pg_bin.run_capture(['pgbench', '-c1', '-t5000', pg.connstr()])
+            elif workload == "pgbench big":
+                pg_bin.run_capture(['pgbench', '-s100', '-i', pg.connstr()])
+                pg_bin.run_capture(['pgbench', '-c1', '-t100000', pg.connstr()])
+            elif workload == "pgbench long":
+                pg_bin.run_capture(['pgbench', '-s100', '-i', pg.connstr()])
+                pg_bin.run_capture(['pgbench', '-c1', '-t1000000', pg.connstr()])
 
             pscur.execute(f"checkpoint {env.initial_tenant.hex} {timeline} 0")
 

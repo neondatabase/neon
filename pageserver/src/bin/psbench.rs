@@ -10,7 +10,7 @@ use clap::{App, Arg};
 use std::fs::File;
 use zenith_utils::{GIT_VERSION, pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage}};
 use std::time::Instant;
-use plotly::{Plot, Scatter, Histogram};
+use plotly::{Histogram, Layout, Plot, Scatter};
 use plotly::common::Mode;
 
 use anyhow::Result;
@@ -27,12 +27,14 @@ pub async fn get_page(
     pagestream: &mut tokio::net::TcpStream,
     lsn: &Lsn,
     page: &Page,
+    latest: bool,
 ) -> anyhow::Result<Vec<u8>> {
+    let latest: u8 = if latest {1} else {0};
     let msg = {
         let query = {
             let mut query = BytesMut::new();
             query.put_u8(2);  // Specifies get_page query
-            query.put_u8(0);  // Specifies this is not a "latest page" query
+            query.put_u8(latest);
             query.put_u64(lsn.0);
             page.write(&mut query).await?;
             query.freeze()
@@ -236,6 +238,33 @@ async fn main() -> Result<()> {
         entries
     };
 
+    let mut durations: Vec<Duration> = vec![];
+    let latest_lsn = entries.iter().map(|(lsn, _, _)| lsn).max().unwrap();
+    for (_, page) in updates_per_page.clone() {
+        let start = Instant::now();
+        let _page_bytes = get_page(&mut socket, latest_lsn, page, true).await?;
+        let duration = start.elapsed();
+
+        durations.push(duration);
+    }
+
+    println!("Total pages: {}", updates_per_page.len());
+
+    durations.sort();
+    println!("Fastest: {:?}", durations.first().unwrap());
+    println!("Median: {:?}", durations[durations.len() / 2]);
+    println!("99th percentile: {:?}", durations[durations.len() - 1 - durations.len() / 100]);
+    println!("Slowest: {:?}", durations.last().unwrap());
+
+
+    return Ok(());
+    let mut plot = Plot::new();
+    plot.add_trace(Histogram::new(durations));
+    plot.show();
+
+    return Ok(());
+
+
     let mut results: Vec<(Lsn, usize)> = vec![];
     let mut page_data = HashMap::<Page, Vec<u8>>::new();
     let mut total_dirty_units = 0;
@@ -245,7 +274,7 @@ async fn main() -> Result<()> {
             // continue;
         // }
         for page in pages {
-            let page_bytes = get_page(&mut socket, &lsn, &page).await?;
+            let page_bytes = get_page(&mut socket, &lsn, &page, false).await?;
 
             let dirty_units = if let Some(prev_bytes) = page_data.get(&page) {
                 let mut dirty_units = 0;
@@ -296,7 +325,7 @@ async fn main() -> Result<()> {
     return Ok(());
 
     // Do some warmup
-    let mut prev_page = get_page(&mut socket, &first_update, &hottest_page).await?;
+    let mut prev_page = get_page(&mut socket, &first_update, &hottest_page, false).await?;
 
     let mut results: Vec<(Lsn, (Duration, usize))> = vec![];
     for (i, (lsn, _pages)) in writes_per_entry.iter().enumerate() {
@@ -309,7 +338,7 @@ async fn main() -> Result<()> {
 
             // println!("Running get_page {:?} at {:?}", hottest_page, lsn);
             let start = Instant::now();
-            let page = get_page(&mut socket, &lsn, &hottest_page).await?;
+            let page = get_page(&mut socket, &lsn, &hottest_page, false).await?;
             let duration = start.elapsed();
 
             // TODO why is most modified page constant? Is this test correct?
