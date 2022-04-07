@@ -26,5 +26,5 @@ if ! curl -sf -X PATCH -d '{}' {{ console_mgmt_base_url }}/api/v1/safekeepers/${
     ID=$(curl -sf -X POST {{ console_mgmt_base_url }}/api/v1/safekeepers -d@/tmp/payload | jq -r '.ID')
 
     # init safekeeper
-    sudo -u safekeeper /usr/local/bin/safekeeper -c "id=${ID}" --init -D /storage/safekeeper/data
+    sudo -u safekeeper /usr/local/bin/safekeeper --id ${ID} --init -D /storage/safekeeper/data
 fi
