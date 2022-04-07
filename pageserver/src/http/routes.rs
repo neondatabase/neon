@@ -22,6 +22,7 @@ use super::models::{
     StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
 };
 use crate::remote_storage::{schedule_timeline_download, RemoteIndex};
+use crate::repository::Repository;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
 
@@ -162,8 +163,11 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let local_timeline = {
             repo.get_timeline(timeline_id)
+                .as_ref()
                 .map(|timeline| {
                     LocalTimelineInfo::from_repo_timeline(
+                        tenant_id,
+                        timeline_id,
                         timeline,
                         include_non_incremental_logical_size,
                     )
@@ -216,6 +220,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     let span = tokio::task::spawn_blocking(move || {
         let entered = span.entered();
         if tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).is_ok() {
+            // TODO: maybe answer with 309 Not Modified here?
             anyhow::bail!("Timeline is already present locally")
         };
         Ok(entered.exit())
@@ -231,10 +236,10 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
             tenant_id,
             timeline_id,
         })
-        .ok_or_else(|| ApiError::BadRequest("Unknown remote timeline".to_string()))?;
+        .ok_or_else(|| ApiError::NotFound("Unknown remote timeline".to_string()))?;
 
     if index_entry.get_awaits_download() {
-        return Err(ApiError::NotFound(
+        return Err(ApiError::Conflict(
             "Timeline download is already in progress".to_string(),
         ));
     }

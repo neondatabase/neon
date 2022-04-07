@@ -277,7 +277,7 @@ impl RemoteTimeline {
             .map(CheckpointArchive::disk_consistent_lsn)
     }
 
-    /// Lists all relish files in the given remote timeline. Omits the metadata file.
+    /// Lists all layer files in the given remote timeline. Omits the metadata file.
     pub fn stored_files(&self, timeline_dir: &Path) -> BTreeSet<PathBuf> {
         self.timeline_files
             .values()

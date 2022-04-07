@@ -168,7 +168,14 @@ impl SafekeeperPostgresHandler {
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
         let start_pos = self.timeline.get().get_end_of_wal();
         let lsn = start_pos.to_string();
-        let sysid = self.timeline.get().get_info().server.system_id.to_string();
+        let sysid = self
+            .timeline
+            .get()
+            .get_state()
+            .1
+            .server
+            .system_id
+            .to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

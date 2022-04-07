@@ -249,10 +249,17 @@ class ZenithBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        # Fetch all the exposed prometheus metrics from page server
-        all_metrics = pageserver.http_client().get_metrics()
-        # Use a regular expression to extract the one we're interested in
-        #
+        metric_name = r'pageserver_disk_io_bytes{io_operation="write"}'
+        return self.get_int_counter_value(pageserver, metric_name)
+
+    def get_peak_mem(self, pageserver) -> int:
+        """
+        Fetch the "maxrss" metric from the pageserver
+        """
+        metric_name = r'pageserver_maxrss_kb'
+        return self.get_int_counter_value(pageserver, metric_name)
+
+    def get_int_counter_value(self, pageserver, metric_name) -> int:
         # TODO: If we start to collect more of the prometheus metrics in the
         # performance test suite like this, we should refactor this to load and
         # parse all the metrics into a more convenient structure in one go.
@@ -260,20 +267,8 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$',
-                            all_metrics,
-                            re.MULTILINE)
-        assert matches
-        return int(round(float(matches.group(1))))
-
-    def get_peak_mem(self, pageserver) -> int:
-        """
-        Fetch the "maxrss" metric from the pageserver
-        """
-        # Fetch all the exposed prometheus metrics from page server
         all_metrics = pageserver.http_client().get_metrics()
-        # See comment in get_io_writes()
-        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics, re.MULTILINE)
+        matches = re.search(fr'^{metric_name} (\S+)$', all_metrics, re.MULTILINE)
         assert matches
         return int(round(float(matches.group(1))))
 

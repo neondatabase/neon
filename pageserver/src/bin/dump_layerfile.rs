@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
 
-    dump_layerfile_from_path(&path)?;
+    dump_layerfile_from_path(&path, true)?;
 
     Ok(())
 }

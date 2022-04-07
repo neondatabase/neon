@@ -78,6 +78,11 @@ postgres: postgres-configure \
 	$(MAKE) -C tmp_install/build/contrib/zenith install
 	+@echo "Compiling contrib/zenith_test_utils"
 	$(MAKE) -C tmp_install/build/contrib/zenith_test_utils install
+	+@echo "Compiling pg_buffercache"
+	$(MAKE) -C tmp_install/build/contrib/pg_buffercache install
+	+@echo "Compiling pageinspect"
+	$(MAKE) -C tmp_install/build/contrib/pageinspect install
+
 
 .PHONY: postgres-clean
 postgres-clean:

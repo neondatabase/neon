@@ -8,3 +8,4 @@ prometheus = {version = "0.13", default_features=false} # removes protobuf depen
 libc = "0.2"
 lazy_static = "1.4"
 once_cell = "1.8.0"
+workspace_hack = { version = "0.1", path = "../workspace_hack" }

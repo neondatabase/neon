@@ -160,7 +160,7 @@ pub fn serve_thread_main<S>(
 where
     S: Future<Output = ()> + Send + Sync,
 {
-    info!("Starting a http endpoint at {}", listener.local_addr()?);
+    info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();

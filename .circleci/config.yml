@@ -34,10 +34,13 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
-          command: git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+          command: |
+              git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+              cat Makefile >> /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
@@ -78,11 +81,14 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
           command: |
             git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+            cat Makefile >> /tmp/cache-key-postgres
+
 
       - restore_cache:
           name: Restore postgres cache
@@ -222,12 +228,12 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
@@ -281,12 +287,12 @@ jobs:
             - run: git submodule update --init --depth 1
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
@@ -618,7 +624,7 @@ jobs:
             ssh-add ssh-key
             rm -f ssh-key ssh-key-cert.pub
 
-            ansible-playbook deploy.yaml -i production.hosts -e console_mgmt_base_url=http://console-release.local
+            ansible-playbook deploy.yaml -i production.hosts
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-release-proxy:

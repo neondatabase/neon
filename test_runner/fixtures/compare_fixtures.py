@@ -102,18 +102,8 @@ class ZenithCompare(PgCompare):
                                  'MB',
                                  report=MetricReport.LOWER_IS_BETTER)
 
-        total_files = 0
-        total_bytes = 0
-        log_file_path = f"{self.env.repo_dir}/pageserver.log"
-        with open(log_file_path) as log_file:
-            lines = log_file.readlines()
-            for line in lines:
-                prefix = "would-schedule-s3-upload "
-                if line.startswith(prefix):
-                    num_bytes = int(line[len(prefix):])
-                    total_files += 1
-                    total_bytes += num_bytes
-
+        total_files = self.zenbenchmark.get_int_counter_value(self.env.pageserver, "pageserver_num_files_scheduled_for_upload")
+        total_bytes = self.zenbenchmark.get_int_counter_value(self.env.pageserver, "pageserver_bytes_scheduled_for_upload")
         self.zenbenchmark.record("data_uploaded",
                                  total_bytes / (1024 * 1024),
                                  "MB",

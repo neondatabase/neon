@@ -4,13 +4,13 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteIndex;
-use crate::repository::{Repository, Timeline, TimelineSyncStatusUpdate};
+use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
-use crate::CheckpointConfig;
+use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use log::*;
@@ -28,7 +28,9 @@ lazy_static! {
 
 struct Tenant {
     state: TenantState,
-    repo: Arc<dyn Repository>,
+    repo: Arc<RepositoryImpl>,
+
+    timelines: HashMap<ZTimelineId, Arc<DatadirTimelineImpl>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -67,14 +69,14 @@ pub fn load_local_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
-) -> Arc<dyn Repository> {
+) -> Arc<RepositoryImpl> {
     let mut m = access_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
         // Set up a WAL redo manager, for applying WAL records.
         let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
         // Set up an object repository, for actual data storage.
-        let repo: Arc<dyn Repository> = Arc::new(LayeredRepository::new(
+        let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(
             conf,
             Arc::new(walredo_mgr),
             tenant_id,
@@ -84,6 +86,7 @@ pub fn load_local_repo(
         Tenant {
             state: TenantState::Idle,
             repo,
+            timelines: HashMap::new(),
         }
     });
     Arc::clone(&tenant.repo)
@@ -138,7 +141,7 @@ pub fn shutdown_all_tenants() {
 
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -152,7 +155,7 @@ pub fn shutdown_all_tenants() {
         debug!("shutdown tenant {}", tenantid);
         match get_repository_for_tenant(tenantid) {
             Ok(repo) => {
-                if let Err(err) = repo.checkpoint_iteration(CheckpointConfig::Flush) {
+                if let Err(err) = repo.checkpoint() {
                     error!(
                         "Could not checkpoint tenant {} during shutdown: {:?}",
                         tenantid, err
@@ -192,6 +195,7 @@ pub fn create_tenant_repository(
             v.insert(Tenant {
                 state: TenantState::Idle,
                 repo,
+                timelines: HashMap::new(),
             });
             Ok(Some(tenantid))
         }
@@ -203,7 +207,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 }
 
 ///
-/// Change the state of a tenant to Active and launch its checkpointer and GC
+/// Change the state of a tenant to Active and launch its compactor and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
 pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Result<()> {
@@ -218,15 +222,15 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
         // If the tenant is already active, nothing to do.
         TenantState::Active => {}
 
-        // If it's Idle, launch the checkpointer and GC threads
+        // If it's Idle, launch the compactor and GC threads
         TenantState::Idle => {
             thread_mgr::spawn(
-                ThreadKind::Checkpointer,
+                ThreadKind::Compactor,
                 Some(tenant_id),
                 None,
-                "Checkpointer thread",
+                "Compactor thread",
                 true,
-                move || crate::tenant_threads::checkpoint_loop(tenant_id, conf),
+                move || crate::tenant_threads::compact_loop(tenant_id, conf),
             )?;
 
             let gc_spawn_result = thread_mgr::spawn(
@@ -244,7 +248,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                     "Failed to start GC thread for tenant {}, stopping its checkpointer thread: {:?}",
                     tenant_id, e
                 );
-                thread_mgr::shutdown_threads(Some(ThreadKind::Checkpointer), Some(tenant_id), None);
+                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
                 return gc_spawn_result;
             }
 
@@ -258,7 +262,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Repository>> {
+pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<RepositoryImpl>> {
     let m = access_tenants();
     let tenant = m
         .get(&tenantid)
@@ -271,10 +275,27 @@ pub fn get_repository_for_tenant(tenantid: ZTenantId) -> Result<Arc<dyn Reposito
 pub fn get_timeline_for_tenant_load(
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
-) -> Result<Arc<dyn Timeline>> {
-    get_repository_for_tenant(tenantid)?
+) -> Result<Arc<DatadirTimelineImpl>> {
+    let mut m = access_tenants();
+    let tenant = m
+        .get_mut(&tenantid)
+        .with_context(|| format!("Tenant {} not found", tenantid))?;
+
+    if let Some(page_tline) = tenant.timelines.get(&timelineid) {
+        return Ok(Arc::clone(page_tline));
+    }
+    // First access to this timeline. Create a DatadirTimeline wrapper for it
+    let tline = tenant
+        .repo
         .get_timeline_load(timelineid)
-        .with_context(|| format!("Timeline {} not found for tenant {}", timelineid, tenantid))
+        .with_context(|| format!("Timeline {} not found for tenant {}", timelineid, tenantid))?;
+
+    let repartition_distance = tenant.repo.conf.checkpoint_distance / 10;
+
+    let page_tline = Arc::new(DatadirTimelineImpl::new(tline, repartition_distance));
+    page_tline.init_logical_size()?;
+    tenant.timelines.insert(timelineid, Arc::clone(&page_tline));
+    Ok(page_tline)
 }
 
 #[serde_as]
