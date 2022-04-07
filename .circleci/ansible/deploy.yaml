@@ -116,6 +116,30 @@
 
   tasks:
 
+    - name: upload init script
+      when: console_mgmt_base_url is defined
+      ansible.builtin.template:
+        src: scripts/init_safekeeper.sh
+        dest: /tmp/init_safekeeper.sh
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      tags:
+      - safekeeper
+
+    - name: init safekeeper
+      shell:
+        cmd: /tmp/init_safekeeper.sh
+      args:
+        creates: "/storage/safekeeper/data/safekeeper.id"
+      environment:
+        ZENITH_REPO_DIR: "/storage/safekeeper/data"
+        LD_LIBRARY_PATH: "/usr/local/lib"
+      become: true
+      tags:
+      - safekeeper
+
     # in the future safekeepers should discover pageservers byself
     # but currently use first pageserver that was discovered
     - name: set first pageserver var for safekeepers
