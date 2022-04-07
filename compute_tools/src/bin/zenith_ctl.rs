@@ -129,6 +129,7 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 
     handle_roles(&read_state.spec, &mut client)?;
     handle_databases(&read_state.spec, &mut client)?;
+    handle_grants(&read_state.spec, &mut client)?;
     create_writablity_check_data(&mut client)?;
 
     // 'Close' connection
