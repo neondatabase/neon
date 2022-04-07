@@ -114,7 +114,10 @@ class VanillaCompare(PgCompare):
     def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
-        vanilla_pg.configure(['shared_buffers=1MB'])
+        vanilla_pg.configure([
+            'shared_buffers=1MB',
+            'synchronous_commit=off',
+        ])
         vanilla_pg.start()
 
         # Long-lived cursor, useful for flushing
