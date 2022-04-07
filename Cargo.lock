@@ -142,30 +142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 
 [[package]]
-name = "aversion"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41992ab8cfcc3026ef9abceffe0c2b0479c043183fc23825e30d22baab6df334"
-dependencies = [
- "aversion-macros",
- "byteorder",
- "serde",
- "serde_cbor",
- "thiserror",
-]
-
-[[package]]
-name = "aversion-macros"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ba5785f953985aa0caca927ba4005880f3b4f53de87f134e810ae3549f744d2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "aws-creds"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,17 +238,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "bookfile"
-version = "0.3.0"
-source = "git+https://github.com/zenithdb/bookfile.git?rev=bf6e43825dfb6e749ae9b80e8372c8fea76cec2f#bf6e43825dfb6e749ae9b80e8372c8fea76cec2f"
-dependencies = [
- "aversion",
- "byteorder",
- "serde",
- "thiserror",
 ]
 
 [[package]]
@@ -1524,7 +1489,6 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-trait",
- "bookfile",
  "byteorder",
  "bytes",
  "chrono",

@@ -23,21 +23,27 @@
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
 //!
 //!
-//! A delta file is constructed using the 'bookfile' crate. Each file consists of three
-//! parts: the 'index', the values, and a short summary header. They are stored as
-//! separate chapters.
+//! Every delta file consists of three parts: "summary", "index", and
+//! "values". The summary is a fixed size header at the beginning of the file,
+//! and it contains basic information about the layer, and offsets to the other
+//! parts. The "index" is a serialized HashMap mapping from Key and LSN to an offset in the
+//! "values" part.  The actual page images and WAL records are stored in the
+//! "values" part.
 //!
 use crate::config::PageServerConf;
+use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::layered_repository::block_io::{BlockCursor, BlockReader, FileBlockReader};
 use crate::layered_repository::filename::{DeltaFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::DELTA_FILE_MAGIC;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::{bail, ensure, Result};
+use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
+use anyhow::{bail, ensure, Context, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,44 +52,43 @@ use zenith_utils::vec_map::VecMap;
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::fs;
-use std::io::BufWriter;
-use std::io::Write;
+use std::io::{BufWriter, Write};
+use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
-use bookfile::{Book, BookWriter, ChapterWriter};
-
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
-/// Mapping from (key, lsn) -> page/WAL record
-/// byte ranges in VALUES_CHAPTER
-static INDEX_CHAPTER: u64 = 1;
-
-/// Page/WAL bytes - cannot be interpreted
-/// without the page versions from the INDEX_CHAPTER
-static VALUES_CHAPTER: u64 = 2;
-
-/// Contains the [`Summary`] struct
-static SUMMARY_CHAPTER: u64 = 3;
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
+    /// Magic value to identify this as a zenith delta file. Always DELTA_FILE_MAGIC.
+    magic: u16,
+    format_version: u16,
+
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
+
+    /// Block number where the 'index' part of the file begins.
+    index_start_blk: u32,
 }
 
 impl From<&DeltaLayer> for Summary {
     fn from(layer: &DeltaLayer) -> Self {
         Self {
+            magic: DELTA_FILE_MAGIC,
+            format_version: STORAGE_FORMAT_VERSION,
+
             tenantid: layer.tenantid,
             timelineid: layer.timelineid,
             key_range: layer.key_range.clone(),
             lsn_range: layer.lsn_range.clone(),
+
+            index_start_blk: 0,
         }
     }
 }
@@ -118,7 +123,11 @@ pub struct DeltaLayerInner {
     ///
     index: HashMap<Key, VecMap<Lsn, BlobRef>>,
 
-    book: Option<Book<VirtualFile>>,
+    // values copied from summary
+    index_start_blk: u32,
+
+    /// Reader object for reading blocks from the file. (None if not loaded yet)
+    file: Option<FileBlockReader<VirtualFile>>,
 }
 
 impl Layer for DeltaLayer {
@@ -155,44 +164,27 @@ impl Layer for DeltaLayer {
         {
             // Open the file and lock the metadata in memory
             let inner = self.load()?;
-            let values_reader = inner
-                .book
-                .as_ref()
-                .expect("should be loaded in load call above")
-                .chapter_reader(VALUES_CHAPTER)?;
 
             // Scan the page versions backwards, starting from `lsn`.
             if let Some(vec_map) = inner.index.get(&key) {
+                let mut reader = inner.file.as_ref().unwrap().block_cursor();
                 let slice = vec_map.slice_range(lsn_range);
-                let mut size = 0usize;
-                let mut first_pos = 0u64;
-                for (_entry_lsn, blob_ref) in slice.iter().rev() {
-                    size += blob_ref.size();
-                    first_pos = blob_ref.pos();
-                    if blob_ref.will_init() {
-                        break;
-                    }
-                }
-                if size != 0 {
-                    let mut buf = vec![0u8; size];
-                    values_reader.read_exact_at(&mut buf, first_pos)?;
-                    for (entry_lsn, blob_ref) in slice.iter().rev() {
-                        let offs = (blob_ref.pos() - first_pos) as usize;
-                        let val = Value::des(&buf[offs..offs + blob_ref.size()])?;
-                        match val {
-                            Value::Image(img) => {
-                                reconstruct_state.img = Some((*entry_lsn, img));
+                for (entry_lsn, blob_ref) in slice.iter().rev() {
+                    let buf = reader.read_blob(blob_ref.pos())?;
+                    let val = Value::des(&buf)?;
+                    match val {
+                        Value::Image(img) => {
+                            reconstruct_state.img = Some((*entry_lsn, img));
+                            need_image = false;
+                            break;
+                        }
+                        Value::WalRecord(rec) => {
+                            let will_init = rec.will_init();
+                            reconstruct_state.records.push((*entry_lsn, rec));
+                            if will_init {
+                                // This WAL record initializes the page, so no need to go further back
                                 need_image = false;
                                 break;
-                            }
-                            Value::WalRecord(rec) => {
-                                let will_init = rec.will_init();
-                                reconstruct_state.records.push((*entry_lsn, rec));
-                                if will_init {
-                                    // This WAL record initializes the page, so no need to go further back
-                                    need_image = false;
-                                    break;
-                                }
                             }
                         }
                     }
@@ -210,7 +202,7 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + '_> {
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
         let inner = self.load().unwrap();
 
         match DeltaValueIter::new(inner) {
@@ -281,20 +273,16 @@ impl Layer for DeltaLayer {
 
         let inner = self.load()?;
 
-        let path = self.path();
-        let file = std::fs::File::open(&path)?;
-        let book = Book::new(file)?;
-        let chapter = book.chapter_reader(VALUES_CHAPTER)?;
-
         let mut values: Vec<(&Key, &VecMap<Lsn, BlobRef>)> = inner.index.iter().collect();
         values.sort_by_key(|k| k.0);
+
+        let mut reader = inner.file.as_ref().unwrap().block_cursor();
 
         for (key, versions) in values {
             for (lsn, blob_ref) in versions.as_slice() {
                 let mut desc = String::new();
-                let mut buf = vec![0u8; blob_ref.size()];
-                match chapter.read_exact_at(&mut buf, blob_ref.pos()) {
-                    Ok(()) => {
+                match reader.read_blob(blob_ref.pos()) {
+                    Ok(buf) => {
                         let val = Value::des(&buf);
 
                         match val {
@@ -378,19 +366,19 @@ impl DeltaLayer {
         let path = self.path();
 
         // Open the file if it's not open already.
-        if inner.book.is_none() {
-            let file = VirtualFile::open(&path)?;
-            inner.book = Some(Book::new(file)?);
+        if inner.file.is_none() {
+            let file = VirtualFile::open(&path)
+                .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+            inner.file = Some(FileBlockReader::new(file));
         }
-        let book = inner.book.as_ref().unwrap();
+        let file = inner.file.as_mut().unwrap();
+        let summary_blk = file.read_blk(0)?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         match &self.path_or_conf {
             PathOrConf::Conf(_) => {
-                let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
-                let actual_summary = Summary::des(&chapter)?;
-
-                let expected_summary = Summary::from(self);
-
+                let mut expected_summary = Summary::from(self);
+                expected_summary.index_start_blk = actual_summary.index_start_blk;
                 if actual_summary != expected_summary {
                     bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
                 }
@@ -409,8 +397,13 @@ impl DeltaLayer {
             }
         }
 
-        let chapter = book.read_chapter(INDEX_CHAPTER)?;
-        let index = HashMap::des(&chapter)?;
+        file.file.seek(SeekFrom::Start(
+            actual_summary.index_start_blk as u64 * PAGE_SZ as u64,
+        ))?;
+        let mut buf_reader = std::io::BufReader::new(&mut file.file);
+        let index = HashMap::des_from(&mut buf_reader)?;
+
+        inner.index_start_blk = actual_summary.index_start_blk;
 
         debug!("loaded from {}", &path.display());
 
@@ -434,8 +427,9 @@ impl DeltaLayer {
             lsn_range: filename.lsn_range.clone(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
-                book: None,
                 index: HashMap::default(),
+                file: None,
+                index_start_blk: 0,
             }),
         }
     }
@@ -443,12 +437,14 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'dump_layerfile' binary.
-    pub fn new_for_path<F>(path: &Path, book: &Book<F>) -> Result<Self>
+    pub fn new_for_path<F>(path: &Path, file: F) -> Result<Self>
     where
         F: FileExt,
     {
-        let chapter = book.read_chapter(SUMMARY_CHAPTER)?;
-        let summary = Summary::des(&chapter)?;
+        let mut summary_buf = Vec::new();
+        summary_buf.resize(PAGE_SZ, 0);
+        file.read_exact_at(&mut summary_buf, 0)?;
+        let summary = Summary::des_prefix(&summary_buf)?;
 
         Ok(DeltaLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
@@ -458,8 +454,9 @@ impl DeltaLayer {
             lsn_range: summary.lsn_range,
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
-                book: None,
+                file: None,
                 index: HashMap::default(),
+                index_start_blk: 0,
             }),
         })
     }
@@ -504,8 +501,7 @@ pub struct DeltaLayerWriter {
 
     index: HashMap<Key, VecMap<Lsn, BlobRef>>,
 
-    values_writer: ChapterWriter<BufWriter<VirtualFile>>,
-    end_offset: u64,
+    blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
 }
 
 impl DeltaLayerWriter {
@@ -531,13 +527,10 @@ impl DeltaLayerWriter {
             u64::from(lsn_range.start),
             u64::from(lsn_range.end)
         ));
-        let file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::create(&path)?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
         let buf_writer = BufWriter::new(file);
-        let book = BookWriter::new(buf_writer, DELTA_FILE_MAGIC)?;
-
-        // Open the page-versions chapter for writing. The calls to
-        // `put_value` will use this to write the contents.
-        let values_writer = book.new_chapter(VALUES_CHAPTER);
+        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
 
         Ok(DeltaLayerWriter {
             conf,
@@ -547,8 +540,7 @@ impl DeltaLayerWriter {
             key_start,
             lsn_range,
             index: HashMap::new(),
-            values_writer,
-            end_offset: 0,
+            blob_writer,
         })
     }
 
@@ -558,17 +550,12 @@ impl DeltaLayerWriter {
     /// The values must be appended in key, lsn order.
     ///
     pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
-        //info!("DELTA: key {} at {} on {}", key, lsn, self.path.display());
         assert!(self.lsn_range.start <= lsn);
-        // Remember the offset and size metadata. The metadata is written
-        // to a separate chapter, in `finish`.
-        let off = self.end_offset;
-        let buf = Value::ser(&val)?;
-        let len = buf.len();
-        self.values_writer.write_all(&buf)?;
-        self.end_offset += len as u64;
+
+        let off = self.blob_writer.write_blob(&Value::ser(&val)?)?;
+
         let vec_map = self.index.entry(key).or_default();
-        let blob_ref = BlobRef::new(off, len, val.will_init());
+        let blob_ref = BlobRef::new(off, val.will_init());
         let old = vec_map.append_or_update_last(lsn, blob_ref).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -583,38 +570,40 @@ impl DeltaLayerWriter {
     }
 
     pub fn size(&self) -> u64 {
-        self.end_offset
+        self.blob_writer.size()
     }
 
     ///
     /// Finish writing the delta layer.
     ///
     pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        // Close the values chapter
-        let book = self.values_writer.close()?;
+        let index_start_blk =
+            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+
+        let buf_writer = self.blob_writer.into_inner();
+        let mut file = buf_writer.into_inner()?;
 
         // Write out the index
-        let mut chapter = book.new_chapter(INDEX_CHAPTER);
         let buf = HashMap::ser(&self.index)?;
-        chapter.write_all(&buf)?;
-        let book = chapter.close()?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.write_all(&buf)?;
 
-        let mut chapter = book.new_chapter(SUMMARY_CHAPTER);
+        // Fill in the summary on blk 0
         let summary = Summary {
+            magic: DELTA_FILE_MAGIC,
+            format_version: STORAGE_FORMAT_VERSION,
             tenantid: self.tenantid,
             timelineid: self.timelineid,
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
+            index_start_blk,
         };
-        Summary::ser_into(&summary, &mut chapter)?;
-        let book = chapter.close()?;
-
-        // This flushes the underlying 'buf_writer'.
-        book.close()?;
+        file.seek(SeekFrom::Start(0))?;
+        Summary::ser_into(&summary, &mut file)?;
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
-        // set inner.book here. The first read will have to re-open it.
+        // set inner.file here. The first read will have to re-open it.
         let layer = DeltaLayer {
             path_or_conf: PathOrConf::Conf(self.conf),
             tenantid: self.tenantid,
@@ -624,7 +613,8 @@ impl DeltaLayerWriter {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 index: HashMap::new(),
-                book: None,
+                file: None,
+                index_start_blk,
             }),
         };
 
@@ -647,22 +637,6 @@ impl DeltaLayerWriter {
 
         Ok(layer)
     }
-
-    pub fn abort(self) {
-        match self.values_writer.close() {
-            Ok(book) => {
-                if let Err(err) = book.close() {
-                    error!("error while closing delta layer file: {}", err);
-                }
-            }
-            Err(err) => {
-                error!("error while closing chapter writer: {}", err);
-            }
-        }
-        if let Err(err) = std::fs::remove_file(self.path) {
-            error!("error removing unfinished delta layer file: {}", err);
-        }
-    }
 }
 
 ///
@@ -672,13 +646,23 @@ impl DeltaLayerWriter {
 /// That takes up quite a lot of memory. Should do this in a more streaming
 /// fashion.
 ///
-struct DeltaValueIter {
+struct DeltaValueIter<'a> {
     all_offsets: Vec<(Key, Lsn, BlobRef)>,
     next_idx: usize,
-    data: Vec<u8>,
+    reader: BlockCursor<Adapter<'a>>,
 }
 
-impl Iterator for DeltaValueIter {
+struct Adapter<'a>(RwLockReadGuard<'a, DeltaLayerInner>);
+
+impl<'a> BlockReader for Adapter<'a> {
+    type BlockLease = PageReadGuard<'static>;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+        self.0.file.as_ref().unwrap().read_blk(blknum)
+    }
+}
+
+impl<'a> Iterator for DeltaValueIter<'a> {
     type Item = Result<(Key, Lsn, Value)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -686,8 +670,8 @@ impl Iterator for DeltaValueIter {
     }
 }
 
-impl DeltaValueIter {
-    fn new(inner: RwLockReadGuard<DeltaLayerInner>) -> Result<Self> {
+impl<'a> DeltaValueIter<'a> {
+    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
         let mut index: Vec<(&Key, &VecMap<Lsn, BlobRef>)> = inner.index.iter().collect();
         index.sort_by_key(|x| x.0);
 
@@ -698,30 +682,24 @@ impl DeltaValueIter {
             }
         }
 
-        let values_reader = inner
-            .book
-            .as_ref()
-            .expect("should be loaded in load call above")
-            .chapter_reader(VALUES_CHAPTER)?;
-        let file_size = values_reader.len() as usize;
-        let mut layer = DeltaValueIter {
+        let iter = DeltaValueIter {
             all_offsets,
             next_idx: 0,
-            data: vec![0u8; file_size],
+            reader: BlockCursor::new(Adapter(inner)),
         };
-        values_reader.read_exact_at(&mut layer.data, 0)?;
 
-        Ok(layer)
+        Ok(iter)
     }
 
     fn next_res(&mut self) -> Result<Option<(Key, Lsn, Value)>> {
         if self.next_idx < self.all_offsets.len() {
-            let (key, lsn, blob_ref) = self.all_offsets[self.next_idx];
-            let offs = blob_ref.pos() as usize;
-            let size = blob_ref.size();
-            let val = Value::des(&self.data[offs..offs + size])?;
+            let (key, lsn, off) = &self.all_offsets[self.next_idx];
+
+            //let mut reader = BlobReader::new(self.inner.file.as_ref().unwrap());
+            let buf = self.reader.read_blob(off.pos())?;
+            let val = Value::des(&buf)?;
             self.next_idx += 1;
-            Ok(Some((key, lsn, val)))
+            Ok(Some((*key, *lsn, val)))
         } else {
             Ok(None)
         }

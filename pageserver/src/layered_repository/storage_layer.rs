@@ -150,9 +150,10 @@ pub trait Layer: Send + Sync {
 const WILL_INIT: u64 = 1;
 
 ///
-/// Struct representing reference to BLOB in layers. Reference contains BLOB offset and size.
-/// For WAL records (delta layer) it also contains `will_init` flag which helps to determine range of records
-/// which needs to be applied without reading/deserializing records themselves.
+/// Struct representing reference to BLOB in layers. Reference contains BLOB
+/// offset, and for WAL records it also contains `will_init` flag. The flag
+/// helps to determine the range of records that needs to be applied, without
+/// reading/deserializing records themselves.
 ///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct BlobRef(u64);
@@ -163,15 +164,11 @@ impl BlobRef {
     }
 
     pub fn pos(&self) -> u64 {
-        self.0 >> 32
+        self.0 >> 1
     }
 
-    pub fn size(&self) -> usize {
-        ((self.0 & 0xFFFFFFFF) >> 1) as usize
-    }
-
-    pub fn new(pos: u64, size: usize, will_init: bool) -> BlobRef {
-        let mut blob_ref = (pos << 32) | ((size as u64) << 1);
+    pub fn new(pos: u64, will_init: bool) -> BlobRef {
+        let mut blob_ref = pos << 1;
         if will_init {
             blob_ref |= WILL_INIT;
         }

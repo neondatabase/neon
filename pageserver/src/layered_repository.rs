@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bookfile::Book;
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -56,6 +55,8 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blob_io;
+pub mod block_io;
 mod delta_layer;
 pub(crate) mod ephemeral_file;
 mod filename;
@@ -2054,16 +2055,17 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
-    let file = File::open(path)?;
-    let book = Book::new(file)?;
+    use std::os::unix::fs::FileExt;
 
-    match book.magic() {
-        crate::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
-        crate::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
+    // All layer files start with a two-byte "magic" value, to identify the kind of
+    // file.
+    let file = File::open(path)?;
+    let mut header_buf = [0u8; 2];
+    file.read_exact_at(&mut header_buf, 0)?;
+
+    match u16::from_be_bytes(header_buf) {
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2274,7 +2276,6 @@ pub mod tests {
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
-                println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
