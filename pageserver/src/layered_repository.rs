@@ -49,7 +49,10 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{Histogram, HistogramVec, IntCounter, IntGauge, IntGaugeVec, register_histogram_vec, register_int_counter, register_int_gauge_vec};
+use zenith_metrics::{
+    register_histogram_vec, register_int_counter, register_int_gauge_vec, Histogram, HistogramVec,
+    IntCounter, IntGauge, IntGaugeVec,
+};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
