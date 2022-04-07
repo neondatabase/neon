@@ -132,7 +132,7 @@
       shell:
         cmd: /tmp/init_safekeeper.sh
       args:
-        creates: "/storage/safekeeper/data/tenants"
+        creates: "/storage/safekeeper/data/safekeeper.id"
       environment:
         ZENITH_REPO_DIR: "/storage/safekeeper/data"
         LD_LIBRARY_PATH: "/usr/local/lib"
