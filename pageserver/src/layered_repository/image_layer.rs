@@ -28,7 +28,7 @@ use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter
 use crate::layered_repository::block_io::{BlockReader, FileBlockReader};
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
-    BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
+    Layer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
@@ -105,7 +105,7 @@ pub struct ImageLayerInner {
     loaded: bool,
 
     /// offset of each value
-    index: HashMap<Key, BlobRef>,
+    index: HashMap<Key, u64>,
 
     // values copied from summary
     index_start_blk: u32,
@@ -147,18 +147,18 @@ impl Layer for ImageLayer {
         assert!(lsn_range.end >= self.lsn);
 
         let inner = self.load()?;
-        if let Some(blob_ref) = inner.index.get(&key) {
+        if let Some(&offset) = inner.index.get(&key) {
             let buf = inner
                 .file
                 .as_ref()
                 .unwrap()
                 .block_cursor()
-                .read_blob(blob_ref.pos())
+                .read_blob(offset)
                 .with_context(|| {
                     format!(
                         "failed to read blob from data file {} at offset {}",
                         self.filename().display(),
-                        blob_ref.pos()
+                        offset
                     )
                 })?;
             let value = Bytes::from(buf);
@@ -228,11 +228,8 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
-        let mut index_vec: Vec<(&Key, &BlobRef)> = inner.index.iter().collect();
-        index_vec.sort_by_key(|x| x.1.pos());
-
-        for (key, blob_ref) in index_vec {
-            println!("key: {} offset {}", key, blob_ref.pos());
+        for (key, offset) in inner.index.iter() {
+            println!("key: {} offset {}", key, offset);
         }
 
         Ok(())
@@ -423,7 +420,7 @@ pub struct ImageLayerWriter {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    index: HashMap<Key, BlobRef>,
+    index: HashMap<Key, u64>,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
 }
@@ -476,7 +473,7 @@ impl ImageLayerWriter {
         ensure!(self.key_range.contains(&key));
         let off = self.blob_writer.write_blob(img)?;
 
-        let old = self.index.insert(key, BlobRef::new(off, true));
+        let old = self.index.insert(key, off);
         assert!(old.is_none());
 
         Ok(())

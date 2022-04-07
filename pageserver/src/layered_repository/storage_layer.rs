@@ -7,7 +7,6 @@ use crate::walrecord::ZenithWalRecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -144,34 +143,4 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
-}
-
-// Flag indicating that this version initialize the page
-const WILL_INIT: u64 = 1;
-
-///
-/// Struct representing reference to BLOB in layers. Reference contains BLOB
-/// offset, and for WAL records it also contains `will_init` flag. The flag
-/// helps to determine the range of records that needs to be applied, without
-/// reading/deserializing records themselves.
-///
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-pub struct BlobRef(u64);
-
-impl BlobRef {
-    pub fn will_init(&self) -> bool {
-        (self.0 & WILL_INIT) != 0
-    }
-
-    pub fn pos(&self) -> u64 {
-        self.0 >> 1
-    }
-
-    pub fn new(pos: u64, will_init: bool) -> BlobRef {
-        let mut blob_ref = pos << 1;
-        if will_init {
-            blob_ref |= WILL_INIT;
-        }
-        BlobRef(blob_ref)
-    }
 }

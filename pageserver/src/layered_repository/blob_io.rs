@@ -10,12 +10,15 @@ use std::io::Error;
 
 /// For reading
 pub trait BlobCursor {
+    /// Read a blob into a new buffer.
     fn read_blob(&mut self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf)?;
         Ok(buf)
     }
 
+    /// Read blob into the given buffer. Any previous contents in the buffer
+    /// are overwritten.
     fn read_blob_into_buf(
         &mut self,
         offset: u64,
@@ -75,10 +78,19 @@ where
     }
 }
 
+///
+/// Abstract trait for a data sink that you can write blobs to.
+///
 pub trait BlobWriter {
+    /// Write a blob of data. Returns the offset that it was written to,
+    /// which can be used to retrieve the data later.
     fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error>;
 }
 
+///
+/// An implementation of BlobWriter to write blobs to anything that
+/// implements std::io::Write.
+///
 pub struct WriteBlobWriter<W>
 where
     W: std::io::Write,
@@ -102,6 +114,11 @@ where
         self.offset
     }
 
+    /// Access the underlying Write object.
+    ///
+    /// NOTE: WriteBlobWriter keeps track of the current write offset. If
+    /// you write something directly to the inner Write object, it makes the
+    /// internally tracked 'offset' to go out of sync. So don't do that.
     pub fn into_inner(self) -> W {
         self.inner
     }
