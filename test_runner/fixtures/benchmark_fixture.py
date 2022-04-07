@@ -260,6 +260,7 @@ class ZenithBenchmarker:
         return self.get_int_counter_value(pageserver, metric_name)
 
     def get_int_counter_value(self, pageserver, metric_name) -> int:
+        """Fetch the value of given int counter from pageserver metrics."""
         # TODO: If we start to collect more of the prometheus metrics in the
         # performance test suite like this, we should refactor this to load and
         # parse all the metrics into a more convenient structure in one go.
