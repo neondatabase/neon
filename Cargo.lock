@@ -1499,6 +1499,7 @@ dependencies = [
  "daemonize",
  "fail",
  "futures",
+ "hex",
  "hex-literal",
  "humantime",
  "hyper",

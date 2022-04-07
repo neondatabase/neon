@@ -16,40 +16,43 @@
 //! Every image layer file consists of three parts: "summary",
 //! "index", and "values".  The summary is a fixed size header at the
 //! beginning of the file, and it contains basic information about the
-//! layer, and offsets to the other parts. The "index" is a serialized
-//! HashMap, mapping from Key to an offset in the "values" part.  The
+//! layer, and offsets to the other parts. The "index" is a B-tree,
+//! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
-//!
-//! Only the "index" is loaded into memory by the load function.
-//! When images are needed, they are read directly from disk.
-//!
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
-use crate::layered_repository::block_io::{BlockReader, FileBlockReader};
+use crate::layered_repository::block_io::{BlockBuf, BlockReader, FileBlockReader};
+use crate::layered_repository::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::layered_repository::filename::{ImageFileName, PathOrConf};
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, Value};
+use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::{ZTenantId, ZTimelineId};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use hex;
 use log::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard, TryLockError};
+use std::sync::{RwLock, RwLockReadGuard};
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;
 
+///
+/// Header stored in the beginning of the file
+///
+/// After this comes the 'values' part, starting on block 1. After that,
+/// the 'index' starts at the block indicated by 'index_start_blk'
+///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Summary {
     /// Magic value to identify this as a zenith image file. Always IMAGE_FILE_MAGIC.
@@ -63,6 +66,9 @@ struct Summary {
 
     /// Block number where the 'index' part of the file begins.
     index_start_blk: u32,
+    /// Block within the 'index', where the B-tree root page is stored
+    index_root_blk: u32,
+    // the 'values' part starts after the summary header, on block 1.
 }
 
 impl From<&ImageLayer> for Summary {
@@ -73,10 +79,10 @@ impl From<&ImageLayer> for Summary {
             tenantid: layer.tenantid,
             timelineid: layer.timelineid,
             key_range: layer.key_range.clone(),
-
             lsn: layer.lsn,
 
             index_start_blk: 0,
+            index_root_blk: 0,
         }
     }
 }
@@ -104,11 +110,9 @@ pub struct ImageLayerInner {
     /// If false, the 'index' has not been loaded into memory yet.
     loaded: bool,
 
-    /// offset of each value
-    index: HashMap<Key, u64>,
-
     // values copied from summary
     index_start_blk: u32,
+    index_root_blk: u32,
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
@@ -147,21 +151,21 @@ impl Layer for ImageLayer {
         assert!(lsn_range.end >= self.lsn);
 
         let inner = self.load()?;
-        if let Some(&offset) = inner.index.get(&key) {
-            let buf = inner
-                .file
-                .as_ref()
-                .unwrap()
-                .block_cursor()
-                .read_blob(offset)
-                .with_context(|| {
-                    format!(
-                        "failed to read blob from data file {} at offset {}",
-                        self.filename().display(),
-                        offset
-                    )
-                })?;
-            let value = Bytes::from(buf);
+
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf)? {
+            let blob = file.block_cursor().read_blob(offset).with_context(|| {
+                format!(
+                    "failed to read value from data file {} at offset {}",
+                    self.filename().display(),
+                    offset
+                )
+            })?;
+            let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
@@ -172,33 +176,6 @@ impl Layer for ImageLayer {
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
         todo!();
-    }
-
-    fn unload(&self) -> Result<()> {
-        // Unload the index.
-        //
-        // TODO: we should access the index directly from pages on the disk,
-        // using the buffer cache. This load/unload mechanism is really ad hoc.
-
-        // FIXME: In debug mode, loading and unloading the index slows
-        // things down so much that you get timeout errors. At least
-        // with the test_parallel_copy test. So as an even more ad hoc
-        // stopgap fix for that, only unload every on average 10
-        // checkpoint cycles.
-        use rand::RngCore;
-        if rand::thread_rng().next_u32() > (u32::MAX / 10) {
-            return Ok(());
-        }
-
-        let mut inner = match self.inner.try_write() {
-            Ok(inner) => inner,
-            Err(TryLockError::WouldBlock) => return Ok(()),
-            Err(TryLockError::Poisoned(_)) => panic!("ImageLayer lock was poisoned"),
-        };
-        inner.index = HashMap::default();
-        inner.loaded = false;
-
-        Ok(())
     }
 
     fn delete(&self) -> Result<()> {
@@ -227,10 +204,16 @@ impl Layer for ImageLayer {
         }
 
         let inner = self.load()?;
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader =
+            DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        for (key, offset) in inner.index.iter() {
-            println!("key: {} offset {}", key, offset);
-        }
+        tree_reader.dump()?;
+
+        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+            println!("key: {} offset {}", hex::encode(key), value);
+            true
+        })?;
 
         Ok(())
     }
@@ -300,6 +283,7 @@ impl ImageLayer {
             PathOrConf::Conf(_) => {
                 let mut expected_summary = Summary::from(self);
                 expected_summary.index_start_blk = actual_summary.index_start_blk;
+                expected_summary.index_root_blk = actual_summary.index_root_blk;
 
                 if actual_summary != expected_summary {
                     bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
@@ -319,17 +303,8 @@ impl ImageLayer {
             }
         }
 
-        file.file.seek(SeekFrom::Start(
-            actual_summary.index_start_blk as u64 * PAGE_SZ as u64,
-        ))?;
-        let mut buf_reader = std::io::BufReader::new(&mut file.file);
-        let index = HashMap::des_from(&mut buf_reader)?;
-
         inner.index_start_blk = actual_summary.index_start_blk;
-
-        info!("loaded from {}", &path.display());
-
-        inner.index = index;
+        inner.index_root_blk = actual_summary.index_root_blk;
         inner.loaded = true;
         Ok(())
     }
@@ -348,10 +323,10 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             inner: RwLock::new(ImageLayerInner {
-                index: HashMap::new(),
                 loaded: false,
                 file: None,
                 index_start_blk: 0,
+                index_root_blk: 0,
             }),
         }
     }
@@ -376,9 +351,9 @@ impl ImageLayer {
             lsn: summary.lsn,
             inner: RwLock::new(ImageLayerInner {
                 file: None,
-                index: HashMap::new(),
                 loaded: false,
                 index_start_blk: 0,
+                index_root_blk: 0,
             }),
         })
     }
@@ -420,9 +395,8 @@ pub struct ImageLayerWriter {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    index: HashMap<Key, u64>,
-
     blob_writer: WriteBlobWriter<VirtualFile>,
+    tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
 impl ImageLayerWriter {
@@ -447,8 +421,14 @@ impl ImageLayerWriter {
             },
         );
         info!("new image layer {}", path.display());
-        let file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::create(&path)?;
+        // make room for the header block
+        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
         let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
+
+        // Initialize the b-tree index builder
+        let block_buf = BlockBuf::new();
+        let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         let writer = ImageLayerWriter {
             conf,
@@ -457,7 +437,7 @@ impl ImageLayerWriter {
             tenantid,
             key_range: key_range.clone(),
             lsn,
-            index: HashMap::new(),
+            tree: tree_builder,
             blob_writer,
         };
 
@@ -473,8 +453,9 @@ impl ImageLayerWriter {
         ensure!(self.key_range.contains(&key));
         let off = self.blob_writer.write_blob(img)?;
 
-        let old = self.index.insert(key, off);
-        assert!(old.is_none());
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        self.tree.append(&keybuf, off)?;
 
         Ok(())
     }
@@ -486,9 +467,11 @@ impl ImageLayerWriter {
         let mut file = self.blob_writer.into_inner();
 
         // Write out the index
-        let buf = HashMap::ser(&self.index)?;
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
-        file.write_all(&buf)?;
+        let (index_root_blk, block_buf) = self.tree.finish()?;
+        for buf in block_buf.blocks {
+            file.write_all(buf.as_ref())?;
+        }
 
         // Fill in the summary on blk 0
         let summary = Summary {
@@ -499,6 +482,7 @@ impl ImageLayerWriter {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
+            index_root_blk,
         };
         file.seek(SeekFrom::Start(0))?;
         Summary::ser_into(&summary, &mut file)?;
@@ -514,9 +498,9 @@ impl ImageLayerWriter {
             lsn: self.lsn,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
-                index: HashMap::new(),
                 file: None,
                 index_start_blk,
+                index_root_blk,
             }),
         };
         trace!("created image layer {}", layer.path().display());

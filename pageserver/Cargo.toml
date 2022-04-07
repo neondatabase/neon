@@ -10,6 +10,7 @@ regex = "1.4.5"
 bytes = { version = "1.0.1", features = ['serde'] }
 byteorder = "1.4.3"
 futures = "0.3.13"
+hex = "0.4.3"
 hyper = "0.14"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
