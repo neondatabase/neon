@@ -27,13 +27,9 @@ impl Conf {
         self.pg_distrib_dir.join("lib")
     }
 
-    fn new_pg_command<P: AsRef<Path>>(&self, command: P) -> Result<Command> {
+    fn new_pg_command(&self, command: impl AsRef<Path>) -> Result<Command> {
         let path = self.pg_bin_dir().join(command);
-        ensure!(
-            path.exists(),
-            "Command {} does not exist",
-            path.to_str().unwrap()
-        );
+        ensure!(path.exists(), "Command {:?} does not exist", path);
         let mut cmd = Command::new(path);
         cmd.env_clear()
             .env("LD_LIBRARY_PATH", self.pg_lib_dir())
@@ -43,39 +39,35 @@ impl Conf {
 
     pub fn initdb(&self) -> Result<()> {
         info!(
-            "Running initdb in {} with user 'postgres'",
-            self.datadir.to_str().unwrap()
+            "Running initdb in {:?} with user \"postgres\"",
+            self.datadir
         );
         let status = self
             .new_pg_command("initdb")?
-            .args(&["-D", self.datadir.to_str().unwrap(), "-U", "postgres"])
+            .arg("-D")
+            .arg(self.datadir.as_os_str())
+            .args(&["-U", "postgres"])
             .status()?;
         ensure!(status.success(), "initdb failed");
         Ok(())
     }
 
     pub fn start_server(&self) -> Result<PostgresServer> {
-        info!(
-            "Starting Postgres server in {}",
-            self.datadir.to_str().unwrap()
-        );
+        info!("Starting Postgres server in {:?}", self.datadir);
         let unix_socket_dir = std::fs::canonicalize(&self.datadir).unwrap();
         let server_process = self
             .new_pg_command("postgres")?
-            .args(&[
-                "-c",
-                "listen_addresses=",
-                "-k",
-                unix_socket_dir.to_str().unwrap(),
-                "-D",
-                self.datadir.to_str().unwrap(),
-            ])
+            .args(&["-c", "listen_addresses="])
+            .arg("-k")
+            .arg(unix_socket_dir.as_os_str())
+            .arg("-D")
+            .arg(self.datadir.as_os_str())
             .spawn()?;
         let server = PostgresServer {
             process: server_process,
             client_config: {
                 let mut c = postgres::Config::new();
-                c.host_path(&unix_socket_dir.to_str().unwrap());
+                c.host_path(&unix_socket_dir);
                 c.user("postgres");
                 c.connect_timeout(Duration::from_millis(1000));
                 c
@@ -135,8 +127,8 @@ pub trait PostgresClientExt: postgres::GenericClient {
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
-    client: &mut C,
+pub fn generate_last_wal_record_crossing_segment(
+    client: &mut impl postgres::GenericClient,
 ) -> Result<String> {
     // First few created tables take more WAL bytes than later.
     info!("LSN initial = {}", client.pg_current_wal_insert_lsn()?);

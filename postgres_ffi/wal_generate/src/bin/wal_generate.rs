@@ -3,7 +3,12 @@ use clap::{App, Arg};
 use wal_generate::*;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::filter::EnvFilter::from_default_env()
+                .add_directive("wal_generate=info".parse()?),
+        )
+        .init();
     let arg_matches = App::new("Postgres WAL generator")
         .about("Generates Postgres databases with specific WAL properties")
         .arg(
@@ -18,7 +23,7 @@ fn main() -> Result<()> {
             Arg::new("pg-distrib-dir")
                 .long("pg-distrib-dir")
                 .takes_value(true)
-                .help("Directory with Postgres distribution (bin and lib directories)")
+                .help("Directory with Postgres distribution (bin and lib directories, e.g. tmp_install)")
                 .default_value("/usr/local"),
         )
         .get_matches();
