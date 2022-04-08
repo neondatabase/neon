@@ -298,7 +298,7 @@ pub fn get_timeline_for_tenant_load(
         .get_timeline_load(timelineid)
         .with_context(|| format!("Timeline {} not found for tenant {}", timelineid, tenantid))?;
 
-    let repartition_distance = tenant.repo.conf.checkpoint_distance / 10;
+    let repartition_distance = tenant.repo.get_tenant_conf().checkpoint_distance / 10;
 
     let page_tline = Arc::new(DatadirTimelineImpl::new(tline, repartition_distance));
     page_tline.init_logical_size()?;

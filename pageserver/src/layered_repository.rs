@@ -1440,9 +1440,11 @@ impl LayeredTimeline {
     ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
+        let repo = tenant_mgr::get_repository_for_tenant(self.tenantid)?;
+        let tenant_conf = repo.get_tenant_conf();
 
         let distance = last_lsn.widening_sub(self.last_freeze_at.load());
-        if distance >= self.conf.checkpoint_distance.into() {
+        if distance >= tenant_conf.checkpoint_distance.into() {
             self.freeze_inmem_layer(true);
             self.last_freeze_at.store(last_lsn);
         }
@@ -1648,13 +1650,18 @@ impl LayeredTimeline {
         // above. Rewrite it.
         let _compaction_cs = self.compaction_cs.lock().unwrap();
 
-        let target_file_size = self.conf.checkpoint_distance;
+        let repo = tenant_mgr::get_repository_for_tenant(self.tenantid)?;
+        let tenant_conf = repo.get_tenant_conf();
+
+        let target_file_size = tenant_conf.checkpoint_distance;
 
         // Define partitioning schema if needed
         if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
         {
-            let (partitioning, lsn) =
-                pgdir.repartition(self.get_last_record_lsn(), self.conf.compaction_target_size)?;
+            let (partitioning, lsn) = pgdir.repartition(
+                self.get_last_record_lsn(),
+                tenant_conf.compaction_target_size,
+            )?;
             let timer = self.create_images_time_histo.start_timer();
             // 2. Create new image layers for partitions that have been modified
             // "enough".

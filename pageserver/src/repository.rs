@@ -460,6 +460,7 @@ pub mod repo_harness {
 
     pub struct RepoHarness<'a> {
         pub conf: &'static PageServerConf,
+        pub tenant_conf: TenantConf,
         pub tenant_id: ZTenantId,
 
         pub lock_guard: (
@@ -491,12 +492,15 @@ pub mod repo_harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+            let tenant_conf = TenantConf::dummy_conf();
+
             let tenant_id = ZTenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
             Ok(Self {
                 conf,
+                tenant_conf,
                 tenant_id,
                 lock_guard,
             })
@@ -511,8 +515,7 @@ pub mod repo_harness {
 
             let repo = LayeredRepository::new(
                 self.conf,
-                // Use default TenantConf in tests
-                TenantConf::from(self.conf),
+                self.tenant_conf,
                 walredo_mgr,
                 self.tenant_id,
                 RemoteIndex::empty(),

@@ -150,7 +150,7 @@ pub fn init_pageserver(
 
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        let repo = create_repo(conf, TenantConf::from(conf), tenant_id, CreateRepo::Dummy)
+        let repo = create_repo(conf, TenantConf::default(), tenant_id, CreateRepo::Dummy)
             .context("failed to create repo")?;
         let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
         bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())

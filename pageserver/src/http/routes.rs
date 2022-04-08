@@ -291,8 +291,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let remote_index = get_state(&request).remote_index.clone();
 
-    let conf = get_config(&request);
-    let mut tenant_conf = TenantConf::from(conf);
+    let mut tenant_conf = TenantConf::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period =
             humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?;
@@ -321,6 +320,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
+        let conf = get_config(&request);
 
         tenant_mgr::create_tenant_repository(conf, tenant_conf, target_tenant_id, remote_index)
     })

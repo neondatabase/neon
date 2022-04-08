@@ -680,7 +680,7 @@ impl postgres_backend::Handler for PageServerHandler {
             ensure!(params.len() == 1, "invalid param number for config command");
             let tenantid = ZTenantId::from_str(params[0])?;
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let conf = repo.get_tenant_conf();
+            let tenant_conf = repo.get_tenant_conf();
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"compaction_target_size"),
@@ -690,12 +690,18 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"pitr_interval"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
-                Some(conf.checkpoint_distance.to_string().as_bytes()),
-                Some(conf.compaction_target_size.to_string().as_bytes()),
-                Some(conf.compaction_period.as_secs().to_string().as_bytes()),
-                Some(conf.gc_horizon.to_string().as_bytes()),
-                Some(conf.gc_period.as_secs().to_string().as_bytes()),
-                Some(conf.pitr_interval.as_secs().to_string().as_bytes()),
+                Some(tenant_conf.checkpoint_distance.to_string().as_bytes()),
+                Some(tenant_conf.compaction_target_size.to_string().as_bytes()),
+                Some(
+                    tenant_conf
+                        .compaction_period
+                        .as_secs()
+                        .to_string()
+                        .as_bytes(),
+                ),
+                Some(tenant_conf.gc_horizon.to_string().as_bytes()),
+                Some(tenant_conf.gc_period.as_secs().to_string().as_bytes()),
+                Some(tenant_conf.pitr_interval.as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
@@ -715,10 +721,14 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            let tenant_conf = repo.get_tenant_conf();
+
             let gc_horizon: u64 = caps
                 .get(4)
                 .map(|h| h.as_str().parse())
-                .unwrap_or(Ok(self.conf.gc_horizon))?;
+                .unwrap_or(Ok(tenant_conf.gc_horizon))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;

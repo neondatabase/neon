@@ -19,6 +19,24 @@ use zenith_utils::zid::ZTenantId;
 
 pub const TENANT_CONFIG_NAME: &str = "config";
 
+pub mod defaults {
+    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
+    // would be more appropriate. But a low value forces the code to be exercised more,
+    // which is good for now to trigger bugs.
+    // This parameter actually determines L0 layer file size.
+    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
+
+    // Target file size, when creating image and delta layers.
+    // This parameter determines L1 layer file size.
+    pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
+
+    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
+
+    pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
+    pub const DEFAULT_GC_PERIOD: &str = "100 s";
+    pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     pub checkpoint_distance: u64,
@@ -137,14 +155,19 @@ impl TenantConfFile {
 }
 
 impl TenantConf {
-    pub fn from(conf: &PageServerConf) -> TenantConf {
+    pub fn default() -> TenantConf {
+        use defaults::*;
+
         TenantConf {
-            gc_period: conf.gc_period,
-            gc_horizon: conf.gc_horizon,
-            pitr_interval: conf.pitr_interval,
-            checkpoint_distance: conf.checkpoint_distance,
-            compaction_period: conf.compaction_period,
-            compaction_target_size: conf.compaction_target_size,
+            checkpoint_distance: DEFAULT_CHECKPOINT_DISTANCE,
+            compaction_target_size: DEFAULT_COMPACTION_TARGET_SIZE,
+            compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
+                .expect("cannot parse default compaction period"),
+            gc_horizon: DEFAULT_GC_HORIZON,
+            gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
+                .expect("cannot parse default gc period"),
+            pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
+                .expect("cannot parse default PITR interval"),
         }
     }
 
@@ -152,6 +175,18 @@ impl TenantConf {
     /// where certain tenant's tenantconf file should be located.
     pub fn tenantconf_path(conf: &'static PageServerConf, tenantid: ZTenantId) -> PathBuf {
         conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME)
+    }
+
+    #[cfg(test)]
+    pub fn dummy_conf() -> Self {
+        TenantConf {
+            checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
+            compaction_target_size: 4 * 1024 * 1024,
+            compaction_period: Duration::from_secs(10),
+            gc_horizon: defaults::DEFAULT_GC_HORIZON,
+            gc_period: Duration::from_secs(10),
+            pitr_interval: Duration::from_secs(60 * 60),
+        }
     }
 }
 
