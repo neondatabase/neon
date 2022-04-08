@@ -123,6 +123,15 @@ impl Layer for ImageLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
+    fn path(&self) -> PathBuf {
+        Self::path_for(
+            &self.path_or_conf,
+            self.timelineid,
+            self.tenantid,
+            &self.layer_name(),
+        )
+    }
+
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
     }
@@ -363,16 +372,6 @@ impl ImageLayer {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
         }
-    }
-
-    /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.timelineid,
-            self.tenantid,
-            &self.layer_name(),
-        )
     }
 }
 

@@ -9,6 +9,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use zenith_utils::lsn::Lsn;
 
@@ -90,6 +91,12 @@ pub trait Layer: Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
+    /// Get layer creation time. Right now we are using file creation time,
+    /// but it can be not so accurate, because layer can be evicted and reloaded from S3.
+    fn get_creation_time(&self) -> Result<SystemTime> {
+        Ok(std::fs::metadata(&self.path())?.created()?)
+    }
+
     /// Inclusive start bound of the LSN range that this layer holds
     /// Exclusive end bound of the LSN range that this layer holds.
     ///
@@ -102,6 +109,9 @@ pub trait Layer: Send + Sync {
     /// implement this, to print a handy unique identifier for the layer for
     /// log messages, even though they're never not on disk.)
     fn filename(&self) -> PathBuf;
+
+    /// Path to the layer file in pageserver workdir.
+    fn path(&self) -> PathBuf;
 
     ///
     /// Return data needed to reconstruct given page at LSN.
