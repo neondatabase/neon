@@ -746,10 +746,9 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 
 def test_find_end_of_wal_multiple_segments(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
-    env.zenith_cli(["branch", "test_find_end_of_wal_contpage", "main"])
-
+    env.zenith_cli.create_branch('test_find_end_of_wal_contpage')
     pg = env.postgres.create_start('test_find_end_of_wal_contpage')
     wa = env.safekeepers[0]
 
