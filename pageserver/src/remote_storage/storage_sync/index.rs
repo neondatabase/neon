@@ -1,63 +1,56 @@
-//! In-memory index to track the tenant files on the remote strorage, mitigating the storage format differences between the local and remote files.
-//! Able to restore itself from the storage archive data and reconstruct archive indices on demand.
-//!
-//! The index is intended to be portable, so deliberately does not store any local paths inside.
-//! This way in the future, the index could be restored fast from its serialized stored form.
+//! In-memory index to track the tenant files on the remote storage.
+//! Able to restore itself from the storage index parts, that are located in every timeline's remote directory and contain all data about
+//! remote timeline layers and its metadata.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, Ok};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
-use tracing::*;
-use zenith_utils::{
-    lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
-};
 
 use crate::{
-    config::PageServerConf,
-    layered_repository::TIMELINES_SEGMENT_NAME,
-    remote_storage::{
-        storage_sync::compression::{parse_archive_name, FileEntry},
-        ZTenantTimelineId,
-    },
+    config::PageServerConf, layered_repository::metadata::TimelineMetadata,
+    remote_storage::ZTenantTimelineId,
 };
-
-use super::compression::ArchiveHeader;
+use zenith_utils::lsn::Lsn;
 
 /// A part of the filesystem path, that needs a root to become a path again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RelativePath(String);
 
 impl RelativePath {
     /// Attempts to strip off the base from path, producing a relative path or an error.
     pub fn new<P: AsRef<Path>>(base: &Path, path: P) -> anyhow::Result<Self> {
-        let relative = path
-            .as_ref()
-            .strip_prefix(base)
-            .context("path is not relative to base")?;
+        let path = path.as_ref();
+        let relative = path.strip_prefix(base).with_context(|| {
+            format!(
+                "path '{}' is not relative to base '{}'",
+                path.display(),
+                base.display()
+            )
+        })?;
         Ok(RelativePath(relative.to_string_lossy().to_string()))
     }
 
     /// Joins the relative path with the base path.
-    pub fn as_path(&self, base: &Path) -> PathBuf {
+    fn as_path(&self, base: &Path) -> PathBuf {
         base.join(&self.0)
     }
 }
 
 /// An index to track tenant files that exist on the remote storage.
-/// Currently, timeline archive files are tracked only.
 #[derive(Debug, Clone)]
 pub struct RemoteTimelineIndex {
-    timeline_entries: HashMap<ZTenantTimelineId, TimelineIndexEntry>,
+    timeline_entries: HashMap<ZTenantTimelineId, RemoteTimeline>,
 }
 
-/// A wrapper to synchrnize access to the index, should be created and used before dealing with any [`RemoteTimelineIndex`].
+/// A wrapper to synchronize the access to the index, should be created and used before dealing with any [`RemoteTimelineIndex`].
 pub struct RemoteIndex(Arc<RwLock<RemoteTimelineIndex>>);
 
 impl RemoteIndex {
@@ -67,27 +60,22 @@ impl RemoteIndex {
         })))
     }
 
-    /// Attempts to parse file paths (not checking the file contents) and find files
-    /// that can be tracked wiht the index.
-    /// On parse falures, logs the error and continues, so empty index can be created from not suitable paths.
-    pub fn try_parse_descriptions_from_paths<P: AsRef<Path>>(
+    pub fn from_parts(
         conf: &'static PageServerConf,
-        paths: impl Iterator<Item = P>,
-    ) -> Self {
-        let mut index = RemoteTimelineIndex {
-            timeline_entries: HashMap::new(),
-        };
-        for path in paths {
-            if let Err(e) = try_parse_index_entry(&mut index, conf, path.as_ref()) {
-                debug!(
-                    "Failed to parse path '{}' as index entry: {:#}",
-                    path.as_ref().display(),
-                    e
-                );
-            }
+        index_parts: HashMap<ZTenantTimelineId, IndexPart>,
+    ) -> anyhow::Result<Self> {
+        let mut timeline_entries = HashMap::new();
+
+        for (sync_id, index_part) in index_parts {
+            let timeline_path = conf.timeline_path(&sync_id.timeline_id, &sync_id.tenant_id);
+            let remote_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
+                .context("Failed to restore remote timeline data from index part")?;
+            timeline_entries.insert(sync_id, remote_timeline);
         }
 
-        Self(Arc::new(RwLock::new(index)))
+        Ok(Self(Arc::new(RwLock::new(RemoteTimelineIndex {
+            timeline_entries,
+        }))))
     }
 
     pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, RemoteTimelineIndex> {
@@ -106,37 +94,16 @@ impl Clone for RemoteIndex {
 }
 
 impl RemoteTimelineIndex {
-    pub fn timeline_entry(&self, id: &ZTenantTimelineId) -> Option<&TimelineIndexEntry> {
+    pub fn timeline_entry(&self, id: &ZTenantTimelineId) -> Option<&RemoteTimeline> {
         self.timeline_entries.get(id)
     }
 
-    pub fn timeline_entry_mut(
-        &mut self,
-        id: &ZTenantTimelineId,
-    ) -> Option<&mut TimelineIndexEntry> {
+    pub fn timeline_entry_mut(&mut self, id: &ZTenantTimelineId) -> Option<&mut RemoteTimeline> {
         self.timeline_entries.get_mut(id)
     }
 
-    pub fn add_timeline_entry(&mut self, id: ZTenantTimelineId, entry: TimelineIndexEntry) {
+    pub fn add_timeline_entry(&mut self, id: ZTenantTimelineId, entry: RemoteTimeline) {
         self.timeline_entries.insert(id, entry);
-    }
-
-    pub fn upgrade_timeline_entry(
-        &mut self,
-        id: &ZTenantTimelineId,
-        remote_timeline: RemoteTimeline,
-    ) -> anyhow::Result<()> {
-        let mut entry = self.timeline_entries.get_mut(id).ok_or(anyhow::anyhow!(
-            "timeline is unexpectedly missing from remote index"
-        ))?;
-
-        if !matches!(entry.inner, TimelineIndexEntryInner::Description(_)) {
-            anyhow::bail!("timeline entry is not a description entry")
-        };
-
-        entry.inner = TimelineIndexEntryInner::Full(remote_timeline);
-
-        Ok(())
     }
 
     pub fn all_sync_ids(&self) -> impl Iterator<Item = ZTenantTimelineId> + '_ {
@@ -150,351 +117,295 @@ impl RemoteTimelineIndex {
     ) -> anyhow::Result<()> {
         self.timeline_entry_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown timeline sync {}", id))?
-            .set_awaits_download(awaits_download);
+            .awaits_download = awaits_download;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DescriptionTimelineIndexEntry {
-    pub description: BTreeMap<ArchiveId, ArchiveDescription>,
-    pub awaits_download: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FullTimelineIndexEntry {
-    pub remote_timeline: RemoteTimeline,
-    pub awaits_download: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimelineIndexEntryInner {
-    Description(BTreeMap<ArchiveId, ArchiveDescription>),
-    Full(RemoteTimeline),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineIndexEntry {
-    inner: TimelineIndexEntryInner,
-    awaits_download: bool,
-}
-
-impl TimelineIndexEntry {
-    pub fn new(inner: TimelineIndexEntryInner, awaits_download: bool) -> Self {
-        Self {
-            inner,
-            awaits_download,
-        }
-    }
-
-    pub fn inner(&self) -> &TimelineIndexEntryInner {
-        &self.inner
-    }
-
-    pub fn inner_mut(&mut self) -> &mut TimelineIndexEntryInner {
-        &mut self.inner
-    }
-
-    pub fn uploaded_checkpoints(&self) -> BTreeSet<Lsn> {
-        match &self.inner {
-            TimelineIndexEntryInner::Description(description) => {
-                description.keys().map(|archive_id| archive_id.0).collect()
-            }
-            TimelineIndexEntryInner::Full(remote_timeline) => remote_timeline
-                .checkpoint_archives
-                .keys()
-                .map(|archive_id| archive_id.0)
-                .collect(),
-        }
-    }
-
-    /// Gets latest uploaded checkpoint's disk consisten Lsn for the corresponding timeline.
-    pub fn disk_consistent_lsn(&self) -> Option<Lsn> {
-        match &self.inner {
-            TimelineIndexEntryInner::Description(description) => {
-                description.keys().map(|archive_id| archive_id.0).max()
-            }
-            TimelineIndexEntryInner::Full(remote_timeline) => remote_timeline
-                .checkpoint_archives
-                .keys()
-                .map(|archive_id| archive_id.0)
-                .max(),
-        }
-    }
-
-    pub fn get_awaits_download(&self) -> bool {
-        self.awaits_download
-    }
-
-    pub fn set_awaits_download(&mut self, awaits_download: bool) {
-        self.awaits_download = awaits_download;
-    }
-}
-
-/// Checkpoint archive's id, corresponding to the `disk_consistent_lsn` from the timeline's metadata file during checkpointing.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct ArchiveId(pub(super) Lsn);
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-struct FileId(ArchiveId, ArchiveEntryNumber);
-
-type ArchiveEntryNumber = usize;
-
-/// All archives and files in them, representing a certain timeline.
-/// Uses file and archive IDs to reference those without ownership issues.
+/// Restored index part data about the timeline, stored in the remote index.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RemoteTimeline {
-    timeline_files: BTreeMap<FileId, FileEntry>,
-    checkpoint_archives: BTreeMap<ArchiveId, CheckpointArchive>,
-}
+    timeline_layers: HashSet<PathBuf>,
+    missing_layers: HashSet<PathBuf>,
 
-/// Archive metadata, enough to restore a header with the timeline data.
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct CheckpointArchive {
-    disk_consistent_lsn: Lsn,
-    metadata_file_size: u64,
-    files: BTreeSet<FileId>,
-    archive_header_size: u64,
-}
-
-impl CheckpointArchive {
-    pub fn disk_consistent_lsn(&self) -> Lsn {
-        self.disk_consistent_lsn
-    }
+    pub metadata: TimelineMetadata,
+    pub awaits_download: bool,
 }
 
 impl RemoteTimeline {
-    pub fn empty() -> Self {
+    pub fn new(metadata: TimelineMetadata) -> Self {
         Self {
-            timeline_files: BTreeMap::new(),
-            checkpoint_archives: BTreeMap::new(),
+            timeline_layers: HashSet::new(),
+            missing_layers: HashSet::new(),
+            metadata,
+            awaits_download: false,
         }
     }
 
-    pub fn checkpoints(&self) -> impl Iterator<Item = Lsn> + '_ {
-        self.checkpoint_archives
-            .values()
-            .map(CheckpointArchive::disk_consistent_lsn)
+    pub fn add_timeline_layers(&mut self, new_layers: impl IntoIterator<Item = PathBuf>) {
+        self.timeline_layers.extend(new_layers.into_iter());
+    }
+
+    pub fn add_upload_failures(&mut self, upload_failures: impl IntoIterator<Item = PathBuf>) {
+        self.missing_layers.extend(upload_failures.into_iter());
     }
 
     /// Lists all layer files in the given remote timeline. Omits the metadata file.
-    pub fn stored_files(&self, timeline_dir: &Path) -> BTreeSet<PathBuf> {
-        self.timeline_files
-            .values()
-            .map(|file_entry| file_entry.subpath.as_path(timeline_dir))
-            .collect()
+    pub fn stored_files(&self) -> &HashSet<PathBuf> {
+        &self.timeline_layers
     }
 
-    pub fn contains_checkpoint_at(&self, disk_consistent_lsn: Lsn) -> bool {
-        self.checkpoint_archives
-            .contains_key(&ArchiveId(disk_consistent_lsn))
+    pub fn from_index_part(timeline_path: &Path, index_part: IndexPart) -> anyhow::Result<Self> {
+        let metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
+        Ok(Self {
+            timeline_layers: to_local_paths(timeline_path, index_part.timeline_layers),
+            missing_layers: to_local_paths(timeline_path, index_part.missing_layers),
+            metadata,
+            awaits_download: false,
+        })
     }
+}
 
-    pub fn archive_data(&self, archive_id: ArchiveId) -> Option<&CheckpointArchive> {
-        self.checkpoint_archives.get(&archive_id)
-    }
+/// Part of the remote index, corresponding to a certain timeline.
+/// Contains the data about all files in the timeline, present remotely and its metadata.
+#[serde_as]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct IndexPart {
+    timeline_layers: HashSet<RelativePath>,
+    /// Currently is not really used in pageserver,
+    /// present to manually keep track of the layer files that pageserver might never retrieve.
+    ///
+    /// Such "holes" might appear if any upload task was evicted on an error threshold:
+    /// the this layer will only be rescheduled for upload on pageserver restart.
+    missing_layers: HashSet<RelativePath>,
+    #[serde_as(as = "DisplayFromStr")]
+    disk_consistent_lsn: Lsn,
+    metadata_bytes: Vec<u8>,
+}
 
-    /// Restores a header of a certain remote archive from the memory data.
-    /// Returns the header and its compressed size in the archive, both can be used to uncompress that archive.
-    pub fn restore_header(&self, archive_id: ArchiveId) -> anyhow::Result<(ArchiveHeader, u64)> {
-        let archive = self
-            .checkpoint_archives
-            .get(&archive_id)
-            .with_context(|| format!("Archive {:?} not found", archive_id))?;
+impl IndexPart {
+    pub const FILE_NAME: &'static str = "index_part";
+    pub const FILE_EXTENSION: &'static str = "json";
 
-        let mut header_files = Vec::with_capacity(archive.files.len());
-        for (expected_archive_position, archive_file) in archive.files.iter().enumerate() {
-            let &FileId(archive_id, archive_position) = archive_file;
-            ensure!(
-                expected_archive_position == archive_position,
-                "Archive header is corrupt, file # {} from archive {:?} header is missing",
-                expected_archive_position,
-                archive_id,
-            );
-
-            let timeline_file = self.timeline_files.get(archive_file).with_context(|| {
-                format!(
-                    "File with id {:?} not found for archive {:?}",
-                    archive_file, archive_id
-                )
-            })?;
-            header_files.push(timeline_file.clone());
-        }
-
-        Ok((
-            ArchiveHeader {
-                files: header_files,
-                metadata_file_size: archive.metadata_file_size,
-            },
-            archive.archive_header_size,
-        ))
-    }
-
-    /// Updates (creates, if necessary) the data about certain archive contents.
-    pub fn update_archive_contents(
-        &mut self,
+    #[cfg(test)]
+    pub fn new(
+        timeline_layers: HashSet<RelativePath>,
+        missing_layers: HashSet<RelativePath>,
         disk_consistent_lsn: Lsn,
-        header: ArchiveHeader,
-        header_size: u64,
-    ) {
-        let archive_id = ArchiveId(disk_consistent_lsn);
-        let mut common_archive_files = BTreeSet::new();
-        for (file_index, file_entry) in header.files.into_iter().enumerate() {
-            let file_id = FileId(archive_id, file_index);
-            self.timeline_files.insert(file_id, file_entry);
-            common_archive_files.insert(file_id);
+        metadata_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            timeline_layers,
+            missing_layers,
+            disk_consistent_lsn,
+            metadata_bytes,
         }
+    }
 
-        let metadata_file_size = header.metadata_file_size;
-        self.checkpoint_archives
-            .entry(archive_id)
-            .or_insert_with(|| CheckpointArchive {
-                metadata_file_size,
-                files: BTreeSet::new(),
-                archive_header_size: header_size,
-                disk_consistent_lsn,
-            })
-            .files
-            .extend(common_archive_files.into_iter());
+    pub fn missing_files(&self) -> &HashSet<RelativePath> {
+        &self.missing_layers
+    }
+
+    pub fn from_remote_timeline(
+        timeline_path: &Path,
+        remote_timeline: RemoteTimeline,
+    ) -> anyhow::Result<Self> {
+        let metadata_bytes = remote_timeline.metadata.to_bytes()?;
+        Ok(Self {
+            timeline_layers: to_relative_paths(timeline_path, remote_timeline.timeline_layers)
+                .context("Failed to convert timeline layers' paths to relative ones")?,
+            missing_layers: to_relative_paths(timeline_path, remote_timeline.missing_layers)
+                .context("Failed to convert missing layers' paths to relative ones")?,
+            disk_consistent_lsn: remote_timeline.metadata.disk_consistent_lsn(),
+            metadata_bytes,
+        })
     }
 }
 
-/// Metadata abput timeline checkpoint archive, parsed from its remote storage path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveDescription {
-    pub header_size: u64,
-    pub disk_consistent_lsn: Lsn,
-    pub archive_name: String,
+fn to_local_paths(
+    timeline_path: &Path,
+    paths: impl IntoIterator<Item = RelativePath>,
+) -> HashSet<PathBuf> {
+    paths
+        .into_iter()
+        .map(|path| path.as_path(timeline_path))
+        .collect()
 }
 
-fn try_parse_index_entry(
-    index: &mut RemoteTimelineIndex,
-    conf: &'static PageServerConf,
-    path: &Path,
-) -> anyhow::Result<()> {
-    let tenants_dir = conf.tenants_path();
-    let tenant_id = path
-        .strip_prefix(&tenants_dir)
-        .with_context(|| {
-            format!(
-                "Path '{}' does not belong to tenants directory '{}'",
-                path.display(),
-                tenants_dir.display(),
-            )
-        })?
-        .iter()
-        .next()
-        .with_context(|| format!("Found no tenant id in path '{}'", path.display()))?
-        .to_string_lossy()
-        .parse::<ZTenantId>()
-        .with_context(|| format!("Failed to parse tenant id from path '{}'", path.display()))?;
-
-    let timelines_path = conf.timelines_path(&tenant_id);
-    match path.strip_prefix(&timelines_path) {
-        Ok(timelines_subpath) => {
-            let mut segments = timelines_subpath.iter();
-            let timeline_id = segments
-                .next()
-                .with_context(|| {
-                    format!(
-                        "{} directory of tenant {} (path '{}') is not an index entry",
-                        TIMELINES_SEGMENT_NAME,
-                        tenant_id,
-                        path.display()
-                    )
-                })?
-                .to_string_lossy()
-                .parse::<ZTimelineId>()
-                .with_context(|| {
-                    format!("Failed to parse timeline id from path '{}'", path.display())
-                })?;
-
-            let (disk_consistent_lsn, header_size) =
-                parse_archive_name(path).with_context(|| {
-                    format!(
-                        "Failed to parse archive name out in path '{}'",
-                        path.display()
-                    )
-                })?;
-
-            let archive_name = path
-                .file_name()
-                .with_context(|| format!("Archive '{}' has no file name", path.display()))?
-                .to_string_lossy()
-                .to_string();
-
-            let sync_id = ZTenantTimelineId {
-                tenant_id,
-                timeline_id,
-            };
-            let timeline_index_entry = index.timeline_entries.entry(sync_id).or_insert_with(|| {
-                TimelineIndexEntry::new(
-                    TimelineIndexEntryInner::Description(BTreeMap::default()),
-                    false,
-                )
-            });
-            match timeline_index_entry.inner_mut() {
-                TimelineIndexEntryInner::Description(description) => {
-                    description.insert(
-                        ArchiveId(disk_consistent_lsn),
-                        ArchiveDescription {
-                            header_size,
-                            disk_consistent_lsn,
-                            archive_name,
-                        },
-                    );
-                }
-                TimelineIndexEntryInner::Full(_) => {
-                    bail!("Cannot add parsed archive description to its full context in index with sync id {}", sync_id)
-                }
-            }
-        }
-        Err(timelines_strip_error) => {
-            bail!(
-                "Path '{}' is not an archive entry '{}'",
-                path.display(),
-                timelines_strip_error,
-            )
-        }
-    }
-    Ok(())
+fn to_relative_paths(
+    timeline_path: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> anyhow::Result<HashSet<RelativePath>> {
+    paths
+        .into_iter()
+        .map(|path| RelativePath::new(timeline_path, path))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     #[test]
-    fn header_restoration_preserves_file_order() {
-        let header = ArchiveHeader {
-            files: vec![
-                FileEntry {
-                    size: 5,
-                    subpath: RelativePath("one".to_string()),
-                },
-                FileEntry {
-                    size: 1,
-                    subpath: RelativePath("two".to_string()),
-                },
-                FileEntry {
-                    size: 222,
-                    subpath: RelativePath("zero".to_string()),
-                },
-            ],
-            metadata_file_size: 5,
+    fn index_part_conversion() {
+        let harness = RepoHarness::create("index_part_conversion").unwrap();
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let metadata =
+            TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));
+        let remote_timeline = RemoteTimeline {
+            timeline_layers: HashSet::from([
+                timeline_path.join("layer_1"),
+                timeline_path.join("layer_2"),
+            ]),
+            missing_layers: HashSet::from([
+                timeline_path.join("missing_1"),
+                timeline_path.join("missing_2"),
+            ]),
+            metadata: metadata.clone(),
+            awaits_download: false,
         };
 
-        let lsn = Lsn(1);
-        let mut remote_timeline = RemoteTimeline::empty();
-        remote_timeline.update_archive_contents(lsn, header.clone(), 15);
-
-        let (restored_header, _) = remote_timeline
-            .restore_header(ArchiveId(lsn))
-            .expect("Should be able to restore header from a valid remote timeline");
+        let index_part = IndexPart::from_remote_timeline(&timeline_path, remote_timeline.clone())
+            .expect("Correct remote timeline should be convertable to index part");
 
         assert_eq!(
-            header, restored_header,
-            "Header restoration should preserve file order"
+            index_part.timeline_layers.iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                &RelativePath("layer_1".to_string()),
+                &RelativePath("layer_2".to_string())
+            ]),
+            "Index part should have all remote timeline layers after the conversion"
         );
+        assert_eq!(
+            index_part.missing_layers.iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                &RelativePath("missing_1".to_string()),
+                &RelativePath("missing_2".to_string())
+            ]),
+            "Index part should have all missing remote timeline layers after the conversion"
+        );
+        assert_eq!(
+            index_part.disk_consistent_lsn,
+            metadata.disk_consistent_lsn(),
+            "Index part should have disk consistent lsn from the timeline"
+        );
+        assert_eq!(
+            index_part.metadata_bytes,
+            metadata
+                .to_bytes()
+                .expect("Failed to serialize correct metadata into bytes"),
+            "Index part should have all missing remote timeline layers after the conversion"
+        );
+
+        let restored_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
+            .expect("Correct index part should be convertable to remote timeline");
+
+        let original_metadata = &remote_timeline.metadata;
+        let restored_metadata = &restored_timeline.metadata;
+        // we have to compare the metadata this way, since its header is different after creation and restoration,
+        // but that is now consireded ok.
+        assert_eq!(
+            original_metadata.disk_consistent_lsn(),
+            restored_metadata.disk_consistent_lsn(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+        assert_eq!(
+            original_metadata.prev_record_lsn(),
+            restored_metadata.prev_record_lsn(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+        assert_eq!(
+            original_metadata.ancestor_timeline(),
+            restored_metadata.ancestor_timeline(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+        assert_eq!(
+            original_metadata.ancestor_lsn(),
+            restored_metadata.ancestor_lsn(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+        assert_eq!(
+            original_metadata.latest_gc_cutoff_lsn(),
+            restored_metadata.latest_gc_cutoff_lsn(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+        assert_eq!(
+            original_metadata.initdb_lsn(),
+            restored_metadata.initdb_lsn(),
+            "remote timeline -> index part -> remote timeline conversion should not alter metadata"
+        );
+
+        assert_eq!(
+            remote_timeline.awaits_download, restored_timeline.awaits_download,
+            "remote timeline -> index part -> remote timeline conversion should not loose download flag"
+        );
+
+        assert_eq!(
+            remote_timeline
+                .timeline_layers
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            restored_timeline
+                .timeline_layers
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "remote timeline -> index part -> remote timeline conversion should not loose layer data"
+        );
+        assert_eq!(
+            remote_timeline
+                .missing_layers
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            restored_timeline
+                .missing_layers
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "remote timeline -> index part -> remote timeline conversion should not loose missing file data"
+        );
+    }
+
+    #[test]
+    fn index_part_conversion_negatives() {
+        let harness = RepoHarness::create("index_part_conversion_negatives").unwrap();
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let metadata =
+            TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));
+
+        let conversion_result = IndexPart::from_remote_timeline(
+            &timeline_path,
+            RemoteTimeline {
+                timeline_layers: HashSet::from([
+                    PathBuf::from("bad_path"),
+                    timeline_path.join("layer_2"),
+                ]),
+                missing_layers: HashSet::from([
+                    timeline_path.join("missing_1"),
+                    timeline_path.join("missing_2"),
+                ]),
+                metadata: metadata.clone(),
+                awaits_download: false,
+            },
+        );
+        assert!(conversion_result.is_err(), "Should not be able to convert metadata with layer paths that are not in the timeline directory");
+
+        let conversion_result = IndexPart::from_remote_timeline(
+            &timeline_path,
+            RemoteTimeline {
+                timeline_layers: HashSet::from([
+                    timeline_path.join("layer_1"),
+                    timeline_path.join("layer_2"),
+                ]),
+                missing_layers: HashSet::from([
+                    PathBuf::from("bad_path"),
+                    timeline_path.join("missing_2"),
+                ]),
+                metadata,
+                awaits_download: false,
+            },
+        );
+        assert!(conversion_result.is_err(), "Should not be able to convert metadata with missing layer paths that are not in the timeline directory");
     }
 }

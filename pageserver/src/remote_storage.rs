@@ -9,7 +9,6 @@
 //!
 //! * synchronization logic at [`storage_sync`] module that keeps pageserver state (both runtime one and the workdir files) and storage state in sync.
 //! Synchronization internals are split into submodules
-//!     * [`storage_sync::compression`] for a custom remote storage format used to store timeline files in archives
 //!     * [`storage_sync::index`] to keep track of remote tenant files, the metadata and their mappings to local files
 //!     * [`storage_sync::upload`] and [`storage_sync::download`] to manage archive creation and upload; download and extraction, respectively
 //!
@@ -54,25 +53,32 @@
 //! The checkpoint uploads are disabled, if no remote storage configuration is provided (no sync loop is started this way either).
 //! See [`crate::layered_repository`] for the upload calls and the adjacent logic.
 //!
-//! Synchronization logic is able to communicate back with updated timeline sync states, [`TimelineSyncState`],
-//! submitted via [`crate::tenant_mgr::set_timeline_states`] function. Tenant manager applies corresponding timeline updates in pageserver's in-memory state.
+//! Synchronization logic is able to communicate back with updated timeline sync states, [`crate::repository::TimelineSyncStatusUpdate`],
+//! submitted via [`crate::tenant_mgr::apply_timeline_sync_status_updates`] function. Tenant manager applies corresponding timeline updates in pageserver's in-memory state.
 //! Such submissions happen in two cases:
 //! * once after the sync loop startup, to signal pageserver which timelines will be synchronized in the near future
 //! * after every loop step, in case a timeline needs to be reloaded or evicted from pageserver's memory
 //!
-//! When the pageserver terminates, the upload loop finishes a current sync task (if any) and exits.
+//! When the pageserver terminates, the sync loop finishes a current sync task (if any) and exits.
 //!
-//! The storage logic considers `image` as a set of local files, fully representing a certain timeline at given moment (identified with `disk_consistent_lsn`).
+//! The storage logic considers `image` as a set of local files (layers), fully representing a certain timeline at given moment (identified with `disk_consistent_lsn` from the corresponding `metadata` file).
 //! Timeline can change its state, by adding more files on disk and advancing its `disk_consistent_lsn`: this happens after pageserver checkpointing and is followed
 //! by the storage upload, if enabled.
-//! Yet timeline cannot alter already existing files, and normally cannot remote those too: only a GC process is capable of removing unused files.
+//! Yet timeline cannot alter already existing files, and cannot remove those too: only a GC process is capable of removing unused files.
 //! This way, remote storage synchronization relies on the fact that every checkpoint is incremental and local files are "immutable":
 //! * when a certain checkpoint gets uploaded, the sync loop remembers the fact, preventing further reuploads of the same state
 //! * no files are deleted from either local or remote storage, only the missing ones locally/remotely get downloaded/uploaded, local metadata file will be overwritten
 //! when the newer image is downloaded
 //!
-//! To optimize S3 storage (and access), the sync loop compresses the checkpoint files before placing them to S3, and uncompresses them back, keeping track of timeline files and metadata.
-//! Also, the remote file list is queried once only, at startup, to avoid possible extra costs and latency issues.
+//! Pageserver maintains similar to the local file structure remotely: all layer files are uploaded with the same names under the same directory structure.
+//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexShard`], containing the list of remote files.
+//! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
+//! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`ZTenantId`] and [`ZTimelineId`],
+//! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrive its shard contents, if needed, same as any layer files.
+//!
+//! By default, pageserver reads the remote storage index data only for timelines located locally, to synchronize those, if needed.
+//! Bulk index data download happens only initially, on pageserer startup. The rest of the remote storage stays unknown to pageserver and loaded on demand only,
+//! when a new timeline is scheduled for the download.
 //!
 //! NOTES:
 //! * pageserver assumes it has exclusive write access to the remote storage. If supported, the way multiple pageservers can be separated in the same storage
@@ -86,7 +92,7 @@ mod s3_bucket;
 mod storage_sync;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi, fs,
     path::{Path, PathBuf},
 };
@@ -94,22 +100,36 @@ use std::{
 use anyhow::{bail, Context};
 use tokio::io;
 use tracing::{debug, error, info};
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
-pub use self::storage_sync::index::{RemoteIndex, TimelineIndexEntry};
-pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
-use self::{local_fs::LocalFs, s3_bucket::S3Bucket};
-use crate::layered_repository::ephemeral_file::is_ephemeral_file;
+pub use self::{
+    local_fs::LocalFs,
+    s3_bucket::S3Bucket,
+    storage_sync::{
+        download_index_part,
+        index::{IndexPart, RemoteIndex, RemoteTimeline},
+        schedule_timeline_checkpoint_upload, schedule_timeline_download,
+    },
+};
 use crate::{
     config::{PageServerConf, RemoteStorageKind},
-    layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
+    layered_repository::{
+        ephemeral_file::is_ephemeral_file,
+        metadata::{TimelineMetadata, METADATA_FILE_NAME},
+    },
 };
+use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
-pub use storage_sync::compression;
-
+/// A timeline status to share with pageserver's sync counterpart,
+/// after comparing local and remote timeline state.
 #[derive(Clone, Copy, Debug)]
 pub enum LocalTimelineInitStatus {
+    /// The timeline has every remote layer present locally.
+    /// There could be some layers requiring uploading,
+    /// but this does not block the timeline from any user interaction.
     LocallyComplete,
+    /// A timeline has some files remotely, that are not present locally and need downloading.
+    /// Downloading might update timeline's metadata locally and current pageserver logic deals with local layers only,
+    /// so the data needs to be downloaded first before the timeline can be used.
     NeedsSync,
 }
 
@@ -179,7 +199,7 @@ pub fn start_local_timeline_sync(
 
 fn local_tenant_timeline_files(
     config: &'static PageServerConf,
-) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>> {
     let mut local_tenant_timeline_files = HashMap::new();
     let tenants_dir = config.tenants_path();
     for tenants_dir_entry in fs::read_dir(&tenants_dir)
@@ -214,9 +234,8 @@ fn local_tenant_timeline_files(
 fn collect_timelines_for_tenant(
     config: &'static PageServerConf,
     tenant_path: &Path,
-) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)>> {
-    let mut timelines: HashMap<ZTenantTimelineId, (TimelineMetadata, Vec<PathBuf>)> =
-        HashMap::new();
+) -> anyhow::Result<HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>> {
+    let mut timelines = HashMap::new();
     let tenant_id = tenant_path
         .file_name()
         .and_then(ffi::OsStr::to_str)
@@ -265,8 +284,8 @@ fn collect_timelines_for_tenant(
 //  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
-) -> anyhow::Result<(ZTimelineId, TimelineMetadata, Vec<PathBuf>)> {
-    let mut timeline_files = Vec::new();
+) -> anyhow::Result<(ZTimelineId, TimelineMetadata, HashSet<PathBuf>)> {
+    let mut timeline_files = HashSet::new();
     let mut timeline_metadata_path = None;
 
     let timeline_id = timeline_dir
@@ -286,7 +305,7 @@ fn collect_timeline_files(
                 debug!("skipping ephemeral file {}", entry_path.display());
                 continue;
             } else {
-                timeline_files.push(entry_path);
+                timeline_files.insert(entry_path);
             }
         }
     }
@@ -307,7 +326,7 @@ fn collect_timeline_files(
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
-trait RemoteStorage: Send + Sync {
+pub trait RemoteStorage: Send + Sync {
     /// A way to uniquely reference a file in the remote storage.
     type StoragePath;
 
@@ -324,9 +343,9 @@ trait RemoteStorage: Send + Sync {
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
-        /// S3 PUT request requires the content length to be specified,
-        /// otherwise it starts to fail with the concurrent connection count increasing.
-        from_size_kb: usize,
+        // S3 PUT request requires the content length to be specified,
+        // otherwise it starts to fail with the concurrent connection count increasing.
+        from_size_bytes: usize,
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;

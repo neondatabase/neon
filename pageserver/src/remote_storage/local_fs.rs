@@ -105,7 +105,7 @@ impl RemoteStorage for LocalFs {
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
-        from_size_kb: usize,
+        from_size_bytes: usize,
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
@@ -129,7 +129,11 @@ impl RemoteStorage for LocalFs {
                 })?,
         );
 
-        io::copy(&mut from.take(from_size_kb as u64), &mut destination)
+        let from_size_bytes = from_size_bytes as u64;
+        // Require to read 1 byte more than the expected to check later, that the stream and its size match.
+        let mut buffer_to_read = from.take(from_size_bytes + 1);
+
+        let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
             .with_context(|| {
                 format!(
@@ -137,6 +141,19 @@ impl RemoteStorage for LocalFs {
                     temp_file_path.display()
                 )
             })?;
+
+        ensure!(
+            bytes_read == from_size_bytes,
+            "Provided stream has actual size {} fthat is smaller than the given stream size {}",
+            bytes_read,
+            from_size_bytes
+        );
+
+        ensure!(
+            buffer_to_read.read(&mut [0]).await? == 0,
+            "Provided stream has bigger size than the given stream size {}",
+            from_size_bytes
+        );
 
         destination.flush().await.with_context(|| {
             format!(

@@ -1,30 +1,76 @@
-//! Timeline synchrnonization logic to put files from archives on remote storage into pageserver's local directory.
+//! Timeline synchrnonization logic to fetch the layer files from remote storage into pageserver's local directory.
 
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::fmt::Debug;
 
-use anyhow::{ensure, Context};
+use anyhow::Context;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
 use tracing::{debug, error, trace, warn};
-use zenith_utils::zid::ZTenantId;
 
 use crate::{
     config::PageServerConf,
-    layered_repository::metadata::{metadata_path, TimelineMetadata},
+    layered_repository::metadata::metadata_path,
     remote_storage::{
-        storage_sync::{
-            compression, fetch_full_index, index::TimelineIndexEntryInner, sync_queue, SyncKind,
-            SyncTask,
-        },
+        storage_sync::{sync_queue, SyncTask},
         RemoteStorage, ZTenantTimelineId,
     },
 };
 
 use super::{
-    index::{ArchiveId, RemoteTimeline},
-    RemoteIndex, TimelineDownload,
+    index::{IndexPart, RemoteTimeline},
+    SyncData, TimelineDownload,
 };
 
+/// Retrieves index data from the remote storage for a given timeline.
+pub async fn download_index_part<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    sync_id: ZTenantTimelineId,
+) -> anyhow::Result<IndexPart>
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+{
+    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
+        .with_file_name(IndexPart::FILE_NAME)
+        .with_extension(IndexPart::FILE_EXTENSION);
+    let part_storage_path = storage.storage_path(&index_part_path).with_context(|| {
+        format!(
+            "Failed to get the index part storage path for local path '{}'",
+            index_part_path.display()
+        )
+    })?;
+    let mut index_part_bytes = Vec::new();
+    storage
+        .download(&part_storage_path, &mut index_part_bytes)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to download an index part from storage path '{:?}'",
+                part_storage_path
+            )
+        })?;
+
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes).with_context(|| {
+        format!(
+            "Failed to deserialize index part file from storage path '{:?}'",
+            part_storage_path
+        )
+    })?;
+
+    let missing_files = index_part.missing_files();
+    if !missing_files.is_empty() {
+        warn!(
+            "Found missing layers in index part for timeline {}: {:?}",
+            sync_id, missing_files
+        );
+    }
+
+    Ok(index_part)
+}
+
 /// Timeline download result, with extra data, needed for downloading.
+#[derive(Debug)]
 pub(super) enum DownloadedTimeline {
     /// Remote timeline data is either absent or corrupt, no download possible.
     Abort,
@@ -33,222 +79,136 @@ pub(super) enum DownloadedTimeline {
     FailedAndRescheduled,
     /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
     /// Initial download successful.
-    Successful,
+    Successful(SyncData<TimelineDownload>),
 }
 
-/// Attempts to download and uncompress files from all remote archives for the timeline given.
+/// Attempts to download all given timeline's layers.
 /// Timeline files that already exist locally are skipped during the download, but the local metadata file is
-/// updated in the end of every checkpoint archive extraction.
+/// updated in the end, if the remote one contains a newer disk_consistent_lsn.
 ///
-/// On an error, bumps the retries count and reschedules the download, with updated archive skip list
-/// (for any new successful archive downloads and extractions).
-pub(super) async fn download_timeline<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    conf: &'static PageServerConf,
-    remote_assets: Arc<(S, RemoteIndex)>,
+/// On an error, bumps the retries count and updates the files to skip with successful downloads, rescheduling the task.
+pub(super) async fn download_timeline_layers<'a, P, S>(
+    storage: &'a S,
+    remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
-    mut download: TimelineDownload,
-    retries: u32,
-) -> DownloadedTimeline {
-    debug!("Downloading layers for sync id {}", sync_id);
-
-    let ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    } = sync_id;
-    let index = &remote_assets.1;
-
-    let index_read = index.read().await;
-    let remote_timeline = match index_read.timeline_entry(&sync_id) {
+    mut download_data: SyncData<TimelineDownload>,
+) -> DownloadedTimeline
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+{
+    let remote_timeline = match remote_timeline {
+        Some(remote_timeline) => {
+            if !remote_timeline.awaits_download {
+                error!("Timeline with sync id {} is not awaiting download", sync_id);
+                return DownloadedTimeline::Abort;
+            }
+            remote_timeline
+        }
         None => {
-            error!("Cannot download: no timeline is present in the index for given id");
-            drop(index_read);
+            error!(
+                "Timeline with sync id {} is not present in the remote index",
+                sync_id
+            );
             return DownloadedTimeline::Abort;
         }
-
-        Some(index_entry) => match index_entry.inner() {
-            TimelineIndexEntryInner::Full(remote_timeline) => {
-                let cloned = remote_timeline.clone();
-                drop(index_read);
-                cloned
-            }
-            TimelineIndexEntryInner::Description(_) => {
-                // we do not check here for awaits_download because it is ok
-                // to call this function while the download is in progress
-                // so it is not a concurrent download, it is the same one
-
-                let remote_disk_consistent_lsn = index_entry.disk_consistent_lsn();
-                drop(index_read);
-                debug!("Found timeline description for the given ids, downloading the full index");
-                match fetch_full_index(
-                    remote_assets.as_ref(),
-                    &conf.timeline_path(&timeline_id, &tenant_id),
-                    sync_id,
-                )
-                .await
-                {
-                    Ok(remote_timeline) => remote_timeline,
-                    Err(e) => {
-                        error!("Failed to download full timeline index: {:?}", e);
-
-                        return match remote_disk_consistent_lsn {
-                            Some(_) => {
-                                sync_queue::push(SyncTask::new(
-                                    sync_id,
-                                    retries,
-                                    SyncKind::Download(download),
-                                ));
-                                DownloadedTimeline::FailedAndRescheduled
-                            }
-                            None => {
-                                error!("Cannot download: no disk consistent Lsn is present for the index entry");
-                                DownloadedTimeline::Abort
-                            }
-                        };
-                    }
-                }
-            }
-        },
-    };
-    if remote_timeline.checkpoints().max().is_none() {
-        debug!("Cannot download: no disk consistent Lsn is present for the remote timeline");
-        return DownloadedTimeline::Abort;
     };
 
-    debug!("Downloading timeline archives");
-    let archives_to_download = remote_timeline
-        .checkpoints()
-        .map(ArchiveId)
-        .filter(|remote_archive| !download.archives_to_skip.contains(remote_archive))
+    debug!("Downloading timeline layers for sync id {}", sync_id);
+    let download = &mut download_data.data;
+
+    let layers_to_download = remote_timeline
+        .stored_files()
+        .difference(&download.layers_to_skip)
+        .cloned()
         .collect::<Vec<_>>();
 
-    let archives_total = archives_to_download.len();
-    debug!("Downloading {} archives of a timeline", archives_total);
-    trace!("Archives to download: {:?}", archives_to_download);
+    trace!("Layers to download: {:?}", layers_to_download);
 
-    for (archives_downloaded, archive_id) in archives_to_download.into_iter().enumerate() {
-        match try_download_archive(
-            conf,
-            sync_id,
-            Arc::clone(&remote_assets),
-            &remote_timeline,
-            archive_id,
-            Arc::clone(&download.files_to_skip),
-        )
-        .await
-        {
-            Err(e) => {
-                let archives_left = archives_total - archives_downloaded;
-                error!(
-                    "Failed to download archive {:?} (archives downloaded: {}; archives left: {}) for tenant {} timeline {}, requeueing the download: {:?}",
-                    archive_id, archives_downloaded, archives_left, tenant_id, timeline_id, e
+    let mut download_tasks = layers_to_download
+        .into_iter()
+        .map(|layer_desination_path| async move {
+            if layer_desination_path.exists() {
+                debug!(
+                    "Layer already exists locally, skipping download: {}",
+                    layer_desination_path.display()
                 );
-                sync_queue::push(SyncTask::new(
-                    sync_id,
-                    retries,
-                    SyncKind::Download(download),
-                ));
-                return DownloadedTimeline::FailedAndRescheduled;
+            } else {
+                let layer_storage_path = storage
+                    .storage_path(&layer_desination_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to get the layer storage path for local path '{}'",
+                            layer_desination_path.display()
+                        )
+                    })?;
+
+                let mut destination_file = fs::File::create(&layer_desination_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to create a destination file for layer '{}'",
+                            layer_desination_path.display()
+                        )
+                    })?;
+
+                storage
+                    .download(&layer_storage_path, &mut destination_file)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to download a layer from storage path '{:?}'",
+                            layer_storage_path
+                        )
+                    })?;
             }
-            Ok(()) => {
-                debug!("Successfully downloaded archive {:?}", archive_id);
-                download.archives_to_skip.insert(archive_id);
+            Ok::<_, anyhow::Error>(layer_desination_path)
+        })
+        .collect::<FuturesUnordered<_>>();
+
+    debug!("Downloading {} layers of a timeline", download_tasks.len());
+
+    let mut errors_happened = false;
+    while let Some(download_result) = download_tasks.next().await {
+        match download_result {
+            Ok(downloaded_path) => {
+                download.layers_to_skip.insert(downloaded_path);
+            }
+            Err(e) => {
+                errors_happened = true;
+                error!(
+                    "Failed to download a layer for timeline {}: {:?}",
+                    sync_id, e
+                );
             }
         }
     }
 
-    debug!("Finished downloading all timeline's archives");
-    DownloadedTimeline::Successful
-}
-
-async fn try_download_archive<
-    P: Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    conf: &'static PageServerConf,
-    ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    }: ZTenantTimelineId,
-    remote_assets: Arc<(S, RemoteIndex)>,
-    remote_timeline: &RemoteTimeline,
-    archive_id: ArchiveId,
-    files_to_skip: Arc<BTreeSet<PathBuf>>,
-) -> anyhow::Result<()> {
-    debug!("Downloading archive {:?}", archive_id);
-    let archive_to_download = remote_timeline
-        .archive_data(archive_id)
-        .with_context(|| format!("Archive {:?} not found in remote storage", archive_id))?;
-    let (archive_header, header_size) = remote_timeline
-        .restore_header(archive_id)
-        .context("Failed to restore header when downloading an archive")?;
-
-    match read_local_metadata(conf, timeline_id, tenant_id).await {
-        Ok(local_metadata) => ensure!(
-            // need to allow `<=` instead of `<` due to cases when a failed archive can be redownloaded
-            local_metadata.disk_consistent_lsn() <= archive_to_download.disk_consistent_lsn(),
-            "Cannot download archive with Lsn {} since it's earlier than local Lsn {}",
-            archive_to_download.disk_consistent_lsn(),
-            local_metadata.disk_consistent_lsn()
-        ),
-        Err(e) => warn!("Failed to read local metadata file, assuming it's safe to override its with the download. Read: {:#}", e),
+    if errors_happened {
+        debug!("Reenqueuing failed download task for timeline {}", sync_id);
+        download_data.retries += 1;
+        sync_queue::push(sync_id, SyncTask::Download(download_data));
+        DownloadedTimeline::FailedAndRescheduled
+    } else {
+        debug!("Finished downloading all timeline's layers");
+        DownloadedTimeline::Successful(download_data)
     }
-    compression::uncompress_file_stream_with_index(
-        conf.timeline_path(&timeline_id, &tenant_id),
-        files_to_skip,
-        archive_to_download.disk_consistent_lsn(),
-        archive_header,
-        header_size,
-        move |mut archive_target, archive_name| async move {
-            let archive_local_path = conf
-                .timeline_path(&timeline_id, &tenant_id)
-                .join(&archive_name);
-            let remote_storage = &remote_assets.0;
-            remote_storage
-                .download_range(
-                    &remote_storage.storage_path(&archive_local_path)?,
-                    header_size,
-                    None,
-                    &mut archive_target,
-                )
-                .await
-        },
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn read_local_metadata(
-    conf: &'static PageServerConf,
-    timeline_id: zenith_utils::zid::ZTimelineId,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<TimelineMetadata> {
-    let local_metadata_path = metadata_path(conf, timeline_id, tenant_id);
-    let local_metadata_bytes = fs::read(&local_metadata_path)
-        .await
-        .context("Failed to read local metadata file bytes")?;
-    TimelineMetadata::from_bytes(&local_metadata_bytes)
-        .context("Failed to read local metadata files bytes")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use tempfile::tempdir;
-    use tokio::fs;
     use zenith_utils::lsn::Lsn;
 
     use crate::{
         remote_storage::{
-            local_fs::LocalFs,
-            storage_sync::test_utils::{
-                assert_index_descriptions, assert_timeline_files_match, create_local_timeline,
-                dummy_metadata, ensure_correct_timeline_upload, expect_timeline,
+            storage_sync::{
+                index::RelativePath,
+                test_utils::{create_local_timeline, dummy_metadata},
             },
+            LocalFs,
         },
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
     };
@@ -256,80 +216,185 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_download_timeline() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("test_download_timeline")?;
-        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RemoteIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+    async fn download_timeline() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("download_timeline")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
+        let storage = LocalFs::new(tempdir()?.path().to_path_buf(), &harness.conf.workdir)?;
+        let current_retries = 3;
+        let metadata = dummy_metadata(Lsn(0x30));
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let timeline_upload =
+            create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
+
+        for local_path in timeline_upload.layers_to_upload {
+            let remote_path = storage.storage_path(&local_path)?;
+            let remote_parent_dir = remote_path.parent().unwrap();
+            if !remote_parent_dir.exists() {
+                fs::create_dir_all(&remote_parent_dir).await?;
+            }
+            fs::copy(&local_path, &remote_path).await?;
+        }
+        let mut read_dir = fs::read_dir(&local_timeline_path).await?;
+        while let Some(dir_entry) = read_dir.next_entry().await? {
+            if dir_entry.file_name().to_str() == Some("layer_to_keep_locally") {
+                continue;
+            } else {
+                fs::remove_file(dir_entry.path()).await?;
+            }
+        }
+
+        let mut remote_timeline = RemoteTimeline::new(metadata.clone());
+        remote_timeline.awaits_download = true;
+        remote_timeline.add_timeline_layers(
+            layer_files
+                .iter()
+                .map(|layer| local_timeline_path.join(layer)),
         );
-        let remote_assets = Arc::new((storage, index));
-        let storage = &remote_assets.0;
-        let index = &remote_assets.1;
 
-        let regular_timeline_path = repo_harness.timeline_path(&TIMELINE_ID);
-        let regular_timeline = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            dummy_metadata(Lsn(0x30)),
-        )?;
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            regular_timeline,
-        )
-        .await;
-        // upload multiple checkpoints for the same timeline
-        let regular_timeline = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["c", "d"],
-            dummy_metadata(Lsn(0x40)),
-        )?;
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            regular_timeline,
-        )
-        .await;
-
-        fs::remove_dir_all(&regular_timeline_path).await?;
-        let remote_regular_timeline = expect_timeline(index, sync_id).await;
-
-        download_timeline(
-            repo_harness.conf,
-            Arc::clone(&remote_assets),
+        let download_data = match download_timeline_layers(
+            &storage,
+            Some(&remote_timeline),
             sync_id,
-            TimelineDownload {
-                files_to_skip: Arc::new(BTreeSet::new()),
-                archives_to_skip: BTreeSet::new(),
-            },
-            0,
+            SyncData::new(
+                current_retries,
+                TimelineDownload {
+                    layers_to_skip: HashSet::from([local_timeline_path.join("layer_to_skip")]),
+                },
+            ),
         )
-        .await;
-        assert_index_descriptions(
-            index,
-            &RemoteIndex::try_parse_descriptions_from_paths(
-                repo_harness.conf,
-                remote_assets
-                    .0
-                    .list()
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        .await
+        {
+            DownloadedTimeline::Successful(data) => data,
+            wrong_result => panic!(
+                "Expected a successful download for timeline, but got: {:?}",
+                wrong_result
+            ),
+        };
+
+        assert_eq!(
+            current_retries, download_data.retries,
+            "On successful download, retries are not expected to change"
+        );
+        assert_eq!(
+            download_data
+                .data
+                .layers_to_skip
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            layer_files
+                .iter()
+                .map(|layer| local_timeline_path.join(layer))
+                .collect(),
+            "On successful download, layers to skip should contain all downloaded files and present layers that were skipped"
+        );
+
+        let mut downloaded_files = BTreeSet::new();
+        let mut read_dir = fs::read_dir(&local_timeline_path).await?;
+        while let Some(dir_entry) = read_dir.next_entry().await? {
+            downloaded_files.insert(dir_entry.path());
+        }
+
+        assert_eq!(
+            downloaded_files,
+            layer_files
+                .iter()
+                .filter(|layer| layer != &&"layer_to_skip")
+                .map(|layer| local_timeline_path.join(layer))
+                .collect(),
+            "On successful download, all layers that were not skipped, should be downloaded"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn download_timeline_negatives() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("download_timeline_negatives")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+        let storage = LocalFs::new(tempdir()?.path().to_owned(), &harness.conf.workdir)?;
+
+        let empty_remote_timeline_download = download_timeline_layers(
+            &storage,
+            None,
+            sync_id,
+            SyncData::new(
+                0,
+                TimelineDownload {
+                    layers_to_skip: HashSet::new(),
+                },
             ),
         )
         .await;
-        assert_timeline_files_match(&repo_harness, TIMELINE_ID, remote_regular_timeline);
+        assert!(
+            matches!(empty_remote_timeline_download, DownloadedTimeline::Abort),
+            "Should not allow downloading for empty remote timeline"
+        );
+
+        let not_expecting_download_remote_timeline = RemoteTimeline::new(dummy_metadata(Lsn(5)));
+        assert!(
+            !not_expecting_download_remote_timeline.awaits_download,
+            "Should not expect download for the timeline"
+        );
+        let already_downloading_remote_timeline_download = download_timeline_layers(
+            &storage,
+            Some(&not_expecting_download_remote_timeline),
+            sync_id,
+            SyncData::new(
+                0,
+                TimelineDownload {
+                    layers_to_skip: HashSet::new(),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                dbg!(already_downloading_remote_timeline_download),
+                DownloadedTimeline::Abort,
+            ),
+            "Should not allow downloading for remote timeline that does not expect it"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_index_part() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("test_download_index_part")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+
+        let storage = LocalFs::new(tempdir()?.path().to_path_buf(), &harness.conf.workdir)?;
+        let metadata = dummy_metadata(Lsn(0x30));
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let index_part = IndexPart::new(
+            HashSet::from([
+                RelativePath::new(&local_timeline_path, local_timeline_path.join("one"))?,
+                RelativePath::new(&local_timeline_path, local_timeline_path.join("two"))?,
+            ]),
+            HashSet::from([RelativePath::new(
+                &local_timeline_path,
+                local_timeline_path.join("three"),
+            )?]),
+            metadata.disk_consistent_lsn(),
+            metadata.to_bytes()?,
+        );
+
+        let local_index_part_path =
+            metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
+                .with_file_name(IndexPart::FILE_NAME)
+                .with_extension(IndexPart::FILE_EXTENSION);
+        let storage_path = storage.storage_path(&local_index_part_path)?;
+        fs::create_dir_all(storage_path.parent().unwrap()).await?;
+        fs::write(&storage_path, serde_json::to_vec(&index_part)?).await?;
+
+        let downloaded_index_part = download_index_part(harness.conf, &storage, sync_id).await?;
+
+        assert_eq!(
+            downloaded_index_part, index_part,
+            "Downloaded index part should be the same as the one in storage"
+        );
 
         Ok(())
     }

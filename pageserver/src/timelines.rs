@@ -114,8 +114,8 @@ impl LocalTimelineInfo {
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
     pub awaits_download: bool,
 }
 

@@ -305,7 +305,7 @@ fn walreceiver_main(
                         tenant_id,
                         timeline_id,
                     })
-                    .and_then(|e| e.disk_consistent_lsn())
+                    .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
                     .unwrap_or(Lsn(0)) // no checkpoint was uploaded
             });
 

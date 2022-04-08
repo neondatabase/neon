@@ -46,7 +46,6 @@ fail = "0.5.0"
 rusoto_core = "0.47"
 rusoto_s3 = "0.47"
 async-trait = "0.1"
-async-compression = {version = "0.3", features = ["zstd", "tokio"]}
 
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }

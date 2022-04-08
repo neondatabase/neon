@@ -56,20 +56,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2bf394cfbbe876f0ac67b13b6ca819f9c9f2fb9ec67223cceb1555fbab1c31a"
-dependencies = [
- "futures-core",
- "memchr",
- "pin-project-lite",
- "tokio",
- "zstd",
- "zstd-safe",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1508,7 +1494,6 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "async-trait",
  "byteorder",
  "bytes",
@@ -3428,32 +3413,3 @@ name = "zeroize"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c88870063c39ee00ec285a2f8d6a966e5b6fb2becc4e8dac77ed0d370ed6006"
-
-[[package]]
-name = "zstd"
-version = "0.10.0+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1365becbe415f3f0fcd024e2f7b45bacfb5bdd055f0dc113571394114e7bdd"
-dependencies = [
- "zstd-safe",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "4.1.4+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f7cd17c9af1a4d6c24beb1cc54b17e2ef7b593dc92f19e9d9acad8b182bbaee"
-dependencies = [
- "libc",
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-sys"
-version = "1.6.3+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc49afa5c8d634e75761feda8c592051e7eeb4683ba827211eb0d731d3402ea8"
-dependencies = [
- "cc",
- "libc",
-]

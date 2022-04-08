@@ -17,7 +17,7 @@ use rusoto_s3::{
 };
 use tokio::io;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::{
     config::S3Config,
@@ -70,10 +70,6 @@ pub struct S3Bucket {
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
-        // TODO kb check this
-        // Keeping a single client may cause issues due to timeouts.
-        // https://github.com/rusoto/rusoto/issues/1686
-
         debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
@@ -91,10 +87,10 @@ impl S3Bucket {
         let request_dispatcher = HttpClient::new().context("Failed to create S3 http client")?;
         let client = if aws_config.access_key_id.is_none() && aws_config.secret_access_key.is_none()
         {
-            trace!("Using IAM-based AWS access");
+            debug!("Using IAM-based AWS access");
             S3Client::new_with(request_dispatcher, InstanceMetadataProvider::new(), region)
         } else {
-            trace!("Using credentials-based AWS access");
+            debug!("Using credentials-based AWS access");
             S3Client::new_with(
                 request_dispatcher,
                 StaticProvider::new_minimal(
@@ -180,7 +176,7 @@ impl RemoteStorage for S3Bucket {
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
-        from_size_kb: usize,
+        from_size_bytes: usize,
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
@@ -188,7 +184,7 @@ impl RemoteStorage for S3Bucket {
             .put_object(PutObjectRequest {
                 body: Some(StreamingBody::new_with_size(
                     ReaderStream::new(from),
-                    from_size_kb,
+                    from_size_bytes,
                 )),
                 bucket: self.bucket_name.clone(),
                 key: to.key().to_owned(),

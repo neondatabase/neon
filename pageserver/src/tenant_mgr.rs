@@ -95,7 +95,7 @@ pub fn load_local_repo(
 /// Updates tenants' repositories, changing their timelines state in memory.
 pub fn apply_timeline_sync_status_updates(
     conf: &'static PageServerConf,
-    remote_index: RemoteIndex,
+    remote_index: &RemoteIndex,
     sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
 ) {
     if sync_status_updates.is_empty() {
@@ -109,7 +109,7 @@ pub fn apply_timeline_sync_status_updates(
     trace!("Sync status updates: {:?}", sync_status_updates);
 
     for (tenant_id, tenant_timelines_sync_status_updates) in sync_status_updates {
-        let repo = load_local_repo(conf, tenant_id, &remote_index);
+        let repo = load_local_repo(conf, tenant_id, remote_index);
 
         for (timeline_id, timeline_sync_status_update) in tenant_timelines_sync_status_updates {
             match repo.apply_timeline_remote_sync_status_update(timeline_id, timeline_sync_status_update)
