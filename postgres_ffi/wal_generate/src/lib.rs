@@ -155,15 +155,26 @@ pub fn generate_wal_record_crossing_segment_followed_by_small_one(
         "Initial LSN is too far in the future"
     );
 
-    client.execute(
+    // This message will be followed by a small COMMIT message and flushed for sure.
+    // Non-transactional messages may be not flushed immediately and wait for the background thread (which flushes every `wal_writer_delay` ms) or following WAL.
+    let message_lsn: PgLsn = client.query_one(
         "select pg_logical_emit_message(true, 'big-17mb-msg', concat(repeat('abcd', 17 * 256 * 1024), 'end')) as message_lsn",
         &[]
-    )?;
+    )?.get("message_lsn");
+    ensure!(
+        message_lsn > PgLsn::from(0x0200_0000 + 4 * 8192),
+        "Logical message did not cross the segment boundary"
+    );
 
     let after_message_lsn = client.pg_current_wal_insert_lsn()?;
     ensure!(
-        after_message_lsn > PgLsn::from(0x0200_0000 + 4 * 8192),
-        "Logical message did not cross the segment boundary"
+        message_lsn < after_message_lsn,
+        "No record found after the emitted message"
+    );
+
+    ensure!(
+        after_message_lsn == client.pg_current_wal_flush_lsn()?,
+        "WAL is either not flushed or is extended with something unknown"
     );
     Ok(after_message_lsn)
 }
