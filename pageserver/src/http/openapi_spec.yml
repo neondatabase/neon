@@ -409,6 +409,7 @@ components:
       type: object
       required:
         - awaits_download
+        - remote_consistent_lsn
       properties:
         awaits_download:
           type: boolean

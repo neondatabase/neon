@@ -550,7 +550,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let tenant_id = get_tenant_id(create_match, env)?;
             let new_branch_name = create_match
                 .value_of("branch-name")
-                .ok_or(anyhow!("No branch name provided"))?;
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
             let timeline = pageserver
                 .timeline_create(tenant_id, None, None, None)?
                 .ok_or_else(|| anyhow!("Failed to create new timeline for tenant {}", tenant_id))?;
@@ -571,7 +571,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let tenant_id = get_tenant_id(branch_match, env)?;
             let new_branch_name = branch_match
                 .value_of("branch-name")
-                .ok_or(anyhow!("No branch name provided"))?;
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
             let ancestor_branch_name = branch_match
                 .value_of("ancestor-branch-name")
                 .unwrap_or(DEFAULT_BRANCH_NAME);

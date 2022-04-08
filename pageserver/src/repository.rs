@@ -182,14 +182,12 @@ impl Value {
 
 #[derive(Clone, Copy, Debug)]
 pub enum TimelineSyncStatusUpdate {
-    Uploaded,
     Downloaded,
 }
 
 impl Display for TimelineSyncStatusUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            TimelineSyncStatusUpdate::Uploaded => "Uploaded",
             TimelineSyncStatusUpdate::Downloaded => "Downloaded",
         };
         f.write_str(s)

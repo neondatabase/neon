@@ -387,8 +387,6 @@ impl Repository for LayeredRepository {
             timeline_id, timeline_sync_status_update
         );
         match timeline_sync_status_update {
-            TimelineSyncStatusUpdate::Uploaded => { /* nothing to do, remote consistent lsn is managed by the remote storage */
-            }
             TimelineSyncStatusUpdate::Downloaded => {
                 match self.timelines.lock().unwrap().entry(timeline_id) {
                     Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
@@ -650,7 +648,8 @@ impl LayeredRepository {
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenantid, timeline = ?target_timelineid);
+            info_span!("gc iteration", tenant = %self.tenantid, timeline = ?target_timelineid)
+                .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -1548,7 +1547,7 @@ impl LayeredTimeline {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,
-                    vec![new_delta_path],
+                    new_delta_path,
                     metadata,
                 );
             }
