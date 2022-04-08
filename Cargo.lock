@@ -1774,6 +1774,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32c",
+ "env_logger",
  "hex",
  "lazy_static",
  "log",
@@ -1783,8 +1784,6 @@ dependencies = [
  "serde",
  "test-log",
  "thiserror",
- "tracing",
- "tracing-subscriber",
  "wal_generate",
  "workspace_hack",
  "zenith_utils",
@@ -3037,9 +3036,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap 3.0.14",
+ "env_logger",
+ "log",
  "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

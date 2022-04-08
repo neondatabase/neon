@@ -1,11 +1,11 @@
 use anyhow::*;
 use core::time::Duration;
+use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {

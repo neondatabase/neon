@@ -3,12 +3,10 @@ use clap::{App, Arg};
 use wal_generate::*;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::filter::EnvFilter::from_default_env()
-                .add_directive("wal_generate=info".parse()?),
-        )
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("wal_generate=info"),
+    )
+    .init();
     let arg_matches = App::new("Postgres WAL generator")
         .about("Generates Postgres databases with specific WAL properties")
         .arg(

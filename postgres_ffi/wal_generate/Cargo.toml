@@ -8,6 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 clap = "3.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+env_logger = "0.9"
+log = "0.4"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
