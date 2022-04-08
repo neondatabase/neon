@@ -22,6 +22,7 @@ workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 nix = "0.23"
+wal_generate = { path = "wal_generate" }
 
 [build-dependencies]
 bindgen = "0.59.1"

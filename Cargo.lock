@@ -1783,6 +1783,7 @@ dependencies = [
  "regex",
  "serde",
  "thiserror",
+ "wal_generate",
  "workspace_hack",
  "zenith_utils",
 ]
@@ -3016,6 +3017,17 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "wal_generate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 3.0.14",
+ "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "walkdir"
