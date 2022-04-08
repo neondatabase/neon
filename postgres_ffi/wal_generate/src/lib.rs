@@ -1,7 +1,7 @@
 use anyhow::*;
 use core::time::Duration;
-use postgres::Client;
 use postgres::types::PgLsn;
+use postgres::Client;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -27,9 +27,13 @@ impl Conf {
         self.pg_distrib_dir.join("lib")
     }
 
-    fn new_pg_command<P: AsRef<Path>>(&self, command: P) -> Result<Command> { 
+    fn new_pg_command<P: AsRef<Path>>(&self, command: P) -> Result<Command> {
         let path = self.pg_bin_dir().join(command);
-        ensure!(path.exists(), "Command {} does not exist", path.to_str().unwrap());
+        ensure!(
+            path.exists(),
+            "Command {} does not exist",
+            path.to_str().unwrap()
+        );
         let mut cmd = Command::new(path);
         cmd.env_clear()
             .env("LD_LIBRARY_PATH", self.pg_lib_dir())
@@ -38,13 +42,13 @@ impl Conf {
     }
 
     pub fn initdb(&self) -> Result<()> {
-        info!("Running initdb in {} with user 'postgres'", self.datadir.to_str().unwrap());
+        info!(
+            "Running initdb in {} with user 'postgres'",
+            self.datadir.to_str().unwrap()
+        );
         let status = self
             .new_pg_command("initdb")?
-            .args(&[
-                "-D", &self.datadir.to_str().unwrap(),
-                "-U", "postgres"
-            ])
+            .args(&["-D", self.datadir.to_str().unwrap(), "-U", "postgres"])
             .status()?;
         ensure!(status.success(), "initdb failed");
         Ok(())
@@ -59,9 +63,12 @@ impl Conf {
         let server_process = self
             .new_pg_command("postgres")?
             .args(&[
-                "-c", "listen_addresses=",
-                "-k", unix_socket_dir.to_str().unwrap(),
-                "-D", self.datadir.to_str().unwrap(),
+                "-c",
+                "listen_addresses=",
+                "-k",
+                unix_socket_dir.to_str().unwrap(),
+                "-D",
+                self.datadir.to_str().unwrap(),
             ])
             .spawn()?;
         let server = PostgresServer {
@@ -84,7 +91,7 @@ impl PostgresServer {
         while Instant::now() < retry_until {
             use std::result::Result::Ok;
             if let Ok(client) = self.client_config.connect(postgres::NoTls) {
-                return Ok(client)
+                return Ok(client);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -104,7 +111,7 @@ impl Drop for PostgresServer {
             Ok(Some(_)) => return,
             Ok(None) => {
                 warn!("Server was not terminated, will be killed");
-            },
+            }
             Err(e) => {
                 error!("Unable to get status of the server: {}, will be killed", e);
             }
@@ -115,16 +122,22 @@ impl Drop for PostgresServer {
 
 pub trait PostgresClientExt: postgres::GenericClient {
     fn pg_current_wal_insert_lsn(&mut self) -> Result<PgLsn> {
-        Ok(self.query_one("SELECT pg_current_wal_insert_lsn()", &[])?.get(0))
+        Ok(self
+            .query_one("SELECT pg_current_wal_insert_lsn()", &[])?
+            .get(0))
     }
     fn pg_current_wal_flush_lsn(&mut self) -> Result<PgLsn> {
-        Ok(self.query_one("SELECT pg_current_wal_flush_lsn()", &[])?.get(0))
+        Ok(self
+            .query_one("SELECT pg_current_wal_flush_lsn()", &[])?
+            .get(0))
     }
 }
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(client: &mut C) -> Result<String> {
+pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
+    client: &mut C,
+) -> Result<String> {
     // First few created tables take more WAL bytes than later.
     info!("LSN initial = {}", client.pg_current_wal_insert_lsn()?);
     client.execute("create table t_base_1 (x int)", &[])?;
@@ -137,29 +150,54 @@ pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(cli
     let expect_commit_end_after_lsn = PgLsn::from(0x0200_0000);
 
     let before_padding_lsn = client.pg_current_wal_insert_lsn()?;
-    ensure!(before_padding_lsn <= start_creating_at_lsn, "Initial LSN is too far in the future");
+    ensure!(
+        before_padding_lsn <= start_creating_at_lsn,
+        "Initial LSN is too far in the future"
+    );
     let padding_bytes = u64::from(start_creating_at_lsn) - u64::from(before_padding_lsn);
-    info!("Adding padding with logical message of approx. {} bytes", padding_bytes);
-    client.execute("select pg_logical_emit_message(false, 'padding-msg', repeat('x', $1))", &[&(padding_bytes as i32)])?;
+    info!(
+        "Adding padding with logical message of approx. {} bytes",
+        padding_bytes
+    );
+    client.execute(
+        "select pg_logical_emit_message(false, 'padding-msg', repeat('x', $1))",
+        &[&(padding_bytes as i32)],
+    )?;
 
-    let mut t = client.transaction()?; 
+    let mut t = client.transaction()?;
     let before_create_lsn = t.pg_current_wal_insert_lsn()?;
     info!("LSN before table creation = {}", before_create_lsn);
     ensure!(before_create_lsn <= stop_creating_at_lsn);
-    
+
     let mut tables_created = 0;
     while t.pg_current_wal_insert_lsn()? < stop_creating_at_lsn {
         // SQL injection via format! is intended: we need to pass table name
-        t.execute(format!("create table t{} (x int)", tables_created).as_str(), &[])?;
+        t.execute(
+            format!("create table t{} (x int)", tables_created).as_str(),
+            &[],
+        )?;
         tables_created += 1;
     }
 
     let after_create_lsn = t.pg_current_wal_insert_lsn()?;
-    info!("LSN after table creation: {}, created {} tables, approx. {} WAL bytes/table", after_create_lsn, tables_created, (u64::from(after_create_lsn) - u64::from(before_create_lsn)) / tables_created);
+    info!(
+        "LSN after table creation: {}, created {} tables, approx. {} WAL bytes/table",
+        after_create_lsn,
+        tables_created,
+        (u64::from(after_create_lsn) - u64::from(before_create_lsn)) / tables_created
+    );
     t.commit()?;
     let after_commit_lsn = client.pg_current_wal_insert_lsn()?;
-    info!("LSN after commmit: {}, approx. {} bytes/table", after_commit_lsn, (u64::from(after_commit_lsn) - u64::from(after_create_lsn)) / tables_created);
-    ensure!(after_commit_lsn >= expect_commit_end_after_lsn, "Commit message ended at {} only", after_commit_lsn);
+    info!(
+        "LSN after commmit: {}, approx. {} bytes/table",
+        after_commit_lsn,
+        (u64::from(after_commit_lsn) - u64::from(after_create_lsn)) / tables_created
+    );
+    ensure!(
+        after_commit_lsn >= expect_commit_end_after_lsn,
+        "Commit message ended at {} only",
+        after_commit_lsn
+    );
 
     Ok(format!("t{}", tables_created - 1))
 }

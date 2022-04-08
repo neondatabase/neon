@@ -12,14 +12,14 @@ fn main() -> Result<()> {
                 .long("datadir")
                 .takes_value(true)
                 .help("Data directory for the Postgres server")
-                .required(true)
+                .required(true),
         )
         .arg(
             Arg::new("pg-distrib-dir")
                 .long("pg-distrib-dir")
                 .takes_value(true)
                 .help("Directory with Postgres distribution (bin and lib directories)")
-                .default_value("/usr/local")
+                .default_value("/usr/local"),
         )
         .get_matches();
 
