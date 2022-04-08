@@ -243,5 +243,9 @@ pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
         after_commit_lsn
     );
 
+    ensure!(
+        after_commit_lsn == client.pg_current_wal_flush_lsn()?,
+        "WAL is either not flushed or is extended with something unknown"
+    );
     Ok(after_commit_lsn)
 }
