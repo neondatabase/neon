@@ -24,6 +24,8 @@ use crate::{
     remote_storage::{strip_path_prefix, RemoteStorage},
 };
 
+use super::StorageMetadata;
+
 const S3_FILE_SEPARATOR: char = '/';
 
 #[derive(Debug, Eq, PartialEq)]
@@ -179,12 +181,14 @@ impl RemoteStorage for S3Bucket {
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         to: &Self::StoragePath,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         self.client
             .put_object(PutObjectRequest {
                 body: Some(StreamingBody::new(ReaderStream::new(from))),
                 bucket: self.bucket_name.clone(),
                 key: to.key().to_owned(),
+                metadata: metadata.map(|m| m.0),
                 ..PutObjectRequest::default()
             })
             .await?;
@@ -195,7 +199,7 @@ impl RemoteStorage for S3Bucket {
         &self,
         from: &Self::StoragePath,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<StorageMetadata>> {
         let object_output = self
             .client
             .get_object(GetObjectRequest {
@@ -210,7 +214,7 @@ impl RemoteStorage for S3Bucket {
             io::copy(&mut from, to).await?;
         }
 
-        Ok(())
+        Ok(object_output.metadata.map(StorageMetadata))
     }
 
     async fn download_range(
@@ -219,7 +223,7 @@ impl RemoteStorage for S3Bucket {
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<StorageMetadata>> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
         // and needs both ends to be exclusive
         let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
@@ -242,7 +246,7 @@ impl RemoteStorage for S3Bucket {
             io::copy(&mut from, to).await?;
         }
 
-        Ok(())
+        Ok(object_output.metadata.map(StorageMetadata))
     }
 
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {

@@ -325,26 +325,34 @@ trait RemoteStorage: Send + Sync {
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         to: &Self::StoragePath,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
     async fn download(
         &self,
         from: &Self::StoragePath,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Option<StorageMetadata>>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
     async fn download_range(
         &self,
         from: &Self::StoragePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Option<StorageMetadata>>;
 
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()>;
 }
+
+/// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
+/// Immutable, cannot be changed once the file is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMetadata(HashMap<String, String>);
 
 fn strip_path_prefix<'a>(prefix: &'a Path, path: &'a Path) -> anyhow::Result<&'a Path> {
     if prefix == path {

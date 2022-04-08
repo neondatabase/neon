@@ -201,6 +201,7 @@ async fn try_upload_checkpoint<
                 .upload(
                     archive_streamer,
                     &remote_storage.storage_path(&timeline_dir.join(&archive_name))?,
+                    None,
                 )
                 .await
         },
