@@ -58,7 +58,7 @@ impl LocalFs {
         &self,
         file_path: &Path,
     ) -> anyhow::Result<Option<StorageMetadata>> {
-        let metadata_path = storage_metadata_path(&file_path);
+        let metadata_path = storage_metadata_path(file_path);
         if metadata_path.exists() && metadata_path.is_file() {
             let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
                 format!(

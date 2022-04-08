@@ -201,8 +201,7 @@ pub async fn read_archive_header<A: io::AsyncRead + Send + Sync + Unpin>(
         .await
         .context("Failed to decompress a header from the archive")?;
 
-    Ok(ArchiveHeader::des(&header_bytes)
-        .context("Failed to deserialize a header from the archive")?)
+    ArchiveHeader::des(&header_bytes).context("Failed to deserialize a header from the archive")
 }
 
 /// Reads the archive metadata out of the archive name:

@@ -68,10 +68,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 // healthcheck handler
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let config = get_config(&request);
-    Ok(json_response(
-        StatusCode::OK,
-        StatusResponse { id: config.id },
-    )?)
+    json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -131,7 +128,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
         })
     }
 
-    Ok(json_response(StatusCode::OK, response_data)?)
+    json_response(StatusCode::OK, response_data)
 }
 
 // Gate non incremental logical size calculation behind a flag
@@ -207,7 +204,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         remote: remote_timeline_info,
     };
 
-    Ok(json_response(StatusCode::OK, timeline_info)?)
+    json_response(StatusCode::OK, timeline_info)
 }
 
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -247,7 +244,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     index_entry.set_awaits_download(true);
     schedule_timeline_download(tenant_id, timeline_id);
 
-    Ok(json_response(StatusCode::ACCEPTED, ())?)
+    json_response(StatusCode::ACCEPTED, ())
 }
 
 async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -266,7 +263,7 @@ async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body
     .await
     .map_err(ApiError::from_err)??;
 
-    Ok(json_response(StatusCode::OK, ())?)
+    json_response(StatusCode::OK, ())
 }
 
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -280,7 +277,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     .await
     .map_err(ApiError::from_err)??;
 
-    Ok(json_response(StatusCode::OK, response_data)?)
+    json_response(StatusCode::OK, response_data)
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
