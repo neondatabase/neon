@@ -42,13 +42,19 @@ impl Conf {
             "Running initdb in {:?} with user \"postgres\"",
             self.datadir
         );
-        let status = self
+        let output = self
             .new_pg_command("initdb")?
             .arg("-D")
             .arg(self.datadir.as_os_str())
             .args(&["-U", "postgres", "--no-instructions", "--no-sync"])
-            .status()?;
-        ensure!(status.success(), "initdb failed");
+            .output()?;
+        debug!("initdb output: {:?}", output);
+        ensure!(
+            output.status.success(),
+            "initdb failed, stdout and stderr follow:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
         Ok(())
     }
 
@@ -84,6 +90,7 @@ impl Conf {
             .new_pg_command("pg_waldump")?
             .args(&[&segment_file.to_str().unwrap()])
             .output()?;
+        debug!("waldump output: {:?}", output);
         Ok(output)
     }
 }
@@ -140,33 +147,30 @@ impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
 pub fn generate_wal_record_crossing_segment_followed_by_small_one(
     client: &mut impl postgres::GenericClient,
-) -> Result<String> {
+) -> Result<PgLsn> {
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
-    let expected_segment_border = PgLsn::from(0x0200_0000);
     info!("LSN initial = {}", initial_lsn);
     ensure!(
-        initial_lsn < expected_segment_border,
+        initial_lsn < PgLsn::from(0x0200_0000 - 4 * 8192),
         "Initial LSN is too far in the future"
     );
 
     client.execute(
-        "select pg_logical_emit_message(false, 'big-17mb-msg', concat(repeat('abcd', 17 * 256 * 1024), 'end')) as message_lsn",
+        "select pg_logical_emit_message(true, 'big-17mb-msg', concat(repeat('abcd', 17 * 256 * 1024), 'end')) as message_lsn",
         &[]
     )?;
 
     let after_message_lsn = client.pg_current_wal_insert_lsn()?;
     ensure!(
-        after_message_lsn > expected_segment_border,
+        after_message_lsn > PgLsn::from(0x0200_0000 + 4 * 8192),
         "Logical message did not cross the segment boundary"
     );
-
-    client.execute("create table t (x int)", &[])?;
-    Ok("t".to_string())
+    Ok(after_message_lsn)
 }
 
 pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
     client: &mut C,
-) -> Result<String> {
+) -> Result<PgLsn> {
     // First few created tables take more WAL bytes than later.
     info!("LSN initial = {}", client.pg_current_wal_insert_lsn()?);
     client.execute("create table t_base_1 (x int)", &[])?;
@@ -228,5 +232,5 @@ pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
         after_commit_lsn
     );
 
-    Ok(format!("t{}", tables_created - 1))
+    Ok(after_commit_lsn)
 }
