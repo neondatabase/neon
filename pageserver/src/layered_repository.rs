@@ -1474,8 +1474,7 @@ impl LayeredTimeline {
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn;
-        disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
+        let disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.

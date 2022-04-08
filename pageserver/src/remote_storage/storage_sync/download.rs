@@ -225,8 +225,8 @@ async fn read_local_metadata(
     let local_metadata_bytes = fs::read(&local_metadata_path)
         .await
         .context("Failed to read local metadata file bytes")?;
-    Ok(TimelineMetadata::from_bytes(&local_metadata_bytes)
-        .context("Failed to read local metadata files bytes")?)
+    TimelineMetadata::from_bytes(&local_metadata_bytes)
+        .context("Failed to read local metadata files bytes")
 }
 
 #[cfg(test)]

@@ -296,9 +296,7 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
-        let mut points: Vec<Key>;
-
-        points = vec![key_range.start];
+        let mut points = vec![key_range.start];
         for l in self.historic_layers.iter() {
             if l.get_lsn_range().start > lsn {
                 continue;
