@@ -13,10 +13,10 @@ mod password;
 mod secret;
 mod signature;
 
-pub use secret::*;
-
 pub use exchange::Exchange;
+pub use key::ScramKey;
 pub use secret::ServerSecret;
+pub use secret::*;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
