@@ -8,7 +8,6 @@ use super::signature::SignatureBuilder;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
-#[derive(Debug)]
 struct TlsServerEndPoint;
 
 impl std::fmt::Display for TlsServerEndPoint {
@@ -28,7 +27,6 @@ impl std::str::FromStr for TlsServerEndPoint {
     }
 }
 
-#[derive(Debug)]
 enum ExchangeState {
     /// Waiting for [`ClientFirstMessage`].
     Initial,
@@ -41,7 +39,6 @@ enum ExchangeState {
 }
 
 /// Server's side of SCRAM auth algorithm.
-#[derive(Debug)]
 pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
