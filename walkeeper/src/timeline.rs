@@ -100,7 +100,7 @@ impl SharedState {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::new(zttid, conf);
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state);
+        let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state)?;
         sk.control_store.persist(&sk.s)?;
 
         Ok(Self {
@@ -127,7 +127,7 @@ impl SharedState {
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state),
+            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state)?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
