@@ -6,7 +6,6 @@
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/backend/libpq/auth-scram.c>
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/interfaces/libpq/fe-auth-scram.c>
 
-mod channel_binding;
 mod exchange;
 mod key;
 mod messages;
@@ -14,7 +13,6 @@ mod password;
 mod secret;
 mod signature;
 
-pub use channel_binding::*;
 pub use secret::*;
 
 pub use exchange::Exchange;

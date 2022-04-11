@@ -2,7 +2,7 @@
 
 use super::key::{ScramKey, SCRAM_KEY_LEN};
 
-/// A collection of messages needed to derive the client's signature.
+/// A collection of message parts needed to derive the client's signature.
 #[derive(Debug)]
 pub struct SignatureBuilder<'a> {
     pub client_first_message_bare: &'a str,
@@ -33,7 +33,7 @@ pub struct Signature {
 }
 
 impl Signature {
-    /// Derive ClientKey from client's signature and proof
+    /// Derive `ClientKey` from client's signature and proof.
     pub fn derive_client_key(&self, proof: &[u8; SCRAM_KEY_LEN]) -> ScramKey {
         // This is how the proof is calculated:
         //
@@ -42,10 +42,10 @@ impl Signature {
         // 3. ClientKey ^ ClientSignature -> ClientProof
         //
         // Step 3 implies that we can restore ClientKey from the proof
-        // by xoring the latter with the ClientSignature again. Afterwards
-        // we can check that the presumed ClientKey meets our expectations.
+        // by xoring the latter with the ClientSignature. Afterwards we
+        // can check that the presumed ClientKey meets our expectations.
         let mut signature = self.bytes;
-        for (i, x) in proof.into_iter().enumerate() {
+        for (i, x) in proof.iter().enumerate() {
             signature[i] ^= x;
         }
 

@@ -1,9 +1,9 @@
 //! Definitions for SCRAM messages.
 
 use super::base64_decode_array;
-use super::channel_binding::ChannelBinding;
 use super::key::{ScramKey, SCRAM_KEY_LEN};
 use super::signature::SignatureBuilder;
+use crate::sasl::ChannelBinding;
 use std::fmt;
 use std::ops::Range;
 
@@ -71,6 +71,7 @@ impl<'a> ClientFirstMessage<'a> {
         })
     }
 
+    /// Build a response to [`ClientFirstMessage`].
     pub fn build_server_first_message(
         &self,
         nonce: &[u8; SCRAM_RAW_NONCE_LEN],
@@ -128,6 +129,7 @@ impl<'a> ClientFinalMessage<'a> {
         })
     }
 
+    /// Build a response to [`ClientFinalMessage`].
     pub fn build_server_final_message(
         &self,
         signature_builder: SignatureBuilder,
@@ -144,6 +146,8 @@ impl<'a> ClientFinalMessage<'a> {
     }
 }
 
+/// We need to keep a convenient representation of this
+/// message for the next authentication step.
 pub struct OwnedServerFirstMessage {
     /// Owned `server-first-message`.
     message: String,

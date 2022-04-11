@@ -1,11 +1,15 @@
+#![allow(unused)]
+
 //! Tools for SCRAM server secret management.
 
 use super::base64_decode_array;
 use super::key::ScramKey;
 
+/// Server secret is produced from [password](super::password::SaltedPassword)
+/// and is used throughout the authentication process.
 #[derive(Debug)]
 pub struct ServerSecret {
-    /// Number of iterations for PBKDF2 function.
+    /// Number of iterations for `PBKDF2` function.
     pub iterations: u32,
     /// Salt used to hash user's password.
     pub salt_base64: String,
@@ -80,13 +84,18 @@ mod tests {
         let stored_key = "D5h6KTMBlUvDJk2Y8ELfC1Sjtc6k9YHjRyuRZyBNJns=";
         let server_key = "Pi3QHbcluX//NDfVkKlFl88GGzlJ5LkyPwcdlN/QBvI=";
 
-        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}");
+        let secret = format!(
+            "SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",
+            iterations = iterations,
+            salt = salt,
+            stored_key = stored_key,
+            server_key = server_key,
+        );
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);
         assert_eq!(parsed.salt_base64, salt);
 
-        // TODO: derive from 'password'
         assert_eq!(base64::encode(parsed.stored_key), stored_key);
         assert_eq!(base64::encode(parsed.server_key), server_key);
     }
@@ -103,7 +112,7 @@ mod tests {
         );
         assert_eq!(
             base64::encode(secret.server_key.as_ref()),
-            "Ei+LYpBzKmSeBZnYTuZu8h5acUmpPa7h7VrgxwTuJec="
+            "ub8OgRsftnk2ccDMOt7ffHXNcikRkQkq1lh4xaAqrSw="
         );
     }
 }

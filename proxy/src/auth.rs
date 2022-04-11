@@ -23,7 +23,7 @@ pub enum AuthErrorImpl {
     Console(#[from] cplane_api::AuthError),
 
     #[error(transparent)]
-    Sasl(#[from] sasl::SaslError),
+    Sasl(#[from] sasl::Error),
 
     /// For passwords that couldn't be processed by [`parse_password`].
     #[error("Malformed password message")]

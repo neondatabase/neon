@@ -1,3 +1,8 @@
+//! Main authentication flow.
+
+// TODO: make use of AuthFlow
+#![allow(unused)]
+
 use super::{AuthError, AuthErrorImpl};
 use crate::stream::PqStream;
 use crate::{sasl, scram};
@@ -82,7 +87,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     pub async fn authenticate(self) -> Result<(), AuthError> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
-        let sasl = sasl::SaslFirstMessage::parse(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
+        let sasl = sasl::FirstMessage::parse(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {
@@ -91,7 +96,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 
         let secret = self.state.0;
         sasl::SaslStream::new(self.stream, sasl.message)
-            .authenticate(scram::Exchange::new(secret, rand::random))
+            .authenticate(scram::Exchange::new(secret, rand::random, None))
             .await?;
 
         Ok(())

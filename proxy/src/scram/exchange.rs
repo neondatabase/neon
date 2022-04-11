@@ -1,10 +1,32 @@
-use super::channel_binding::ChannelBinding;
+//! Implementation of the SCRAM authentication algorithm.
+
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
-use crate::sasl::{self, SaslError, SaslMechanism};
+use crate::sasl::{self, ChannelBinding, Error as SaslError};
+
+/// The only channel binding mode we currently support.
+#[derive(Debug)]
+struct TlsServerEndPoint;
+
+impl std::fmt::Display for TlsServerEndPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tls-server-end-point")
+    }
+}
+
+impl std::str::FromStr for TlsServerEndPoint {
+    type Err = sasl::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tls-server-end-point" => Ok(TlsServerEndPoint),
+            _ => Err(sasl::Error::ChannelBindingBadMethod(s.into())),
+        }
+    }
+}
 
 #[derive(Debug)]
 enum ExchangeState {
@@ -12,7 +34,7 @@ enum ExchangeState {
     Initial,
     /// Waiting for [`ClientFinalMessage`].
     SaltSent {
-        cbind_flag: ChannelBinding<String>,
+        cbind_flag: ChannelBinding<TlsServerEndPoint>,
         client_first_message_bare: String,
         server_first_message: OwnedServerFirstMessage,
     },
@@ -24,19 +46,25 @@ pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
     nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
+    cert_digest: Option<&'a [u8]>,
 }
 
 impl<'a> Exchange<'a> {
-    pub fn new(secret: &'a ServerSecret, nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN]) -> Self {
+    pub fn new(
+        secret: &'a ServerSecret,
+        nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
+        cert_digest: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             state: ExchangeState::Initial,
             secret,
             nonce,
+            cert_digest,
         }
     }
 }
 
-impl SaslMechanism for Exchange<'_> {
+impl sasl::Mechanism for Exchange<'_> {
     fn exchange(mut self, input: &str) -> sasl::Result<(Option<Self>, String)> {
         use ExchangeState::*;
         match &self.state {
@@ -52,7 +80,7 @@ impl SaslMechanism for Exchange<'_> {
                 let msg = server_first_message.as_str().to_owned();
 
                 self.state = SaltSent {
-                    cbind_flag: client_first_message.cbind_flag.map(str::to_owned),
+                    cbind_flag: client_first_message.cbind_flag.and_then(str::parse)?,
                     client_first_message_bare: client_first_message.bare.to_owned(),
                     server_first_message,
                 };
@@ -68,13 +96,14 @@ impl SaslMechanism for Exchange<'_> {
                     ClientFinalMessage::parse(input).ok_or(SaslError::BadClientMessage)?;
 
                 let channel_binding = cbind_flag.encode(|_| {
-                    // TODO: make global design decision regarding the certificate
-                    todo!("fetch TLS certificate data")
-                });
+                    self.cert_digest
+                        .map(base64::encode)
+                        .ok_or(SaslError::ChannelBindingFailed("no cert digest provided"))
+                })?;
 
                 // This might've been caused by a MITM attack
                 if client_final_message.channel_binding != channel_binding {
-                    return Err(SaslError::AuthenticationFailed("channel binding failed"));
+                    return Err(SaslError::ChannelBindingFailed("data mismatch"));
                 }
 
                 if client_final_message.nonce != server_first_message.nonce() {

@@ -1,4 +1,4 @@
-//! Definition and parser for channel binding flag (a part of GS2 header).
+//! Definition and parser for channel binding flag (a part of the `GS2` header).
 
 /// Channel binding flag (possibly with params).
 #[derive(Debug, PartialEq, Eq)]
@@ -12,13 +12,13 @@ pub enum ChannelBinding<T> {
 }
 
 impl<T> ChannelBinding<T> {
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> ChannelBinding<R> {
+    pub fn and_then<R, E>(self, f: impl FnOnce(T) -> Result<R, E>) -> Result<ChannelBinding<R>, E> {
         use ChannelBinding::*;
-        match self {
+        Ok(match self {
             NotSupportedClient => NotSupportedClient,
             NotSupportedServer => NotSupportedServer,
-            Required(x) => Required(f(x)),
-        }
+            Required(x) => Required(f(x)?),
+        })
     }
 }
 
@@ -34,11 +34,14 @@ impl<'a> ChannelBinding<&'a str> {
     }
 }
 
-impl<T: AsRef<str>> ChannelBinding<T> {
+impl<T: std::fmt::Display> ChannelBinding<T> {
     /// Encode channel binding data as base64 for subsequent checks.
-    pub fn encode(&self, get_cbind_data: impl FnOnce(&str) -> String) -> String {
+    pub fn encode<E>(
+        &self,
+        get_cbind_data: impl FnOnce(&T) -> Result<String, E>,
+    ) -> Result<std::borrow::Cow<'static, str>, E> {
         use ChannelBinding::*;
-        match self {
+        Ok(match self {
             NotSupportedClient => {
                 // base64::encode("n,,")
                 "biws".into()
@@ -48,11 +51,14 @@ impl<T: AsRef<str>> ChannelBinding<T> {
                 "eSws".into()
             }
             Required(mode) => {
-                let mode = mode.as_ref();
-                let msg = format!("p={mode},,{data}", data = get_cbind_data(mode));
-                base64::encode(msg)
+                let msg = format!(
+                    "p={mode},,{data}",
+                    mode = mode,
+                    data = get_cbind_data(mode)?
+                );
+                base64::encode(msg).into()
             }
-        }
+        })
     }
 }
 
@@ -61,7 +67,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn channel_binding_encode() {
+    fn channel_binding_encode() -> anyhow::Result<()> {
         use ChannelBinding::*;
 
         let cases = [
@@ -71,7 +77,9 @@ mod tests {
         ];
 
         for (cb, input) in cases {
-            assert_eq!(cb.encode(|_| "bar".to_owned()), input);
+            assert_eq!(cb.encode(|_| anyhow::Ok("bar".to_owned()))?, input);
         }
+
+        Ok(())
     }
 }

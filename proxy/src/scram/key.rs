@@ -1,9 +1,11 @@
-//! Tools for client/server/stored keys management.
+//! Tools for client/server/stored key management.
 
 /// Faithfully taken from PostgreSQL.
 pub const SCRAM_KEY_LEN: usize = 32;
 
-/// Thin wrapper for a byte array.
+/// One of the keys derived from the [password](super::password::SaltedPassword).
+/// We use the same structure for all keys, i.e.
+/// `ClientKey`, `StoredKey`, and `ServerKey`.
 #[derive(Default, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ScramKey {

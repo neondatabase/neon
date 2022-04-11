@@ -1,3 +1,5 @@
+//! User credentials used in authentication.
+
 use super::AuthError;
 use crate::compute::DatabaseInfo;
 use crate::config::ProxyConfig;
