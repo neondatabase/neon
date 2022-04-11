@@ -1680,13 +1680,11 @@ impl LayeredTimeline {
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.lock().unwrap();
 
-        // We compact or "shuffle" the level-0 delta layers when 10 have
-        // accumulated.
-        static COMPACT_THRESHOLD: usize = 10;
-
         let level0_deltas = layers.get_level0_deltas()?;
 
-        if level0_deltas.len() < COMPACT_THRESHOLD {
+        // We compact or "shuffle" the level-0 delta layers when they've
+        // accumulated over the compaction threshold.
+        if level0_deltas.len() < self.conf.compaction_threshold {
             return Ok(());
         }
         drop(layers);
