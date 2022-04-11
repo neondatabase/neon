@@ -49,6 +49,7 @@ impl<'a> ServerMessage<&'a str> {
         })
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

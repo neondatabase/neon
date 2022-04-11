@@ -39,9 +39,20 @@ pub enum Error {
 /// A convenient result type for SASL exchange.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A result of one SASL exchange.
+pub enum Step<T, R> {
+    /// We should continue exchanging messages.
+    Continue(T),
+    /// The client has been authenticated successfully.
+    Authenticated(R),
+}
+
 /// Every SASL mechanism (e.g. [SCRAM](crate::scram)) is expected to implement this trait.
 pub trait Mechanism: Sized {
+    /// What's produced as a result of successful authentication.
+    type Output;
+
     /// Produce a server challenge to be sent to the client.
     /// This is how this method is called in PostgreSQL (`libpq/sasl.h`).
-    fn exchange(self, input: &str) -> Result<(Option<Self>, String)>;
+    fn exchange(self, input: &str) -> Result<(Step<Self, Self::Output>, String)>;
 }
