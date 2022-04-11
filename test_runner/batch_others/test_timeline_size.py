@@ -1,5 +1,4 @@
 from contextlib import closing
-from uuid import UUID
 import psycopg2.extras
 import psycopg2.errors
 from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres, assert_local

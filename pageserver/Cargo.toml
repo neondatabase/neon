@@ -4,19 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bookfile = { git = "https://github.com/zenithdb/bookfile.git", branch="generic-readext" }
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
 bytes = { version = "1.0.1", features = ['serde'] }
 byteorder = "1.4.3"
 futures = "0.3.13"
+hex = "0.4.3"
 hyper = "0.14"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "3.0"
 daemonize = "0.4.1"
-tokio = { version = "1.11", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
+tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
@@ -50,7 +51,7 @@ async-compression = {version = "0.3", features = ["zstd", "tokio"]}
 postgres_ffi = { path = "../postgres_ffi" }
 zenith_metrics = { path = "../zenith_metrics" }
 zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { path = "../workspace_hack" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
 hex-literal = "0.3"

@@ -25,8 +25,9 @@
 //! * all never local state gets scheduled for upload, such timelines are "local" and fully operational
 //! * the rest of the remote timelines are reported to pageserver, but not downloaded before they are actually accessed in pageserver,
 //! it may schedule the download on such occasions.
+//! Then, the index is shared across pageserver under [`RemoteIndex`] guard to ensure proper synchronization.
 //!
-//! The synchronization unit is an archive: a set of timeline files (or relishes) and a special metadata file, all compressed into a blob.
+//! The synchronization unit is an archive: a set of layer files and a special metadata file, all compressed into a blob.
 //! Currently, there's no way to process an archive partially, if the archive processing fails, it has to be started from zero next time again.
 //! An archive contains set of files of a certain timeline, added during checkpoint(s) and the timeline metadata at that moment.
 //! The archive contains that metadata's `disk_consistent_lsn` in its name, to be able to restore partial index information from just a remote storage file list.
@@ -80,10 +81,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use tokio::{
     runtime::Runtime,
-    sync::{
-        mpsc::{self, UnboundedReceiver},
-        RwLock,
-    },
+    sync::mpsc::{self, UnboundedReceiver},
     time::{Duration, Instant},
 };
 use tracing::*;
@@ -92,8 +90,8 @@ use self::{
     compression::ArchiveHeader,
     download::{download_timeline, DownloadedTimeline},
     index::{
-        ArchiveDescription, ArchiveId, RemoteTimeline, RemoteTimelineIndex, TimelineIndexEntry,
-        TimelineIndexEntryInner,
+        ArchiveDescription, ArchiveId, RemoteIndex, RemoteTimeline, RemoteTimelineIndex,
+        TimelineIndexEntry, TimelineIndexEntryInner,
     },
     upload::upload_timeline_checkpoint,
 };
@@ -142,7 +140,7 @@ lazy_static! {
 /// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
     use std::{
-        collections::{BTreeSet, HashMap},
+        collections::HashMap,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -205,9 +203,9 @@ mod sync_queue {
     pub async fn next_task_batch(
         receiver: &mut UnboundedReceiver<SyncTask>,
         mut max_batch_size: usize,
-    ) -> BTreeSet<SyncTask> {
+    ) -> Vec<SyncTask> {
         if max_batch_size == 0 {
-            return BTreeSet::new();
+            return Vec::new();
         }
         let mut tasks = HashMap::with_capacity(max_batch_size);
 
@@ -244,7 +242,7 @@ mod sync_queue {
 
 /// A task to run in the async download/upload loop.
 /// Limited by the number of retries, after certain threshold the failing task gets evicted and the timeline disabled.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 pub struct SyncTask {
     sync_id: ZTenantTimelineId,
     retries: u32,
@@ -261,7 +259,7 @@ impl SyncTask {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 enum SyncKind {
     /// A certain amount of images (archive files) to download.
     Download(TimelineDownload),
@@ -281,15 +279,15 @@ impl SyncKind {
 
 /// Local timeline files for upload, appeared after the new checkpoint.
 /// Current checkpoint design assumes new files are added only, no deletions or amendment happens.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 pub struct NewCheckpoint {
-    /// Relish file paths in the pageserver workdir, that were added for the corresponding checkpoint.
+    /// layer file paths in the pageserver workdir, that were added for the corresponding checkpoint.
     layers: Vec<PathBuf>,
     metadata: TimelineMetadata,
 }
 
 /// Info about the remote image files.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Clone)]
 struct TimelineDownload {
     files_to_skip: Arc<BTreeSet<PathBuf>>,
     archives_to_skip: BTreeSet<ArchiveId>,
@@ -323,8 +321,8 @@ pub fn schedule_timeline_checkpoint_upload(
             tenant_id, timeline_id
         )
     } else {
-        warn!(
-            "Could not send an upload task for tenant {}, timeline {}: the sync queue is not initialized",
+        debug!(
+            "Upload task for tenant {}, timeline {} sent",
             tenant_id, timeline_id
         )
     }
@@ -392,28 +390,31 @@ pub(super) fn spawn_storage_sync_thread<
                 None
             }
         });
-    let mut remote_index =
-        RemoteTimelineIndex::try_parse_descriptions_from_paths(conf, download_paths);
+    let remote_index = RemoteIndex::try_parse_descriptions_from_paths(conf, download_paths);
 
-    let local_timeline_init_statuses =
-        schedule_first_sync_tasks(&mut remote_index, local_timeline_files);
-    let remote_index = Arc::new(RwLock::new(remote_index));
-    let remote_index_cloned = Arc::clone(&remote_index);
+    let local_timeline_init_statuses = schedule_first_sync_tasks(
+        &mut runtime.block_on(remote_index.write()),
+        local_timeline_files,
+    );
+
+    let loop_index = remote_index.clone();
     thread_mgr::spawn(
         ThreadKind::StorageSync,
         None,
         None,
         "Remote storage sync thread",
+        false,
         move || {
             storage_sync_loop(
                 runtime,
                 conf,
                 receiver,
-                remote_index_cloned,
+                loop_index,
                 storage,
                 max_concurrent_sync,
                 max_sync_errors,
-            )
+            );
+            Ok(())
         },
     )
     .context("Failed to spawn remote storage sync thread")?;
@@ -436,42 +437,48 @@ fn storage_sync_loop<
     runtime: Runtime,
     conf: &'static PageServerConf,
     mut receiver: UnboundedReceiver<SyncTask>,
-    index: Arc<RwLock<RemoteTimelineIndex>>,
+    index: RemoteIndex,
     storage: S,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> anyhow::Result<()> {
-    let remote_assets = Arc::new((storage, Arc::clone(&index)));
+) {
+    let remote_assets = Arc::new((storage, index.clone()));
+    info!("Starting remote storage sync loop");
     loop {
-        let index = Arc::clone(&index);
+        let index = index.clone();
         let loop_step = runtime.block_on(async {
             tokio::select! {
-                new_timeline_states = loop_step(
+                step = loop_step(
                     conf,
                     &mut receiver,
                     Arc::clone(&remote_assets),
                     max_concurrent_sync,
                     max_sync_errors,
                 )
-                .instrument(debug_span!("storage_sync_loop_step")) => LoopStep::SyncStatusUpdates(new_timeline_states),
+                .instrument(info_span!("storage_sync_loop_step")) => step,
                 _ = thread_mgr::shutdown_watcher() => LoopStep::Shutdown,
             }
         });
 
         match loop_step {
             LoopStep::SyncStatusUpdates(new_timeline_states) => {
-                // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                apply_timeline_sync_status_updates(conf, index, new_timeline_states);
-                debug!("Sync loop step completed");
+                if new_timeline_states.is_empty() {
+                    debug!("Sync loop step completed, no new timeline states");
+                } else {
+                    info!(
+                        "Sync loop step completed, {} new timeline state update(s)",
+                        new_timeline_states.len()
+                    );
+                    // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
+                    apply_timeline_sync_status_updates(conf, index, new_timeline_states);
+                }
             }
             LoopStep::Shutdown => {
-                debug!("Shutdown requested, stopping");
+                info!("Shutdown requested, stopping");
                 break;
             }
         }
     }
-
-    Ok(())
 }
 
 async fn loop_step<
@@ -480,19 +487,18 @@ async fn loop_step<
 >(
     conf: &'static PageServerConf,
     receiver: &mut UnboundedReceiver<SyncTask>,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     max_concurrent_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>> {
+) -> LoopStep {
     let max_concurrent_sync = max_concurrent_sync.get();
-    let mut next_tasks = BTreeSet::new();
+    let mut next_tasks = Vec::new();
 
     // request the first task in blocking fashion to do less meaningless work
     if let Some(first_task) = sync_queue::next_task(receiver).await {
-        next_tasks.insert(first_task);
+        next_tasks.push(first_task);
     } else {
-        debug!("Shutdown requested, stopping");
-        return HashMap::new();
+        return LoopStep::Shutdown;
     };
     next_tasks.extend(
         sync_queue::next_task_batch(receiver, max_concurrent_sync - 1)
@@ -501,12 +507,17 @@ async fn loop_step<
     );
 
     let remaining_queue_length = sync_queue::len();
-    debug!(
-        "Processing {} tasks in batch, more tasks left to process: {}",
-        next_tasks.len(),
-        remaining_queue_length
-    );
     REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
+    if remaining_queue_length > 0 || !next_tasks.is_empty() {
+        info!(
+            "Processing {} tasks in batch, more tasks left to process: {}",
+            next_tasks.len(),
+            remaining_queue_length
+        );
+    } else {
+        debug!("No tasks to process");
+        return LoopStep::SyncStatusUpdates(HashMap::new());
+    }
 
     let mut task_batch = next_tasks
         .into_iter()
@@ -516,8 +527,9 @@ async fn loop_step<
             let sync_name = task.kind.sync_name();
 
             let extra_step = match tokio::spawn(
-                process_task(conf, Arc::clone(&remote_assets), task, max_sync_errors)
-                    .instrument(debug_span!("", sync_id = %sync_id, attempt, sync_name)),
+                process_task(conf, Arc::clone(&remote_assets), task, max_sync_errors).instrument(
+                    info_span!("process_sync_task", sync_id = %sync_id, attempt, sync_name),
+                ),
             )
             .await
             {
@@ -552,7 +564,7 @@ async fn loop_step<
         }
     }
 
-    new_timeline_states
+    LoopStep::SyncStatusUpdates(new_timeline_states)
 }
 
 async fn process_task<
@@ -560,7 +572,7 @@ async fn process_task<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     conf: &'static PageServerConf,
-    remote_assets: Arc<(S, Arc<RwLock<RemoteTimelineIndex>>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     task: SyncTask,
     max_sync_errors: NonZeroU32,
 ) -> Option<TimelineSyncStatusUpdate> {
@@ -584,7 +596,7 @@ async fn process_task<
         tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
     }
 
-    let remote_index = Arc::clone(&remote_assets.1);
+    let remote_index = &remote_assets.1;
 
     let sync_start = Instant::now();
     let sync_name = task.kind.sync_name();
@@ -592,7 +604,7 @@ async fn process_task<
         SyncKind::Download(download_data) => {
             let download_result = download_timeline(
                 conf,
-                remote_assets,
+                remote_assets.clone(),
                 task.sync_id,
                 download_data,
                 task.retries + 1,
@@ -772,7 +784,7 @@ async fn fetch_full_index<
     P: Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
-    (storage, index): &(S, Arc<RwLock<RemoteTimelineIndex>>),
+    (storage, index): &(S, RemoteIndex),
     timeline_dir: &Path,
     id: ZTenantTimelineId,
 ) -> anyhow::Result<RemoteTimeline> {
@@ -808,8 +820,9 @@ async fn fetch_full_index<
         }
     };
     drop(index_read); // tokio rw lock is not upgradeable
-    let mut index_write = index.write().await;
-    index_write
+    index
+        .write()
+        .await
         .upgrade_timeline_entry(&id, full_index.clone())
         .context("cannot upgrade timeline entry in remote index")?;
     Ok(full_index)
@@ -854,8 +867,8 @@ mod test_utils {
 
     #[track_caller]
     pub async fn ensure_correct_timeline_upload(
-        harness: &RepoHarness,
-        remote_assets: Arc<(LocalFs, Arc<RwLock<RemoteTimelineIndex>>)>,
+        harness: &RepoHarness<'_>,
+        remote_assets: Arc<(LocalFs, RemoteIndex)>,
         timeline_id: ZTimelineId,
         new_upload: NewCheckpoint,
     ) {
@@ -872,7 +885,7 @@ mod test_utils {
         let (storage, index) = remote_assets.as_ref();
         assert_index_descriptions(
             index,
-            RemoteTimelineIndex::try_parse_descriptions_from_paths(
+            &RemoteIndex::try_parse_descriptions_from_paths(
                 harness.conf,
                 remote_assets
                     .0
@@ -914,7 +927,7 @@ mod test_utils {
     }
 
     pub async fn expect_timeline(
-        index: &Arc<RwLock<RemoteTimelineIndex>>,
+        index: &RemoteIndex,
         sync_id: ZTenantTimelineId,
     ) -> RemoteTimeline {
         if let Some(TimelineIndexEntryInner::Full(remote_timeline)) = index
@@ -934,9 +947,11 @@ mod test_utils {
 
     #[track_caller]
     pub async fn assert_index_descriptions(
-        index: &Arc<RwLock<RemoteTimelineIndex>>,
-        expected_index_with_descriptions: RemoteTimelineIndex,
+        index: &RemoteIndex,
+        expected_index_with_descriptions: &RemoteIndex,
     ) {
+        let expected_index_with_descriptions = expected_index_with_descriptions.read().await;
+
         let index_read = index.read().await;
         let actual_sync_ids = index_read.all_sync_ids().collect::<BTreeSet<_>>();
         let expected_sync_ids = expected_index_with_descriptions

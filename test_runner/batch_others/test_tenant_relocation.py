@@ -3,10 +3,8 @@ import os
 import pathlib
 import subprocess
 import threading
-from typing import Dict
 from uuid import UUID
 from fixtures.log_helper import log
-import time
 import signal
 import pytest
 
@@ -15,7 +13,6 @@ from fixtures.utils import lsn_from_hex
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
-    print("!" * 100, abs(a - b) / a)
     assert abs(a - b) / a < margin_ratio, abs(a - b) / a
 
 
@@ -235,10 +232,10 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             assert cur.fetchone() == (2001000, )
 
         if with_load == 'with_load':
-            assert load_ok_event.wait(1)
+            assert load_ok_event.wait(3)
             log.info('stopping load thread')
             load_stop_event.set()
-            load_thread.join()
+            load_thread.join(timeout=10)
             log.info('load thread stopped')
 
         # bring old pageserver back for clean shutdown via zenith cli

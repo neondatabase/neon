@@ -73,7 +73,7 @@ pub fn handle_json_ctrl(
 
     let inserted_wal = append_logical_message(spg, append_request)?;
     let response = AppendResult {
-        state: spg.timeline.get().get_info(),
+        state: spg.timeline.get().get_state().1,
         inserted_wal,
     };
     let response_data = serde_json::to_vec(&response)?;
@@ -112,7 +112,7 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
 
 fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: Lsn) -> Result<()> {
     // add new term to existing history
-    let history = spg.timeline.get().get_info().acceptor_state.term_history;
+    let history = spg.timeline.get().get_state().1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
     let mut history_entries = history.0;
     history_entries.push(TermSwitchEntry { term, lsn });
@@ -142,7 +142,7 @@ fn append_logical_message(
     msg: &AppendLogicalMessage,
 ) -> Result<InsertedWAL> {
     let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
-    let sk_state = spg.timeline.get().get_info();
+    let sk_state = spg.timeline.get().get_state().1;
 
     let begin_lsn = msg.begin_lsn;
     let end_lsn = begin_lsn + wal_data.len() as u64;

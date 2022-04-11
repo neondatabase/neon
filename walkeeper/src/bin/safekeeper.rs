@@ -11,18 +11,19 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
+use url::{ParseError, Url};
 use walkeeper::control_file::{self};
 use zenith_utils::http::endpoint;
 use zenith_utils::zid::ZNodeId;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 use tokio::sync::mpsc;
-use walkeeper::callmemaybe;
 use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use walkeeper::http;
 use walkeeper::s3_offload;
 use walkeeper::wal_service;
 use walkeeper::SafeKeeperConf;
+use walkeeper::{broker, callmemaybe};
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
 
@@ -104,6 +105,11 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::new("id").long("id").takes_value(true).help("safekeeper node id: integer")
+        ).arg(
+            Arg::new("broker-endpoints")
+            .long("broker-endpoints")
+            .takes_value(true)
+            .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
         )
         .get_matches();
 
@@ -152,6 +158,11 @@ fn main() -> Result<()> {
                 .parse()
                 .context("failed to parse safekeeper id")?,
         ));
+    }
+
+    if let Some(addr) = arg_matches.value_of("broker-endpoints") {
+        let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
+        conf.broker_endpoints = Some(collected_ep?);
     }
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
@@ -259,17 +270,29 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
 
     threads.push(wal_acceptor_thread);
 
+    let conf_cloned = conf.clone();
     let callmemaybe_thread = thread::Builder::new()
         .name("callmemaybe thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = callmemaybe::thread_main(conf, rx);
+            let thread_result = callmemaybe::thread_main(conf_cloned, rx);
             if let Err(e) = thread_result {
                 error!("callmemaybe thread terminated: {}", e);
             }
         })
         .unwrap();
     threads.push(callmemaybe_thread);
+
+    if conf.broker_endpoints.is_some() {
+        let conf_ = conf.clone();
+        threads.push(
+            thread::Builder::new()
+                .name("broker thread".into())
+                .spawn(|| {
+                    broker::thread_main(conf_);
+                })?,
+        );
+    }
 
     // TODO: put more thoughts into handling of failed threads
     // We probably should restart them.

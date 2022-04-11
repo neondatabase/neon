@@ -30,8 +30,14 @@ pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
+    // This parameter actually determines L0 layer file size.
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-    pub const DEFAULT_CHECKPOINT_PERIOD: &str = "1 s";
+
+    // Target file size, when creating image and delta layers.
+    // This parameter determines L1 layer file size.
+    pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
+
+    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
@@ -40,7 +46,7 @@ pub mod defaults {
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 100;
+    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 10;
     pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
@@ -57,7 +63,8 @@ pub mod defaults {
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
-#checkpoint_period = '{DEFAULT_CHECKPOINT_PERIOD}'
+#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
+#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
@@ -90,8 +97,15 @@ pub struct PageServerConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
     // page server crashes.
+    // This parameter actually determines L0 layer file size.
     pub checkpoint_distance: u64,
-    pub checkpoint_period: Duration,
+
+    // Target file size, when creating image and delta layers.
+    // This parameter determines L1 layer file size.
+    pub compaction_target_size: u64,
+
+    // How often to check if there's compaction work to be done.
+    pub compaction_period: Duration,
 
     pub gc_horizon: u64,
     pub gc_period: Duration,
@@ -145,7 +159,9 @@ struct PageServerConfigBuilder {
     listen_http_addr: BuilderValue<String>,
 
     checkpoint_distance: BuilderValue<u64>,
-    checkpoint_period: BuilderValue<Duration>,
+
+    compaction_target_size: BuilderValue<u64>,
+    compaction_period: BuilderValue<Duration>,
 
     gc_horizon: BuilderValue<u64>,
     gc_period: BuilderValue<Duration>,
@@ -179,8 +195,9 @@ impl Default for PageServerConfigBuilder {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
             checkpoint_distance: Set(DEFAULT_CHECKPOINT_DISTANCE),
-            checkpoint_period: Set(humantime::parse_duration(DEFAULT_CHECKPOINT_PERIOD)
-                .expect("cannot parse default checkpoint period")),
+            compaction_target_size: Set(DEFAULT_COMPACTION_TARGET_SIZE),
+            compaction_period: Set(humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
+                .expect("cannot parse default compaction period")),
             gc_horizon: Set(DEFAULT_GC_HORIZON),
             gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period")),
@@ -216,8 +233,12 @@ impl PageServerConfigBuilder {
         self.checkpoint_distance = BuilderValue::Set(checkpoint_distance)
     }
 
-    pub fn checkpoint_period(&mut self, checkpoint_period: Duration) {
-        self.checkpoint_period = BuilderValue::Set(checkpoint_period)
+    pub fn compaction_target_size(&mut self, compaction_target_size: u64) {
+        self.compaction_target_size = BuilderValue::Set(compaction_target_size)
+    }
+
+    pub fn compaction_period(&mut self, compaction_period: Duration) {
+        self.compaction_period = BuilderValue::Set(compaction_period)
     }
 
     pub fn gc_horizon(&mut self, gc_horizon: u64) {
@@ -286,9 +307,12 @@ impl PageServerConfigBuilder {
             checkpoint_distance: self
                 .checkpoint_distance
                 .ok_or(anyhow::anyhow!("missing checkpoint_distance"))?,
-            checkpoint_period: self
-                .checkpoint_period
-                .ok_or(anyhow::anyhow!("missing checkpoint_period"))?,
+            compaction_target_size: self
+                .compaction_target_size
+                .ok_or(anyhow::anyhow!("missing compaction_target_size"))?,
+            compaction_period: self
+                .compaction_period
+                .ok_or(anyhow::anyhow!("missing compaction_period"))?,
             gc_horizon: self
                 .gc_horizon
                 .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
@@ -337,10 +361,10 @@ pub struct RemoteStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
-    /// Specify a root folder to place all stored relish data into.
+    /// Specify a root folder to place all stored files into.
     LocalFs(PathBuf),
-    /// AWS S3 based storage, storing all relishes into the root
-    /// of the S3 bucket from the config.
+    /// AWS S3 based storage, storing all files in the S3 bucket
+    /// specified by the config
     AwsS3(S3Config),
 }
 
@@ -425,7 +449,10 @@ impl PageServerConf {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
                 "checkpoint_distance" => builder.checkpoint_distance(parse_toml_u64(key, item)?),
-                "checkpoint_period" => builder.checkpoint_period(parse_toml_duration(key, item)?),
+                "compaction_target_size" => {
+                    builder.compaction_target_size(parse_toml_u64(key, item)?)
+                }
+                "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
                 "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
                 "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
@@ -561,7 +588,8 @@ impl PageServerConf {
         PageServerConf {
             id: ZNodeId(0),
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-            checkpoint_period: Duration::from_secs(10),
+            compaction_target_size: 4 * 1024 * 1024,
+            compaction_period: Duration::from_secs(10),
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
             wait_lsn_timeout: Duration::from_secs(60),
@@ -631,7 +659,9 @@ listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
 checkpoint_distance = 111 # in bytes
-checkpoint_period = '111 s'
+
+compaction_target_size = 111 # in bytes
+compaction_period = '111 s'
 
 gc_period = '222 s'
 gc_horizon = 222
@@ -668,7 +698,8 @@ id = 10
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-                checkpoint_period: humantime::parse_duration(defaults::DEFAULT_CHECKPOINT_PERIOD)?,
+                compaction_target_size: defaults::DEFAULT_COMPACTION_TARGET_SIZE,
+                compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
                 gc_horizon: defaults::DEFAULT_GC_HORIZON,
                 gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
@@ -712,7 +743,8 @@ id = 10
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
                 checkpoint_distance: 111,
-                checkpoint_period: Duration::from_secs(111),
+                compaction_target_size: 111,
+                compaction_period: Duration::from_secs(111),
                 gc_horizon: 222,
                 gc_period: Duration::from_secs(222),
                 wait_lsn_timeout: Duration::from_secs(111),
