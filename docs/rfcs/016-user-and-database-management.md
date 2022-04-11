@@ -3,7 +3,8 @@
 ### CREATE USER
 
 CREATE USER is only allowed from console, 
-because it requires generation of the access token and other complex logic.
+because console is involved in the auth process, when users connect via proxy.
+It's much handier to have a single source of truth.
 
 Client has to chose which databases will be accessible by the new user.
 Along with database access, we explicitly grant CREATE ON DATABASE privilege to the user.
@@ -14,8 +15,9 @@ All new users are granted with CREATEDB privilege by default.
 `CREATE ROLE .. WITH CREATEDB`
 Later we may add an option to manage it.
 
-*Q: Are we going to allow user to create new users and NOLIGIN roles to manage privileges?
-*`CREATE ROLE .. WITH CREATEROLE`
+For now we do not allow clients to create new users and NOLIGIN roles to manage privileges.
+i.e. `CREATE ROLE .. WITH CREATEROLE`
+Let's postpone this until we got N feature requests about more complex roles management.
 
 
 ### CREATE DATABASE
@@ -23,7 +25,7 @@ Later we may add an option to manage it.
 Client can CREATE DATABASE via SQL as well as via console.
 
 When database is created from SQL (not by superuser)
-we intercept this action using DDL hook and send it to the console to synchronize the information about databases.
+we intercept this action using DDL hook and send request to the console to synchronize the information about databases.
 
 ### CREATE EXTENSION
 
@@ -39,7 +41,7 @@ Nothing special. PostgreSQL behavior.
 ### DROP DATABASE
 
 From PostgreSQL docs:
-The right to drop an object, or to alter its definition in any way, is not treated as a grantable privilege; it is inherent in the owner, and cannot be granted or revoked. (However, a similar effect can be obtained by granting or revoking membership in the role that owns the object) 
+> The right to drop an object, or to alter its definition in any way, is not treated as a grantable privilege; it is inherent in the owner, and cannot be granted or revoked. (However, a similar effect can be obtained by granting or revoking membership in the role that owns the object) 
 
 Note that ownership can be changed using `REASSIGN OWNED BY .. TO ..` 
 
