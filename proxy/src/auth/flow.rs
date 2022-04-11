@@ -1,8 +1,5 @@
 //! Main authentication flow.
 
-// TODO: make use of AuthFlow
-#![allow(unused)]
-
 use super::{AuthError, AuthErrorImpl};
 use crate::stream::PqStream;
 use crate::{sasl, scram};
@@ -76,6 +73,7 @@ impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
 /// Stream wrapper for handling simple MD5 password auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Md5> {
     /// Perform user authentication. Raise an error in case authentication failed.
+    #[allow(unused)]
     pub async fn authenticate(self) -> Result<(), AuthError> {
         unimplemented!("MD5 auth flow is yet to be implemented");
     }

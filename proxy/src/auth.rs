@@ -1,4 +1,6 @@
 mod credentials;
+
+#[cfg(test)]
 mod flow;
 
 use crate::compute::DatabaseInfo;
@@ -6,13 +8,15 @@ use crate::config::ProxyConfig;
 use crate::cplane_api::{self, CPlaneApi};
 use crate::error::UserFacingError;
 use crate::stream::PqStream;
-use crate::{sasl, waiters};
+use crate::waiters;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub use credentials::ClientCredentials;
+
+#[cfg(test)]
 pub use flow::*;
 
 /// Common authentication error.
@@ -22,8 +26,9 @@ pub enum AuthErrorImpl {
     #[error(transparent)]
     Console(#[from] cplane_api::AuthError),
 
+    #[cfg(test)]
     #[error(transparent)]
-    Sasl(#[from] sasl::Error),
+    Sasl(#[from] crate::sasl::Error),
 
     /// For passwords that couldn't be processed by [`parse_password`].
     #[error("Malformed password message")]

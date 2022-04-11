@@ -12,12 +12,17 @@ mod cplane_api;
 mod error;
 mod http;
 mod mgmt;
-mod parse;
 mod proxy;
-mod sasl;
-mod scram;
 mod stream;
 mod waiters;
+
+// Currently SCRAM is only used in tests
+#[cfg(test)]
+mod parse;
+#[cfg(test)]
+mod sasl;
+#[cfg(test)]
+mod scram;
 
 use anyhow::{bail, Context};
 use clap::{App, Arg};

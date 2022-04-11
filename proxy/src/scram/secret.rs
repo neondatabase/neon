@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 //! Tools for SCRAM server secret management.
 
 use super::base64_decode_array;

@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 //! Password hashing routines.
 
 use super::key::ScramKey;
