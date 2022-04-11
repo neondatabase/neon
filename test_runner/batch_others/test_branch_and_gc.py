@@ -27,7 +27,8 @@ def test_branch_and_gc(zenith_env_builder: ZenithEnvBuilder):
         '--pageserver-config-override="gc_period"="10 m"',
         '--pageserver-config-override="gc_horizon"=1048576',
         '--pageserver-config-override="checkpoint_distance"=4194304',
-        '--pageserver-config-override="compaction_period"="10 m"'
+        '--pageserver-config-override="compaction_period"="10 m"',
+        '--pageserver-config-override="compaction_threshold"=2'
     ])
     env.safekeepers[0].start()
 
