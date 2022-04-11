@@ -610,10 +610,10 @@ where
         // set basic info about server, if not yet
         // TODO: verify that is doesn't change after
         {
-            let mut state = self.state.update_guard();
+            let mut state = self.state.clone();
             state.server.system_id = msg.system_id;
             state.server.wal_seg_size = msg.wal_seg_size;
-            state.persist()?;
+            self.state.persist(&state)?;
         }
 
         // pass wal_seg_size to read WAL and find flush_lsn
@@ -642,10 +642,10 @@ where
             term_history: self.get_term_history(),
         };
         if self.state.acceptor_state.term < msg.term {
-            let mut state = self.state.update_guard();
+            let mut state = self.state.clone();
             state.acceptor_state.term = msg.term;
             // persist vote before sending it out
-            state.persist()?;
+            self.state.persist(&state)?;
 
             resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
@@ -657,9 +657,9 @@ where
     /// Bump our term if received a note from elected proposer with higher one
     fn bump_if_higher(&mut self, term: Term) -> Result<()> {
         if self.state.acceptor_state.term < term {
-            let mut state = self.state.update_guard();
+            let mut state = self.state.clone();
             state.acceptor_state.term = term;
-            state.persist()?;
+            self.state.persist(&state)?;
         }
         Ok(())
     }
@@ -694,9 +694,9 @@ where
 
         // and now adopt term history from proposer
         {
-            let mut state = self.state.update_guard();
+            let mut state = self.state.clone();
             state.acceptor_state.term_history = msg.term_history.clone();
-            state.persist()?;
+            self.state.persist(&state)?;
         }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
@@ -735,12 +735,12 @@ where
 
     /// Persist in-memory state to the disk.
     fn persist_control_file(&mut self) -> Result<()> {
-        let mut state = self.state.update_guard();
+        let mut state = self.state.clone();
 
         state.commit_lsn = self.inmem.commit_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
-        state.persist()
+        self.state.persist(&state)
     }
 
     /// Handle request to append WAL.
@@ -837,16 +837,14 @@ mod tests {
     use std::ops::Deref;
 
     use super::*;
-    use crate::{control_file::StatePersister, wal_storage::Storage};
+    use crate::wal_storage::Storage;
 
     // fake storage for tests
     struct InMemoryState {
         persisted_state: SafeKeeperState,
     }
 
-    impl control_file::Storage for InMemoryState {}
-
-    impl StatePersister for InMemoryState {
+    impl control_file::Storage for InMemoryState {
         fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
