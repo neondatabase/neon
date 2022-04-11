@@ -5,7 +5,6 @@ use super::key::ScramKey;
 
 /// Server secret is produced from [password](super::password::SaltedPassword)
 /// and is used throughout the authentication process.
-#[derive(Debug)]
 pub struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
     pub iterations: u32,
