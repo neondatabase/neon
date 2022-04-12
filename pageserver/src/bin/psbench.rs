@@ -2,15 +2,13 @@
 //!
 //! Usually it's easier to write python perf tests, but here the performance
 //! of the tester matters, and the API is easier to work with from rust.
-use std::{collections::{HashMap, HashSet}, io::{BufRead, BufReader, Cursor}, net::SocketAddr, ops::AddAssign, time::Duration};
-use byteorder::ReadBytesExt;
-use itertools::Itertools;
+use std::{collections::HashSet, io::{BufRead, BufReader, Cursor}, time::Duration};
 use pageserver::wal_metadata::{Page, WalEntryMetadata};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use clap::{App, Arg};
 use std::fs::File;
-use zenith_utils::{GIT_VERSION, lsn::Lsn, pq_proto::{BeMessage, BeParameterStatusMessage, FeMessage}};
+use zenith_utils::{GIT_VERSION, lsn::Lsn, pq_proto::{BeMessage, FeMessage}};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -135,13 +133,10 @@ async fn main() -> Result<()> {
     let affected_pages: HashSet<_> = wal_metadata.iter().map(|m| m.affected_pages.clone())
         .flatten().collect();
     let latest_lsn = wal_metadata.iter().map(|m| m.lsn).max().unwrap();
-    println!("Total pages: {}", affected_pages.len());
-    println!("total wal: {}", wal_metadata.len());
-    println!("total wal bytes: {}", total_wal_size);
 
     // Get all latest pages
     let mut durations: Vec<Duration> = vec![];
-    for page in affected_pages {
+    for page in &affected_pages {
         let start = Instant::now();
         let _page_bytes = get_page(&mut socket, &latest_lsn, &page, true).await?;
         let duration = start.elapsed();
@@ -150,10 +145,14 @@ async fn main() -> Result<()> {
     }
 
     durations.sort();
-    println!("Fastest: {:?}", durations.first().unwrap());
-    println!("Median: {:?}", durations[durations.len() / 2]);
-    println!("99th percentile: {:?}", durations[durations.len() - 1 - durations.len() / 100]);
-    println!("Slowest: {:?}", durations.last().unwrap());
+    // Results are a space separated table of "metric_name value unit", for ease of parsing
+    println!("test_param num_pages {}", affected_pages.len());
+    println!("test_param num_wal_entries {}", wal_metadata.len());
+    println!("test_param total_wal_size {} bytes", total_wal_size);
+    println!("lower_is_better fastest {:?} microseconds", durations.first().unwrap().as_micros());
+    println!("lower_is_better median {:?} microseconds", durations[durations.len() / 2].as_micros());
+    println!("lower_is_better p99 {:?} microseconds", durations[durations.len() - 1 - durations.len() / 100].as_micros());
+    println!("lower_is_better slowest {:?} microseconds", durations.last().unwrap().as_micros());
 
     Ok(())
 }

@@ -618,7 +618,7 @@ class ZenithEnv:
         psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
         tenant_hex = self.initial_tenant.hex
         args = [psbench_binpath, wal_metadata_filename, tenant_hex, timeline]
-        subprocess.run(args)
+        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
