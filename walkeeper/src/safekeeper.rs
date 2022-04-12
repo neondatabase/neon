@@ -514,11 +514,16 @@ where
     WAL: wal_storage::Storage,
 {
     // constructor
-    pub fn new(ztli: ZTimelineId, state: CTRL, wal_store: WAL) -> Result<SafeKeeper<CTRL, WAL>> {
+    pub fn new(
+        ztli: ZTimelineId,
+        state: CTRL,
+        mut wal_store: WAL,
+    ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
             bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
         }
 
+        // initialize wal_store, if state is already initialized
         wal_store.init_storage(&state)?;
 
         Ok(SafeKeeper {
