@@ -1,6 +1,6 @@
 //! Timeline synchrnonization logic to put files from archives on remote storage into pageserver's local directory.
 
-use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use anyhow::{ensure, Context};
 use tokio::fs;
@@ -64,11 +64,16 @@ pub(super) async fn download_timeline<
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => {
             error!("Cannot download: no timeline is present in the index for given id");
+            drop(index_read);
             return DownloadedTimeline::Abort;
         }
 
         Some(index_entry) => match index_entry.inner() {
-            TimelineIndexEntryInner::Full(remote_timeline) => Cow::Borrowed(remote_timeline),
+            TimelineIndexEntryInner::Full(remote_timeline) => {
+                let cloned = remote_timeline.clone();
+                drop(index_read);
+                cloned
+            }
             TimelineIndexEntryInner::Description(_) => {
                 // we do not check here for awaits_download because it is ok
                 // to call this function while the download is in progress
@@ -84,7 +89,7 @@ pub(super) async fn download_timeline<
                 )
                 .await
                 {
-                    Ok(remote_timeline) => Cow::Owned(remote_timeline),
+                    Ok(remote_timeline) => remote_timeline,
                     Err(e) => {
                         error!("Failed to download full timeline index: {:?}", e);
 
