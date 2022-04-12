@@ -195,41 +195,31 @@ pub struct SafeKeeperState {
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
     /// informational purposes, we receive it from pageserver (or broker).
     pub remote_consistent_lsn: Lsn,
-    // Peers and their state as we remember it. Knowing peers themselves is
-    // fundamental; but state is saved here only for informational purposes and
-    // obviously can be stale. (Currently not saved at all, but let's provision
-    // place to have less file version upgrades).
+    /// Peers and their state as we remember it. Knowing peers themselves is
+    /// fundamental; but state is saved here only for informational purposes and
+    /// obviously can be stale. (Currently not saved at all, but let's provision
+    /// place to have less file version upgrades).
     pub peers: Peers,
 }
 
 #[derive(Debug, Clone)]
-/// In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
-/// are not flushed yet.
+/// In memory safekeeper state. Some fields mirror ones in `SafeKeeperState`;
+/// values are not flushed yet.
 pub struct SafekeeperMemState {
+    // LSNs waiting to be persisted to disk;
     pub commit_lsn: Lsn,
     pub s3_wal_lsn: Lsn, // TODO: keep only persistent version
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
-}
 
-#[derive(Debug, Clone)]
-/// In memory state for last elected proposer.
-struct ElectedProposerInfo {
-    /// UUID of a elected proposer
+    /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
+    pub global_commit_lsn: Lsn,
+
+    /// UUID of a elected proposer.
     proposer_uuid: PgUuid,
-
     /// LSN since the proposer safekeeper currently talking to appends WAL;
     /// determines epoch switch point.
     epoch_start_lsn: Lsn,
-}
-
-impl ElectedProposerInfo {
-    pub fn empty() -> Self {
-        Self {
-            proposer_uuid: [0; 16],
-            epoch_start_lsn: Lsn(0),
-        }
-    }
 }
 
 impl SafeKeeperState {
@@ -514,17 +504,12 @@ impl SafeKeeperMetrics {
 pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     /// Cached metrics so we don't have to recompute labels on each update.
     metrics: SafeKeeperMetrics,
-
-    /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
-    pub global_commit_lsn: Lsn,
-    /// In-memory info about the elected proposer.
-    elected: ElectedProposerInfo,
-
-    /// In-memory consensus state, not yet persisted to disk.
+    /// In-memory safekeeper state. Some fields repeat ones from
+    /// persistent SafeKeeperState and waiting to be persisted
+    /// to disk.
     pub inmem: SafekeeperMemState,
     /// SafeKeeperState persisted to disk and methods for update.
     pub state: CTRL,
-
     /// WAL storage with write functions.
     pub wal_store: WAL,
 }
