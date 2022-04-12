@@ -82,6 +82,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ) -> Result<()> {
         let mut modification = timeline.begin_modification(lsn);
 
+        let recdata_len = recdata.len();
         let mut decoded = decode_wal_record(recdata);
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -248,6 +249,13 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         for blk in decoded.blocks.iter() {
             self.ingest_decoded_block(&mut modification, lsn, &decoded, blk)?;
         }
+
+        // Emit wal entry metadata, if configured to do so
+        crate::wal_metadata::write(crate::wal_metadata::WalEntryMetadata {
+            lsn,
+            size: recdata_len,
+            affected_pages: decoded.blocks.iter().map(|blk| blk.into()).collect(),
+        });
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {

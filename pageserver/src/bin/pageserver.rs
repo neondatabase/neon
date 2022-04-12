@@ -185,6 +185,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
 
+    // Initialize wal metadata logger, if necessary
+    pageserver::wal_metadata::init(conf).expect("wal_metadata init failed");
+
     info!("version: {}", GIT_VERSION);
 
     // TODO: Check that it looks like a valid repository before going further

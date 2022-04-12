@@ -15,6 +15,7 @@ pub mod tenant_threads;
 pub mod thread_mgr;
 pub mod timelines;
 pub mod virtual_file;
+pub mod wal_metadata;
 pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
