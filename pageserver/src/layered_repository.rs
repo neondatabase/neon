@@ -108,16 +108,17 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
-// Metrics for cloud upload
+// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
+// or in testing they estimate how much we would upload if we did.
 lazy_static! {
-    static ref NUM_FILES_SCHEDULED_FOR_UPLOAD: IntCounter = register_int_counter!(
-        "pageserver_num_files_scheduled_for_upload",
-        "Number of files scheduled for upload to cloud storage",
+    static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
+        "pageserver_num_persistent_files_created",
+        "Number of files created that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
-    static ref BYTES_SCHEDULED_FOR_UPLOAD: IntCounter = register_int_counter!(
-        "pageserver_bytes_scheduled_for_upload",
-        "Total bytes scheduled for upload to cloud storage",
+    static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
+        "pageserver_persistent_bytes_written",
+        "Total bytes written that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
 }
@@ -1540,12 +1541,9 @@ impl LayeredTimeline {
             )?;
 
             // Update upload metrics
-            for path in vec![new_delta_path.clone()] {
-                let file = File::open(path)?;
-                let size_bytes = file.metadata()?.len();
-                NUM_FILES_SCHEDULED_FOR_UPLOAD.inc_by(1);
-                BYTES_SCHEDULED_FOR_UPLOAD.inc_by(size_bytes);
-            }
+            let new_delta_size = File::open(&new_delta_path)?.metadata()?.len();
+            NUM_PERSISTENT_FILES_CREATED.inc_by(1);
+            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_size);
 
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
