@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use crate::pgdatadir_mapping::*;
 use crate::relish::*;
 use crate::repository::Repository;
+use crate::wal_metadata::WalEntryMetadata;
 use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
@@ -256,6 +257,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 hex::encode(bytes.freeze())
             };
             let page_hex = {
+                let foo: DecodedBkpBlock;
                 use bytes::BufMut;
                 let mut page = BytesMut::new();
                 page.put_u32(blk.rnode_spcnode);
@@ -269,6 +271,13 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
             self.ingest_decoded_block(&mut writer, lsn, &decoded, blk)?;
         }
+
+        // Emit wal entry metadata, if configured to do so
+        crate::wal_metadata::write(WalEntryMetadata {
+            lsn,
+            size: recdata_len,
+            affected_pages: decoded.blocks.iter().map(|blk| blk.into()).collect()
+        });
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {

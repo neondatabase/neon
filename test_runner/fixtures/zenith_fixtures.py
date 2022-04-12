@@ -614,11 +614,10 @@ class ZenithEnv:
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
     def run_psbench(self, timeline):
-        ps_log_filename = os.path.join(self.repo_dir, "pageserver.log")
-        ps_connstr = self.pageserver.connstr()
+        wal_metadata_filename = os.path.join(self.repo_dir, "wal_metadata.log")
         psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
         tenant_hex = self.initial_tenant.hex
-        args = [psbench_binpath, ps_log_filename, ps_connstr, tenant_hex, timeline]
+        args = [psbench_binpath, wal_metadata_filename, tenant_hex, timeline]
         subprocess.run(args)
 
     @cached_property

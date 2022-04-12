@@ -19,6 +19,7 @@ pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
+pub mod wal_metadata;
 
 use lazy_static::lazy_static;
 use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};

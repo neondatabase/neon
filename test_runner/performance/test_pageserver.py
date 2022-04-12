@@ -18,7 +18,7 @@ def test_get_page(zenith_simple_env: ZenithEnv,
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            workload = "pgbench long"
+            workload = "pgbench"
 
             print(f"Running workload {workload}")
             if workload == "hot page":
