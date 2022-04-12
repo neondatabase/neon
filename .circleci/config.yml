@@ -672,7 +672,7 @@ jobs:
             --data \
               "{
                 \"state\": \"pending\",
-                \"context\": \"zenith-remote-ci\",
+                \"context\": \"neon-cloud-e2e\",
                 \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
               }"
       - run:
@@ -688,7 +688,7 @@ jobs:
               "{
                 \"ref\": \"main\",
                 \"inputs\": {
-                  \"ci_job_name\": \"zenith-remote-ci\",
+                  \"ci_job_name\": \"neon-cloud-e2e\",
                   \"commit_hash\": \"$CIRCLE_SHA1\",
                   \"remote_repo\": \"$LOCAL_REPO\"
                 }
@@ -828,11 +828,11 @@ workflows:
       - remote-ci-trigger:
           # Context passes credentials for gh api
           context: CI_ACCESS_TOKEN
-          remote_repo: "zenithdb/console"
+          remote_repo: "neondatabase/cloud"
           requires:
             # XXX: Successful build doesn't mean everything is OK, but
             # the job to be triggered takes so much time to complete (~22 min)
             # that it's better not to wait for the commented-out steps
-            - build-zenith-debug
+            - build-zenith-release
             # - pg_regress-tests-release
             # - other-tests-release
