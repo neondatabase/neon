@@ -68,11 +68,11 @@ S3.
 
 The unit is # of bytes.
 
-#### checkpoint_period
+#### compaction_period
 
-The pageserver checks whether `checkpoint_distance` has been reached
-every `checkpoint_period` seconds. Default is 1 s, which should be
-fine.
+Every `compaction_period` seconds, the page server checks if
+maintenance operations, like compaction, are needed on the layer
+files.  Default is 1 s, which should be fine.
 
 #### gc_horizon
 

@@ -73,8 +73,11 @@ is accessed through a buffer cache.
 If the page server crashes, the Memtable is lost. It is rebuilt by
 processing again the WAL that's newer than the latest layer in L0.
 
-The size of the Memtable is equal to the "checkpoint distance", or the
-amount of WAL that we need to keep in the safekeeper.
+The size of the Memtable is configured by the "checkpoint distance"
+setting. Because anything that hasn't been flushed to disk and
+uploaded to S3 yet needs to be kept in the safekeeper, the "checkpoint
+distance" also determines the amount of WAL that needs to kept in the
+safekeeper.
 
 # L0
 
@@ -129,7 +132,7 @@ collecting layers that are older than the GC horizon.
 # Partitioning scheme
 
 When compaction happens and creates a new set of files in L1, how do
-we partition the data into the files? 
+we partition the data into the files?
 
 - Goal is that each file is ~ 1 GB in size
 - Try to match partition boundaries at relation boundaries. (See [1]

@@ -13,7 +13,7 @@ keeps track of WAL records which are not synced to S3 yet.
 
 The Page Server consists of multiple threads that operate on a shared
 repository of page versions:
-
+```
                                            | WAL
                                            V
                                    +--------------+
@@ -46,7 +46,7 @@ Legend:
 
 --->   Data flow
 <---
-
+```
 
 Page Service
 ------------

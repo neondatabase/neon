@@ -1,5 +1,5 @@
 //!
-//! The layer map tracks what layers exist for all the relishes in a timeline.
+//! The layer map tracks what layers exist in a timeline.
 //!
 //! When the timeline is first accessed, the server lists of all layer files
 //! in the timelines/<timelineid> directory, and populates this map with
@@ -61,12 +61,24 @@ pub struct LayerMap {
     historic_layers: Vec<Arc<dyn Layer>>,
 }
 
+/// Return value of LayerMap::search
 pub struct SearchResult {
     pub layer: Arc<dyn Layer>,
     pub lsn_floor: Lsn,
 }
 
 impl LayerMap {
+    ///
+    /// Find the latest layer that covers the given 'key', with lsn <
+    /// 'end_lsn'.
+    ///
+    /// Returns the layer, if any, and an 'lsn_floor' value that
+    /// indicates which portion of the layer the caller should
+    /// check. 'lsn_floor' is normally the start-LSN of the layer, but
+    /// can be greater if there is an overlapping layer that might
+    /// contain the version, even if it's missing from the returned
+    /// layer.
+    ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
         // linear search
         // Find the latest image layer that covers the given key
@@ -195,11 +207,11 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Is there a newer image layer for given segment?
+    /// Is there a newer image layer for given key-range?
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    /// We ignore segments newer than disk_consistent_lsn because they will be removed at restart
+    /// We ignore layers newer than disk_consistent_lsn because they will be removed at restart
     /// We also only look at historic layers
     //#[allow(dead_code)]
     pub fn newer_image_layer_exists(
@@ -238,28 +250,13 @@ impl LayerMap {
         }
     }
 
-    /// Is there any layer for given segment that is alive at the lsn?
-    ///
-    /// This is a public wrapper for SegEntry fucntion,
-    /// used for garbage collection, to determine if some alive layer
-    /// exists at the lsn. If so, we shouldn't delete a newer dropped layer
-    /// to avoid incorrectly making it visible.
-    /*
-        pub fn layer_exists_at_lsn(&self, seg: SegmentTag, lsn: Lsn) -> Result<bool> {
-            Ok(if let Some(segentry) = self.historic_layers.get(&seg) {
-                segentry.exists_at_lsn(seg, lsn)?.unwrap_or(false)
-            } else {
-                false
-            })
-        }
-    */
-
     pub fn iter_historic_layers(&self) -> std::slice::Iter<Arc<dyn Layer>> {
         self.historic_layers.iter()
     }
 
+    /// Find the last image layer that covers 'key', ignoring any image layers
+    /// newer than 'lsn'.
     fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
-        // Find the last image layer that covers the key
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         for l in self.historic_layers.iter() {
@@ -299,9 +296,7 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
-        let mut points: Vec<Key>;
-
-        points = vec![key_range.start];
+        let mut points = vec![key_range.start];
         for l in self.historic_layers.iter() {
             if l.get_lsn_range().start > lsn {
                 continue;
@@ -334,6 +329,8 @@ impl LayerMap {
         Ok(ranges)
     }
 
+    /// Count how many L1 delta layers there are that overlap with the
+    /// given key and LSN range.
     pub fn count_deltas(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>) -> Result<usize> {
         let mut result = 0;
         for l in self.historic_layers.iter() {
@@ -360,6 +357,7 @@ impl LayerMap {
         Ok(result)
     }
 
+    /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
         let mut deltas = Vec::new();
         for l in self.historic_layers.iter() {
@@ -376,10 +374,22 @@ impl LayerMap {
 
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self) -> Result<()> {
+    pub fn dump(&self, verbose: bool) -> Result<()> {
         println!("Begin dump LayerMap");
+
+        println!("open_layer:");
+        if let Some(open_layer) = &self.open_layer {
+            open_layer.dump(verbose)?;
+        }
+
+        println!("frozen_layers:");
+        for frozen_layer in self.frozen_layers.iter() {
+            frozen_layer.dump(verbose)?;
+        }
+
+        println!("historic_layers:");
         for layer in self.historic_layers.iter() {
-            layer.dump()?;
+            layer.dump(verbose)?;
         }
         println!("End dump LayerMap");
         Ok(())

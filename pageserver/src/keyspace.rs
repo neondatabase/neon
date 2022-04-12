@@ -2,23 +2,20 @@ use crate::repository::{key_range_size, singleton_range, Key};
 use postgres_ffi::pg_constants;
 use std::ops::Range;
 
-// Target file size, when creating image and delta layers
-pub const TARGET_FILE_SIZE_BYTES: u64 = 128 * 1024 * 1024; // 128 MB
-
 ///
 /// Represents a set of Keys, in a compact form.
 ///
 #[derive(Clone, Debug)]
 pub struct KeySpace {
-    // Contiguous ranges of keys that belong to the key space. In key order, and
-    // with no overlap.
+    /// Contiguous ranges of keys that belong to the key space. In key order,
+    /// and with no overlap.
     pub ranges: Vec<Range<Key>>,
 }
 
 impl KeySpace {
     ///
-    /// Partition a key space into roughly chunks of roughly 'target_size' bytes in
-    /// each patition.
+    /// Partition a key space into roughly chunks of roughly 'target_size' bytes
+    /// in each patition.
     ///
     pub fn partition(&self, target_size: u64) -> KeyPartitioning {
         // Assume that each value is 8k in size.

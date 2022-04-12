@@ -18,7 +18,7 @@ paths:
               schema:
                 type: object
                 required:
-                - id
+                  - id
                 properties:
                   id:
                     type: integer
@@ -122,6 +122,110 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Attach remote timeline
+      responses:
+        "200":
+          description: Timeline attaching scheduled
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Timeline download is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Detach local timeline
+      responses:
+        "200":
+          description: Timeline detached
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
       - name: tenant_id
@@ -148,6 +252,7 @@ paths:
                   format: hex
                 ancestor_start_lsn:
                   type: string
+                  format: hex
       responses:
         "201":
           description: TimelineInfo
@@ -178,7 +283,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AlreadyExistsError"
+                $ref: "#/components/schemas/ConflictError"
         "500":
           description: Generic operation error
           content:
@@ -259,7 +364,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AlreadyExistsError"
+                $ref: "#/components/schemas/ConflictError"
         "500":
           description: Generic operation error
           content:
@@ -289,7 +394,6 @@ components:
       required:
         - timeline_id
         - tenant_id
-        - disk_consistent_lsn
       properties:
         timeline_id:
           type: string
@@ -297,17 +401,44 @@ components:
         tenant_id:
           type: string
           format: hex
+        local:
+          $ref: "#/components/schemas/LocalTimelineInfo"
+        remote:
+          $ref: "#/components/schemas/RemoteTimelineInfo"
+    RemoteTimelineInfo:
+      type: object
+      required:
+        - awaits_download
+      properties:
+        awaits_download:
+          type: boolean
+        remote_consistent_lsn:
+          type: string
+          format: hex
+    LocalTimelineInfo:
+      type: object
+      required:
+        - last_record_lsn
+        - disk_consistent_lsn
+        - timeline_state
+      properties:
         last_record_lsn:
           type: string
-        prev_record_lsn:
+          format: hex
+        disk_consistent_lsn:
+          type: string
+          format: hex
+        timeline_state:
           type: string
         ancestor_timeline_id:
           type: string
           format: hex
         ancestor_lsn:
           type: string
-        disk_consistent_lsn:
+          format: hex
+        prev_record_lsn:
           type: string
+          format: hex
         current_logical_size:
           type: integer
         current_logical_size_non_incremental:
@@ -327,14 +458,21 @@ components:
       properties:
         msg:
           type: string
-    AlreadyExistsError:
+    ForbiddenError:
       type: object
       required:
         - msg
       properties:
         msg:
           type: string
-    ForbiddenError:
+    NotFoundError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ConflictError:
       type: object
       required:
         - msg

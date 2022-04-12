@@ -11,8 +11,7 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use anyhow::{bail, ensure, Context, Result};
-use bookfile::Book;
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -34,13 +33,14 @@ use std::time::Instant;
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::keyspace::KeySpace;
 use crate::page_cache;
-use crate::remote_storage::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
+use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
 use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncState, TimelineWriter,
+    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
 };
 use crate::repository::{Key, Value};
+use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -48,13 +48,18 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec};
+use zenith_metrics::{
+    register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec, IntGauge, IntGaugeVec,
+};
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blob_io;
+pub mod block_io;
 mod delta_layer;
-mod ephemeral_file;
+mod disk_btree;
+pub(crate) mod ephemeral_file;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
@@ -95,6 +100,15 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+lazy_static! {
+    static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_last_record_lsn",
+        "Last record LSN grouped by timeline",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
 /// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
@@ -113,29 +127,48 @@ pub struct LayeredRepository {
     // timeout...
     gc_cs: Mutex<()>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+
+    // provides access to timeline data sitting in the remote storage
+    // supposed to be used for retrieval of remote consistent lsn in walreceiver
+    remote_index: RemoteIndex,
+
     /// Makes every timeline to backup their files to remote storage.
-    upload_relishes: bool,
+    upload_layers: bool,
 }
 
 /// Public interface
 impl Repository for LayeredRepository {
     type Timeline = LayeredTimeline;
 
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<Self::Timeline>> {
-        Ok(RepositoryTimeline::from(self.get_or_init_timeline(
-            timelineid,
-            &mut self.timelines.lock().unwrap(),
-        )?))
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>> {
+        let timelines = self.timelines.lock().unwrap();
+        self.get_timeline_internal(timelineid, &timelines)
+            .map(RepositoryTimeline::from)
     }
 
-    fn list_timelines(&self) -> Result<Vec<RepositoryTimeline<Self::Timeline>>> {
-        Ok(self
-            .timelines
+    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+        let mut timelines = self.timelines.lock().unwrap();
+        match self.get_timeline_load_internal(timelineid, &mut timelines)? {
+            Some(local_loaded_timeline) => Ok(local_loaded_timeline),
+            None => anyhow::bail!(
+                "cannot get local timeline: unknown timeline id: {}",
+                timelineid
+            ),
+        }
+    }
+
+    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Self::Timeline>)> {
+        self.timelines
             .lock()
             .unwrap()
-            .values()
-            .map(|timeline_entry| RepositoryTimeline::from(timeline_entry.clone()))
-            .collect())
+            .iter()
+            .map(|(timeline_id, timeline_entry)| {
+                (
+                    *timeline_id,
+                    RepositoryTimeline::from(timeline_entry.clone()),
+                )
+            })
+            .collect()
     }
 
     fn create_empty_timeline(
@@ -158,14 +191,20 @@ impl Repository for LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline.layers.lock().unwrap().next_open_layer_at = Some(initdb_lsn);
 
-        let timeline_rc = Arc::new(timeline);
-        let r = timelines.insert(timelineid, LayeredTimelineEntry::Local(timeline_rc.clone()));
-        assert!(r.is_none());
-        Ok(timeline_rc)
+        let timeline = Arc::new(timeline);
+        let r = timelines.insert(
+            timelineid,
+            LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
+        );
+        ensure!(
+            r.is_none(),
+            "assertion failure, inserted duplicate timeline"
+        );
+        Ok(timeline)
     }
 
     /// Branch a timeline
@@ -176,14 +215,12 @@ impl Repository for LayeredRepository {
         let _gc_cs = self.gc_cs.lock().unwrap();
 
         let mut timelines = self.timelines.lock().unwrap();
-        let src_timeline = match self.get_or_init_timeline(src, &mut timelines)? {
-            LayeredTimelineEntry::Local(timeline) => timeline,
-            LayeredTimelineEntry::Remote { .. } => {
-                bail!("Cannot branch off the timeline {} that's not local", src)
-            }
-        };
+        let src_timeline = self
+            .get_timeline_load_internal(src, &mut timelines)
+            // message about timeline being remote is one .context up in the stack
+            .context("failed to load timeline for branching")?
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
-
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
@@ -218,6 +255,7 @@ impl Repository for LayeredRepository {
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
         Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
+        timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -260,10 +298,10 @@ impl Repository for LayeredRepository {
             let _entered =
                 info_span!("compact", timeline = %timelineid, tenant = %self.tenantid).entered();
             match timeline {
-                LayeredTimelineEntry::Local(timeline) => {
+                LayeredTimelineEntry::Loaded(timeline) => {
                     timeline.compact()?;
                 }
-                LayeredTimelineEntry::Remote { .. } => {
+                LayeredTimelineEntry::Unloaded { .. } => {
                     debug!("Cannot compact remote timeline {}", timelineid)
                 }
             }
@@ -280,11 +318,19 @@ impl Repository for LayeredRepository {
     fn checkpoint(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
-        // checkpoints.  We don't want to block everything else while the
+        // checkpoints. We don't want to block everything else while the
         // checkpoint runs.
         let timelines = self.timelines.lock().unwrap();
         let timelines_to_compact = timelines
             .iter()
+            // filter to get only loaded timelines
+            .filter_map(|(timelineid, entry)| match entry {
+                LayeredTimelineEntry::Loaded(timeline) => Some((timelineid, timeline)),
+                LayeredTimelineEntry::Unloaded { .. } => {
+                    debug!("Skipping checkpoint for unloaded timeline {}", timelineid);
+                    None
+                }
+            })
             .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
@@ -292,15 +338,7 @@ impl Repository for LayeredRepository {
         for (timelineid, timeline) in &timelines_to_compact {
             let _entered =
                 info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
-            match timeline {
-                LayeredTimelineEntry::Local(timeline) => {
-                    timeline.checkpoint(CheckpointConfig::Flush)?;
-                }
-                LayeredTimelineEntry::Remote { .. } => debug!(
-                    "Cannot run the checkpoint for remote timeline {}",
-                    timelineid
-                ),
-            }
+            timeline.checkpoint(CheckpointConfig::Flush)?;
         }
 
         Ok(())
@@ -309,32 +347,10 @@ impl Repository for LayeredRepository {
     // Detaches the timeline from the repository.
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
         let mut timelines = self.timelines.lock().unwrap();
-        match timelines.entry(timeline_id) {
-            Entry::Vacant(_) => {
-                bail!("cannot detach non existing timeline");
-            }
-            Entry::Occupied(mut entry) => {
-                let timeline_entry = entry.get_mut();
+        if timelines.remove(&timeline_id).is_none() {
+            bail!("cannot detach timeline that is not available locally");
+        }
 
-                let timeline = match timeline_entry {
-                    LayeredTimelineEntry::Remote { .. } => {
-                        bail!("cannot detach remote timeline {}", timeline_id);
-                    }
-                    LayeredTimelineEntry::Local(timeline) => timeline,
-                };
-
-                // TODO (rodionov) keep local state in timeline itself (refactoring related to https://github.com/zenithdb/zenith/issues/997 and #1104)
-
-                // FIXME this is local disk consistent lsn, need to keep the latest succesfully uploaded checkpoint lsn in timeline (metadata?)
-                //  https://github.com/zenithdb/zenith/issues/1104
-                let remote_disk_consistent_lsn = timeline.disk_consistent_lsn.load();
-                // reference to timeline is dropped here
-                entry.insert(LayeredTimelineEntry::Remote {
-                    id: timeline_id,
-                    disk_consistent_lsn: remote_disk_consistent_lsn,
-                });
-            }
-        };
         // Release the lock to shutdown and remove the files without holding it
         drop(timelines);
         // shutdown the timeline (this shuts down the walreceiver)
@@ -345,158 +361,144 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    // TODO this method currentlly does not do anything to prevent (or react to) state updates between a sync task schedule and a sync task end (that causes this update).
-    // Sync task is enqueued and can error and be rescheduled, so some significant time may pass between the events.
-    //
-    /// Reacts on the timeline sync state change, changing pageserver's memory state for this timeline (unload or load of the timeline files).
-    fn set_timeline_state(
+    fn apply_timeline_remote_sync_status_update(
         &self,
         timeline_id: ZTimelineId,
-        new_state: TimelineSyncState,
+        timeline_sync_status_update: TimelineSyncStatusUpdate,
     ) -> Result<()> {
         debug!(
-            "set_timeline_state: timeline_id: {}, new_state: {:?}",
-            timeline_id, new_state
+            "apply_timeline_remote_sync_status_update timeline_id: {} update: {:?}",
+            timeline_id, timeline_sync_status_update
         );
-        let mut timelines_accessor = self.timelines.lock().unwrap();
-
-        match new_state {
-            TimelineSyncState::Ready(_) => {
-                let reloaded_timeline =
-                    self.init_local_timeline(timeline_id, &mut timelines_accessor)?;
-                timelines_accessor
-                    .insert(timeline_id, LayeredTimelineEntry::Local(reloaded_timeline));
-                None
+        match timeline_sync_status_update {
+            TimelineSyncStatusUpdate::Uploaded => { /* nothing to do, remote consistent lsn is managed by the remote storage */
             }
-            TimelineSyncState::Evicted(_) => timelines_accessor.remove(&timeline_id),
-            TimelineSyncState::AwaitsDownload(disk_consistent_lsn)
-            | TimelineSyncState::CloudOnly(disk_consistent_lsn) => timelines_accessor.insert(
-                timeline_id,
-                LayeredTimelineEntry::Remote {
-                    id: timeline_id,
-                    disk_consistent_lsn,
-                },
-            ),
-        };
-        // NOTE we do not delete local data in case timeline became cloud only, this is performed in detach_timeline
-        drop(timelines_accessor);
-
+            TimelineSyncStatusUpdate::Downloaded => {
+                match self.timelines.lock().unwrap().entry(timeline_id) {
+                    Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
+                    Entry::Vacant(entry) => {
+                        // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
+                        let metadata = Self::load_metadata(self.conf, timeline_id, self.tenantid).context("failed to load local metadata")?;
+                        // finally we make newly downloaded timeline visible to repository
+                        entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
+                    },
+                };
+            }
+        }
         Ok(())
     }
 
-    /// Layered repo does not store anything but
-    /// * local, fully loaded timelines, ready for usage
-    /// * remote timelines, that need a download task scheduled first before they can be used
-    ///
-    /// [`TimelineSyncState::Evicted`] and other non-local and non-remote states are not stored in the layered repo at all,
-    /// hence their statuses cannot be returned by the repo.
-    fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState> {
-        let timelines_accessor = self.timelines.lock().unwrap();
-        let timeline_entry = timelines_accessor.get(&timeline_id)?;
-        Some(
-            if timeline_entry
-                .local_or_schedule_download(self.tenantid)
-                .is_some()
-            {
-                TimelineSyncState::Ready(timeline_entry.disk_consistent_lsn())
-            } else {
-                TimelineSyncState::CloudOnly(timeline_entry.disk_consistent_lsn())
-            },
-        )
+    fn get_remote_index(&self) -> &RemoteIndex {
+        &self.remote_index
     }
 }
 
 #[derive(Clone)]
 enum LayeredTimelineEntry {
-    Local(Arc<LayeredTimeline>),
-    Remote {
+    Loaded(Arc<LayeredTimeline>),
+    Unloaded {
         id: ZTimelineId,
-        /// metadata contents of the latest successfully uploaded checkpoint
-        disk_consistent_lsn: Lsn,
+        metadata: TimelineMetadata,
     },
 }
 
 impl LayeredTimelineEntry {
     fn timeline_id(&self) -> ZTimelineId {
         match self {
-            LayeredTimelineEntry::Local(timeline) => timeline.timelineid,
-            LayeredTimelineEntry::Remote { id, .. } => *id,
+            LayeredTimelineEntry::Loaded(timeline) => timeline.timelineid,
+            LayeredTimelineEntry::Unloaded { id, .. } => *id,
         }
     }
 
-    /// Gets local timeline data, if it's present. Otherwise schedules a download fot the remote timeline and returns `None`.
-    fn local_or_schedule_download(&self, tenant_id: ZTenantId) -> Option<Arc<LayeredTimeline>> {
+    fn ancestor_timeline_id(&self) -> Option<ZTimelineId> {
         match self {
-            Self::Local(local) => Some(Arc::clone(local)),
-            Self::Remote {
-                id: timeline_id, ..
-            } => {
-                debug!(
-                    "Accessed a remote timeline {} for tenant {}, scheduling a timeline download",
-                    timeline_id, tenant_id
-                );
-                schedule_timeline_download(tenant_id, *timeline_id);
-                None
+            LayeredTimelineEntry::Loaded(timeline) => {
+                timeline.ancestor_timeline.as_ref().map(|t| t.timeline_id())
             }
+            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_timeline(),
         }
     }
 
-    /// Gets a current (latest for the remote case) disk consistent Lsn for the timeline.
-    fn disk_consistent_lsn(&self) -> Lsn {
+    fn ancestor_lsn(&self) -> Lsn {
         match self {
-            Self::Local(local) => local.disk_consistent_lsn.load(),
-            Self::Remote {
-                disk_consistent_lsn,
-                ..
-            } => *disk_consistent_lsn,
+            LayeredTimelineEntry::Loaded(timeline) => timeline.ancestor_lsn,
+            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_lsn(),
+        }
+    }
+
+    fn ensure_loaded(&self) -> anyhow::Result<&Arc<LayeredTimeline>> {
+        match self {
+            LayeredTimelineEntry::Loaded(timeline) => Ok(timeline),
+            LayeredTimelineEntry::Unloaded { .. } => {
+                anyhow::bail!("timeline is unloaded")
+            }
         }
     }
 }
 
 impl From<LayeredTimelineEntry> for RepositoryTimeline<LayeredTimeline> {
-    fn from(layered_timeline: LayeredTimelineEntry) -> Self {
-        match layered_timeline {
-            LayeredTimelineEntry::Local(timeline) => RepositoryTimeline::Local {
-                id: timeline.timelineid,
-                timeline,
-            },
-            LayeredTimelineEntry::Remote {
-                id,
-                disk_consistent_lsn,
-            } => RepositoryTimeline::Remote {
-                id,
-                disk_consistent_lsn,
-            },
+    fn from(entry: LayeredTimelineEntry) -> Self {
+        match entry {
+            LayeredTimelineEntry::Loaded(timeline) => RepositoryTimeline::Loaded(timeline as _),
+            LayeredTimelineEntry::Unloaded { metadata, .. } => {
+                RepositoryTimeline::Unloaded { metadata }
+            }
         }
     }
 }
 
 /// Private functions
 impl LayeredRepository {
-    // Implementation of the public `get_timeline` function. This differs from the public
-    // interface in that the caller must already hold the mutex on the 'timelines' hashmap.
-    fn get_or_init_timeline(
+    // Implementation of the public `get_timeline` function.
+    // Differences from the public:
+    //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
+    fn get_timeline_internal(
+        &self,
+        timelineid: ZTimelineId,
+        timelines: &HashMap<ZTimelineId, LayeredTimelineEntry>,
+    ) -> Option<LayeredTimelineEntry> {
+        timelines.get(&timelineid).cloned()
+    }
+
+    // Implementation of the public `get_timeline_load` function.
+    // Differences from the public:
+    //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
+    fn get_timeline_load_internal(
         &self,
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
-    ) -> Result<LayeredTimelineEntry> {
+    ) -> anyhow::Result<Option<Arc<LayeredTimeline>>> {
         match timelines.get(&timelineid) {
-            Some(timeline_entry) => {
-                let _ = timeline_entry.local_or_schedule_download(self.tenantid);
-                Ok(timeline_entry.clone())
-            }
+            Some(entry) => match entry {
+                LayeredTimelineEntry::Loaded(local_timeline) => {
+                    debug!("timeline {} found loaded into memory", &timelineid);
+                    return Ok(Some(Arc::clone(local_timeline)));
+                }
+                LayeredTimelineEntry::Unloaded { .. } => {}
+            },
             None => {
-                let timeline = self.init_local_timeline(timelineid, timelines)?;
-                timelines.insert(
-                    timelineid,
-                    LayeredTimelineEntry::Local(Arc::clone(&timeline)),
-                );
-                Ok(LayeredTimelineEntry::Local(timeline))
+                debug!("timeline {} not found", &timelineid);
+                return Ok(None);
             }
-        }
+        };
+        debug!(
+            "timeline {} found on a local disk, but not loaded into the memory, loading",
+            &timelineid
+        );
+        let timeline = self.load_local_timeline(timelineid, timelines)?;
+        let was_loaded = timelines.insert(
+            timelineid,
+            LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
+        );
+        ensure!(
+            was_loaded.is_none()
+                || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
+            "assertion failure, inserted wrong timeline in an incorrect state"
+        );
+        Ok(Some(timeline))
     }
 
-    fn init_local_timeline(
+    fn load_local_timeline(
         &self,
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
@@ -507,11 +509,19 @@ impl LayeredRepository {
 
         let ancestor = metadata
             .ancestor_timeline()
-            .map(|ancestor_timelineid| self.get_or_init_timeline(ancestor_timelineid, timelines))
-            .transpose()?;
-        let _enter =
-            info_span!("loading timeline", timeline = %timelineid, tenant = %self.tenantid)
-                .entered();
+            .map(|ancestor_timeline_id| {
+                trace!(
+                    "loading {}'s ancestor {}",
+                    timelineid,
+                    &ancestor_timeline_id
+                );
+                self.get_timeline_load_internal(ancestor_timeline_id, timelines)
+            })
+            .transpose()
+            .context("cannot load ancestor timeline")?
+            .flatten()
+            .map(LayeredTimelineEntry::Loaded);
+        let _enter = info_span!("loading local timeline").entered();
         let timeline = LayeredTimeline::new(
             self.conf,
             metadata,
@@ -519,7 +529,7 @@ impl LayeredRepository {
             timelineid,
             self.tenantid,
             Arc::clone(&self.walredo_mgr),
-            self.upload_relishes,
+            self.upload_layers,
         );
         timeline
             .load_layer_map(disk_consistent_lsn)
@@ -532,7 +542,8 @@ impl LayeredRepository {
         conf: &'static PageServerConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenantid: ZTenantId,
-        upload_relishes: bool,
+        remote_index: RemoteIndex,
+        upload_layers: bool,
     ) -> LayeredRepository {
         LayeredRepository {
             tenantid,
@@ -540,7 +551,8 @@ impl LayeredRepository {
             timelines: Mutex::new(HashMap::new()),
             gc_cs: Mutex::new(()),
             walredo_mgr,
-            upload_relishes,
+            remote_index,
+            upload_layers,
         }
     }
 
@@ -621,92 +633,54 @@ impl LayeredRepository {
         horizon: u64,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
+        let _span_guard =
+            info_span!("gc iteration", tenant = %self.tenantid, timeline = ?target_timelineid);
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
         // grab mutex to prevent new timelines from being created here.
         let _gc_cs = self.gc_cs.lock().unwrap();
 
-        let mut timelines = self.timelines.lock().unwrap();
-
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        //
-        let mut timelineids: Vec<ZTimelineId> = Vec::new();
-
-        // We scan the directory, not the in-memory hash table, because the hash
-        // table only contains entries for timelines that have been accessed. We
-        // need to take all timelines into account, not only the active ones.
-        let timelines_path = self.conf.timelines_path(&self.tenantid);
-
-        for direntry in fs::read_dir(timelines_path)? {
-            let direntry = direntry?;
-            if let Some(fname) = direntry.file_name().to_str() {
-                if let Ok(timelineid) = fname.parse::<ZTimelineId>() {
-                    timelineids.push(timelineid);
-                }
-            }
-        }
-
-        // Now collect info about branchpoints
         let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
-        for &timelineid in &timelineids {
-            let timeline = match self.get_or_init_timeline(timelineid, &mut timelines)? {
-                LayeredTimelineEntry::Local(timeline) => timeline,
-                LayeredTimelineEntry::Remote { .. } => {
-                    warn!(
-                        "Timeline {} is not local, cannot proceed with gc",
-                        timelineid
-                    );
-                    return Ok(totals);
-                }
-            };
+        let mut timeline_ids = Vec::new();
+        let mut timelines = self.timelines.lock().unwrap();
 
-            if let Some(ancestor_timeline) = &timeline.ancestor_timeline {
-                let ancestor_timeline =
-                    match ancestor_timeline.local_or_schedule_download(self.tenantid) {
-                        Some(timeline) => timeline,
-                        None => {
-                            warn!(
-                                "Timeline {} has ancestor {} is not local, cannot proceed with gc",
-                                timelineid,
-                                ancestor_timeline.timeline_id()
-                            );
-                            return Ok(totals);
-                        }
-                    };
+        for (timeline_id, timeline_entry) in timelines.iter() {
+            timeline_ids.push(*timeline_id);
+
+            // This is unresolved question for now, how to do gc in presense of remote timelines
+            // especially when this is combined with branching.
+            // Somewhat related: https://github.com/zenithdb/zenith/issues/999
+            if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
                 // If target_timeline is specified, we only need to know branchpoints of its children
                 if let Some(timelineid) = target_timelineid {
-                    if ancestor_timeline.timelineid == timelineid {
+                    if ancestor_timeline_id == &timelineid {
                         all_branchpoints
-                            .insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                            .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
                     }
                 }
                 // Collect branchpoints for all timelines
                 else {
-                    all_branchpoints.insert((ancestor_timeline.timelineid, timeline.ancestor_lsn));
+                    all_branchpoints.insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
                 }
             }
         }
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
-        for timelineid in timelineids {
+        for timelineid in timeline_ids.into_iter() {
             if thread_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;
             }
 
-            // We have already loaded all timelines above
-            // so this operation is just a quick map lookup.
-            let timeline = match self.get_or_init_timeline(timelineid, &mut *timelines)? {
-                LayeredTimelineEntry::Local(timeline) => timeline,
-                LayeredTimelineEntry::Remote { .. } => {
-                    debug!("Skipping GC for non-local timeline {}", timelineid);
-                    continue;
-                }
-            };
+            // Timeline is known to be local and loaded.
+            let timeline = self
+                .get_timeline_load_internal(timelineid, &mut *timelines)?
+                .expect("checked above that timeline is local and loaded");
 
             // If target_timeline is specified, only GC it
             if let Some(target_timelineid) = target_timelineid {
@@ -787,14 +761,15 @@ pub struct LayeredTimeline {
     ancestor_timeline: Option<LayeredTimelineEntry>,
     ancestor_lsn: Lsn,
 
-    // Metrics histograms
+    // Metrics
     reconstruct_time_histo: Histogram,
     flush_time_histo: Histogram,
     compact_time_histo: Histogram,
     create_images_time_histo: Histogram,
+    last_record_gauge: IntGauge,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
-    upload_relishes: AtomicBool,
+    upload_layers: AtomicBool,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
@@ -819,8 +794,6 @@ pub struct LayeredTimeline {
     // garbage collecting data that is still needed by the child timelines.
     gc_info: RwLock<GcInfo>,
 
-    partitioning: RwLock<Option<(KeyPartitioning, Lsn)>>,
-
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
     // It is needed in checks when we want to error on some operations
@@ -830,8 +803,25 @@ pub struct LayeredTimeline {
     initdb_lsn: Lsn,
 }
 
+///
+/// Information about how much history needs to be retained, needed by
+/// Garbage Collection.
+///
 struct GcInfo {
+    /// Specific LSNs that are needed.
+    ///
+    /// Currently, this includes all points where child branches have
+    /// been forked off from. In the future, could also include
+    /// explicit user-defined snapshot points.
     retain_lsns: Vec<Lsn>,
+
+    /// In addition to 'retain_lsns', keep everything newer than this
+    /// point.
+    ///
+    /// This is calculated by subtracting 'gc_horizon' setting from
+    /// last-record LSN
+    ///
+    /// FIXME: is this inclusive or exclusive?
     cutoff: Lsn,
 }
 
@@ -848,10 +838,10 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()> {
+    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
-        assert!(
+        ensure!(
             !IS_WAL_RECEIVER.with(|c| c.get()),
             "wait_lsn called by WAL receiver thread"
         );
@@ -906,7 +896,7 @@ impl Timeline for LayeredTimeline {
     /// Public entry point for checkpoint(). All the logic is in the private
     /// checkpoint_internal function, this public facade just wraps it for
     /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()> {
+    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
                 self.freeze_inmem_layer(false);
@@ -953,14 +943,6 @@ impl Timeline for LayeredTimeline {
         self.disk_consistent_lsn.load()
     }
 
-    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()> {
-        self.partitioning
-            .write()
-            .unwrap()
-            .replace((partitioning, lsn));
-        Ok(())
-    }
-
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
             tl: self,
@@ -981,7 +963,7 @@ impl LayeredTimeline {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        upload_relishes: bool,
+        upload_layers: bool,
     ) -> LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
@@ -1006,6 +988,9 @@ impl LayeredTimeline {
                 &tenantid.to_string(),
                 &timelineid.to_string(),
             ])
+            .unwrap();
+        let last_record_gauge = LAST_RECORD_LSN
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
 
         LayeredTimeline {
@@ -1032,8 +1017,9 @@ impl LayeredTimeline {
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
+            last_record_gauge,
 
-            upload_relishes: AtomicBool::new(upload_relishes),
+            upload_layers: AtomicBool::new(upload_layers),
 
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
@@ -1043,7 +1029,6 @@ impl LayeredTimeline {
                 retain_lsns: Vec::new(),
                 cutoff: Lsn(0),
             }),
-            partitioning: RwLock::new(None),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
@@ -1065,9 +1050,9 @@ impl LayeredTimeline {
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
             let fname = direntry.file_name();
-            let fname = fname.to_str().unwrap();
+            let fname = fname.to_string_lossy();
 
-            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+            if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
                     warn!(
@@ -1085,7 +1070,7 @@ impl LayeredTimeline {
                 trace!("found layer {}", layer.filename().display());
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -1110,7 +1095,7 @@ impl LayeredTimeline {
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
-            } else if is_ephemeral_file(fname) {
+            } else if is_ephemeral_file(&fname) {
                 // Delete any old ephemeral files
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
                 fs::remove_file(direntry.path())?;
@@ -1142,7 +1127,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -1274,33 +1259,29 @@ impl LayeredTimeline {
     }
 
     fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
-        let ancestor_entry = self
+        let ancestor = self
             .ancestor_timeline
             .as_ref()
-            .expect("get_ancestor_timeline() called on timeline with no parent");
-
-        let timeline = match ancestor_entry.local_or_schedule_download(self.tenantid) {
-            Some(timeline) => timeline,
-            None => {
-                bail!(
-                    "Cannot get the whole layer for read locked: ancestor of timeline {} is not present locally",
-                    self.timelineid
-                )
-            }
-        };
-        Ok(timeline)
+            .expect("there should be an ancestor")
+            .ensure_loaded()
+            .with_context(|| {
+                format!(
+                "Cannot get the whole layer for read locked: timeline {} is not present locally",
+                self.get_ancestor_timeline_id().unwrap())
+            })?;
+        Ok(Arc::clone(ancestor))
     }
 
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, lsn: Lsn) -> Result<Arc<InMemoryLayer>> {
+    fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.lock().unwrap();
 
-        assert!(lsn.is_aligned());
+        ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
-        assert!(
+        ensure!(
             lsn > last_record_lsn,
             "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
@@ -1354,6 +1335,7 @@ impl LayeredTimeline {
     fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
+        self.last_record_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
@@ -1382,6 +1364,10 @@ impl LayeredTimeline {
         drop(layers);
     }
 
+    ///
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated
+    /// in the in-memory layer, and initiate flushing it if so.
+    ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
 
@@ -1398,6 +1384,7 @@ impl LayeredTimeline {
                 Some(self.tenantid),
                 Some(self.timelineid),
                 "layer flush thread",
+                false,
                 move || self_clone.flush_frozen_layers(false),
             )?;
         }
@@ -1487,8 +1474,7 @@ impl LayeredTimeline {
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn;
-        disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
+        let disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1538,7 +1524,7 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
-            if self.upload_relishes.load(atomic::Ordering::Relaxed) {
+            if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
                     self.timelineid,
@@ -1593,20 +1579,15 @@ impl LayeredTimeline {
 
         let target_file_size = self.conf.checkpoint_distance;
 
-        // 1. The partitioning was already done by the code in
-        // pgdatadir_mapping.rs. We just use it here.
-        let partitioning_guard = self.partitioning.read().unwrap();
-        if let Some((partitioning, lsn)) = partitioning_guard.as_ref() {
+        // Define partitioning schema if needed
+        if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
+        {
+            let (partitioning, lsn) =
+                pgdir.repartition(self.get_last_record_lsn(), self.conf.compaction_target_size)?;
             let timer = self.create_images_time_histo.start_timer();
-            // Make a copy of the partitioning, so that we can release
-            // the lock. Otherwise we could block the WAL receiver.
-            let lsn = *lsn;
-            let parts = partitioning.parts.clone();
-            drop(partitioning_guard);
-
             // 2. Create new image layers for partitions that have been modified
             // "enough".
-            for part in parts.iter() {
+            for part in partitioning.parts.iter() {
                 if self.time_for_new_image_layer(part, lsn, 3)? {
                     self.create_image_layer(part, lsn)?;
                 }
@@ -1618,17 +1599,8 @@ impl LayeredTimeline {
             self.compact_level0(target_file_size)?;
             timer.stop_and_record();
         } else {
-            info!("Could not compact because no partitioning specified yet");
+            debug!("Could not compact because no partitioning specified yet");
         }
-
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
 
         Ok(())
     }
@@ -1653,7 +1625,7 @@ impl LayeredTimeline {
 
                 let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
 
-                info!(
+                debug!(
                     "range {}-{}, has {} deltas on this timeline",
                     img_range.start, img_range.end, num_deltas
                 );
@@ -1896,7 +1868,7 @@ impl LayeredTimeline {
 
             // 1. Is it newer than cutoff point?
             if l.get_lsn_range().end > cutoff {
-                info!(
+                debug!(
                     "keeping {} because it's newer than cutoff {}",
                     l.filename().display(),
                     cutoff
@@ -1913,7 +1885,7 @@ impl LayeredTimeline {
             for retain_lsn in retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
-                    info!(
+                    debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.filename().display(),
                         retain_lsn,
@@ -1931,12 +1903,14 @@ impl LayeredTimeline {
             // OK for a delta layer to have end LSN 101, but if the end LSN
             // is 102, then it might not have been fully flushed to disk
             // before crash.
+            //
+            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
             if !layers.newer_image_layer_exists(
                 &l.get_key_range(),
                 l.get_lsn_range().end,
                 disk_consistent_lsn + 1,
             )? {
-                info!(
+                debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
                 );
@@ -1945,7 +1919,7 @@ impl LayeredTimeline {
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            info!(
+            debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.filename().display(),
                 l.is_incremental(),
@@ -2071,17 +2045,18 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 }
 
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
-    let file = File::open(path)?;
-    let book = Book::new(file)?;
+pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
+    use std::os::unix::fs::FileExt;
 
-    match book.magic() {
-        delta_layer::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump()?;
-        }
-        image_layer::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump()?;
-        }
+    // All layer files start with a two-byte "magic" value, to identify the kind of
+    // file.
+    let file = File::open(path)?;
+    let mut header_buf = [0u8; 2];
+    file.read_exact_at(&mut header_buf, 0)?;
+
+    match u16::from_be_bytes(header_buf) {
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2091,7 +2066,10 @@ pub fn dump_layerfile_from_path(path: &Path) -> Result<()> {
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
-    let filename = path.file_name().unwrap().to_str().unwrap();
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
+        .to_string_lossy();
     let mut new_path = path.clone();
 
     for i in 0u32.. {
@@ -2117,8 +2095,7 @@ pub mod tests {
     use super::*;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::repo_harness::*;
-    use rand::thread_rng;
-    use rand::Rng;
+    use rand::{thread_rng, Rng};
 
     #[test]
     fn corrupt_metadata() -> Result<()> {
@@ -2135,12 +2112,11 @@ pub mod tests {
 
         let mut metadata_bytes = std::fs::read(&metadata_path)?;
         assert_eq!(metadata_bytes.len(), 512);
-        metadata_bytes[512 - 4 - 2] ^= 1;
+        metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let new_repo = harness.load();
-        let err = new_repo.get_timeline(TIMELINE_ID).err().unwrap();
-        assert_eq!(err.to_string(), "failed to load metadata");
+        let err = harness.try_load().err().expect("should fail");
+        assert_eq!(err.to_string(), "failed to load local metadata");
         assert_eq!(
             err.source().unwrap().to_string(),
             "metadata checksum mismatch"
@@ -2220,7 +2196,7 @@ pub mod tests {
         let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
         let mut blknum = 0;
         for _ in 0..50 {
-            for _ in 0..1000 {
+            for _ in 0..10000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer();
                 writer.put(
@@ -2238,12 +2214,6 @@ pub mod tests {
             }
 
             let cutoff = tline.get_last_record_lsn();
-            let parts = keyspace
-                .clone()
-                .to_keyspace()
-                .partition(TEST_FILE_SIZE as u64);
-            tline.hint_partitioning(parts.clone(), lsn)?;
-
             tline.update_gc_info(Vec::new(), cutoff);
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
@@ -2286,9 +2256,6 @@ pub mod tests {
             keyspace.add_key(test_key);
         }
 
-        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
-        tline.hint_partitioning(parts, lsn)?;
-
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
@@ -2300,7 +2267,6 @@ pub mod tests {
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
-                println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -2360,20 +2326,11 @@ pub mod tests {
             keyspace.add_key(test_key);
         }
 
-        let parts = keyspace.to_keyspace().partition(TEST_FILE_SIZE as u64);
-        tline.hint_partitioning(parts, lsn)?;
-
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = ZTimelineId::generate();
             repo.branch_timeline(tline_id, new_tline_id, lsn)?;
-            tline = if let RepositoryTimeline::Local { id: _, timeline } =
-                repo.get_timeline(new_tline_id)?
-            {
-                timeline
-            } else {
-                panic!("unexpected timeline state");
-            };
+            tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
             for _ in 0..NUM_KEYS {

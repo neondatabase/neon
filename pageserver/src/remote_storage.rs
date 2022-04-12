@@ -5,7 +5,7 @@
 //! There are a few components the storage machinery consists of:
 //! * [`RemoteStorage`] trait a CRUD-like generic abstraction to use for adapting external storages with a few implementations:
 //!     * [`local_fs`] allows to use local file system as an external storage
-//!     * [`rust_s3`] uses AWS S3 bucket as an external storage
+//!     * [`s3_bucket`] uses AWS S3 bucket as an external storage
 //!
 //! * synchronization logic at [`storage_sync`] module that keeps pageserver state (both runtime one and the workdir files) and storage state in sync.
 //! Synchronization internals are split into submodules
@@ -82,7 +82,7 @@
 //! The sync queue processing also happens in batches, so the sync tasks can wait in the queue for some time.
 
 mod local_fs;
-mod rust_s3;
+mod s3_bucket;
 mod storage_sync;
 
 use std::{
@@ -93,28 +93,34 @@ use std::{
 
 use anyhow::{bail, Context};
 use tokio::io;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
+pub use self::storage_sync::index::{RemoteIndex, TimelineIndexEntry};
 pub use self::storage_sync::{schedule_timeline_checkpoint_upload, schedule_timeline_download};
-use self::{local_fs::LocalFs, rust_s3::S3};
+use self::{local_fs::LocalFs, s3_bucket::S3Bucket};
+use crate::layered_repository::ephemeral_file::is_ephemeral_file;
 use crate::{
     config::{PageServerConf, RemoteStorageKind},
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
-    repository::TimelineSyncState,
 };
 
 pub use storage_sync::compression;
+
+#[derive(Clone, Copy, Debug)]
+pub enum LocalTimelineInitStatus {
+    LocallyComplete,
+    NeedsSync,
+}
+
+type LocalTimelineInitStatuses = HashMap<ZTenantId, HashMap<ZTimelineId, LocalTimelineInitStatus>>;
 
 /// A structure to combine all synchronization data to share with pageserver after a successful sync loop initialization.
 /// Successful initialization includes a case when sync loop is not started, in which case the startup data is returned still,
 /// to simplify the received code.
 pub struct SyncStartupData {
-    /// A sync state, derived from initial comparison of local timeline files and the remote archives,
-    /// before any sync tasks are executed.
-    /// To reuse the local file scan logic, the timeline states are returned even if no sync loop get started during init:
-    /// in this case, no remote files exist and all local timelines with correct metadata files are considered ready.
-    pub initial_timeline_states: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncState>>,
+    pub remote_index: RemoteIndex,
+    pub local_timeline_init_statuses: LocalTimelineInitStatuses,
 }
 
 /// Based on the config, initiates the remote storage connection and starts a separate thread
@@ -145,7 +151,7 @@ pub fn start_local_timeline_sync(
                 storage_sync::spawn_storage_sync_thread(
                     config,
                     local_timeline_files,
-                    S3::new(s3_config, &config.workdir)?,
+                    S3Bucket::new(s3_config, &config.workdir)?,
                     storage_config.max_concurrent_sync,
                     storage_config.max_sync_errors,
                 )
@@ -154,23 +160,18 @@ pub fn start_local_timeline_sync(
         .context("Failed to spawn the storage sync thread"),
         None => {
             info!("No remote storage configured, skipping storage sync, considering all local timelines with correct metadata files enabled");
-            let mut initial_timeline_states: HashMap<
-                ZTenantId,
-                HashMap<ZTimelineId, TimelineSyncState>,
-            > = HashMap::new();
-            for (ZTenantTimelineId{tenant_id, timeline_id}, (timeline_metadata, _)) in
+            let mut local_timeline_init_statuses = LocalTimelineInitStatuses::new();
+            for (ZTenantTimelineId { tenant_id, timeline_id }, _) in
                 local_timeline_files
             {
-                initial_timeline_states
+                local_timeline_init_statuses
                     .entry(tenant_id)
                     .or_default()
-                    .insert(
-                        timeline_id,
-                        TimelineSyncState::Ready(timeline_metadata.disk_consistent_lsn()),
-                    );
+                    .insert(timeline_id, LocalTimelineInitStatus::LocallyComplete);
             }
             Ok(SyncStartupData {
-                initial_timeline_states,
+                local_timeline_init_statuses,
+                remote_index: RemoteIndex::empty(),
             })
         }
     }
@@ -260,6 +261,8 @@ fn collect_timelines_for_tenant(
     Ok(timelines)
 }
 
+// discover timeline files and extract timeline metadata
+//  NOTE: ephemeral files are excluded from the list
 fn collect_timeline_files(
     timeline_dir: &Path,
 ) -> anyhow::Result<(ZTimelineId, TimelineMetadata, Vec<PathBuf>)> {
@@ -279,6 +282,9 @@ fn collect_timeline_files(
         if entry_path.is_file() {
             if entry_path.file_name().and_then(ffi::OsStr::to_str) == Some(METADATA_FILE_NAME) {
                 timeline_metadata_path = Some(entry_path);
+            } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
+                debug!("skipping ephemeral file {}", entry_path.display());
+                continue;
             } else {
                 timeline_files.push(entry_path);
             }
@@ -319,26 +325,34 @@ trait RemoteStorage: Send + Sync {
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         to: &Self::StoragePath,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
     async fn download(
         &self,
         from: &Self::StoragePath,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Option<StorageMetadata>>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
     async fn download_range(
         &self,
         from: &Self::StoragePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Option<StorageMetadata>>;
 
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()>;
 }
+
+/// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
+/// Immutable, cannot be changed once the file is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMetadata(HashMap<String, String>);
 
 fn strip_path_prefix<'a>(prefix: &'a Path, path: &'a Path) -> anyhow::Result<&'a Path> {
     if prefix == path {

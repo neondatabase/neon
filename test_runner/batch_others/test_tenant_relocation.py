@@ -5,15 +5,15 @@ import subprocess
 import threading
 from uuid import UUID
 from fixtures.log_helper import log
-import time
 import signal
 import pytest
 
-from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, zenith_binpath, pg_distrib_dir
+from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
+from fixtures.utils import lsn_from_hex
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
-    assert abs(a - b) / a < margin_ratio, (a, b, margin_ratio)
+    assert abs(a - b) / a < margin_ratio, abs(a - b) / a
 
 
 @contextmanager
@@ -34,6 +34,7 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c listen_pg_addr='localhost:{pg_port}'",
         f"-c listen_http_addr='localhost:{http_port}'",
         f"-c pg_distrib_dir='{pg_distrib_dir}'",
+        f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
 
@@ -55,20 +56,6 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         log.info("stopping new pageserver")
         pid = int((new_pageserver_dir / 'pageserver.pid').read_text())
         os.kill(pid, signal.SIGQUIT)
-
-
-def wait_for(number_of_iterations: int, interval: int, func):
-    last_exception = None
-    for i in range(number_of_iterations):
-        try:
-            res = func()
-        except Exception as e:
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            last_exception = e
-            time.sleep(interval)
-            continue
-        return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
 @contextmanager
@@ -108,13 +95,6 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
-def assert_local(pageserver_http_client: ZenithPageserverHttpClient, tenant: UUID, timeline: str):
-    timeline_detail = pageserver_http_client.timeline_detail(tenant, UUID(timeline))
-    assert timeline_detail.get('type') == "Local", timeline_detail
-    return timeline_detail
-
-
-@pytest.mark.skip(reason="will be fixed with https://github.com/zenithdb/zenith/issues/1193")
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                            port_distributor: PortDistributor,
@@ -129,7 +109,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
     tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
-
+    env.zenith_cli.create_root_branch('main', tenant_id=tenant)
     env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
     tenant_pg = env.postgres.create_start(branch_name='main',
@@ -141,8 +121,8 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         with conn.cursor() as cur:
             # save timeline for later gc call
             cur.execute("SHOW zenith.zenith_timeline")
-            timeline = cur.fetchone()[0]
-            log.info("timeline to relocate %s", timeline)
+            timeline = UUID(cur.fetchone()[0])
+            log.info("timeline to relocate %s", timeline.hex)
 
             # we rely upon autocommit after each statement
             # as waiting for acceptors happens there
@@ -150,6 +130,15 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             cur.execute("INSERT INTO t SELECT generate_series(1,1000), 'some payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (500500, )
+            cur.execute("SELECT pg_current_wal_flush_lsn()")
+
+            current_lsn = lsn_from_hex(cur.fetchone()[0])
+
+    pageserver_http = env.pageserver.http_client()
+
+    # wait until pageserver receives that data
+    wait_for_last_record_lsn(pageserver_http, tenant, timeline, current_lsn)
+    timeline_detail = assert_local(pageserver_http, tenant, timeline)
 
     if with_load == 'with_load':
         # create load table
@@ -165,12 +154,10 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # run checkpoint manually to be sure that data landed in remote storage
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor() as pscur:
-            pscur.execute(f"do_gc {tenant.hex} {timeline}")
+            pscur.execute(f"checkpoint {tenant.hex} {timeline.hex}")
 
-    # ensure upload is completed
-    pageserver_http_client = env.pageserver.http_client()
-    timeline_detail = pageserver_http_client.timeline_detail(tenant, UUID(timeline))
-    assert timeline_detail['disk_consistent_lsn'] == timeline_detail['timeline_state']['Ready']
+    # wait until pageserver successfully uploaded a checkpoint to remote storage
+    wait_for_upload(pageserver_http, tenant, timeline, current_lsn)
 
     log.info("inititalizing new pageserver")
     # bootstrap second pageserver
@@ -182,8 +169,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
     pageserver_bin = pathlib.Path(zenith_binpath) / 'pageserver'
 
-    new_pageserver_http_client = ZenithPageserverHttpClient(port=new_pageserver_http_port,
-                                                            auth_token=None)
+    new_pageserver_http = ZenithPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
 
     with new_pageserver_helper(new_pageserver_dir,
                                pageserver_bin,
@@ -192,25 +178,18 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                                new_pageserver_http_port):
 
         # call to attach timeline to new pageserver
-        new_pageserver_http_client.timeline_attach(tenant, UUID(timeline))
-        # FIXME cannot handle duplicate download requests, subject to fix in https://github.com/zenithdb/zenith/issues/997
-        time.sleep(5)
-        # new pageserver should in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
+        new_pageserver_http.timeline_attach(tenant, timeline)
+        # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
         new_timeline_detail = wait_for(
             number_of_iterations=5,
             interval=1,
-            func=lambda: assert_local(new_pageserver_http_client, tenant, timeline))
-        assert new_timeline_detail['timeline_state'].get('Ready'), new_timeline_detail
+            func=lambda: assert_local(new_pageserver_http, tenant, timeline))
+
         # when load is active these checks can break because lsns are not static
         # so lets check with some margin
-        if with_load == 'without_load':
-            # TODO revisit this once https://github.com/zenithdb/zenith/issues/1049 is fixed
-            assert_abs_margin_ratio(new_timeline_detail['disk_consistent_lsn'],
-                                    timeline_detail['disk_consistent_lsn'],
-                                    0.01)
-            assert_abs_margin_ratio(new_timeline_detail['timeline_state']['Ready'],
-                                    timeline_detail['timeline_state']['Ready'],
-                                    0.01)
+        assert_abs_margin_ratio(lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
+                                lsn_from_hex(timeline_detail['local']['disk_consistent_lsn']),
+                                0.03)
 
         # callmemaybe to start replication from safekeeper to the new pageserver
         # when there is no load there is a clean checkpoint and no wal delta
@@ -219,7 +198,9 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         with pg_cur(PgProtocol(host='localhost', port=new_pageserver_pg_port)) as cur:
             # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'"
             safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} ztenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
-            cur.execute("callmemaybe {} {} {}".format(tenant, timeline, safekeeper_connstring))
+            cur.execute("callmemaybe {} {} {}".format(tenant.hex,
+                                                      timeline.hex,
+                                                      safekeeper_connstring))
 
         tenant_pg.stop()
 
@@ -239,7 +220,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
         # is no longer involved, and if it is, we will see the errors
-        pageserver_http_client.timeline_detach(tenant, UUID(timeline))
+        pageserver_http.timeline_detach(tenant, timeline)
 
         with pg_cur(tenant_pg) as cur:
             # check that data is still there
@@ -251,10 +232,10 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             assert cur.fetchone() == (2001000, )
 
         if with_load == 'with_load':
-            assert load_ok_event.wait(1)
+            assert load_ok_event.wait(3)
             log.info('stopping load thread')
             load_stop_event.set()
-            load_thread.join()
+            load_thread.join(timeout=10)
             log.info('load thread stopped')
 
         # bring old pageserver back for clean shutdown via zenith cli

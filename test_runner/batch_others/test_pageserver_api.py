@@ -1,6 +1,6 @@
 from uuid import uuid4, UUID
 import pytest
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient, zenith_binpath
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 
 
 # test that we cannot override node id
@@ -39,9 +39,13 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
         timeline_id_str = str(timeline['timeline_id'])
         timeline_details = client.timeline_detail(tenant_id=tenant_id,
                                                   timeline_id=UUID(timeline_id_str))
-        assert timeline_details['kind'] == 'Local'
+
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str
+
+        local_timeline_details = timeline_details.get('local')
+        assert local_timeline_details is not None
+        assert local_timeline_details['timeline_state'] == 'Loaded'
 
 
 def test_pageserver_http_api_client(zenith_simple_env: ZenithEnv):

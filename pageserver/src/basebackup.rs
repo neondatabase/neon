@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use log::*;
 use std::fmt::Write as FmtWrite;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 
-use crate::relish::*;
+use crate::reltag::SlruKind;
 use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
@@ -65,6 +65,7 @@ impl<'a> Basebackup<'a> {
         // prev_lsn to Lsn(0) if we cannot provide the correct value.
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
+            info!("waiting for {}", req_lsn);
             timeline.tline.wait_lsn(req_lsn)?;
 
             // If the requested point is the end of the timeline, we can
@@ -153,7 +154,7 @@ impl<'a> Basebackup<'a> {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-            assert!(img.len() == pg_constants::BLCKSZ as usize);
+            ensure!(img.len() == pg_constants::BLCKSZ as usize);
 
             slru_buf.extend_from_slice(&img);
         }
@@ -180,7 +181,7 @@ impl<'a> Basebackup<'a> {
     ) -> anyhow::Result<()> {
         let relmap_img = if has_relmap_file {
             let img = self.timeline.get_relmap_file(spcnode, dbnode, self.lsn)?;
-            assert!(img.len() == 512);
+            ensure!(img.len() == 512);
             Some(img)
         } else {
             None
@@ -220,7 +221,8 @@ impl<'a> Basebackup<'a> {
             {
                 return Ok(());
             }
-            assert!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
+            // User defined tablespaces are not supported
+            ensure!(spcnode == pg_constants::DEFAULTTABLESPACE_OID);
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
@@ -314,7 +316,7 @@ impl<'a> Basebackup<'a> {
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
         let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
-        assert!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
+        ensure!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
     }

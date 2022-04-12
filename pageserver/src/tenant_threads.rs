@@ -57,7 +57,7 @@ pub fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()>
         // Garbage collect old files that are not needed for PITR anymore
         if conf.gc_horizon > 0 {
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            repo.gc_iteration(None, conf.gc_horizon, false).unwrap();
+            repo.gc_iteration(None, conf.gc_horizon, false)?;
         }
 
         // TODO Write it in more adequate way using

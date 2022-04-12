@@ -5,23 +5,23 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
+use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
+use crate::layered_repository::block_io::BlockReader;
 use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
 use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::storage_layer::{
-    BlobRef, Layer, ValueReconstructResult, ValueReconstructState,
+    Layer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use log::*;
 use std::collections::HashMap;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
-use std::io::Write;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use zenith_utils::bin_ser::BeSer;
@@ -54,14 +54,12 @@ pub struct InMemoryLayerInner {
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
     ///
-    index: HashMap<Key, VecMap<Lsn, BlobRef>>,
+    index: HashMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
-
-    end_offset: u64,
 }
 
 impl InMemoryLayerInner {
@@ -114,16 +112,18 @@ impl Layer for InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult> {
-        assert!(lsn_range.start <= self.start_lsn);
+    ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start <= self.start_lsn);
         let mut need_image = true;
 
         let inner = self.inner.read().unwrap();
 
+        let mut reader = inner.file.block_cursor();
+
         // Scan the page versions backwards, starting from `lsn`.
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
-            for (entry_lsn, blob_ref) in slice.iter().rev() {
+            for (entry_lsn, pos) in slice.iter().rev() {
                 match &reconstruct_state.img {
                     Some((cached_lsn, _)) if entry_lsn <= cached_lsn => {
                         return Ok(ValueReconstructResult::Complete)
@@ -131,8 +131,7 @@ impl Layer for InMemoryLayer {
                     _ => {}
                 }
 
-                let mut buf = vec![0u8; blob_ref.size()];
-                inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
+                let buf = reader.read_blob(*pos)?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
@@ -167,17 +166,10 @@ impl Layer for InMemoryLayer {
         todo!();
     }
 
-    /// Cannot unload anything in an in-memory layer, since there's no backing
-    /// store. To release memory used by an in-memory layer, use 'freeze' to turn
-    /// it into an on-disk layer.
-    fn unload(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Nothing to do here. When you drop the last reference to the layer, it will
     /// be deallocated.
     fn delete(&self) -> Result<()> {
-        panic!("can't delete an InMemoryLayer")
+        bail!("can't delete an InMemoryLayer")
     }
 
     fn is_incremental(&self) -> bool {
@@ -190,7 +182,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self) -> Result<()> {
+    fn dump(&self, verbose: bool) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
@@ -204,12 +196,16 @@ impl Layer for InMemoryLayer {
             self.timelineid, self.start_lsn, end_str,
         );
 
+        if !verbose {
+            return Ok(());
+        }
+
+        let mut cursor = inner.file.block_cursor();
         let mut buf = Vec::new();
         for (key, vec_map) in inner.index.iter() {
-            for (lsn, blob_ref) in vec_map.as_slice() {
+            for (lsn, pos) in vec_map.as_slice() {
                 let mut desc = String::new();
-                buf.resize(blob_ref.size(), 0);
-                inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
+                cursor.read_blob_into_buf(*pos, &mut buf)?;
                 let val = Value::des(&buf);
                 match val {
                     Ok(Value::Image(img)) => {
@@ -264,7 +260,6 @@ impl InMemoryLayer {
                 end_lsn: None,
                 index: HashMap::new(),
                 file,
-                end_offset: 0,
             }),
         })
     }
@@ -279,15 +274,10 @@ impl InMemoryLayer {
 
         inner.assert_writeable();
 
-        let off = inner.end_offset;
-        let buf = Value::ser(&val)?;
-        let len = buf.len();
-        inner.file.write_all(&buf)?;
-        inner.end_offset += len as u64;
+        let off = inner.file.write_blob(&Value::ser(&val)?)?;
 
         let vec_map = inner.index.entry(key).or_default();
-        let blob_ref = BlobRef::new(off, len, val.will_init());
-        let old = vec_map.append_or_update_last(lsn, blob_ref).unwrap().0;
+        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
             warn!("Key {} at {} already exists", key, lsn);
@@ -311,30 +301,16 @@ impl InMemoryLayer {
         assert!(self.start_lsn < end_lsn);
         inner.end_lsn = Some(end_lsn);
 
-        // FIXME
-        /*
-                for perseg in inner.segs.values() {
-                    if let Some((lsn, _)) = perseg.seg_sizes.as_slice().last() {
-                        assert!(lsn < &end_lsn, "{:?} {:?}", lsn, end_lsn);
-                    }
-
-                    for (_blk, vec_map) in perseg.page_versions.iter() {
-                        for (lsn, _pos) in vec_map.as_slice() {
-                            assert!(*lsn < end_lsn);
-                        }
-                    }
-                }
-        */
+        for vec_map in inner.index.values() {
+            for (lsn, _pos) in vec_map.as_slice() {
+                assert!(*lsn < end_lsn);
+            }
+        }
     }
 
     /// Write this frozen in-memory layer to disk.
     ///
-    /// Returns new layers that replace this one.
-    /// If not dropped and reconstruct_pages is true, returns a new image layer containing the page versions
-    /// at the `end_lsn`. Can also return a DeltaLayer that includes all the
-    /// WAL records between start and end LSN. (The delta layer is not needed
-    /// when a new relish is created with a single LSN, so that the start and
-    /// end LSN are the same.)
+    /// Returns a new delta layer with all the same data as this in-memory layer
     pub fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
@@ -355,21 +331,21 @@ impl InMemoryLayer {
             self.start_lsn..inner.end_lsn.unwrap(),
         )?;
 
-        let mut do_steps = || -> Result<()> {
-            for (key, vec_map) in inner.index.iter() {
-                // Write all page versions
-                for (lsn, blob_ref) in vec_map.as_slice() {
-                    let mut buf = vec![0u8; blob_ref.size()];
-                    inner.file.read_exact_at(&mut buf, blob_ref.pos())?;
-                    let val = Value::des(&buf)?;
-                    delta_layer_writer.put_value(*key, *lsn, val)?;
-                }
+        let mut buf = Vec::new();
+
+        let mut cursor = inner.file.block_cursor();
+
+        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
+        keys.sort_by_key(|k| k.0);
+
+        for (key, vec_map) in keys.iter() {
+            let key = **key;
+            // Write all page versions
+            for (lsn, pos) in vec_map.as_slice() {
+                cursor.read_blob_into_buf(*pos, &mut buf)?;
+                let val = Value::des(&buf)?;
+                delta_layer_writer.put_value(key, *lsn, val)?;
             }
-            Ok(())
-        };
-        if let Err(err) = do_steps() {
-            delta_layer_writer.abort();
-            return Err(err);
         }
 
         let delta_layer = delta_layer_writer.finish(Key::MAX)?;

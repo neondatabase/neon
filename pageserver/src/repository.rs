@@ -1,10 +1,13 @@
-use crate::keyspace::KeyPartitioning;
+use crate::layered_repository::metadata::TimelineMetadata;
+use crate::remote_storage::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
+use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fmt::Display;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
@@ -24,6 +27,8 @@ pub struct Key {
     pub field5: u8,
     pub field6: u32,
 }
+
+pub const KEY_SIZE: usize = 18;
 
 impl Key {
     pub fn next(&self) -> Key {
@@ -59,7 +64,7 @@ impl Key {
         key
     }
 
-    pub fn from_array(b: [u8; 18]) -> Self {
+    pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
             field2: u32::from_be_bytes(b[1..5].try_into().unwrap()),
@@ -68,6 +73,15 @@ impl Key {
             field5: b[13],
             field6: u32::from_be_bytes(b[14..18].try_into().unwrap()),
         }
+    }
+
+    pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
+        buf[0] = self.field1;
+        BE::write_u32(&mut buf[1..5], self.field2);
+        BE::write_u32(&mut buf[5..9], self.field3);
+        BE::write_u32(&mut buf[9..13], self.field4);
+        buf[13] = self.field5;
+        BE::write_u32(&mut buf[14..18], self.field6);
     }
 }
 
@@ -141,12 +155,15 @@ impl Key {
     }
 }
 
-//
-// There are two kinds of values: incremental and non-incremental
-//
+/// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
+    /// An Image value contains a full copy of the value
     Image(Bytes),
+    /// A WalRecord value contains a WAL record that needs to be
+    /// replayed get the full value. Replaying the WAL record
+    /// might need a previous version of the value (if will_init()
+    /// returns false), or it may be replayed stand-alone (true).
     WalRecord(ZenithWalRecord),
 }
 
@@ -163,32 +180,45 @@ impl Value {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum TimelineSyncStatusUpdate {
+    Uploaded,
+    Downloaded,
+}
+
+impl Display for TimelineSyncStatusUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TimelineSyncStatusUpdate::Uploaded => "Uploaded",
+            TimelineSyncStatusUpdate::Downloaded => "Downloaded",
+        };
+        f.write_str(s)
+    }
+}
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
     type Timeline: Timeline;
 
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
-
-    /// Updates timeline based on the new sync state, received from the remote storage synchronization.
+    /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn set_timeline_state(
+    fn apply_timeline_remote_sync_status_update(
         &self,
         timeline_id: ZTimelineId,
-        new_state: TimelineSyncState,
+        timeline_sync_status_update: TimelineSyncStatusUpdate,
     ) -> Result<()>;
 
-    /// Gets current synchronization state of the timeline.
-    /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn get_timeline_state(&self, timeline_id: ZTimelineId) -> Option<TimelineSyncState>;
-
     /// Get Timeline handle for given zenith timeline ID.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Result<RepositoryTimeline<Self::Timeline>>;
+    /// This function is idempotent. It doesnt change internal state in any way.
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>>;
+
+    /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
+    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Self::Timeline>>;
 
     /// Lists timelines the repository contains.
     /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
-    fn list_timelines(&self) -> Result<Vec<RepositoryTimeline<Self::Timeline>>>;
+    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Self::Timeline>)>;
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
@@ -225,69 +255,44 @@ pub trait Repository: Send + Sync {
     /// perform one compaction iteration.
     /// this function is periodically called by compactor thread.
     fn compaction_iteration(&self) -> Result<()>;
+
+    /// detaches locally available timeline by stopping all threads and removing all the data.
+    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
+
+    // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
+    fn get_remote_index(&self) -> &RemoteIndex;
 }
 
 /// A timeline, that belongs to the current repository.
 pub enum RepositoryTimeline<T> {
     /// Timeline, with its files present locally in pageserver's working directory.
     /// Loaded into pageserver's memory and ready to be used.
-    Local { id: ZTimelineId, timeline: Arc<T> },
-    /// Timeline, found on the pageserver's remote storage, but not yet downloaded locally.
-    Remote {
-        id: ZTimelineId,
-        /// metadata contents of the latest successfully uploaded checkpoint
-        disk_consistent_lsn: Lsn,
+    Loaded(Arc<T>),
+
+    /// All the data is available locally, but not loaded into memory, so loading have to be done before actually using the timeline
+    Unloaded {
+        // It is ok to keep metadata here, because it is not changed when timeline is unloaded.
+        // FIXME can s3 sync actually change it? It can change it when timeline is in awaiting download state.
+        //  but we currently do not download something for the timeline once it is local (even if there are new checkpoints) is it correct?
+        // also it is not that good to keep TimelineMetadata here, because it is layered repo implementation detail
+        metadata: TimelineMetadata,
     },
 }
 
-impl<T> RepositoryTimeline<T> {
-    pub fn local_timeline(&self) -> Option<Arc<T>> {
-        if let Self::Local { timeline, .. } = self {
-            Some(Arc::clone(timeline))
-        } else {
-            None
-        }
-    }
-
-    pub fn id(&self) -> ZTimelineId {
-        match self {
-            Self::Local { id, .. } => *id,
-            Self::Remote { id, .. } => *id,
-        }
-    }
-}
-
-/// A state of the timeline synchronization with the remote storage.
-/// Contains `disk_consistent_lsn` of the corresponding remote timeline (latest checkpoint's disk_consistent_lsn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimelineSyncState {
-    /// No further downloads from the remote storage are needed.
-    /// The timeline state is up-to-date or ahead of the remote storage one,
-    /// ready to be used in any pageserver operation.
-    Ready(Lsn),
-    /// Timeline is scheduled for downloading, but its current local state is not up to date with the remote storage.
-    /// The timeline is not ready to be used in any pageserver operations, otherwise it might diverge its local state from the remote version,
-    /// making it impossible to sync it further.
-    AwaitsDownload(Lsn),
-    /// Timeline was not in the pageserver's local working directory, but was found on the remote storage, ready to be downloaded.
-    /// Cannot be used in any pageserver operations due to complete absence locally.
-    CloudOnly(Lsn),
-    /// Timeline was evicted from the pageserver's local working directory due to conflicting remote and local states or too many errors during the synchronization.
-    /// Such timelines cannot have their state synchronized further and may not have the data about remote timeline's disk_consistent_lsn, since eviction may happen
-    /// due to errors before the remote timeline contents is known.
-    Evicted(Option<Lsn>),
+pub enum LocalTimelineState {
+    // timeline is loaded into memory (with layer map and all the bits),
+    Loaded,
+    // timeline is on disk locally and ready to be loaded into memory.
+    Unloaded,
 }
 
-impl TimelineSyncState {
-    pub fn remote_disk_consistent_lsn(&self) -> Option<Lsn> {
-        Some(match self {
-            TimelineSyncState::Evicted(None) => return None,
-            TimelineSyncState::Ready(lsn) => lsn,
-            TimelineSyncState::AwaitsDownload(lsn) => lsn,
-            TimelineSyncState::CloudOnly(lsn) => lsn,
-            TimelineSyncState::Evicted(Some(lsn)) => lsn,
-        })
-        .copied()
+impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
+    fn from(local_timeline_entry: &'a RepositoryTimeline<T>) -> Self {
+        match local_timeline_entry {
+            RepositoryTimeline::Loaded(_) => LocalTimelineState::Loaded,
+            RepositoryTimeline::Unloaded { .. } => LocalTimelineState::Unloaded,
+        }
     }
 }
 
@@ -379,19 +384,6 @@ pub trait Timeline: Send + Sync {
     fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
 
     ///
-    /// Tell the implementation how the keyspace should be partitioned.
-    ///
-    /// FIXME: This is quite a hack. The code in pgdatadir_mapping.rs knows
-    /// which keys exist and what is the logical grouping of them. That's why
-    /// the code there (and in keyspace.rs) decides the partitioning, not the
-    /// layered_repository.rs implementation. That's a layering violation:
-    /// the Repository implementation ought to be responsible for the physical
-    /// layout, but currently it's more convenient to do it in pgdatadir_mapping.rs
-    /// rather than in layered_repository.rs.
-    ///
-    fn hint_partitioning(&self, partitioning: KeyPartitioning, lsn: Lsn) -> Result<()>;
-
-    ///
     /// Check that it is valid to request operations with that lsn.
     fn check_lsn_is_in_scope(
         &self,
@@ -433,7 +425,7 @@ pub mod repo_harness {
     use crate::RepositoryImpl;
     use crate::{
         config::PageServerConf,
-        layered_repository::{LayeredRepository, TIMELINES_SEGMENT_NAME},
+        layered_repository::LayeredRepository,
         walredo::{WalRedoError, WalRedoManager},
     };
 
@@ -487,7 +479,6 @@ pub mod repo_harness {
             let repo_dir = PageServerConf::test_repo_dir(test_name);
             let _ = fs::remove_dir_all(&repo_dir);
             fs::create_dir_all(&repo_dir)?;
-            fs::create_dir_all(&repo_dir.join(TIMELINES_SEGMENT_NAME))?;
 
             let conf = PageServerConf::dummy_conf(repo_dir);
             // Make a static copy of the config. This can never be free'd, but that's
@@ -496,6 +487,7 @@ pub mod repo_harness {
 
             let tenant_id = ZTenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
+            fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
             Ok(Self {
                 conf,
@@ -505,9 +497,39 @@ pub mod repo_harness {
         }
 
         pub fn load(&self) -> RepositoryImpl {
+            self.try_load().expect("failed to load test repo")
+        }
+
+        pub fn try_load(&self) -> Result<RepositoryImpl> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            LayeredRepository::new(self.conf, walredo_mgr, self.tenant_id, false)
+            let repo = LayeredRepository::new(
+                self.conf,
+                walredo_mgr,
+                self.tenant_id,
+                RemoteIndex::empty(),
+                false,
+            );
+            // populate repo with locally available timelines
+            for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
+                .expect("should be able to read timelines dir")
+            {
+                let timeline_dir_entry = timeline_dir_entry.unwrap();
+                let timeline_id: ZTimelineId = timeline_dir_entry
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .parse()
+                    .unwrap();
+
+                repo.apply_timeline_remote_sync_status_update(
+                    timeline_id,
+                    TimelineSyncStatusUpdate::Downloaded,
+                )?;
+            }
+
+            Ok(repo)
         }
 
         pub fn timeline_path(&self, timeline_id: &ZTimelineId) -> PathBuf {
@@ -559,7 +581,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     lazy_static! {
-        static ref TEST_KEY: Key = Key::from_array(hex!("112222222233333333444444445500000001"));
+        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
     }
 
     #[test]
@@ -620,10 +642,9 @@ mod tests {
 
         // Branch the history, modify relation differently on the new timeline
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
+        let newtline = repo
+            .get_timeline_load(NEW_TIMELINE_ID)
+            .expect("Should have a local timeline");
         let new_writer = newtline.writer();
         new_writer.put(TEST_KEY_A, Lsn(0x40), test_value("bar at 0x40"))?;
         new_writer.finish_write(Lsn(0x40));
@@ -769,11 +790,9 @@ mod tests {
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
-
+        let newtline = repo
+            .get_timeline_load(NEW_TIMELINE_ID)
+            .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, false)?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
@@ -787,10 +806,9 @@ mod tests {
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
-        let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
-            Some(timeline) => timeline,
-            None => panic!("Should have a local timeline"),
-        };
+        let newtline = repo
+            .get_timeline_load(NEW_TIMELINE_ID)
+            .expect("Should have a local timeline");
 
         make_some_layers(newtline.as_ref(), Lsn(0x60))?;
 
@@ -802,6 +820,83 @@ mod tests {
             newtline.get(*TEST_KEY, Lsn(0x50))?,
             TEST_IMG(&format!("foo at {}", Lsn(0x40)))
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_load() -> Result<()> {
+        const TEST_NAME: &str = "timeline_load";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        {
+            let repo = harness.load();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0x8000))?;
+            make_some_layers(tline.as_ref(), Lsn(0x8000))?;
+            tline.checkpoint(CheckpointConfig::Forced)?;
+        }
+
+        let repo = harness.load();
+        let tline = repo
+            .get_timeline(TIMELINE_ID)
+            .expect("cannot load timeline");
+        assert!(matches!(tline, RepositoryTimeline::Unloaded { .. }));
+
+        assert!(repo.get_timeline_load(TIMELINE_ID).is_ok());
+
+        let tline = repo
+            .get_timeline(TIMELINE_ID)
+            .expect("cannot load timeline");
+        assert!(matches!(tline, RepositoryTimeline::Loaded(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_load_with_ancestor() -> Result<()> {
+        const TEST_NAME: &str = "timeline_load_with_ancestor";
+        let harness = RepoHarness::create(TEST_NAME)?;
+        // create two timelines
+        {
+            let repo = harness.load();
+            let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+            make_some_layers(tline.as_ref(), Lsn(0x20))?;
+            tline.checkpoint(CheckpointConfig::Forced)?;
+
+            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+
+            let newtline = repo
+                .get_timeline_load(NEW_TIMELINE_ID)
+                .expect("Should have a local timeline");
+
+            make_some_layers(newtline.as_ref(), Lsn(0x60))?;
+            tline.checkpoint(CheckpointConfig::Forced)?;
+        }
+
+        // check that both of them are initially unloaded
+        let repo = harness.load();
+        {
+            let tline = repo.get_timeline(TIMELINE_ID).expect("cannot get timeline");
+            assert!(matches!(tline, RepositoryTimeline::Unloaded { .. }));
+
+            let tline = repo
+                .get_timeline(NEW_TIMELINE_ID)
+                .expect("cannot get timeline");
+            assert!(matches!(tline, RepositoryTimeline::Unloaded { .. }));
+        }
+        // load only child timeline
+        let _ = repo
+            .get_timeline_load(NEW_TIMELINE_ID)
+            .expect("cannot load timeline");
+
+        // check that both, child and ancestor are loaded
+        let tline = repo
+            .get_timeline(NEW_TIMELINE_ID)
+            .expect("cannot get timeline");
+        assert!(matches!(tline, RepositoryTimeline::Loaded(_)));
+
+        let tline = repo.get_timeline(TIMELINE_ID).expect("cannot get timeline");
+        assert!(matches!(tline, RepositoryTimeline::Loaded(_)));
 
         Ok(())
     }

@@ -1,7 +1,18 @@
 [pageservers]
-zenith-us-stage-ps-1
+#zenith-us-stage-ps-1 console_region_id=27
+zenith-us-stage-ps-2 console_region_id=27
 
 [safekeepers]
-zenith-us-stage-sk-1
-zenith-us-stage-sk-2
-zenith-us-stage-sk-3
+zenith-us-stage-sk-1 console_region_id=27
+zenith-us-stage-sk-2 console_region_id=27
+zenith-us-stage-sk-3 console_region_id=27
+zenith-us-stage-sk-4 console_region_id=27
+
+[storage:children]
+pageservers
+safekeepers
+
+[storage:vars]
+console_mgmt_base_url = http://console-staging.local
+bucket_name           = zenith-staging-storage-us-east-1
+bucket_region         = us-east-1

@@ -33,7 +33,7 @@ use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use crate::basebackup;
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::DatadirTimeline;
-use crate::relish::*;
+use crate::reltag::RelTag;
 use crate::repository::Repository;
 use crate::repository::Timeline;
 use crate::tenant_mgr;
@@ -230,6 +230,7 @@ pub fn thread_main(
                     None,
                     None,
                     "serving Page Service thread",
+                    false,
                     move || page_service_conn_main(conf, local_auth, socket, auth_type),
                 ) {
                     // Thread creation failed. Log the error and continue.
@@ -324,8 +325,8 @@ impl PageServerHandler {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle pagerequests for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -513,10 +514,11 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
+        info!("starting");
 
         // check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-            .context("Cannot handle basebackup request for a remote timeline")?;
+        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            .context("Cannot load local timeline")?;
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
@@ -535,7 +537,7 @@ impl PageServerHandler {
             basebackup.send_tarball()?;
         }
         pgb.write_message(&BeMessage::CopyDone)?;
-        debug!("CopyDone sent!");
+        info!("done");
 
         Ok(())
     }
@@ -568,7 +570,6 @@ impl postgres_backend::Handler for PageServerHandler {
         // which requires auth to be present
         let data = self
             .auth
-            .as_ref()
             .as_ref()
             .unwrap()
             .decode(str::from_utf8(jwt_response)?)?;
@@ -650,8 +651,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
 
             // Check that the timeline exists
-            tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for callmemaybe requests")?;
+            tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
             walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
 
@@ -725,8 +726,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
-            let timeline = tenant_mgr::get_timeline_for_tenant(tenantid, timelineid)
-                .context("Failed to fetch local timeline for checkpoint request")?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
 
             timeline.tline.checkpoint(CheckpointConfig::Forced)?;
 

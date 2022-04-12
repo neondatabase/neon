@@ -24,13 +24,23 @@ pub enum ConnectionError {
 impl UserFacingError for ConnectionError {}
 
 /// Compute node connection params.
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct DatabaseInfo {
     pub host: String,
     pub port: u16,
     pub dbname: String,
     pub user: String,
     pub password: Option<String>,
+}
+
+// Manually implement debug to omit personal and sensitive info
+impl std::fmt::Debug for DatabaseInfo {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fmt.debug_struct("DatabaseInfo")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 /// PostgreSQL version as [`String`].
@@ -41,6 +51,7 @@ impl DatabaseInfo {
         let host_port = format!("{}:{}", self.host, self.port);
         let socket = TcpStream::connect(host_port).await?;
         let socket_addr = socket.peer_addr()?;
+        socket2::SockRef::from(&socket).set_keepalive(true)?;
 
         Ok((socket_addr, socket))
     }

@@ -67,6 +67,8 @@ For more detailed info, see `/walkeeper/README`
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.
 
+We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
+
 `/zenith`
 
 Main entry point for the 'zenith' CLI utility.

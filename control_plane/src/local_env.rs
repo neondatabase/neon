@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -12,9 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
 use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{
-    HexZTenantId, HexZTimelineId, ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId,
-};
+use zenith_utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use crate::safekeeper::SafekeeperNode;
 
@@ -25,6 +24,7 @@ use crate::safekeeper::SafekeeperNode;
 // to 'zenith init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
+#[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
@@ -50,11 +50,16 @@ pub struct LocalEnv {
     // Default tenant ID to use with the 'zenith' command line utility, when
     // --tenantid is not explicitly specified.
     #[serde(default)]
-    pub default_tenant_id: Option<HexZTenantId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub default_tenant_id: Option<ZTenantId>,
 
     // used to issue tokens during e.g pg start
     #[serde(default)]
     pub private_key_path: PathBuf,
+
+    // A comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
+    #[serde(default)]
+    pub broker_endpoints: Option<String>,
 
     pub pageserver: PageServerConf,
 
@@ -66,7 +71,8 @@ pub struct LocalEnv {
     // A `HashMap<String, HashMap<ZTenantId, ZTimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    branch_name_mappings: HashMap<String, Vec<(HexZTenantId, HexZTimelineId)>>,
+    #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
+    branch_name_mappings: HashMap<String, Vec<(ZTenantId, ZTimelineId)>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -164,9 +170,6 @@ impl LocalEnv {
             .entry(branch_name.clone())
             .or_default();
 
-        let tenant_id = HexZTenantId::from(tenant_id);
-        let timeline_id = HexZTimelineId::from(timeline_id);
-
         let existing_ids = existing_values
             .iter()
             .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
@@ -193,7 +196,6 @@ impl LocalEnv {
         branch_name: &str,
         tenant_id: ZTenantId,
     ) -> Option<ZTimelineId> {
-        let tenant_id = HexZTenantId::from(tenant_id);
         self.branch_name_mappings
             .get(branch_name)?
             .iter()
@@ -207,13 +209,7 @@ impl LocalEnv {
             .iter()
             .flat_map(|(name, tenant_timelines)| {
                 tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
-                    (
-                        ZTenantTimelineId::new(
-                            ZTenantId::from(tenant_id),
-                            ZTimelineId::from(timeline_id),
-                        ),
-                        name.clone(),
-                    )
+                    (ZTenantTimelineId::new(tenant_id, timeline_id), name.clone())
                 })
             })
             .collect()
@@ -259,7 +255,7 @@ impl LocalEnv {
 
         // If no initial tenant ID was given, generate it.
         if env.default_tenant_id.is_none() {
-            env.default_tenant_id = Some(HexZTenantId::from(ZTenantId::generate()));
+            env.default_tenant_id = Some(ZTenantId::generate());
         }
 
         env.base_data_dir = base_path();

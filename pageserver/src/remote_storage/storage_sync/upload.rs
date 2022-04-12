@@ -2,23 +2,21 @@
 
 use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use anyhow::ensure;
-use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
 use crate::{
     config::PageServerConf,
     remote_storage::{
         storage_sync::{
-            compression,
-            index::{RemoteTimeline, TimelineIndexEntry},
-            sync_queue, update_index_description, SyncKind, SyncTask,
+            compression, fetch_full_index,
+            index::{RemoteTimeline, TimelineIndexEntry, TimelineIndexEntryInner},
+            sync_queue, SyncKind, SyncTask,
         },
         RemoteStorage, ZTenantTimelineId,
     },
 };
 
-use super::{compression::ArchiveHeader, index::RemoteTimelineIndex, NewCheckpoint};
+use super::{compression::ArchiveHeader, NewCheckpoint, RemoteIndex};
 
 /// Attempts to compress and upload given checkpoint files.
 /// No extra checks for overlapping files is made: download takes care of that, ensuring no non-metadata local timeline files are overwritten.
@@ -30,7 +28,7 @@ pub(super) async fn upload_timeline_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: NewCheckpoint,
     retries: u32,
@@ -49,22 +47,24 @@ pub(super) async fn upload_timeline_checkpoint<
     let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
         None => None,
-        Some(TimelineIndexEntry::Full(remote_timeline)) => Some(Cow::Borrowed(remote_timeline)),
-        Some(TimelineIndexEntry::Description(_)) => {
-            debug!("Found timeline description for the given ids, downloading the full index");
-            match update_index_description(remote_assets.as_ref(), &timeline_dir, sync_id).await {
-                Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
-                Err(e) => {
-                    error!("Failed to download full timeline index: {:?}", e);
-                    sync_queue::push(SyncTask::new(
-                        sync_id,
-                        retries,
-                        SyncKind::Upload(new_checkpoint),
-                    ));
-                    return Some(false);
+        Some(entry) => match entry.inner() {
+            TimelineIndexEntryInner::Full(remote_timeline) => Some(Cow::Borrowed(remote_timeline)),
+            TimelineIndexEntryInner::Description(_) => {
+                debug!("Found timeline description for the given ids, downloading the full index");
+                match fetch_full_index(remote_assets.as_ref(), &timeline_dir, sync_id).await {
+                    Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
+                    Err(e) => {
+                        error!("Failed to download full timeline index: {:?}", e);
+                        sync_queue::push(SyncTask::new(
+                            sync_id,
+                            retries,
+                            SyncKind::Upload(new_checkpoint),
+                        ));
+                        return Some(false);
+                    }
                 }
             }
-        }
+        },
     };
 
     let already_contains_upload_lsn = remote_timeline
@@ -93,30 +93,48 @@ pub(super) async fn upload_timeline_checkpoint<
     )
     .await
     {
-        Ok((archive_header, header_size)) => {
+        Some(Ok((archive_header, header_size))) => {
             let mut index_write = index.write().await;
-            match index_write.timeline_entry_mut(&sync_id) {
-                Some(TimelineIndexEntry::Full(remote_timeline)) => {
-                    remote_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                }
-                None | Some(TimelineIndexEntry::Description(_)) => {
+            match index_write
+                .timeline_entry_mut(&sync_id)
+                .map(|e| e.inner_mut())
+            {
+                None => {
                     let mut new_timeline = RemoteTimeline::empty();
                     new_timeline.update_archive_contents(
                         new_checkpoint.metadata.disk_consistent_lsn(),
                         archive_header,
                         header_size,
                     );
-                    index_write.add_timeline_entry(sync_id, TimelineIndexEntry::Full(new_timeline));
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
+                }
+                Some(TimelineIndexEntryInner::Full(remote_timeline)) => {
+                    remote_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
+                    );
+                }
+                Some(TimelineIndexEntryInner::Description(_)) => {
+                    let mut new_timeline = RemoteTimeline::empty();
+                    new_timeline.update_archive_contents(
+                        new_checkpoint.metadata.disk_consistent_lsn(),
+                        archive_header,
+                        header_size,
+                    );
+                    index_write.add_timeline_entry(
+                        sync_id,
+                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
+                    )
                 }
             }
             debug!("Checkpoint uploaded successfully");
             Some(true)
         }
-        Err(e) => {
+        Some(Err(e)) => {
             error!(
                 "Failed to upload checkpoint: {:?}, requeueing the upload",
                 e
@@ -128,6 +146,7 @@ pub(super) async fn upload_timeline_checkpoint<
             ));
             Some(false)
         }
+        None => Some(true),
     }
 }
 
@@ -136,11 +155,11 @@ async fn try_upload_checkpoint<
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 >(
     config: &'static PageServerConf,
-    remote_assets: Arc<(S, RwLock<RemoteTimelineIndex>)>,
+    remote_assets: Arc<(S, RemoteIndex)>,
     sync_id: ZTenantTimelineId,
     new_checkpoint: &NewCheckpoint,
     files_to_skip: BTreeSet<PathBuf>,
-) -> anyhow::Result<(ArchiveHeader, u64)> {
+) -> Option<anyhow::Result<(ArchiveHeader, u64)>> {
     let ZTenantTimelineId {
         tenant_id,
         timeline_id,
@@ -152,7 +171,7 @@ async fn try_upload_checkpoint<
         .iter()
         .filter(|&path_to_upload| {
             if files_to_skip.contains(path_to_upload) {
-                error!(
+                warn!(
                     "Skipping file upload '{}', since it was already uploaded",
                     path_to_upload.display()
                 );
@@ -162,9 +181,16 @@ async fn try_upload_checkpoint<
             }
         })
         .collect::<Vec<_>>();
-    ensure!(!files_to_upload.is_empty(), "No files to upload");
 
-    compression::archive_files_as_stream(
+    if files_to_upload.is_empty() {
+        warn!(
+            "No files to upload. Upload request was: {:?}, already uploaded files: {:?}",
+            new_checkpoint.layers, files_to_skip
+        );
+        return None;
+    }
+
+    let upload_result = compression::archive_files_as_stream(
         &timeline_dir,
         files_to_upload.into_iter(),
         &new_checkpoint.metadata,
@@ -175,12 +201,15 @@ async fn try_upload_checkpoint<
                 .upload(
                     archive_streamer,
                     &remote_storage.storage_path(&timeline_dir.join(&archive_name))?,
+                    None,
                 )
                 .await
         },
     )
     .await
-    .map(|(header, header_size, _)| (header, header_size))
+    .map(|(header, header_size, _)| (header, header_size));
+
+    Some(upload_result)
 }
 
 #[cfg(test)]
@@ -209,14 +238,14 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             storage
                 .list()
                 .await?
                 .into_iter()
                 .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-        ));
+        );
         let remote_assets = Arc::new((storage, index));
         let index = &remote_assets.1;
 
@@ -405,14 +434,14 @@ mod tests {
         let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
         let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RwLock::new(RemoteTimelineIndex::try_parse_descriptions_from_paths(
+        let index = RemoteIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             storage
                 .list()
                 .await?
                 .into_iter()
                 .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-        ));
+        );
         let remote_assets = Arc::new((storage, index));
         let storage = &remote_assets.0;
         let index = &remote_assets.1;
@@ -431,7 +460,7 @@ mod tests {
             first_checkpoint,
         )
         .await;
-        let after_first_uploads = RemoteTimelineIndex::try_parse_descriptions_from_paths(
+        let after_first_uploads = RemoteIndex::try_parse_descriptions_from_paths(
             repo_harness.conf,
             remote_assets
                 .0
@@ -462,7 +491,7 @@ mod tests {
             0,
         )
         .await;
-        assert_index_descriptions(index, after_first_uploads.clone()).await;
+        assert_index_descriptions(index, &after_first_uploads).await;
 
         let checkpoint_with_uploaded_lsn = create_local_timeline(
             &repo_harness,
@@ -478,7 +507,7 @@ mod tests {
             0,
         )
         .await;
-        assert_index_descriptions(index, after_first_uploads.clone()).await;
+        assert_index_descriptions(index, &after_first_uploads).await;
 
         Ok(())
     }

@@ -34,10 +34,13 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
-          command: git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+          command: |
+              git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+              cat Makefile >> /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
@@ -78,11 +81,14 @@ jobs:
       - checkout
 
         # Grab the postgres git revision to build a cache key.
+        # Append makefile as it could change the way postgres is built.
         # Note this works even though the submodule hasn't been checkout out yet.
       - run:
           name: Get postgres cache key
           command: |
             git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+            cat Makefile >> /tmp/cache-key-postgres
+
 
       - restore_cache:
           name: Restore postgres cache
@@ -111,7 +117,12 @@ jobs:
             fi
 
             export CARGO_INCREMENTAL=0
+            export CACHEPOT_BUCKET=zenith-rust-cachepot
+            export RUSTC_WRAPPER=cachepot
+            export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
+            export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
             "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --bins --tests
+            cachepot -s
 
       - save_cache:
           name: Save rust cache
@@ -141,11 +152,13 @@ jobs:
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
               cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
+              CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
               cov_prefix=()
+              CARGO_FLAGS=--release
             fi
 
-            "${cov_prefix[@]}" cargo test
+            "${cov_prefix[@]}" cargo test $CARGO_FLAGS
 
         # Install the rust binaries, for use by test jobs
       - run:
@@ -215,12 +228,12 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
@@ -274,12 +287,12 @@ jobs:
             - run: git submodule update --init --depth 1
       - restore_cache:
           keys:
-            - v1-python-deps-{{ checksum "poetry.lock" }}
+            - v2-python-deps-{{ checksum "poetry.lock" }}
       - run:
           name: Install deps
           command: ./scripts/pysync
       - save_cache:
-          key: v1-python-deps-{{ checksum "poetry.lock" }}
+          key: v2-python-deps-{{ checksum "poetry.lock" }}
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
@@ -464,7 +477,10 @@ jobs:
           name: Build and push compute-tools Docker image
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
-            docker build -t zenithdb/compute-tools:latest -f Dockerfile.compute-tools .
+            docker build \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
+              --tag zenithdb/compute-tools:latest -f Dockerfile.compute-tools .
             docker push zenithdb/compute-tools:latest
       - run:
           name: Init postgres submodule
@@ -518,7 +534,10 @@ jobs:
           name: Build and push compute-tools Docker image
           command: |
             echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
-            docker build -t zenithdb/compute-tools:release -f Dockerfile.compute-tools .
+            docker build \
+              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
+              --tag zenithdb/compute-tools:release -f Dockerfile.compute-tools .
             docker push zenithdb/compute-tools:release
       - run:
           name: Init postgres submodule
@@ -605,7 +624,7 @@ jobs:
             ssh-add ssh-key
             rm -f ssh-key ssh-key-cert.pub
 
-            ansible-playbook deploy.yaml -i production.hosts -e console_mgmt_base_url=http://console-release.local
+            ansible-playbook deploy.yaml -i production.hosts
             rm -f zenith_install.tar.gz .zenith_current_version
 
   deploy-release-proxy:

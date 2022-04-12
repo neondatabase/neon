@@ -33,7 +33,7 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (get_self_dir, mkdir_if_needed, subprocess_capture)
+from .utils import (etcd_path, get_self_dir, mkdir_if_needed, subprocess_capture, lsn_from_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -257,7 +257,8 @@ class PgProtocol:
                 dbname: Optional[str] = None,
                 schema: Optional[str] = None,
                 username: Optional[str] = None,
-                password: Optional[str] = None) -> str:
+                password: Optional[str] = None,
+                statement_timeout_ms: Optional[int] = None) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
@@ -277,16 +278,23 @@ class PgProtocol:
         if schema:
             res = f"{res} options='-c search_path={schema}'"
 
+        if statement_timeout_ms:
+            res = f"{res} options='-c statement_timeout={statement_timeout_ms}'"
+
         return res
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self,
-                *,
-                autocommit=True,
-                dbname: Optional[str] = None,
-                schema: Optional[str] = None,
-                username: Optional[str] = None,
-                password: Optional[str] = None) -> PgConnection:
+    def connect(
+        self,
+        *,
+        autocommit=True,
+        dbname: Optional[str] = None,
+        schema: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        # individual statement timeout in seconds, 2 minutes should be enough for our tests
+        statement_timeout: Optional[int] = 120
+    ) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
@@ -294,12 +302,12 @@ class PgProtocol:
         """
 
         conn = psycopg2.connect(
-            self.connstr(
-                dbname=dbname,
-                schema=schema,
-                username=username,
-                password=password,
-            ))
+            self.connstr(dbname=dbname,
+                         schema=schema,
+                         username=username,
+                         password=password,
+                         statement_timeout_ms=statement_timeout *
+                         1000 if statement_timeout else None))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
@@ -425,7 +433,8 @@ class ZenithEnvBuilder:
                  num_safekeepers: int = 0,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None,
-                 default_branch_name=DEFAULT_BRANCH_NAME):
+                 default_branch_name=DEFAULT_BRANCH_NAME,
+                 broker: bool = False):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -434,6 +443,7 @@ class ZenithEnvBuilder:
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
+        self.broker = broker
         self.env: Optional[ZenithEnv] = None
 
         self.s3_mock_server: Optional[MockS3Server] = None
@@ -509,6 +519,8 @@ class ZenithEnvBuilder:
             self.env.pageserver.stop(immediate=True)
             if self.s3_mock_server:
                 self.s3_mock_server.kill()
+            if self.env.broker is not None:
+                self.env.broker.stop()
 
 
 class ZenithEnv:
@@ -561,6 +573,16 @@ class ZenithEnv:
             default_tenant_id = '{self.initial_tenant.hex}'
         """)
 
+        self.broker = None
+        if config.broker:
+            # keep etcd datadir inside 'repo'
+            self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
+                               port=self.port_distributor.get_port(),
+                               peer_port=self.port_distributor.get_port())
+            toml += textwrap.dedent(f"""
+            broker_endpoints = 'http://127.0.0.1:{self.broker.port}'
+        """)
+
         # Create config for pageserver
         pageserver_port = PageserverPort(
             pg=self.port_distributor.get_port(),
@@ -603,11 +625,14 @@ class ZenithEnv:
         self.zenith_cli.init(toml)
 
     def start(self):
-        # Start up the page server and all the safekeepers
+        # Start up the page server, all the safekeepers and the broker
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
             safekeeper.start()
+
+        if self.broker is not None:
+            self.broker.start()
 
     def get_safekeeper_connstrs(self) -> str:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
@@ -872,6 +897,30 @@ class ZenithCli:
             created_timeline_id = matches.group('timeline_id')
 
         return uuid.UUID(created_timeline_id)
+
+    def create_root_branch(self, branch_name: str, tenant_id: Optional[uuid.UUID] = None):
+        cmd = [
+            'timeline',
+            'create',
+            '--branch-name',
+            branch_name,
+            '--tenant-id',
+            (tenant_id or self.env.initial_tenant).hex,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
+
+        created_timeline_id = None
+        if matches is not None:
+            created_timeline_id = matches.group('timeline_id')
+
+        if created_timeline_id is None:
+            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+        else:
+            return uuid.UUID(created_timeline_id)
 
     def create_branch(self,
                       new_branch_name: str = DEFAULT_BRANCH_NAME,
@@ -1649,6 +1698,7 @@ class Safekeeper:
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
+    remote_consistent_lsn: str
 
 
 @dataclass
@@ -1672,7 +1722,8 @@ class SafekeeperHttpClient(requests.Session):
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
-                                        flush_lsn=resj['flush_lsn'])
+                                        flush_lsn=resj['flush_lsn'],
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
@@ -1691,6 +1742,54 @@ class SafekeeperHttpClient(requests.Session):
                 re.MULTILINE):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
+
+
+@dataclass
+class Etcd:
+    """ An object managing etcd instance """
+    datadir: str
+    port: int
+    peer_port: int
+    handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def check_status(self):
+        s = requests.Session()
+        s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
+        s.get(f"http://localhost:{self.port}/health").raise_for_status()
+
+    def start(self):
+        pathlib.Path(self.datadir).mkdir(exist_ok=True)
+        etcd_full_path = etcd_path()
+        if etcd_full_path is None:
+            raise Exception('etcd not found')
+
+        with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
+            args = [
+                etcd_full_path,
+                f"--data-dir={self.datadir}",
+                f"--listen-client-urls=http://localhost:{self.port}",
+                f"--advertise-client-urls=http://localhost:{self.port}",
+                f"--listen-peer-urls=http://localhost:{self.peer_port}"
+            ]
+            self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
+
+        # wait for start
+        started_at = time.time()
+        while True:
+            try:
+                self.check_status()
+            except Exception as e:
+                elapsed = time.time() - started_at
+                if elapsed > 5:
+                    raise RuntimeError(f"timed out waiting {elapsed:.0f}s for etcd start: {e}")
+                time.sleep(0.5)
+            else:
+                break  # success
+
+    def stop(self):
+        if self.handle is not None:
+            self.handle.terminate()
+            self.handle.wait()
 
 
 def get_test_output_dir(request: Any) -> str:
@@ -1846,3 +1945,63 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
+
+
+def wait_for(number_of_iterations: int, interval: int, func):
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            res = func()
+        except Exception as e:
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            last_exception = e
+            time.sleep(interval)
+            continue
+        return res
+    raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
+                 tenant: uuid.UUID,
+                 timeline: uuid.UUID):
+    timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
+    assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
+    return timeline_detail
+
+
+def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['remote']['remote_consistent_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
+
+
+def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID,
+                    lsn: int):
+    """waits for local timeline upload up to specified lsn"""
+
+    wait_for(10, 1, lambda: remote_consistent_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+
+
+def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    lsn_str = detail['local']['last_record_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
+
+
+def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+                             tenant: uuid.UUID,
+                             timeline: uuid.UUID,
+                             lsn: int):
+    """waits for pageserver to catch up to a certain lsn"""
+
+    wait_for(10, 1, lambda: last_record_lsn(pageserver_http_client, tenant, timeline) >= lsn)

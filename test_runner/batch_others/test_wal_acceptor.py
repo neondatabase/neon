@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.zenith_fixtures import PgBin, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
-from fixtures.utils import lsn_to_hex, mkdir_if_needed, lsn_from_hex
+from fixtures.utils import etcd_path, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
@@ -22,6 +22,7 @@ from typing import List, Optional, Any
 # succeed and data is written
 def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
+    zenith_env_builder.broker = True
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_wal_acceptors_normal_work')
@@ -89,29 +90,33 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         sk_metrics = [sk.http_client().get_metrics() for sk in env.safekeepers]
 
         timeline_metrics = []
-        with env.pageserver.http_client() as pageserver_http:
-            for timeline_detail in timeline_details:
-                timeline_id: str = timeline_detail["timeline_id"]
+        for timeline_detail in timeline_details:
+            timeline_id: str = timeline_detail["timeline_id"]
 
-                m = TimelineMetrics(
-                    timeline_id=timeline_id,
-                    last_record_lsn=lsn_from_hex(timeline_detail["last_record_lsn"]),
-                )
-                for sk_m in sk_metrics:
-                    m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
-                    m.commit_lsns.append(sk_m.commit_lsn_inexact[(tenant_id.hex, timeline_id)])
+            local_timeline_detail = timeline_detail.get('local')
+            if local_timeline_detail is None:
+                log.debug(f"Timeline {timeline_id} is not present locally, skipping")
+                continue
 
-                for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
-                    # Invariant. May be < when transaction is in progress.
-                    assert commit_lsn <= flush_lsn
-                # We only call collect_metrics() after a transaction is confirmed by
-                # the compute node, which only happens after a consensus of safekeepers
-                # has confirmed the transaction. We assume majority consensus here.
-                assert (2 * sum(m.last_record_lsn <= lsn
-                                for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
-                assert (2 * sum(m.last_record_lsn <= lsn
-                                for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
-                timeline_metrics.append(m)
+            m = TimelineMetrics(
+                timeline_id=timeline_id,
+                last_record_lsn=lsn_from_hex(local_timeline_detail['last_record_lsn']),
+            )
+            for sk_m in sk_metrics:
+                m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
+                m.commit_lsns.append(sk_m.commit_lsn_inexact[(tenant_id.hex, timeline_id)])
+
+            for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
+                # Invariant. May be < when transaction is in progress.
+                assert commit_lsn <= flush_lsn, f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            # We only call collect_metrics() after a transaction is confirmed by
+            # the compute node, which only happens after a consensus of safekeepers
+            # has confirmed the transaction. We assume majority consensus here.
+            assert (2 * sum(m.last_record_lsn <= lsn
+                            for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            assert (2 * sum(m.last_record_lsn <= lsn
+                            for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+            timeline_metrics.append(m)
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
 
@@ -320,6 +325,49 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
     stop_value.value = 1
     proc.join()
+
+
+# Test that safekeepers push their info to the broker and learn peer status from it
+@pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
+def test_broker(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 3
+    zenith_env_builder.broker = True
+    zenith_env_builder.enable_local_fs_remote_storage()
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch("test_broker", "main")
+    pg = env.postgres.create_start('test_broker')
+    pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+
+    # learn zenith timeline from compute
+    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
+    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    # wait until remote_consistent_lsn gets advanced on all safekeepers
+    clients = [sk.http_client() for sk in env.safekeepers]
+    stat_before = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
+    log.info(f"statuses is {stat_before}")
+
+    pg.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
+    # force checkpoint to advance remote_consistent_lsn
+    with closing(env.pageserver.connect()) as psconn:
+        with psconn.cursor() as pscur:
+            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+    # and wait till remote_consistent_lsn propagates to all safekeepers
+    started_at = time.time()
+    while True:
+        stat_after = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
+        if all(
+                lsn_from_hex(s_after.remote_consistent_lsn) > lsn_from_hex(
+                    s_before.remote_consistent_lsn) for s_after,
+                s_before in zip(stat_after, stat_before)):
+            break
+        elapsed = time.time() - started_at
+        if elapsed > 20:
+            raise RuntimeError(
+                f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
+            )
+        time.sleep(0.5)
 
 
 class ProposerPostgres(PgProtocol):
