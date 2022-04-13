@@ -1540,10 +1540,8 @@ impl LayeredTimeline {
                 false,
             )?;
 
-            // Update upload metrics
-            let new_delta_size = File::open(&new_delta_path)?.metadata()?.len();
             NUM_PERSISTENT_FILES_CREATED.inc_by(1);
-            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_size);
+            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
 
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
