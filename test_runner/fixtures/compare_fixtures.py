@@ -87,6 +87,9 @@ class ZenithCompare(PgCompare):
     def flush(self):
         self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
 
+    def compact(self):
+        self.pscur.execute(f"compact {self.env.initial_tenant.hex} {self.timeline}")
+
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record("peak_mem",
                                  self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
