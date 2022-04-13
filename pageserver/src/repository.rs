@@ -252,8 +252,10 @@ pub trait Repository: Send + Sync {
         checkpoint_before_gc: bool,
     ) -> Result<GcResult>;
 
-    /// perform one compaction iteration.
-    /// this function is periodically called by compactor thread.
+    /// Perform one compaction iteration.
+    /// This function is periodically called by compactor thread.
+    /// Also it can be explicitly requested per timeline through page server
+    /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
     /// detaches locally available timeline by stopping all threads and removing all the data.
