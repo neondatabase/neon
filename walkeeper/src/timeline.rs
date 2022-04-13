@@ -27,6 +27,7 @@ use crate::safekeeper::{
     SafekeeperMemState,
 };
 use crate::send_wal::HotStandbyFeedback;
+use crate::wal_backup::WalBackup;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
@@ -99,7 +100,9 @@ impl SharedState {
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::new(zttid, conf);
-        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let mut wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let _wal_backup = WalBackup::create( wal_store.get_segment_complete_recv());
+
         let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state)?;
         sk.control_store.persist(&sk.s)?;
 
@@ -121,7 +124,8 @@ impl SharedState {
 
         let control_store = control_file::FileStorage::new(zttid, conf);
 
-        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let mut wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let _wal_backup = WalBackup::restore(wal_store.get_segment_complete_recv());
 
         info!("timeline {} restored", zttid.timeline_id);
 
