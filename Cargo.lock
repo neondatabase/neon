@@ -1907,12 +1907,15 @@ name = "proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.13.0",
  "bytes",
  "clap 3.0.14",
  "fail",
  "futures",
  "hashbrown",
  "hex",
+ "hmac 0.10.1",
  "hyper",
  "lazy_static",
  "md5",
@@ -1921,16 +1924,20 @@ dependencies = [
  "rand",
  "rcgen",
  "reqwest",
+ "routerify 2.2.0",
+ "rstest",
  "rustls 0.19.1",
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "thiserror",
  "tokio",
  "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
  "tokio-postgres-rustls",
  "tokio-rustls 0.22.0",
+ "tokio-stream",
  "workspace_hack",
  "zenith_metrics",
  "zenith_utils",
@@ -2132,6 +2139,19 @@ dependencies = [
 
 [[package]]
 name = "routerify"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c6bb49594c791cadb5ccfa5f36d41b498d40482595c199d10cd318800280bd9"
+dependencies = [
+ "http",
+ "hyper",
+ "lazy_static",
+ "percent-encoding",
+ "regex",
+]
+
+[[package]]
+name = "routerify"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "496c1d3718081c45ba9c31fbfc07417900aa96f4070ff90dc29961836b7a9945"
@@ -2141,6 +2161,19 @@ dependencies = [
  "lazy_static",
  "percent-encoding",
  "regex",
+]
+
+[[package]]
+name = "rstest"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d912f35156a3f99a66ee3e11ac2e0b3f34ac85a07e05263d05a7e2c8810d616f"
+dependencies = [
+ "cfg-if",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn",
 ]
 
 [[package]]
@@ -3450,7 +3483,7 @@ dependencies = [
  "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
  "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
  "rand",
- "routerify",
+ "routerify 3.0.0",
  "rustls 0.19.1",
  "rustls-split",
  "serde",
