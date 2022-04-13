@@ -198,7 +198,6 @@ impl BlockWriter for BlockBuf {
         assert!(buf.len() == PAGE_SZ);
         let blknum = self.blocks.len();
         self.blocks.push(buf);
-        tracing::info!("buffered block {}", blknum);
         Ok(blknum as u32)
     }
 }
