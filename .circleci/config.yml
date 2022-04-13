@@ -405,7 +405,7 @@ jobs:
       - run:
           name: Build coverage report
           command: |
-            COMMIT_URL=https://github.com/zenithdb/zenith/commit/$CIRCLE_SHA1
+            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
 
             scripts/coverage \
               --dir=/tmp/zenith/coverage report \
@@ -416,8 +416,8 @@ jobs:
           name: Upload coverage report
           command: |
             LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-            REPORT_URL=https://zenithdb.github.io/zenith-coverage-data/$CIRCLE_SHA1
-            COMMIT_URL=https://github.com/zenithdb/zenith/commit/$CIRCLE_SHA1
+            REPORT_URL=https://neondatabase.github.io/zenith-coverage-data/$CIRCLE_SHA1
+            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
 
             scripts/git-upload \
               --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-coverage-data.git \
@@ -593,7 +593,7 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://zenithdb.github.io/helm-charts
+            helm repo add zenithdb https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
@@ -643,7 +643,7 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://zenithdb.github.io/helm-charts
+            helm repo add zenithdb https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
