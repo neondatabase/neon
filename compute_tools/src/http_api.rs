@@ -11,7 +11,7 @@ use log::{error, info};
 use crate::zenith::*;
 
 // Service function to handle all available routes.
-fn routes(req: Request<Body>, state: Arc<RwLock<ComputeState>>) -> Response<Body> {
+async fn routes(req: Request<Body>, state: Arc<RwLock<ComputeState>>) -> Response<Body> {
     match (req.method(), req.uri().path()) {
         // Timestamp of the last Postgres activity in the plain text.
         (&Method::GET, "/last_activity") => {
@@ -27,6 +27,15 @@ fn routes(req: Request<Body>, state: Arc<RwLock<ComputeState>>) -> Response<Body
             info!("serving /ready GET request");
             let state = state.read().unwrap();
             Response::new(Body::from(format!("{}", state.ready)))
+        }
+
+        (&Method::GET, "/check_writability") => {
+            info!("serving /check_writability GET request");
+            let res = crate::checker::check_writability(&state).await;
+            match res {
+                Ok(_) => Response::new(Body::from("true")),
+                Err(e) => Response::new(Body::from(e.to_string())),
+            }
         }
 
         // Return the `404 Not Found` for any other routes.
@@ -48,7 +57,7 @@ async fn serve(state: Arc<RwLock<ComputeState>>) {
         async move {
             Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                 let state = state.clone();
-                async move { Ok::<_, Infallible>(routes(req, state)) }
+                async move { Ok::<_, Infallible>(routes(req, state).await) }
             }))
         }
     });
