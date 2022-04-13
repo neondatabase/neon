@@ -81,10 +81,12 @@ pub struct WalEntryMetadata {
 }
 
 pub fn init(conf: &'static PageServerConf) -> Result<()> {
-    let wal_metadata_file_dir = conf.workdir.join("wal_metadata.log");
-    WAL_METADATA_FILE
-        .set(File::create(wal_metadata_file_dir)?)
-        .expect("wal_metadata file is already created");
+    if conf.emit_wal_metadata {
+        let wal_metadata_file_dir = conf.workdir.join("wal_metadata.log");
+        WAL_METADATA_FILE
+            .set(File::create(wal_metadata_file_dir)?)
+            .expect("wal_metadata file is already created");
+    }
     Ok(())
 }
 

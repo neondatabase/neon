@@ -134,6 +134,8 @@ pub struct PageServerConf {
 
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
+
+    pub emit_wal_metadata: bool,
 }
 
 // use dedicated enum for builder to better indicate the intention
@@ -185,6 +187,8 @@ struct PageServerConfigBuilder {
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
     id: BuilderValue<ZNodeId>,
+
+    emit_wal_metadata: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -216,6 +220,7 @@ impl Default for PageServerConfigBuilder {
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
+            emit_wal_metadata: Set(false),
         }
     }
 }
@@ -296,6 +301,10 @@ impl PageServerConfigBuilder {
         self.id = BuilderValue::Set(node_id)
     }
 
+    pub fn emit_wal_metadata(&mut self, value: bool) {
+        self.emit_wal_metadata = BuilderValue::Set(value)
+    }
+
     pub fn build(self) -> Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -342,6 +351,9 @@ impl PageServerConfigBuilder {
                 .remote_storage_config
                 .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
             id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
+            emit_wal_metadata: self
+                .emit_wal_metadata
+                .ok_or(anyhow::anyhow!("emit_wal_metadata not specifiec"))?,
         })
     }
 }
@@ -473,6 +485,7 @@ impl PageServerConf {
                     builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
                 }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
+                "emit_wal_metadata" => builder.emit_wal_metadata(true),
                 _ => bail!("unrecognized pageserver option '{}'", key),
             }
         }

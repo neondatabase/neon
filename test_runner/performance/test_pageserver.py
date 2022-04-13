@@ -1,11 +1,15 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnv, PgBin
+from fixtures.zenith_fixtures import ZenithEnv, PgBin, ZenithEnvBuilder
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 
-def test_get_page(zenith_simple_env: ZenithEnv, zenbenchmark: ZenithBenchmarker, pg_bin: PgBin):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_pageserver", "empty")
+def test_get_page(zenith_env_builder: ZenithEnvBuilder,
+                  zenbenchmark: ZenithBenchmarker,
+                  pg_bin: PgBin):
+    zenith_env_builder.pageserver_config_override = "emit_wal_metadata=true"
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch("test_pageserver", "main")
     pg = env.postgres.create_start('test_pageserver')
     tenant_hex = env.initial_tenant.hex
     timeline = pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
