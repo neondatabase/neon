@@ -517,14 +517,16 @@ where
     pub fn new(
         ztli: ZTimelineId,
         control_store: CTRL,
-        wal_store: WAL,
+        mut wal_store: WAL,
         state: SafeKeeperState,
-    ) -> SafeKeeper<CTRL, WAL> {
+    ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
-            panic!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
+            bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
         }
 
-        SafeKeeper {
+        wal_store.init_storage(&state)?;
+
+        Ok(SafeKeeper {
             metrics: SafeKeeperMetrics::new(state.tenant_id, ztli),
             global_commit_lsn: state.commit_lsn,
             epoch_start_lsn: Lsn(0),
@@ -537,7 +539,7 @@ where
             s: state,
             control_store,
             wal_store,
-        }
+        })
     }
 
     /// Get history of term switches for the available WAL
@@ -877,7 +879,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty());
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty()).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -892,7 +894,7 @@ mod tests {
         let storage = InMemoryState {
             persisted_state: state.clone(),
         };
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, state);
+        sk = SafeKeeper::new(ztli, storage, sk.wal_store, state).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -909,7 +911,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty());
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty()).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bookfile::Book;
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -57,7 +56,10 @@ use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blob_io;
+pub mod block_io;
 mod delta_layer;
+mod disk_btree;
 pub(crate) mod ephemeral_file;
 mod filename;
 mod image_layer;
@@ -1488,8 +1490,7 @@ impl LayeredTimeline {
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn;
-        disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
+        let disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1621,15 +1622,6 @@ impl LayeredTimeline {
             debug!("Could not compact because no partitioning specified yet");
         }
 
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
-
         Ok(())
     }
 
@@ -1708,13 +1700,11 @@ impl LayeredTimeline {
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.lock().unwrap();
 
-        // We compact or "shuffle" the level-0 delta layers when 10 have
-        // accumulated.
-        static COMPACT_THRESHOLD: usize = 10;
-
         let level0_deltas = layers.get_level0_deltas()?;
 
-        if level0_deltas.len() < COMPACT_THRESHOLD {
+        // We compact or "shuffle" the level-0 delta layers when they've
+        // accumulated over the compaction threshold.
+        if level0_deltas.len() < self.conf.compaction_threshold {
             return Ok(());
         }
         drop(layers);
@@ -2074,16 +2064,17 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
-    let file = File::open(path)?;
-    let book = Book::new(file)?;
+    use std::os::unix::fs::FileExt;
 
-    match book.magic() {
-        crate::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
-        crate::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
+    // All layer files start with a two-byte "magic" value, to identify the kind of
+    // file.
+    let file = File::open(path)?;
+    let mut header_buf = [0u8; 2];
+    file.read_exact_at(&mut header_buf, 0)?;
+
+    match u16::from_be_bytes(header_buf) {
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2294,7 +2285,6 @@ pub mod tests {
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
-                println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;

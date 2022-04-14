@@ -1,6 +1,6 @@
 //! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
 
-use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use tracing::{debug, error, warn};
 
@@ -46,13 +46,21 @@ pub(super) async fn upload_timeline_checkpoint<
 
     let index_read = index.read().await;
     let remote_timeline = match index_read.timeline_entry(&sync_id) {
-        None => None,
+        None => {
+            drop(index_read);
+            None
+        }
         Some(entry) => match entry.inner() {
-            TimelineIndexEntryInner::Full(remote_timeline) => Some(Cow::Borrowed(remote_timeline)),
+            TimelineIndexEntryInner::Full(remote_timeline) => {
+                let r = Some(remote_timeline.clone());
+                drop(index_read);
+                r
+            }
             TimelineIndexEntryInner::Description(_) => {
+                drop(index_read);
                 debug!("Found timeline description for the given ids, downloading the full index");
                 match fetch_full_index(remote_assets.as_ref(), &timeline_dir, sync_id).await {
-                    Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
+                    Ok(remote_timeline) => Some(remote_timeline),
                     Err(e) => {
                         error!("Failed to download full timeline index: {:?}", e);
                         sync_queue::push(SyncTask::new(
@@ -82,7 +90,6 @@ pub(super) async fn upload_timeline_checkpoint<
     let already_uploaded_files = remote_timeline
         .map(|timeline| timeline.stored_files(&timeline_dir))
         .unwrap_or_default();
-    drop(index_read);
 
     match try_upload_checkpoint(
         config,
@@ -201,6 +208,7 @@ async fn try_upload_checkpoint<
                 .upload(
                     archive_streamer,
                     &remote_storage.storage_path(&timeline_dir.join(&archive_name))?,
+                    None,
                 )
                 .await
         },

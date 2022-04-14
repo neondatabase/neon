@@ -38,11 +38,11 @@ use pgdatadir_mapping::DatadirTimeline;
 /// This is embedded in the metadata file, and also in the header of all the
 /// layer files. If you make any backwards-incompatible changes to the storage
 /// format, bump this!
-pub const STORAGE_FORMAT_VERSION: u16 = 1;
+pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
 // Magic constants used to identify different kinds of files
-pub const IMAGE_FILE_MAGIC: u32 = 0x5A60_0000 | STORAGE_FORMAT_VERSION as u32;
-pub const DELTA_FILE_MAGIC: u32 = 0x5A61_0000 | STORAGE_FORMAT_VERSION as u32;
+pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
+pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(

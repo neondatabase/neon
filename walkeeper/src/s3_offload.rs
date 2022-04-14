@@ -2,19 +2,19 @@
 // Offload old WAL segments to S3 and remove them locally
 //
 
-use anyhow::Result;
+use anyhow::Context;
 use postgres_ffi::xlog_utils::*;
-use s3::bucket::Bucket;
-use s3::creds::Credentials;
-use s3::region::Region;
+use rusoto_core::credential::StaticProvider;
+use rusoto_core::{HttpClient, Region};
+use rusoto_s3::{ListObjectsV2Request, PutObjectRequest, S3Client, StreamingBody, S3};
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, File};
-use std::io::prelude::*;
 use std::path::Path;
 use std::time::SystemTime;
+use tokio::fs::{self, File};
 use tokio::runtime;
 use tokio::time::sleep;
+use tokio_util::io::ReaderStream;
 use tracing::*;
 use walkdir::WalkDir;
 
@@ -39,11 +39,12 @@ pub fn thread_main(conf: SafeKeeperConf) {
 }
 
 async fn offload_files(
-    bucket: &Bucket,
+    client: &S3Client,
+    bucket_name: &str,
     listing: &HashSet<String>,
     dir_path: &Path,
     conf: &SafeKeeperConf,
-) -> Result<u64> {
+) -> anyhow::Result<u64> {
     let horizon = SystemTime::now() - conf.ttl.unwrap();
     let mut n: u64 = 0;
     for entry in WalkDir::new(dir_path) {
@@ -57,12 +58,17 @@ async fn offload_files(
             let relpath = path.strip_prefix(&conf.workdir).unwrap();
             let s3path = String::from("walarchive/") + relpath.to_str().unwrap();
             if !listing.contains(&s3path) {
-                let mut file = File::open(&path)?;
-                let mut content = Vec::new();
-                file.read_to_end(&mut content)?;
-                bucket.put_object(s3path, &content).await?;
+                let file = File::open(&path).await?;
+                client
+                    .put_object(PutObjectRequest {
+                        body: Some(StreamingBody::new(ReaderStream::new(file))),
+                        bucket: bucket_name.to_string(),
+                        key: s3path,
+                        ..PutObjectRequest::default()
+                    })
+                    .await?;
 
-                fs::remove_file(&path)?;
+                fs::remove_file(&path).await?;
                 n += 1;
             }
         }
@@ -70,35 +76,59 @@ async fn offload_files(
     Ok(n)
 }
 
-async fn main_loop(conf: &SafeKeeperConf) -> Result<()> {
+async fn main_loop(conf: &SafeKeeperConf) -> anyhow::Result<()> {
     let region = Region::Custom {
-        region: env::var("S3_REGION").unwrap(),
-        endpoint: env::var("S3_ENDPOINT").unwrap(),
+        name: env::var("S3_REGION").context("S3_REGION env var is not set")?,
+        endpoint: env::var("S3_ENDPOINT").context("S3_ENDPOINT env var is not set")?,
     };
-    let credentials = Credentials::new(
-        Some(&env::var("S3_ACCESSKEY").unwrap()),
-        Some(&env::var("S3_SECRET").unwrap()),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
 
-    // Create Bucket in REGION for BUCKET
-    let bucket = Bucket::new_with_path_style("zenith-testbucket", region, credentials)?;
+    let client = S3Client::new_with(
+        HttpClient::new().context("Failed to create S3 http client")?,
+        StaticProvider::new_minimal(
+            env::var("S3_ACCESSKEY").context("S3_ACCESSKEY env var is not set")?,
+            env::var("S3_SECRET").context("S3_SECRET env var is not set")?,
+        ),
+        region,
+    );
+
+    let bucket_name = "zenith-testbucket";
 
     loop {
-        // List out contents of directory
-        let results = bucket
-            .list("walarchive/".to_string(), Some("".to_string()))
-            .await?;
-        let listing = results
-            .iter()
-            .flat_map(|b| b.contents.iter().map(|o| o.key.clone()))
-            .collect();
-
-        let n = offload_files(&bucket, &listing, &conf.workdir, conf).await?;
+        let listing = gather_wal_entries(&client, bucket_name).await?;
+        let n = offload_files(&client, bucket_name, &listing, &conf.workdir, conf).await?;
         info!("Offload {} files to S3", n);
         sleep(conf.ttl.unwrap()).await;
     }
+}
+
+async fn gather_wal_entries(
+    client: &S3Client,
+    bucket_name: &str,
+) -> anyhow::Result<HashSet<String>> {
+    let mut document_keys = HashSet::new();
+
+    let mut continuation_token = None::<String>;
+    loop {
+        let response = client
+            .list_objects_v2(ListObjectsV2Request {
+                bucket: bucket_name.to_string(),
+                prefix: Some("walarchive/".to_string()),
+                continuation_token,
+                ..ListObjectsV2Request::default()
+            })
+            .await?;
+        document_keys.extend(
+            response
+                .contents
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|o| o.key),
+        );
+
+        continuation_token = response.continuation_token;
+        if continuation_token.is_none() {
+            break;
+        }
+    }
+    Ok(document_keys)
 }

@@ -2,6 +2,8 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
+use crate::layered_repository::blob_io::BlobWriter;
+use crate::layered_repository::block_io::BlockReader;
 use crate::page_cache;
 use crate::page_cache::PAGE_SZ;
 use crate::page_cache::{ReadBufResult, WriteBufResult};
@@ -10,7 +12,7 @@ use lazy_static::lazy_static;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -41,7 +43,7 @@ pub struct EphemeralFile {
     _timelineid: ZTimelineId,
     file: Arc<VirtualFile>,
 
-    pos: u64,
+    size: u64,
 }
 
 impl EphemeralFile {
@@ -70,11 +72,11 @@ impl EphemeralFile {
             _tenantid: tenantid,
             _timelineid: timelineid,
             file: file_rc,
-            pos: 0,
+            size: 0,
         })
     }
 
-    pub fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), Error> {
+    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), Error> {
         let mut off = 0;
         while off < PAGE_SZ {
             let n = self
@@ -92,6 +94,26 @@ impl EphemeralFile {
             off += n as usize;
         }
         Ok(())
+    }
+
+    fn get_buf_for_write(&self, blkno: u32) -> Result<page_cache::PageWriteGuard, Error> {
+        // Look up the right page
+        let cache = page_cache::get();
+        let mut write_guard = match cache.write_ephemeral_buf(self.file_id, blkno) {
+            WriteBufResult::Found(guard) => guard,
+            WriteBufResult::NotFound(mut guard) => {
+                // Read the page from disk into the buffer
+                // TODO: if we're overwriting the whole page, no need to read it in first
+                self.fill_buffer(guard.deref_mut(), blkno)?;
+                guard.mark_valid();
+
+                // And then fall through to modify it.
+                guard
+            }
+        };
+        write_guard.mark_dirty();
+
+        Ok(write_guard)
     }
 }
 
@@ -167,48 +189,49 @@ impl FileExt for EphemeralFile {
     }
 }
 
-impl Write for EphemeralFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
-        let n = self.write_at(buf, self.pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
+impl BlobWriter for EphemeralFile {
+    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+        let pos = self.size;
 
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // we don't need to flush data:
-        // * we either write input bytes or not, not keeping any intermediate data buffered
-        // * rust unix file `flush` impl does not flush things either, returning `Ok(())`
-        Ok(())
-    }
-}
+        let mut blknum = (self.size / PAGE_SZ as u64) as u32;
+        let mut off = (pos % PAGE_SZ as u64) as usize;
 
-impl Seek for EphemeralFile {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        match pos {
-            SeekFrom::Start(offset) => {
-                self.pos = offset;
-            }
-            SeekFrom::End(_offset) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "SeekFrom::End not supported by EphemeralFile",
-                ));
-            }
-            SeekFrom::Current(offset) => {
-                let pos = self.pos as i128 + offset as i128;
-                if pos < 0 {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "offset would be negative",
-                    ));
-                }
-                if pos > u64::MAX as i128 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "offset overflow"));
-                }
-                self.pos = pos as u64;
-            }
+        let mut buf = self.get_buf_for_write(blknum)?;
+
+        // Write the length field
+        let len_buf = u32::to_ne_bytes(srcbuf.len() as u32);
+        let thislen = PAGE_SZ - off;
+        if thislen < 4 {
+            // it needs to be split across pages
+            buf[off..(off + thislen)].copy_from_slice(&len_buf[..thislen]);
+            blknum += 1;
+            buf = self.get_buf_for_write(blknum)?;
+            buf[0..4 - thislen].copy_from_slice(&len_buf[thislen..]);
+            off = 4 - thislen;
+        } else {
+            buf[off..off + 4].copy_from_slice(&len_buf);
+            off += 4;
         }
-        Ok(self.pos)
+
+        // Write the payload
+        let mut buf_remain = srcbuf;
+        while !buf_remain.is_empty() {
+            let mut page_remain = PAGE_SZ - off;
+            if page_remain == 0 {
+                blknum += 1;
+                buf = self.get_buf_for_write(blknum)?;
+                off = 0;
+                page_remain = PAGE_SZ;
+            }
+            let this_blk_len = min(page_remain, buf_remain.len());
+            buf[off..(off + this_blk_len)].copy_from_slice(&buf_remain[..this_blk_len]);
+            off += this_blk_len;
+            buf_remain = &buf_remain[this_blk_len..];
+        }
+        drop(buf);
+        self.size += 4 + srcbuf.len() as u64;
+
+        Ok(pos)
     }
 }
 
@@ -239,11 +262,34 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Er
     }
 }
 
+impl BlockReader for EphemeralFile {
+    type BlockLease = page_cache::PageReadGuard<'static>;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+        // Look up the right page
+        let cache = page_cache::get();
+        loop {
+            match cache.read_ephemeral_buf(self.file_id, blknum) {
+                ReadBufResult::Found(guard) => return Ok(guard),
+                ReadBufResult::NotFound(mut write_guard) => {
+                    // Read the page from disk into the buffer
+                    self.fill_buffer(write_guard.deref_mut(), blknum)?;
+                    write_guard.mark_valid();
+
+                    // Swap for read lock
+                    continue;
+                }
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::seq::SliceRandom;
-    use rand::thread_rng;
+    use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
+    use crate::layered_repository::block_io::BlockCursor;
+    use rand::{seq::SliceRandom, thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
 
@@ -281,19 +327,19 @@ mod tests {
     fn test_ephemeral_files() -> Result<(), Error> {
         let (conf, tenantid, timelineid) = repo_harness("ephemeral_files")?;
 
-        let mut file_a = EphemeralFile::create(conf, tenantid, timelineid)?;
+        let file_a = EphemeralFile::create(conf, tenantid, timelineid)?;
 
-        file_a.write_all(b"foo")?;
+        file_a.write_all_at(b"foo", 0)?;
         assert_eq!("foo", read_string(&file_a, 0, 20)?);
 
-        file_a.write_all(b"bar")?;
+        file_a.write_all_at(b"bar", 3)?;
         assert_eq!("foobar", read_string(&file_a, 0, 20)?);
 
         // Open a lot of files, enough to cause some page evictions.
         let mut efiles = Vec::new();
         for fileno in 0..100 {
-            let mut efile = EphemeralFile::create(conf, tenantid, timelineid)?;
-            efile.write_all(format!("file {}", fileno).as_bytes())?;
+            let efile = EphemeralFile::create(conf, tenantid, timelineid)?;
+            efile.write_all_at(format!("file {}", fileno).as_bytes(), 0)?;
             assert_eq!(format!("file {}", fileno), read_string(&efile, 0, 10)?);
             efiles.push((fileno, efile));
         }
@@ -304,6 +350,43 @@ mod tests {
         for (fileno, efile) in efiles.iter_mut() {
             assert_eq!(format!("file {}", fileno), read_string(efile, 0, 10)?);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ephemeral_blobs() -> Result<(), Error> {
+        let (conf, tenantid, timelineid) = repo_harness("ephemeral_blobs")?;
+
+        let mut file = EphemeralFile::create(conf, tenantid, timelineid)?;
+
+        let pos_foo = file.write_blob(b"foo")?;
+        assert_eq!(b"foo", file.block_cursor().read_blob(pos_foo)?.as_slice());
+        let pos_bar = file.write_blob(b"bar")?;
+        assert_eq!(b"foo", file.block_cursor().read_blob(pos_foo)?.as_slice());
+        assert_eq!(b"bar", file.block_cursor().read_blob(pos_bar)?.as_slice());
+
+        let mut blobs = Vec::new();
+        for i in 0..10000 {
+            let data = Vec::from(format!("blob{}", i).as_bytes());
+            let pos = file.write_blob(&data)?;
+            blobs.push((pos, data));
+        }
+
+        let mut cursor = BlockCursor::new(&file);
+        for (pos, expected) in blobs {
+            let actual = cursor.read_blob(pos)?;
+            assert_eq!(actual, expected);
+        }
+        drop(cursor);
+
+        // Test a large blob that spans multiple pages
+        let mut large_data = Vec::new();
+        large_data.resize(20000, 0);
+        thread_rng().fill_bytes(&mut large_data);
+        let pos_large = file.write_blob(&large_data)?;
+        let result = file.block_cursor().read_blob(pos_large)?;
+        assert_eq!(result, large_data);
 
         Ok(())
     }
