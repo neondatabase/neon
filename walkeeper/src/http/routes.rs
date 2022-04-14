@@ -71,6 +71,8 @@ struct TimelineStatus {
     #[serde(serialize_with = "display_serialize")]
     s3_wal_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
+    backup_lsn: Lsn,
+    #[serde(serialize_with = "display_serialize")]
     peer_horizon_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     remote_consistent_lsn: Lsn,
@@ -102,6 +104,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         acceptor_state: acc_state,
         commit_lsn: inmem.commit_lsn,
         s3_wal_lsn: inmem.s3_wal_lsn,
+        backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: inmem.remote_consistent_lsn,
         flush_lsn,

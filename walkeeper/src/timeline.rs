@@ -4,6 +4,7 @@
 use anyhow::{bail, Context, Result};
 
 use lazy_static::lazy_static;
+use tokio::sync::watch;
 
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -100,8 +101,12 @@ impl SharedState {
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::new(zttid, conf);
-        let mut wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let _wal_backup = WalBackup::create( wal_store.get_segment_complete_recv());
+
+        let segment_complete = watch::channel(Lsn::MAX);
+        let lsn_persisted = watch::channel(Lsn::MAX);
+
+        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf, lsn_persisted.0,segment_complete.0);
+        let _wal_backup = WalBackup::create(segment_complete.1, lsn_persisted.1);
 
         let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state)?;
         sk.control_store.persist(&sk.s)?;
@@ -124,8 +129,13 @@ impl SharedState {
 
         let control_store = control_file::FileStorage::new(zttid, conf);
 
-        let mut wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let _wal_backup = WalBackup::restore(wal_store.get_segment_complete_recv());
+        let segment_complete = watch::channel(Lsn::MAX);
+        let lsn_persisted = watch::channel(Lsn::MAX);
+
+        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf, lsn_persisted.0,segment_complete.0);
+
+        // TODO, does it need to become static now?!
+        let _wal_backup = WalBackup::create(segment_complete.1, lsn_persisted.1);
 
         info!("timeline {} restored", zttid.timeline_id);
 
@@ -435,6 +445,7 @@ impl Timeline {
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
             s3_wal_lsn: Some(shared_state.sk.inmem.s3_wal_lsn),
+            backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
             // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: Some(max(
                 shared_state.get_replicas_state().remote_consistent_lsn,
@@ -463,6 +474,9 @@ impl Timeline {
         }
         if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
             shared_state.sk.inmem.s3_wal_lsn = max(s3_wal_lsn, shared_state.sk.inmem.s3_wal_lsn);
+        }
+        if let Some(backup_lsn) = sk_info.backup_lsn {
+            shared_state.sk.inmem.backup_lsn = max(backup_lsn, shared_state.sk.inmem.backup_lsn);
         }
         if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
             shared_state.sk.inmem.remote_consistent_lsn = max(

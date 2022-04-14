@@ -2,15 +2,24 @@
 use std::{path::PathBuf};
 use std::{thread, time};
 
-use tokio::runtime::{Builder};
+use tokio::runtime::{Builder, Runtime};
 
-
+use lazy_static::lazy_static;
 use anyhow::Result;
 
 use tokio::sync::watch::Receiver;
 use zenith_utils::lsn::Lsn;
 use tracing::*;
 
+lazy_static! {
+    static ref BACKUP_RUNTIME: Runtime = {
+        Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+}
 
 /// 
 /// High level abstraction could be an async task service with tasks executed on a thread pool
@@ -35,18 +44,23 @@ pub struct Seg {
 pub struct WalBackup {
     
     _remote_storage : u32,
-    // _async_service : Runtime,
+    // This is not available at construction time, gotta be set later
     // have a per-timeline status of what segments are uploaded
     // Given segments have very specific naming we store it as a bitmap (we probably don't care about postgres timeline in this case, all we care is the start LSN)
     // we check the S3 state only when we're a leader and the timeline is initialized.
 }
 
-#[allow(unreachable_code)]
-async fn detect_task(mut event: Receiver<Lsn>, backup: WalBackup) -> Result<()> {
 
-    while event.changed().await.is_ok() {
+#[allow(unreachable_code)]
+async fn detect_task(mut segment_complete: Receiver<Lsn>, mut _lsn_durable: Receiver<Lsn>, backup: WalBackup) -> Result<()> {
+
+    while segment_complete.changed().await.is_ok() {
+        let segment_end_lsn = *segment_complete.borrow();
         warn!("Woken Up for segment backup");
-        backup.backup_stuff(*event.borrow())?;
+
+        // TODO: check if LSN is durable
+ 
+        backup.backup_stuff(segment_end_lsn)?;
     }
 
     Ok(())
@@ -63,35 +77,21 @@ async fn upload_task(s: String, lsn: Lsn) -> Result<()> {
 }
 
 
-// #[allow(dead_code)]
+#[allow(dead_code)]
 impl WalBackup {
 
-
-    pub fn create(event: Receiver<Lsn>) -> Self {
+    pub fn create(segment_complete: Receiver<Lsn>, lsn_durable: Receiver<Lsn>) -> Self {
         warn!("Backup service is created");
 
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-
-
-        let x = Self {_remote_storage : 0 };// , _async_service : runtime};
-        runtime.spawn(detect_task(event, x));
+        let x = Self {_remote_storage : 0 };
+        BACKUP_RUNTIME.spawn(detect_task(segment_complete, lsn_durable, x));
 
         return x;
     }
 
-    pub fn restore(event: Receiver<Lsn>) -> Self {
+    pub fn restore(segment_complete: Receiver<Lsn>, lsn_durable: Receiver<Lsn>) -> Self {
         warn!("Backup service is restored");
-
-
-        let x = WalBackup::create(event);
-
-        // schedule a task to enqueue missing segmets
-
-        return x;
+        return WalBackup::create(segment_complete, lsn_durable);
     }
 
     // Enqueue segment for upload
@@ -101,22 +101,15 @@ impl WalBackup {
         let tag = seg.as_path().display().to_string();
         warn!("Backup of {} requested for timeline {}", tag, "unknown");
 
-
-        // TODO: figure out how to make two runtimes into one
-        let _async_service = Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-
-
-        let _foo =
-        _async_service.spawn(upload_task(tag, seg_end_lsn));
+        let _foo = BACKUP_RUNTIME.spawn(upload_task(tag, seg_end_lsn));
 
         // TODO: how should this be done?
         // Should we wait on timer to wait on each task or proactively when queue is "FULL", can framework handle this?
         // ERROR handling is not clear, maybe when we can't finish the upload (we should try forever) 
         // self._async_service.block_on(foo).unwrap()?;
+
+
+        // TODO on success update LSN in the control file
 
         Ok(())
     }
@@ -135,6 +128,8 @@ impl WalBackup {
         Ok(())
     }
 
+
+    // TODO this function should only schedule upload at startup time.
     // Returns a list of WAL segments that fall into [start lsn, end lsn).
     fn get_segments(&self, _start: Lsn, _end: Lsn) -> Vec<(Lsn, PathBuf)> {
         warn!("NYI");

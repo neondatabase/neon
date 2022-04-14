@@ -47,6 +47,8 @@ pub struct SafekeeperInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub s3_wal_lsn: Option<Lsn>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub backup_lsn: Option<Lsn>,
     /// LSN of last checkpoint uploaded by pageserver.
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub remote_consistent_lsn: Option<Lsn>,

@@ -8,8 +8,7 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::sync::watch::{Sender, Receiver};
-use tokio::sync::{watch};
+use tokio::sync::watch::{Sender};
 use std::io::{Read, Seek, SeekFrom};
 
 use lazy_static::lazy_static;
@@ -147,15 +146,16 @@ pub struct PhysicalStorage {
     /// - doesn't point to the end of the segment
     file: Option<File>,
 
-    seg_comp_chan: Sender<Lsn>,
+    // TODO: antons complete
+    segment_complete: Sender<Lsn>,
+
+    lsn_persisted: Sender<Lsn>,
 }
 
 impl PhysicalStorage {
-    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf) -> PhysicalStorage {
+    pub fn new(zttid: &ZTenantTimelineId, conf: &SafeKeeperConf, lsn_persisted: Sender<Lsn>, segment_complete: Sender<Lsn>) -> PhysicalStorage {
         let timeline_dir = conf.timeline_dir(zttid);
         
-        let (tx, _rx) = watch::channel(Lsn::MAX);
-
         PhysicalStorage {
             metrics: WalStorageMetrics::new(zttid),
             zttid: *zttid,
@@ -167,7 +167,8 @@ impl PhysicalStorage {
             flush_record_lsn: Lsn(0),
             decoder: WalStreamDecoder::new(Lsn(0)),
             file: None,
-            seg_comp_chan: tx,
+            segment_complete: segment_complete,
+            lsn_persisted: lsn_persisted,
         }
     }
 
@@ -251,11 +252,9 @@ impl PhysicalStorage {
                 wal_file_paths(&self.timeline_dir, segno, wal_seg_size)?;
             fs::rename(&wal_file_partial_path, &wal_file_path)?;
 
-            // new code
-            let blah = XLogSegNoOffsetToRecPtr(segno +1, 0, wal_seg_size);
+            // TODO: antons document
+            let blah = XLogSegNoOffsetToRecPtr(segno + 1, 0, wal_seg_size);
             self.notify_segment_complete(Lsn(blah))?;
-            // ugly code
-            // self.backup.backup_segment(wal_file_path, Lsn::from(blah))?;
         } else {
             // otherwise, file can be reused later
             self.file = Some(file);
@@ -264,23 +263,20 @@ impl PhysicalStorage {
         Ok(())
     }
 
-    pub fn get_segment_complete_recv(&mut self) -> Receiver<Lsn> {
-
-        warn!("## Setting up a channel");
-        let (tx, rx) = watch::channel(Lsn::MAX);
-        self.seg_comp_chan = tx;
-        warn!("## success setting up a channel");
-
-        return rx;
-    }
-
     fn notify_segment_complete(&self, lsn: Lsn) -> Result<()> {
-        warn!("## Send notification for {}", lsn);
+        warn!("## Send notification for segment with last lsn {}", lsn);
 
-        self.seg_comp_chan.send(lsn)?;
-
+        self.segment_complete.send(lsn)?;
         Ok(())
     }
+
+    fn notify_lsn_persisted(&self, lsn: Lsn) -> Result<()> {
+        warn!("## Send notification for lsn {} persistence", lsn);
+
+        self.lsn_persisted.send(lsn)?;
+        Ok(())
+    }
+
 
     /// Writes WAL to the segment files, until everything is writed. If some segments
     /// are fully written, they are flushed to disk. The last (partial) segment can
@@ -398,6 +394,8 @@ impl Storage for PhysicalStorage {
             let _timer = self.metrics.write_wal_seconds.start_timer();
             self.write_exact(startpos, buf)?;
         }
+
+        self.notify_lsn_persisted(startpos + buf.len().try_into().unwrap())?;
 
         // WAL is written, updating write metrics
         self.metrics.write_wal_bytes.observe(buf.len() as f64);

@@ -48,13 +48,12 @@ pub struct SafeKeeperConf {
     pub no_sync: bool,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+
+    // TODO antons kill this with fire, use a different switch to enable/disable wal backup
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
     pub my_id: ZNodeId,
     pub broker_endpoints: Option<Vec<Url>>,
-
-    // TODO antons Should this be a member of configuration??? otherwice how does it get to the handler?!
-    // pub wal_backup: WalBackup,
 }
 
 impl SafeKeeperConf {
@@ -80,8 +79,6 @@ impl Default for SafeKeeperConf {
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: ZNodeId(0),
             broker_endpoints: None,
-            // TODO antons figure out if this is a right place
-            // wal_backup: &WalBackup::create(),
         }
     }
 }
