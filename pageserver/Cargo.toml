@@ -15,7 +15,7 @@ hyper = "0.14"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
 log = "0.4.14"
-clap = "3.0"
+clap = { version = "3.1.8", features = ["derive"] }
 daemonize = "0.4.1"
 tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }

@@ -51,5 +51,5 @@ def test_get_page(zenith_env_builder: ZenithEnvBuilder,
 
             pscur.execute(f"checkpoint {env.initial_tenant.hex} {timeline} 0")
 
-    output = psbench_bin.run(env.initial_tenant.hex, timeline)
+    output = psbench_bin.test_latest_pages(env.initial_tenant.hex, timeline)
     zenbenchmark.record_psbench_result(output)
