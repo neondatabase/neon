@@ -713,6 +713,26 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(result.elapsed.as_millis().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("compact ") {
+            // Run compaction immediately on given timeline.
+            // FIXME This is just for tests. Don't expect this to be exposed to
+            // the users or the api.
+
+            // compact <tenant_id> <timeline_id>
+            let re = Regex::new(r"^compact ([[:xdigit:]]+)\s([[:xdigit:]]+)($|\s)?").unwrap();
+
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("Invalid compact: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Couldn't load timeline")?;
+            timeline.tline.compact()?;
+
+            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("checkpoint ") {
             // Run checkpoint immediately on given timeline.
 

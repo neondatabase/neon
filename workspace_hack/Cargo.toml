@@ -16,32 +16,38 @@ publish = false
 [dependencies]
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
+chrono = { version = "0.4", features = ["clock", "libc", "oldtime", "serde", "std", "time", "winapi"] }
 clap = { version = "2", features = ["ansi_term", "atty", "color", "strsim", "suggestions", "vec_map"] }
 either = { version = "1", features = ["use_std"] }
 hashbrown = { version = "0.11", features = ["ahash", "inline-more", "raw"] }
+indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std", "use_std"] }
 num-integer = { version = "0.1", default-features = false, features = ["std"] }
 num-traits = { version = "0.2", features = ["std"] }
+prost = { version = "0.9", features = ["prost-derive", "std"] }
+rand = { version = "0.8", features = ["alloc", "getrandom", "libc", "rand_chacha", "rand_hc", "small_rng", "std", "std_rng"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
-reqwest = { version = "0.11", default-features = false, features = ["__rustls", "__tls", "blocking", "hyper-rustls", "json", "rustls", "rustls-pemfile", "rustls-tls", "rustls-tls-webpki-roots", "serde_json", "stream", "tokio-rustls", "tokio-util", "webpki-roots"] }
 scopeguard = { version = "1", features = ["use_std"] }
 serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }
-tokio = { version = "1", features = ["bytes", "fs", "io-util", "libc", "macros", "memchr", "mio", "net", "num_cpus", "once_cell", "process", "rt", "rt-multi-thread", "signal-hook-registry", "sync", "time", "tokio-macros"] }
-tracing = { version = "0.1", features = ["attributes", "std", "tracing-attributes"] }
+tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc", "macros", "memchr", "mio", "net", "num_cpus", "once_cell", "process", "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros"] }
+tracing = { version = "0.1", features = ["attributes", "log", "std", "tracing-attributes"] }
 tracing-core = { version = "0.1", features = ["lazy_static", "std"] }
 
 [build-dependencies]
+anyhow = { version = "1", features = ["backtrace", "std"] }
+bytes = { version = "1", features = ["serde", "std"] }
 cc = { version = "1", default-features = false, features = ["jobserver", "parallel"] }
 clap = { version = "2", features = ["ansi_term", "atty", "color", "strsim", "suggestions", "vec_map"] }
 either = { version = "1", features = ["use_std"] }
+hashbrown = { version = "0.11", features = ["ahash", "inline-more", "raw"] }
+indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std", "use_std"] }
-proc-macro2 = { version = "1", features = ["proc-macro"] }
-quote = { version = "1", features = ["proc-macro"] }
+prost = { version = "0.9", features = ["prost-derive", "std"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }

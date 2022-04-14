@@ -37,7 +37,6 @@ toml_edit = { version = "0.13", features = ["easy"] }
 scopeguard = "1.1.0"
 const_format = "0.2.21"
 tracing = "0.1.27"
-tracing-futures = "0.2"
 signal-hook = "0.3.10"
 url = "2"
 nix = "0.23"

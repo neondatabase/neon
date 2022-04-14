@@ -19,6 +19,11 @@ async def copy_test_data_to_table(pg: Postgres, worker_id: int, table_name: str)
     copy_input = repeat_bytes(buf.read(), 5000)
 
     pg_conn = await pg.connect_async()
+
+    # PgProtocol.connect_async sets statement_timeout to 2 minutes.
+    # That's not enough for this test, on a slow system in debug mode.
+    await pg_conn.execute("SET statement_timeout='300s'")
+
     await pg_conn.copy_to_table(table_name, source=copy_input)
 
 

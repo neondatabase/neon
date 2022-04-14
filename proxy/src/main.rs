@@ -1,19 +1,8 @@
-///
-/// Postgres protocol proxy/router.
-///
-/// This service listens psql port and can check auth via external service
-/// (control plane API in our case) and can create new databases and accounts
-/// in somewhat transparent manner (again via communication with control plane API).
-///
-use anyhow::{bail, Context};
-use clap::{Arg, Command};
-use config::ProxyConfig;
-use futures::FutureExt;
-use std::future::Future;
-use tokio::{net::TcpListener, task::JoinError};
-use zenith_utils::GIT_VERSION;
-
-use crate::config::{ClientAuthMethod, RouterConfig};
+//! Postgres protocol proxy/router.
+//!
+//! This service listens psql port and can check auth via external service
+//! (control plane API in our case) and can create new databases and accounts
+//! in somewhat transparent manner (again via communication with control plane API).
 
 mod auth;
 mod cancellation;
@@ -26,6 +15,24 @@ mod mgmt;
 mod proxy;
 mod stream;
 mod waiters;
+
+// Currently SCRAM is only used in tests
+#[cfg(test)]
+mod parse;
+#[cfg(test)]
+mod sasl;
+#[cfg(test)]
+mod scram;
+
+use anyhow::{bail, Context};
+use clap::{Arg, Command};
+use config::ProxyConfig;
+use futures::FutureExt;
+use std::future::Future;
+use tokio::{net::TcpListener, task::JoinError};
+use zenith_utils::GIT_VERSION;
+
+use crate::config::{ClientAuthMethod, RouterConfig};
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(

@@ -26,7 +26,7 @@ jobs:
     runs-on: [self-hosted, zenith-benchmarker]
 
     env:
-      PG_BIN: "/usr/pgsql-13/bin"
+      POSTGRES_DISTRIB_DIR: "/usr/pgsql-13"
 
     steps:
     - name: Checkout zenith repo
@@ -51,7 +51,7 @@ jobs:
         echo Poetry
         poetry --version
         echo Pgbench
-        $PG_BIN/pgbench --version
+        $POSTGRES_DISTRIB_DIR/bin/pgbench --version
 
     # FIXME cluster setup is skipped due to various changes in console API
     # for now pre created cluster is used. When API gain some stability
@@ -66,7 +66,7 @@ jobs:
 
         echo "Starting cluster"
         # wake up the cluster
-        $PG_BIN/psql $BENCHMARK_CONNSTR -c "SELECT 1"
+        $POSTGRES_DISTRIB_DIR/bin/psql $BENCHMARK_CONNSTR -c "SELECT 1"
 
     - name: Run benchmark
       # pgbench is installed system wide from official repo
@@ -83,8 +83,11 @@ jobs:
       # sudo yum install postgresql13-contrib
       # actual binaries are located in /usr/pgsql-13/bin/
       env:
-        TEST_PG_BENCH_TRANSACTIONS_MATRIX: "5000,10000,20000"
-        TEST_PG_BENCH_SCALES_MATRIX: "10,15"
+        # The pgbench test runs two tests of given duration against each scale.
+        # So the total runtime with these parameters is 2 * 2 * 300 = 1200, or 20 minutes.
+        # Plus time needed to initialize the test databases.
+        TEST_PG_BENCH_DURATIONS_MATRIX: "300"
+        TEST_PG_BENCH_SCALES_MATRIX: "10,100"
         PLATFORM: "zenith-staging"
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
