@@ -49,7 +49,8 @@ use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{
-    register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec, IntGauge, IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_gauge_vec, Histogram, HistogramVec,
+    IntCounter, IntGauge, IntGaugeVec,
 };
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -105,6 +106,21 @@ lazy_static! {
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
+// or in testing they estimate how much we would upload if we did.
+lazy_static! {
+    static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
+        "pageserver_num_persistent_files_created",
+        "Number of files created that are meant to be uploaded to cloud storage",
+    )
+    .expect("failed to define a metric");
+    static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
+        "pageserver_persistent_bytes_written",
+        "Total bytes written that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
 }
@@ -1524,6 +1540,10 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
+
+            NUM_PERSISTENT_FILES_CREATED.inc_by(1);
+            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
+
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,

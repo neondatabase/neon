@@ -105,6 +105,19 @@ class ZenithCompare(PgCompare):
                                  'MB',
                                  report=MetricReport.LOWER_IS_BETTER)
 
+        total_files = self.zenbenchmark.get_int_counter_value(
+            self.env.pageserver, "pageserver_num_persistent_files_created")
+        total_bytes = self.zenbenchmark.get_int_counter_value(
+            self.env.pageserver, "pageserver_persistent_bytes_written")
+        self.zenbenchmark.record("data_uploaded",
+                                 total_bytes / (1024 * 1024),
+                                 "MB",
+                                 report=MetricReport.LOWER_IS_BETTER)
+        self.zenbenchmark.record("num_files_uploaded",
+                                 total_files,
+                                 "",
+                                 report=MetricReport.LOWER_IS_BETTER)
+
     def record_pageserver_writes(self, out_name):
         return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
 
