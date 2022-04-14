@@ -1,15 +1,16 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnv, PgBin, ZenithEnvBuilder
+from fixtures.zenith_fixtures import ZenithEnv, PgBin, ZenithEnvBuilder, DEFAULT_BRANCH_NAME, PsbenchBin
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 
 def test_get_page(zenith_env_builder: ZenithEnvBuilder,
                   zenbenchmark: ZenithBenchmarker,
-                  pg_bin: PgBin):
+                  pg_bin: PgBin,
+                  psbench_bin: PsbenchBin):
     zenith_env_builder.pageserver_config_override = "emit_wal_metadata=true"
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_pageserver", "main")
+    env.zenith_cli.create_branch("test_pageserver", DEFAULT_BRANCH_NAME)
     pg = env.postgres.create_start('test_pageserver')
     tenant_hex = env.initial_tenant.hex
     timeline = pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
@@ -40,7 +41,7 @@ def test_get_page(zenith_env_builder: ZenithEnvBuilder,
 
             pscur.execute(f"checkpoint {env.initial_tenant.hex} {timeline} 0")
 
-    output = env.run_psbench(timeline)
+    output = psbench_bin.run(env.initial_tenant.hex, timeline)
     for line in output.split("\n"):
         tokens = line.split(" ")
         report = tokens[0]

@@ -638,13 +638,6 @@ class ZenithEnv:
         """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
-    def run_psbench(self, timeline):
-        wal_metadata_filename = os.path.join(self.repo_dir, "wal_metadata.log")
-        psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
-        tenant_hex = self.initial_tenant.hex
-        args = [psbench_binpath, wal_metadata_filename, tenant_hex, timeline]
-        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
-
     @cached_property
     def auth_keys(self) -> AuthKeys:
         pub = (Path(self.repo_dir) / 'auth_public_key.pem').read_bytes()
@@ -1294,6 +1287,23 @@ class PgBin:
 @pytest.fixture(scope='function')
 def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
+
+
+@dataclass
+class PsbenchBin:
+    """A helper class for running the pageserver benchmarker tool."""
+    wal_metadata_path: str
+
+    def run(self, tenant_hex: str, timeline: str) -> str:
+        psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
+        args = [psbench_binpath, self.wal_metadata_path, tenant_hex, timeline]
+        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+
+
+@pytest.fixture(scope='function')
+def psbench_bin(test_output_dir):
+    wal_metadata_path = os.path.join(test_output_dir, "repo", "wal_metadata.log")
+    return PsbenchBin(wal_metadata_path)
 
 
 class VanillaPostgres(PgProtocol):
