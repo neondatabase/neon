@@ -160,7 +160,7 @@ fn main() -> Result<()> {
 
     // Env variable is set by `cargo`
     let version: Option<&str> = option_env!("CARGO_PKG_VERSION");
-    let matches = clap::App::new("zenith_ctl")
+    let matches = clap::Command::new("zenith_ctl")
         .version(version.unwrap_or("unknown"))
         .arg(
             Arg::new("connstr")

@@ -13,7 +13,7 @@ use zenith_utils::{
 
 use anyhow::{bail, Context, Result};
 
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use daemonize::Daemonize;
 
 use pageserver::{
@@ -31,7 +31,7 @@ use zenith_utils::signals::{self, Signal};
 
 fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("pageserver");
-    let arg_matches = App::new("Zenith page server")
+    let arg_matches = Command::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)
         .arg(

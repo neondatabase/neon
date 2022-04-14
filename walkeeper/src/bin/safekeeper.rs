@@ -2,7 +2,7 @@
 // Main entry point for the safekeeper executable
 //
 use anyhow::{bail, Context, Result};
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
@@ -32,7 +32,7 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 
 fn main() -> Result<()> {
     zenith_metrics::set_common_metrics_prefix("safekeeper");
-    let arg_matches = App::new("Zenith safekeeper")
+    let arg_matches = Command::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
         .arg(

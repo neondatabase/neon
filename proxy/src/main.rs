@@ -6,7 +6,7 @@
 /// in somewhat transparent manner (again via communication with control plane API).
 ///
 use anyhow::{bail, Context};
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use config::ProxyConfig;
 use futures::FutureExt;
 use std::future::Future;
@@ -37,7 +37,7 @@ async fn flatten_err(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     zenith_metrics::set_common_metrics_prefix("zenith_proxy");
-    let arg_matches = App::new("Zenith proxy/router")
+    let arg_matches = Command::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(
             Arg::new("proxy")
