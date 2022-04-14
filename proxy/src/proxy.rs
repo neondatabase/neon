@@ -265,14 +265,24 @@ mod tests {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let server_config = {
-            let mut config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-            config.set_single_cert(vec![cert], key)?;
+            let config = rustls::ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)?;
+
             config.into()
         };
 
         let client_config = {
-            let mut config = rustls::ClientConfig::new();
-            config.root_store.add(&ca)?;
+            let config = rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates({
+                    let mut store = rustls::RootCertStore::empty();
+                    store.add(&ca)?;
+                    store
+                })
+                .with_no_client_auth();
+
             ClientConfig { config, hostname }
         };
 
