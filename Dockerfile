@@ -1,7 +1,7 @@
 # Build Postgres
 #
-#FROM zimg/rust:1.56 AS pg-build
-FROM zenithdb/build:buster-20220309 AS pg-build
+#FROM zimg/rust:1.58 AS pg-build
+FROM zenithdb/build:buster-20220414 AS pg-build
 WORKDIR /pg
 
 USER root
@@ -17,8 +17,8 @@ RUN set -e \
 
 # Build zenith binaries
 #
-#FROM zimg/rust:1.56 AS build
-FROM zenithdb/build:buster-20220309 AS build
+#FROM zimg/rust:1.58 AS build
+FROM zenithdb/build:buster-20220414 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot

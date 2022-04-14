@@ -5,10 +5,10 @@ executors:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
-      - image: zimg/rust:1.56
+      - image: zimg/rust:1.58
   zenith-executor:
     docker:
-      - image: zimg/rust:1.56
+      - image: zimg/rust:1.58
 
 jobs:
   check-codestyle-rust:
