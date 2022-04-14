@@ -5,11 +5,14 @@ def test_proxy_select_1(static_proxy):
     static_proxy.safe_psql("select 1;")
 
 
-@pytest.mark.xfail  # Proxy eats the extra connection options
+# Pass extra options to the server.
+#
+# Currently, proxy eats the extra connection options, so this fails.
+# See https://github.com/neondatabase/neon/issues/1287
+@pytest.mark.xfail
 def test_proxy_options(static_proxy):
-    schema_name = "tmp_schema_1"
-    with static_proxy.connect(schema=schema_name) as conn:
+    with static_proxy.connect(options="-cproxytest.option=value") as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW search_path;")
-            search_path = cur.fetchall()[0][0]
-            assert schema_name == search_path
+            cur.execute("SHOW proxytest.option;")
+            value = cur.fetchall()[0][0]
+            assert value == 'value'
