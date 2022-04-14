@@ -6,7 +6,7 @@ use bytes::{BufMut, BytesMut};
 use clap::{Parser, Subcommand};
 use pageserver::wal_metadata::{Page, WalEntryMetadata};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{
     collections::HashSet,
@@ -120,7 +120,7 @@ struct Metadata {
 
 impl Metadata {
     /// Construct metadata object from wal_metadata file emitted by pageserver
-    fn build(wal_metadata_path: &PathBuf) -> Result<Metadata> {
+    fn build(wal_metadata_path: &Path) -> Result<Metadata> {
         let wal_metadata_file = File::open(wal_metadata_path).expect("error opening wal_metadata");
         let wal_metadata: Vec<WalEntryMetadata> = BufReader::new(wal_metadata_file)
             .lines()
@@ -145,7 +145,7 @@ impl Metadata {
     }
 
     /// Print results in a format readable by benchmark_fixture.py
-    fn report_latency(&self, latencies: &Vec<Duration>) -> Result<()> {
+    fn report_latency(&self, latencies: &[Duration]) -> Result<()> {
         println!("test_param num_pages {}", self.affected_pages.len());
         println!("test_param num_wal_entries {}", self.wal_metadata.len());
         println!("test_param total_wal_size {} bytes", self.total_wal_size);
@@ -174,7 +174,7 @@ async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Resu
     let mut latencies: Vec<Duration> = vec![];
     for page in &metadata.affected_pages {
         let start = Instant::now();
-        let _page_bytes = api.get_page(&metadata.latest_lsn, &page, true).await?;
+        let _page_bytes = api.get_page(&metadata.latest_lsn, page, true).await?;
         let duration = start.elapsed();
 
         latencies.push(duration);

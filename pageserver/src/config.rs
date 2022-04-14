@@ -617,6 +617,7 @@ impl PageServerConf {
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
+            emit_wal_metadata: false,
         }
     }
 }
@@ -725,6 +726,7 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                emit_wal_metadata: false,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -770,6 +772,7 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                emit_wal_metadata: false,
             },
             "Should be able to parse all basic config values correctly"
         );

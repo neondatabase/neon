@@ -2,7 +2,7 @@
 //!
 //! A handy tool for debugging, that's all.
 use anyhow::Result;
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use pageserver::layered_repository::dump_layerfile_from_path;
 use pageserver::page_cache;
 use pageserver::virtual_file;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use zenith_utils::GIT_VERSION;
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith dump_layerfile utility")
+    let arg_matches = Command::new("Zenith dump_layerfile utility")
         .about("Dump contents of one layer file, for debugging")
         .version(GIT_VERSION)
         .arg(

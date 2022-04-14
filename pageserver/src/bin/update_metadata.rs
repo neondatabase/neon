@@ -2,7 +2,7 @@
 //!
 //! A handy tool for debugging, that's all.
 use anyhow::Result;
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use pageserver::layered_repository::metadata::TimelineMetadata;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -10,7 +10,7 @@ use zenith_utils::lsn::Lsn;
 use zenith_utils::GIT_VERSION;
 
 fn main() -> Result<()> {
-    let arg_matches = App::new("Zenith update metadata utility")
+    let arg_matches = Command::new("Zenith update metadata utility")
         .about("Dump or update metadata file")
         .version(GIT_VERSION)
         .arg(

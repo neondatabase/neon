@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{bail, ensure, Context};
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use pageserver::{
     layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME},
     remote_storage::compression,
@@ -23,10 +23,10 @@ const SOURCE_DIRECTORY_ARG_NAME: &str = "source_directory";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let arg_matches = App::new("pageserver zst blob [un]compressor utility")
+    let arg_matches = Command::new("pageserver zst blob [un]compressor utility")
         .version(GIT_VERSION)
         .subcommands(vec![
-            App::new(LIST_SUBCOMMAND)
+            Command::new(LIST_SUBCOMMAND)
                 .about("List the archive contents")
                 .arg(
                     Arg::new(ARCHIVE_ARG_NAME)
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
                         .takes_value(true)
                         .help("An archive to list the contents of"),
                 ),
-            App::new(EXTRACT_SUBCOMMAND)
+            Command::new(EXTRACT_SUBCOMMAND)
                 .about("Extracts the archive into the directory")
                 .arg(
                     Arg::new(ARCHIVE_ARG_NAME)
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
                         .takes_value(true)
                         .help("A directory to extract the archive into. Optional, will use the current directory if not specified"),
                 ),
-            App::new(CREATE_SUBCOMMAND)
+            Command::new(CREATE_SUBCOMMAND)
                 .about("Creates an archive with the contents of a directory (only the first level files are taken, metadata file has to be present in the same directory)")
                 .arg(
                     Arg::new(SOURCE_DIRECTORY_ARG_NAME)
