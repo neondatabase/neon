@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bookfile::Book;
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
@@ -50,13 +49,17 @@ use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{
-    register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec, IntGauge, IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_gauge_vec, Histogram, HistogramVec,
+    IntCounter, IntGauge, IntGaugeVec,
 };
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use zenith_utils::seqwait::SeqWait;
 
+mod blob_io;
+pub mod block_io;
 mod delta_layer;
+mod disk_btree;
 pub(crate) mod ephemeral_file;
 mod filename;
 mod image_layer;
@@ -103,6 +106,21 @@ lazy_static! {
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
+// or in testing they estimate how much we would upload if we did.
+lazy_static! {
+    static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
+        "pageserver_num_persistent_files_created",
+        "Number of files created that are meant to be uploaded to cloud storage",
+    )
+    .expect("failed to define a metric");
+    static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
+        "pageserver_persistent_bytes_written",
+        "Total bytes written that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
 }
@@ -191,7 +209,7 @@ impl Repository for LayeredRepository {
             Arc::clone(&self.walredo_mgr),
             self.upload_layers,
         );
-        timeline.layers.lock().unwrap().next_open_layer_at = Some(initdb_lsn);
+        timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
 
         let timeline = Arc::new(timeline);
         let r = timelines.insert(
@@ -723,7 +741,7 @@ pub struct LayeredTimeline {
     tenantid: ZTenantId,
     timelineid: ZTimelineId,
 
-    layers: Mutex<LayerMap>,
+    layers: RwLock<LayerMap>,
 
     last_freeze_at: AtomicLsn,
 
@@ -995,7 +1013,7 @@ impl LayeredTimeline {
             conf,
             timelineid,
             tenantid,
-            layers: Mutex::new(LayerMap::default()),
+            layers: RwLock::new(LayerMap::default()),
 
             walredo_mgr,
 
@@ -1038,7 +1056,7 @@ impl LayeredTimeline {
     /// Returns all timeline-related files that were found and loaded.
     ///
     fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
         let mut num_layers = 0;
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
@@ -1192,7 +1210,7 @@ impl LayeredTimeline {
                 continue;
             }
 
-            let layers = timeline.layers.lock().unwrap();
+            let layers = timeline.layers.read().unwrap();
 
             // Check the open and frozen in-memory layers first
             if let Some(open_layer) = &layers.open_layer {
@@ -1274,7 +1292,7 @@ impl LayeredTimeline {
     /// Get a handle to the latest layer for appending.
     ///
     fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
 
         ensure!(lsn.is_aligned());
 
@@ -1345,7 +1363,7 @@ impl LayeredTimeline {
         } else {
             Some(self.write_lock.lock().unwrap())
         };
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
@@ -1410,7 +1428,7 @@ impl LayeredTimeline {
         let timer = self.flush_time_histo.start_timer();
 
         loop {
-            let layers = self.layers.lock().unwrap();
+            let layers = self.layers.read().unwrap();
             if let Some(frozen_layer) = layers.frozen_layers.front() {
                 let frozen_layer = Arc::clone(frozen_layer);
                 drop(layers); // to allow concurrent reads and writes
@@ -1454,7 +1472,7 @@ impl LayeredTimeline {
 
         // Finally, replace the frozen in-memory layer with the new on-disk layers
         {
-            let mut layers = self.layers.lock().unwrap();
+            let mut layers = self.layers.write().unwrap();
             let l = layers.frozen_layers.pop_front();
 
             // Only one thread may call this function at a time (for this
@@ -1472,8 +1490,7 @@ impl LayeredTimeline {
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn;
-        disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
+        let disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
@@ -1523,6 +1540,10 @@ impl LayeredTimeline {
                 &metadata,
                 false,
             )?;
+
+            NUM_PERSISTENT_FILES_CREATED.inc_by(1);
+            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
+
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 schedule_timeline_checkpoint_upload(
                     self.tenantid,
@@ -1601,15 +1622,6 @@ impl LayeredTimeline {
             debug!("Could not compact because no partitioning specified yet");
         }
 
-        // Call unload() on all frozen layers, to release memory.
-        // This shouldn't be much memory, as only metadata is slurped
-        // into memory.
-        let layers = self.layers.lock().unwrap();
-        for layer in layers.iter_historic_layers() {
-            layer.unload()?;
-        }
-        drop(layers);
-
         Ok(())
     }
 
@@ -1620,7 +1632,7 @@ impl LayeredTimeline {
         lsn: Lsn,
         threshold: usize,
     ) -> Result<bool> {
-        let layers = self.layers.lock().unwrap();
+        let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
@@ -1678,7 +1690,7 @@ impl LayeredTimeline {
 
         // FIXME: Do we need to do something to upload it to remote storage here?
 
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
         layers.insert_historic(Arc::new(image_layer));
         drop(layers);
 
@@ -1686,15 +1698,13 @@ impl LayeredTimeline {
     }
 
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
-        let layers = self.layers.lock().unwrap();
-
-        // We compact or "shuffle" the level-0 delta layers when 10 have
-        // accumulated.
-        static COMPACT_THRESHOLD: usize = 10;
+        let layers = self.layers.read().unwrap();
 
         let level0_deltas = layers.get_level0_deltas()?;
 
-        if level0_deltas.len() < COMPACT_THRESHOLD {
+        // We compact or "shuffle" the level-0 delta layers when they've
+        // accumulated over the compaction threshold.
+        if level0_deltas.len() < self.conf.compaction_threshold {
             return Ok(());
         }
         drop(layers);
@@ -1778,7 +1788,7 @@ impl LayeredTimeline {
             layer_paths.pop().unwrap();
         }
 
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
         for l in new_layers {
             layers.insert_historic(Arc::new(l));
         }
@@ -1860,7 +1870,7 @@ impl LayeredTimeline {
         // 2. it doesn't need to be retained for 'retain_lsns';
         // 3. newer on-disk image layers cover the layer's whole key range
         //
-        let mut layers = self.layers.lock().unwrap();
+        let mut layers = self.layers.write().unwrap();
         'outer: for l in layers.iter_historic_layers() {
             // This layer is in the process of being flushed to disk.
             // It will be swapped out of the layer map, replaced with
@@ -2054,16 +2064,17 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
 
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
-    let file = File::open(path)?;
-    let book = Book::new(file)?;
+    use std::os::unix::fs::FileExt;
 
-    match book.magic() {
-        crate::DELTA_FILE_MAGIC => {
-            DeltaLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
-        crate::IMAGE_FILE_MAGIC => {
-            ImageLayer::new_for_path(path, &book)?.dump(verbose)?;
-        }
+    // All layer files start with a two-byte "magic" value, to identify the kind of
+    // file.
+    let file = File::open(path)?;
+    let mut header_buf = [0u8; 2];
+    file.read_exact_at(&mut header_buf, 0)?;
+
+    match u16::from_be_bytes(header_buf) {
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -2274,7 +2285,6 @@ pub mod tests {
                     lsn,
                     Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
-                println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;

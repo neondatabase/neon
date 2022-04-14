@@ -21,7 +21,6 @@ use crate::broker::SafekeeperInfo;
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 
 use crate::control_file;
-use crate::control_file::Storage as cf_storage;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState,
@@ -98,10 +97,9 @@ impl SharedState {
         peer_ids: Vec<ZNodeId>,
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
-        let control_store = control_file::FileStorage::new(zttid, conf);
+        let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let mut sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state);
-        sk.control_store.persist(&sk.s)?;
+        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store)?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -116,18 +114,14 @@ impl SharedState {
     /// Restore SharedState from control file.
     /// If file doesn't exist, bails out.
     fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
-        let state = control_file::FileStorage::load_control_file_conf(conf, zttid)
-            .context("failed to load from control file")?;
-
-        let control_store = control_file::FileStorage::new(zttid, conf);
-
+        let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
 
         info!("timeline {} restored", zttid.timeline_id);
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, state),
+            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store)?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
@@ -419,7 +413,7 @@ impl Timeline {
 
     pub fn get_state(&self) -> (SafekeeperMemState, SafeKeeperState) {
         let shared_state = self.mutex.lock().unwrap();
-        (shared_state.sk.inmem.clone(), shared_state.sk.s.clone())
+        (shared_state.sk.inmem.clone(), shared_state.sk.state.clone())
     }
 
     /// Prepare public safekeeper info for reporting.

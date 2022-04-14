@@ -10,8 +10,8 @@ pub async fn json_request<T: for<'de> Deserialize<'de>>(
     let whole_body = hyper::body::aggregate(request.body_mut())
         .await
         .map_err(ApiError::from_err)?;
-    Ok(serde_json::from_reader(whole_body.reader())
-        .map_err(|err| ApiError::BadRequest(format!("Failed to parse json request {}", err)))?)
+    serde_json::from_reader(whole_body.reader())
+        .map_err(|err| ApiError::BadRequest(format!("Failed to parse json request {}", err)))
 }
 
 pub fn json_response<T: Serialize>(

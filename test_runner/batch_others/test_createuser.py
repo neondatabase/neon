@@ -28,4 +28,4 @@ def test_createuser(zenith_simple_env: ZenithEnv):
     pg2 = env.postgres.create_start('test_createuser2')
 
     # Test that you can connect to new branch as a new user
-    assert pg2.safe_psql('select current_user', username='testuser') == [('testuser', )]
+    assert pg2.safe_psql('select current_user', user='testuser') == [('testuser', )]

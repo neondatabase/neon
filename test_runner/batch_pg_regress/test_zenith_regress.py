@@ -40,9 +40,9 @@ def test_zenith_regress(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, c
 
     log.info(pg_regress_command)
     env_vars = {
-        'PGPORT': str(pg.port),
-        'PGUSER': pg.username,
-        'PGHOST': pg.host,
+        'PGPORT': str(pg.default_options['port']),
+        'PGUSER': pg.default_options['user'],
+        'PGHOST': pg.default_options['host'],
     }
 
     # Run the command.

@@ -4,6 +4,7 @@
 use anyhow::Result;
 use clap::{App, Arg};
 use pageserver::layered_repository::dump_layerfile_from_path;
+use pageserver::page_cache;
 use pageserver::virtual_file;
 use std::path::PathBuf;
 use zenith_utils::GIT_VERSION;
@@ -24,6 +25,7 @@ fn main() -> Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
+    page_cache::init(100);
 
     dump_layerfile_from_path(&path, true)?;
 

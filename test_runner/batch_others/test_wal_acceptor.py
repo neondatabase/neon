@@ -108,14 +108,14 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 
             for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
                 # Invariant. May be < when transaction is in progress.
-                assert commit_lsn <= flush_lsn
+                assert commit_lsn <= flush_lsn, f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             # We only call collect_metrics() after a transaction is confirmed by
             # the compute node, which only happens after a consensus of safekeepers
             # has confirmed the transaction. We assume majority consensus here.
             assert (2 * sum(m.last_record_lsn <= lsn
-                            for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers)
+                            for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             assert (2 * sum(m.last_record_lsn <= lsn
-                            for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers)
+                            for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             timeline_metrics.append(m)
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
@@ -379,7 +379,7 @@ class ProposerPostgres(PgProtocol):
                  tenant_id: uuid.UUID,
                  listen_addr: str,
                  port: int):
-        super().__init__(host=listen_addr, port=port, username='zenith_admin')
+        super().__init__(host=listen_addr, port=port, user='zenith_admin', dbname='postgres')
 
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin

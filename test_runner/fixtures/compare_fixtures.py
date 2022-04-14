@@ -2,7 +2,7 @@ import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
 
-from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, ZenithEnv
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 # Type-related stuff
@@ -87,6 +87,9 @@ class ZenithCompare(PgCompare):
     def flush(self):
         self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
 
+    def compact(self):
+        self.pscur.execute(f"compact {self.env.initial_tenant.hex} {self.timeline}")
+
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record("peak_mem",
                                  self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
@@ -100,6 +103,19 @@ class ZenithCompare(PgCompare):
         self.zenbenchmark.record('size',
                                  timeline_size / (1024 * 1024),
                                  'MB',
+                                 report=MetricReport.LOWER_IS_BETTER)
+
+        total_files = self.zenbenchmark.get_int_counter_value(
+            self.env.pageserver, "pageserver_num_persistent_files_created")
+        total_bytes = self.zenbenchmark.get_int_counter_value(
+            self.env.pageserver, "pageserver_persistent_bytes_written")
+        self.zenbenchmark.record("data_uploaded",
+                                 total_bytes / (1024 * 1024),
+                                 "MB",
+                                 report=MetricReport.LOWER_IS_BETTER)
+        self.zenbenchmark.record("num_files_uploaded",
+                                 total_files,
+                                 "",
                                  report=MetricReport.LOWER_IS_BETTER)
 
     def record_pageserver_writes(self, out_name):
@@ -162,6 +178,48 @@ class VanillaCompare(PgCompare):
         return self.zenbenchmark.record_duration(out_name)
 
 
+class RemoteCompare(PgCompare):
+    """PgCompare interface for a remote postgres instance."""
+    def __init__(self, zenbenchmark, remote_pg: RemotePostgres):
+        self._pg = remote_pg
+        self._zenbenchmark = zenbenchmark
+
+        # Long-lived cursor, useful for flushing
+        self.conn = self.pg.connect()
+        self.cur = self.conn.cursor()
+
+    @property
+    def pg(self):
+        return self._pg
+
+    @property
+    def zenbenchmark(self):
+        return self._zenbenchmark
+
+    @property
+    def pg_bin(self):
+        return self._pg.pg_bin
+
+    def flush(self):
+        # TODO: flush the remote pageserver
+        pass
+
+    def report_peak_memory_use(self) -> None:
+        # TODO: get memory usage from remote pageserver
+        pass
+
+    def report_size(self) -> None:
+        # TODO: get storage size from remote pageserver
+        pass
+
+    @contextmanager
+    def record_pageserver_writes(self, out_name):
+        yield  # Do nothing
+
+    def record_duration(self, out_name):
+        return self.zenbenchmark.record_duration(out_name)
+
+
 @pytest.fixture(scope='function')
 def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCompare:
     branch_name = request.node.name
@@ -171,6 +229,11 @@ def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCo
 @pytest.fixture(scope='function')
 def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
     return VanillaCompare(zenbenchmark, vanilla_pg)
+
+
+@pytest.fixture(scope='function')
+def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
+    return RemoteCompare(zenbenchmark, remote_pg)
 
 
 @pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
