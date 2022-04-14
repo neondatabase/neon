@@ -210,6 +210,7 @@ pub struct SafekeeperMemState {
     pub s3_wal_lsn: Lsn, // TODO: keep only persistent version
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
+    pub proposer_uuid: PgUuid,
 }
 
 impl SafeKeeperState {
@@ -502,9 +503,8 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     epoch_start_lsn: Lsn,
 
     pub inmem: SafekeeperMemState, // in memory part
-    pub s: SafeKeeperState,        // persistent part
+    pub state: CTRL,               // persistent state storage
 
-    pub control_store: CTRL,
     pub wal_store: WAL,
 }
 
@@ -516,14 +516,14 @@ where
     // constructor
     pub fn new(
         ztli: ZTimelineId,
-        control_store: CTRL,
+        state: CTRL,
         mut wal_store: WAL,
-        state: SafeKeeperState,
     ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
             bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
         }
 
+        // initialize wal_store, if state is already initialized
         wal_store.init_storage(&state)?;
 
         Ok(SafeKeeper {
@@ -535,23 +535,25 @@ where
                 s3_wal_lsn: state.s3_wal_lsn,
                 peer_horizon_lsn: state.peer_horizon_lsn,
                 remote_consistent_lsn: state.remote_consistent_lsn,
+                proposer_uuid: state.proposer_uuid,
             },
-            s: state,
-            control_store,
+            state,
             wal_store,
         })
     }
 
     /// Get history of term switches for the available WAL
     fn get_term_history(&self) -> TermHistory {
-        self.s
+        self.state
             .acceptor_state
             .term_history
             .up_to(self.wal_store.flush_lsn())
     }
 
     pub fn get_epoch(&self) -> Term {
-        self.s.acceptor_state.get_epoch(self.wal_store.flush_lsn())
+        self.state
+            .acceptor_state
+            .get_epoch(self.wal_store.flush_lsn())
     }
 
     /// Process message from proposer and possibly form reply. Concurrent
@@ -587,46 +589,47 @@ where
             );
         }
         /* Postgres upgrade is not treated as fatal error */
-        if msg.pg_version != self.s.server.pg_version
-            && self.s.server.pg_version != UNKNOWN_SERVER_VERSION
+        if msg.pg_version != self.state.server.pg_version
+            && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
             info!(
                 "incompatible server version {}, expected {}",
-                msg.pg_version, self.s.server.pg_version
+                msg.pg_version, self.state.server.pg_version
             );
         }
-        if msg.tenant_id != self.s.tenant_id {
+        if msg.tenant_id != self.state.tenant_id {
             bail!(
                 "invalid tenant ID, got {}, expected {}",
                 msg.tenant_id,
-                self.s.tenant_id
+                self.state.tenant_id
             );
         }
-        if msg.ztli != self.s.timeline_id {
+        if msg.ztli != self.state.timeline_id {
             bail!(
                 "invalid timeline ID, got {}, expected {}",
                 msg.ztli,
-                self.s.timeline_id
+                self.state.timeline_id
             );
         }
 
         // set basic info about server, if not yet
         // TODO: verify that is doesn't change after
-        self.s.server.system_id = msg.system_id;
-        self.s.server.wal_seg_size = msg.wal_seg_size;
-        self.control_store
-            .persist(&self.s)
-            .context("failed to persist shared state")?;
+        {
+            let mut state = self.state.clone();
+            state.server.system_id = msg.system_id;
+            state.server.wal_seg_size = msg.wal_seg_size;
+            self.state.persist(&state)?;
+        }
 
         // pass wal_seg_size to read WAL and find flush_lsn
-        self.wal_store.init_storage(&self.s)?;
+        self.wal_store.init_storage(&self.state)?;
 
         info!(
             "processed greeting from proposer {:?}, sending term {:?}",
-            msg.proposer_id, self.s.acceptor_state.term
+            msg.proposer_id, self.state.acceptor_state.term
         );
         Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
-            term: self.s.acceptor_state.term,
+            term: self.state.acceptor_state.term,
         })))
     }
 
@@ -637,17 +640,19 @@ where
     ) -> Result<Option<AcceptorProposerMessage>> {
         // initialize with refusal
         let mut resp = VoteResponse {
-            term: self.s.acceptor_state.term,
+            term: self.state.acceptor_state.term,
             vote_given: false as u64,
             flush_lsn: self.wal_store.flush_lsn(),
-            truncate_lsn: self.s.peer_horizon_lsn,
+            truncate_lsn: self.state.peer_horizon_lsn,
             term_history: self.get_term_history(),
         };
-        if self.s.acceptor_state.term < msg.term {
-            self.s.acceptor_state.term = msg.term;
+        if self.state.acceptor_state.term < msg.term {
+            let mut state = self.state.clone();
+            state.acceptor_state.term = msg.term;
             // persist vote before sending it out
-            self.control_store.persist(&self.s)?;
-            resp.term = self.s.acceptor_state.term;
+            self.state.persist(&state)?;
+
+            resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
         }
         info!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
@@ -656,9 +661,10 @@ where
 
     /// Bump our term if received a note from elected proposer with higher one
     fn bump_if_higher(&mut self, term: Term) -> Result<()> {
-        if self.s.acceptor_state.term < term {
-            self.s.acceptor_state.term = term;
-            self.control_store.persist(&self.s)?;
+        if self.state.acceptor_state.term < term {
+            let mut state = self.state.clone();
+            state.acceptor_state.term = term;
+            self.state.persist(&state)?;
         }
         Ok(())
     }
@@ -666,9 +672,9 @@ where
     /// Form AppendResponse from current state.
     fn append_response(&self) -> AppendResponse {
         let ar = AppendResponse {
-            term: self.s.acceptor_state.term,
+            term: self.state.acceptor_state.term,
             flush_lsn: self.wal_store.flush_lsn(),
-            commit_lsn: self.s.commit_lsn,
+            commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
             zenith_feedback: ZenithFeedback::empty(),
@@ -681,7 +687,7 @@ where
         info!("received ProposerElected {:?}", msg);
         self.bump_if_higher(msg.term)?;
         // If our term is higher, ignore the message (next feedback will inform the compute)
-        if self.s.acceptor_state.term > msg.term {
+        if self.state.acceptor_state.term > msg.term {
             return Ok(None);
         }
 
@@ -692,8 +698,11 @@ where
         self.wal_store.truncate_wal(msg.start_streaming_at)?;
 
         // and now adopt term history from proposer
-        self.s.acceptor_state.term_history = msg.term_history.clone();
-        self.control_store.persist(&self.s)?;
+        {
+            let mut state = self.state.clone();
+            state.acceptor_state.term_history = msg.term_history.clone();
+            self.state.persist(&state)?;
+        }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
 
@@ -715,13 +724,13 @@ where
         // Also note that commit_lsn can reach epoch_start_lsn earlier
         // that we receive new epoch_start_lsn, and we still need to sync
         // control file in this case.
-        if commit_lsn == self.epoch_start_lsn && self.s.commit_lsn != commit_lsn {
+        if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
             self.persist_control_file()?;
         }
 
         // We got our first commit_lsn, which means we should sync
         // everything to disk, to initialize the state.
-        if self.s.commit_lsn == Lsn(0) && commit_lsn > Lsn(0) {
+        if self.state.commit_lsn == Lsn(0) && commit_lsn > Lsn(0) {
             self.wal_store.flush_wal()?;
             self.persist_control_file()?;
         }
@@ -731,10 +740,12 @@ where
 
     /// Persist in-memory state to the disk.
     fn persist_control_file(&mut self) -> Result<()> {
-        self.s.commit_lsn = self.inmem.commit_lsn;
-        self.s.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
+        let mut state = self.state.clone();
 
-        self.control_store.persist(&self.s)
+        state.commit_lsn = self.inmem.commit_lsn;
+        state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
+        state.proposer_uuid = self.inmem.proposer_uuid;
+        self.state.persist(&state)
     }
 
     /// Handle request to append WAL.
@@ -744,13 +755,13 @@ where
         msg: &AppendRequest,
         require_flush: bool,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        if self.s.acceptor_state.term < msg.h.term {
+        if self.state.acceptor_state.term < msg.h.term {
             bail!("got AppendRequest before ProposerElected");
         }
 
         // If our term is higher, immediately refuse the message.
-        if self.s.acceptor_state.term > msg.h.term {
-            let resp = AppendResponse::term_only(self.s.acceptor_state.term);
+        if self.state.acceptor_state.term > msg.h.term {
+            let resp = AppendResponse::term_only(self.state.acceptor_state.term);
             return Ok(Some(AcceptorProposerMessage::AppendResponse(resp)));
         }
 
@@ -758,8 +769,7 @@ where
         // processing the message.
 
         self.epoch_start_lsn = msg.h.epoch_start_lsn;
-        // TODO: don't update state without persisting to disk
-        self.s.proposer_uuid = msg.h.proposer_uuid;
+        self.inmem.proposer_uuid = msg.h.proposer_uuid;
 
         // do the job
         if !msg.wal_data.is_empty() {
@@ -790,7 +800,7 @@ where
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
         // when truncate_lsn delta exceeds WAL segment size.
-        if self.s.peer_horizon_lsn + (self.s.server.wal_seg_size as u64)
+        if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
             < self.inmem.peer_horizon_lsn
         {
             self.persist_control_file()?;
@@ -829,6 +839,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+
     use super::*;
     use crate::wal_storage::Storage;
 
@@ -841,6 +853,14 @@ mod tests {
         fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
+        }
+    }
+
+    impl Deref for InMemoryState {
+        type Target = SafeKeeperState;
+
+        fn deref(&self) -> &Self::Target {
+            &self.persisted_state
         }
     }
 
@@ -879,7 +899,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty()).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -890,11 +910,11 @@ mod tests {
         }
 
         // reboot...
-        let state = sk.control_store.persisted_state.clone();
+        let state = sk.state.persisted_state.clone();
         let storage = InMemoryState {
-            persisted_state: state.clone(),
+            persisted_state: state,
         };
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, state).unwrap();
+        sk = SafeKeeper::new(ztli, storage, sk.wal_store).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -911,7 +931,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, SafeKeeperState::empty()).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
