@@ -5,7 +5,6 @@
 use bytes::{BufMut, BytesMut};
 use clap::{Parser, Subcommand};
 use pageserver::wal_metadata::{Page, WalEntryMetadata};
-use tokio::net::TcpStream;
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -15,6 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use zenith_utils::{
     lsn::Lsn,
     pq_proto::{BeMessage, FeMessage},
@@ -26,7 +26,7 @@ const BYTES_IN_PAGE: usize = 8 * 1024;
 
 /// Client for the pageserver's pagestream API
 struct PagestreamApi {
-    stream: TcpStream
+    stream: TcpStream,
 }
 
 /// Good enough implementation for these tests
@@ -51,15 +51,10 @@ impl PagestreamApi {
             _ = client.query(init_query.as_str(), &[]) => (),
         };
 
-        Ok(PagestreamApi{stream})
+        Ok(PagestreamApi { stream })
     }
 
-    async fn get_page(
-        &mut self,
-        lsn: &Lsn,
-        page: &Page,
-        latest: bool,
-    ) -> anyhow::Result<Vec<u8>> {
+    async fn get_page(&mut self, lsn: &Lsn, page: &Page, latest: bool) -> anyhow::Result<Vec<u8>> {
         let latest: u8 = if latest { 1 } else { 0 };
         let msg = {
             let query = {
@@ -126,14 +121,12 @@ struct Metadata {
 impl Metadata {
     /// Construct metadata object from wal_metadata file emitted by pageserver
     fn build(wal_metadata_path: &PathBuf) -> Result<Metadata> {
-        let wal_metadata_file = File::open(wal_metadata_path)
-            .expect("error opening wal_metadata");
+        let wal_metadata_file = File::open(wal_metadata_path).expect("error opening wal_metadata");
         let wal_metadata: Vec<WalEntryMetadata> = BufReader::new(wal_metadata_file)
             .lines()
             .map(|result| result.expect("error reading from file"))
             .map(|line| serde_json::from_str(&line).expect("corrupt metadata file"))
             .collect();
-
 
         let total_wal_size: usize = wal_metadata.iter().map(|m| m.size).sum();
         let affected_pages: HashSet<_> = wal_metadata
@@ -177,7 +170,7 @@ impl Metadata {
 }
 
 /// Sequentially get the latest version of each page and report latencies
-async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Result<Vec<Duration>>{
+async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Result<Vec<Duration>> {
     let mut latencies: Vec<Duration> = vec![];
     for page in &metadata.affected_pages {
         let start = Instant::now();
@@ -215,8 +208,9 @@ async fn main() -> Result<()> {
 
     // Run test
     let latencies = match args.test {
-        PsbenchTest::GetLatestPages => test_latest_pages(&mut pagestream, &metadata)
-    }.await?;
+        PsbenchTest::GetLatestPages => test_latest_pages(&mut pagestream, &metadata),
+    }
+    .await?;
 
     // Report results
     metadata.report_latency(&latencies)?;

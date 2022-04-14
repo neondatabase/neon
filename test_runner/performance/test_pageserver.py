@@ -7,14 +7,13 @@ from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 
 # TODO split this into separate tests maybe
-@pytest.mark.parametrize(
-    "workload",
-    [
-        pytest.param("hot-page", marks=pytest.mark.slow),
-        pytest.param("pgbench"),
-        pytest.param("pgbench-big", marks=pytest.mark.slow),
-        pytest.param("pgbench-long", marks=pytest.mark.slow),
-    ])
+@pytest.mark.parametrize("workload",
+                         [
+                             pytest.param("hot-page", marks=pytest.mark.slow),
+                             pytest.param("pgbench"),
+                             pytest.param("pgbench-big", marks=pytest.mark.slow),
+                             pytest.param("pgbench-long", marks=pytest.mark.slow),
+                         ])
 def test_get_page(zenith_env_builder: ZenithEnvBuilder,
                   zenbenchmark: ZenithBenchmarker,
                   pg_bin: PgBin,
