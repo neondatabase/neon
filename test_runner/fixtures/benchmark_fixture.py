@@ -245,6 +245,16 @@ class ZenithBenchmarker:
                     '',
                     MetricReport.TEST_PARAM)
 
+    def record_psbench_result(self, psbench_output):
+        """Record results from pageserver benchmarker."""
+        for line in psbench_output.split("\n"):
+            tokens = line.split(" ")
+            report = tokens[0]
+            name = tokens[1]
+            value = tokens[2]
+            unit = tokens[3] if len(tokens) > 3 else ""
+            self.record(name, value, unit, report=report)
+
     def get_io_writes(self, pageserver) -> int:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver

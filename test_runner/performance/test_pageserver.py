@@ -42,10 +42,4 @@ def test_get_page(zenith_env_builder: ZenithEnvBuilder,
             pscur.execute(f"checkpoint {env.initial_tenant.hex} {timeline} 0")
 
     output = psbench_bin.run(env.initial_tenant.hex, timeline)
-    for line in output.split("\n"):
-        tokens = line.split(" ")
-        report = tokens[0]
-        name = tokens[1]
-        value = tokens[2]
-        unit = tokens[3] if len(tokens) > 3 else ""
-        zenbenchmark.record(name, value, unit, report=report)
+    zenbenchmark.record_psbench_result(output)
