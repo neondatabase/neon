@@ -123,6 +123,22 @@ def pytest_configure(config):
         top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
     mkdir_if_needed(top_output_dir)
 
+    # Find the postgres installation.
+    global pg_distrib_dir
+    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
+    if env_postgres_bin:
+        pg_distrib_dir = env_postgres_bin
+    else:
+        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
+    log.info(f'pg_distrib_dir is {pg_distrib_dir}')
+    if os.getenv("REMOTE_ENV"):
+        # When testing against a remote server, we only need the client binary.
+        if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/psql')):
+            raise Exception('psql not found at "{}"'.format(pg_distrib_dir))
+    else:
+        if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
+            raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
+
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have zenith binaries locally
         # this is the case for benchmarks run on self-hosted runner
@@ -137,17 +153,6 @@ def pytest_configure(config):
     log.info(f'zenith_binpath is {zenith_binpath}')
     if not os.path.exists(os.path.join(zenith_binpath, 'pageserver')):
         raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
-
-    # Find the postgres installation.
-    global pg_distrib_dir
-    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
-    if env_postgres_bin:
-        pg_distrib_dir = env_postgres_bin
-    else:
-        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
-    log.info(f'pg_distrib_dir is {pg_distrib_dir}')
-    if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
-        raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
 
 
 def zenfixture(func: Fn) -> Fn:
@@ -1303,6 +1308,47 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
     pg_bin = PgBin(test_output_dir)
     with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
         yield vanilla_pg
+
+
+class RemotePostgres(PgProtocol):
+    def __init__(self, pg_bin: PgBin, remote_connstr: str):
+        super().__init__(**parse_dsn(remote_connstr))
+        self.pg_bin = pg_bin
+        # The remote server is assumed to be running already
+        self.running = True
+
+    def configure(self, options: List[str]):
+        raise Exception('cannot change configuration of remote Posgres instance')
+
+    def start(self):
+        raise Exception('cannot start a remote Postgres instance')
+
+    def stop(self):
+        raise Exception('cannot stop a remote Postgres instance')
+
+    def get_subdir_size(self, subdir) -> int:
+        # TODO: Could use the server's Generic File Acccess functions if superuser.
+        # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
+        raise Exception('cannot get size of a Postgres instance')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # do nothing
+        pass
+
+
+@pytest.fixture(scope='function')
+def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
+    pg_bin = PgBin(test_output_dir)
+
+    connstr = os.getenv("BENCHMARK_CONNSTR")
+    if connstr is None:
+        raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
+
+    with RemotePostgres(pg_bin, connstr) as remote_pg:
+        yield remote_pg
 
 
 class ZenithProxy(PgProtocol):

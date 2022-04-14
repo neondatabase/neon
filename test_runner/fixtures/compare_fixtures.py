@@ -2,7 +2,7 @@ import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
 
-from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, ZenithEnv
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 # Type-related stuff
@@ -162,6 +162,48 @@ class VanillaCompare(PgCompare):
         return self.zenbenchmark.record_duration(out_name)
 
 
+class RemoteCompare(PgCompare):
+    """PgCompare interface for a remote postgres instance."""
+    def __init__(self, zenbenchmark, remote_pg: RemotePostgres):
+        self._pg = remote_pg
+        self._zenbenchmark = zenbenchmark
+
+        # Long-lived cursor, useful for flushing
+        self.conn = self.pg.connect()
+        self.cur = self.conn.cursor()
+
+    @property
+    def pg(self):
+        return self._pg
+
+    @property
+    def zenbenchmark(self):
+        return self._zenbenchmark
+
+    @property
+    def pg_bin(self):
+        return self._pg.pg_bin
+
+    def flush(self):
+        # TODO: flush the remote pageserver
+        pass
+
+    def report_peak_memory_use(self) -> None:
+        # TODO: get memory usage from remote pageserver
+        pass
+
+    def report_size(self) -> None:
+        # TODO: get storage size from remote pageserver
+        pass
+
+    @contextmanager
+    def record_pageserver_writes(self, out_name):
+        yield  # Do nothing
+
+    def record_duration(self, out_name):
+        return self.zenbenchmark.record_duration(out_name)
+
+
 @pytest.fixture(scope='function')
 def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCompare:
     branch_name = request.node.name
@@ -171,6 +213,11 @@ def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCo
 @pytest.fixture(scope='function')
 def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
     return VanillaCompare(zenbenchmark, vanilla_pg)
+
+
+@pytest.fixture(scope='function')
+def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
+    return RemoteCompare(zenbenchmark, remote_pg)
 
 
 @pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
