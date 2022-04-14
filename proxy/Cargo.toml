@@ -31,7 +31,6 @@ thiserror = "1.0.30"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 tokio-rustls = "0.22.0"
-tokio-stream = "0.1.8"
 
 zenith_utils = { path = "../zenith_utils" }
 zenith_metrics = { path = "../zenith_metrics" }
