@@ -12,14 +12,14 @@
 //! only measure read performance.
 //!
 use anyhow::Result;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use zenith_utils::lsn::Lsn;
 
-use crate::{config::PageServerConf, repository::Key, walrecord::DecodedBkpBlock};
+use crate::{config::PageServerConf, walrecord::DecodedBkpBlock};
 
 pub static WAL_METADATA_FILE: OnceCell<File> = OnceCell::new();
 

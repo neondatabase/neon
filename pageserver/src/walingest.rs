@@ -255,7 +255,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             lsn,
             size: recdata_len,
             affected_pages: decoded.blocks.iter().map(|blk| blk.into()).collect(),
-        });
+        })?;
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
