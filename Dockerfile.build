@@ -1,4 +1,4 @@
-FROM rust:1.56.1-slim-buster
+FROM rust:1.58-slim-buster
 WORKDIR /home/circleci/project
 
 RUN set -e \

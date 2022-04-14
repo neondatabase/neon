@@ -1,6 +1,6 @@
 # First transient image to build compute_tools binaries
 # NB: keep in sync with rust image version in .circle/config.yml
-FROM zenithdb/build:buster-20220309 AS rust-build
+FROM zenithdb/build:buster-20220414 AS rust-build
 
 WORKDIR /zenith
 
