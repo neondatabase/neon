@@ -420,10 +420,15 @@ impl PostgresNode {
         if let Some(token) = auth_token {
             cmd.env("ZENITH_AUTH_TOKEN", token);
         }
-        let pg_ctl = cmd.status().context("pg_ctl failed")?;
 
-        if !pg_ctl.success() {
-            anyhow::bail!("pg_ctl failed");
+        let pg_ctl = cmd.output().context("pg_ctl failed")?;
+        if !pg_ctl.status.success() {
+            anyhow::bail!(
+                "pg_ctl failed, exit code: {}, stdout: {}, stderr: {}",
+                pg_ctl.status,
+                String::from_utf8_lossy(&pg_ctl.stdout),
+                String::from_utf8_lossy(&pg_ctl.stderr),
+            );
         }
         Ok(())
     }
