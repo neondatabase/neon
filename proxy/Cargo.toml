@@ -21,7 +21,8 @@ pin-project-lite = "0.2.7"
 rand = "0.8.3"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 routerify = "2"
-rustls = "0.19.1"
+rustls = "0.20.0"
+rustls-pemfile = "0.2.1"
 scopeguard = "1.1.0"
 serde = "1"
 serde_json = "1"
@@ -30,7 +31,7 @@ socket2 = "0.4.4"
 thiserror = "1.0.30"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
-tokio-rustls = "0.22.0"
+tokio-rustls = "0.23.0"
 
 zenith_utils = { path = "../zenith_utils" }
 zenith_metrics = { path = "../zenith_metrics" }
@@ -40,4 +41,4 @@ workspace_hack = { version = "0.1", path = "../workspace_hack" }
 async-trait = "0.1"
 rcgen = "0.8.14"
 rstest = "0.12"
-tokio-postgres-rustls = "0.8.0"
+tokio-postgres-rustls = "0.9.0"
