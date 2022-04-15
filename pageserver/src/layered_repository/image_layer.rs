@@ -35,7 +35,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use log::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -43,6 +42,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard};
+use tracing::*;
 
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;

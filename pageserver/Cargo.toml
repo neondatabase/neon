@@ -14,7 +14,6 @@ hex = "0.4.3"
 hyper = "0.14"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
-log = "0.4.14"
 clap = "3.0"
 daemonize = "0.4.1"
 tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }

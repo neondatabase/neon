@@ -1526,7 +1526,6 @@ dependencies = [
  "hyper",
  "itertools",
  "lazy_static",
- "log",
  "nix",
  "once_cell",
  "postgres",

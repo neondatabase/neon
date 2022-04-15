@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use log::*;
 use nix::poll::*;
 use serde::Serialize;
 use std::fs;
@@ -35,6 +34,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
+use tracing::*;
 use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use zenith_utils::bin_ser::BeSer;
 use zenith_utils::lsn::Lsn;

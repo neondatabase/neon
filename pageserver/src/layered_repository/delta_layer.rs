@@ -38,8 +38,8 @@ use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use log::*;
 use serde::{Deserialize, Serialize};
+use tracing::*;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
