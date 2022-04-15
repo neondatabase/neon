@@ -340,13 +340,13 @@ dependencies = [
  "hyper",
  "libc",
  "log",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres",
  "regex",
  "serde",
  "serde_json",
  "tar",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tokio-postgres",
  "workspace_hack",
 ]
 
@@ -378,7 +378,7 @@ dependencies = [
  "lazy_static",
  "nix",
  "pageserver",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres",
  "regex",
  "reqwest",
  "serde",
@@ -1529,9 +1529,9 @@ dependencies = [
  "log",
  "nix",
  "once_cell",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres",
+ "postgres-protocol",
+ "postgres-types",
  "postgres_ffi",
  "rand",
  "regex",
@@ -1546,7 +1546,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-util 0.7.0",
  "toml_edit",
@@ -1717,23 +1717,9 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "log",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres-protocol",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
-]
-
-[[package]]
-name = "postgres"
-version = "0.19.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
-dependencies = [
- "bytes",
- "fallible-iterator",
- "futures",
- "log",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
- "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -1755,41 +1741,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "postgres-protocol"
-version = "0.6.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
-dependencies = [
- "base64 0.13.0",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "hmac 0.10.1",
- "lazy_static",
- "md-5",
- "memchr",
- "rand",
- "sha2",
- "stringprep",
-]
-
-[[package]]
 name = "postgres-types"
 version = "0.2.1"
 source = "git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7#2949d98df52587d562986aad155dd4e889e408b7"
 dependencies = [
  "bytes",
  "fallible-iterator",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
-]
-
-[[package]]
-name = "postgres-types"
-version = "0.2.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
-dependencies = [
- "bytes",
- "fallible-iterator",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
 ]
 
 [[package]]
@@ -1935,7 +1893,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
  "workspace_hack",
@@ -2793,30 +2751,8 @@ dependencies = [
  "percent-encoding",
  "phf",
  "pin-project-lite",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "socket2",
- "tokio",
- "tokio-util 0.6.9",
-]
-
-[[package]]
-name = "tokio-postgres"
-version = "0.7.1"
-source = "git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858#9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858"
-dependencies = [
- "async-trait",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "futures",
- "log",
- "parking_lot",
- "percent-encoding",
- "phf",
- "pin-project-lite",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
- "postgres-types 0.2.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=9eb0dbfbeb6a6c1b79099b9f7ae4a8c021877858)",
+ "postgres-protocol",
+ "postgres-types",
  "socket2",
  "tokio",
  "tokio-util 0.6.9",
@@ -2832,7 +2768,7 @@ dependencies = [
  "ring",
  "rustls 0.20.2",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tokio-postgres",
  "tokio-rustls",
 ]
 
@@ -3171,8 +3107,8 @@ dependencies = [
  "humantime",
  "hyper",
  "lazy_static",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres",
+ "postgres-protocol",
  "postgres_ffi",
  "regex",
  "rusoto_core",
@@ -3183,7 +3119,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
- "tokio-postgres 0.7.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "tokio-postgres",
  "tokio-util 0.7.0",
  "tracing",
  "url",
@@ -3432,7 +3368,7 @@ dependencies = [
  "clap 3.0.14",
  "control_plane",
  "pageserver",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres",
  "postgres_ffi",
  "serde_json",
  "walkeeper",
@@ -3468,8 +3404,8 @@ dependencies = [
  "lazy_static",
  "nix",
  "pin-project-lite",
- "postgres 0.19.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
- "postgres-protocol 0.6.1 (git+https://github.com/zenithdb/rust-postgres.git?rev=2949d98df52587d562986aad155dd4e889e408b7)",
+ "postgres",
+ "postgres-protocol",
  "rand",
  "routerify 3.0.0",
  "rustls 0.19.1",
