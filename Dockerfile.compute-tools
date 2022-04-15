@@ -2,8 +2,6 @@
 # NB: keep in sync with rust image version in .circle/config.yml
 FROM zimg/rust:1.58 AS rust-build
 
-WORKDIR /zenith
-
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
@@ -15,4 +13,4 @@ RUN cargo build -p compute_tools --release && cachepot -s
 # Final image that only has one binary
 FROM debian:buster-slim
 
-COPY --from=rust-build /zenith/target/release/zenith_ctl /usr/local/bin/zenith_ctl
+COPY --from=rust-build /home/circleci/project/target/release/zenith_ctl /usr/local/bin/zenith_ctl
