@@ -247,6 +247,13 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                match &reconstruct_state.img {
+                    Some((cached_lsn, _)) if entry_lsn <= *cached_lsn => {
+                        need_image = false;
+                        return false;
+                    }
+                    _ => {}
+                }
                 offsets.push((entry_lsn, blob_ref.pos()));
 
                 !blob_ref.will_init()
