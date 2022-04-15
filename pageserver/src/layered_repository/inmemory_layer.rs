@@ -16,8 +16,8 @@ use crate::repository::{Key, Value};
 use crate::walrecord;
 use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
-use log::*;
 use std::collections::HashMap;
+use tracing::*;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;

@@ -12,13 +12,13 @@
 //!
 use anyhow::{ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
-use log::*;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
+use tracing::*;
 
 use crate::reltag::SlruKind;
 use crate::repository::Timeline;

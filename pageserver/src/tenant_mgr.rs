@@ -13,13 +13,13 @@ use crate::walredo::PostgresRedoManager;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
-use log::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use tracing::*;
 use zenith_utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
