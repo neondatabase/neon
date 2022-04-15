@@ -10,8 +10,8 @@ bytes = "1.0.1"
 hyper = { version = "0.14.7", features = ["full"] }
 lazy_static = "1.4.0"
 pin-project-lite = "0.2.7"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 routerify = "3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
