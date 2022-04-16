@@ -2,7 +2,7 @@
 # NB: keep in sync with rust image version in .circle/config.yml
 FROM zimg/rust:1.58 AS rust-build
 
-ARG CACHEPOT_BUCKET=zenith-rust-cachepot
+ARG CACHEPOT_BUCKET=zenith-rust-cachepot-docker
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
 
