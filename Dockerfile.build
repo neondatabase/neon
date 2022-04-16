@@ -1,0 +1,23 @@
+FROM rust:1.58-slim-buster
+WORKDIR /home/circleci/project
+
+RUN set -e \
+    && apt-get update \
+    && apt-get -yq install \
+        automake \
+        libtool \
+        build-essential \
+        bison \
+        flex \
+        libreadline-dev \
+        zlib1g-dev \
+        libxml2-dev \
+        libseccomp-dev \
+        pkg-config \
+        libssl-dev \
+        clang
+
+RUN set -e \
+    && rustup component add clippy \
+    && cargo install cargo-audit \
+    && cargo install --git https://github.com/paritytech/cachepot
