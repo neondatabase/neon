@@ -1,5 +1,6 @@
 # Build Postgres
-FROM zimg/rust:1.58 AS pg-build
+#FROM zimg/rust:1.58 AS pg-build
+FROM zenithdb/build:buster-20220414 AS pg-build
 WORKDIR /pg
 
 USER root
@@ -14,7 +15,8 @@ RUN set -e \
     && tar -C tmp_install -czf /postgres_install.tar.gz .
 
 # Build zenith binaries
-FROM zimg/rust:1.58 AS build
+#FROM zimg/rust:1.58 AS build
+FROM zenithdb/build:buster-20220414 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
@@ -26,7 +28,9 @@ COPY . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, loosing the compilation stats.
-RUN cargo build --release && cachepot -s
+#RUN cargo build --release && cachepot -s
+ENV RUSTC_WRAPPER /usr/local/cargo/bin/cachepot
+RUN cargo build --release && /usr/local/cargo/bin/cachepot -s
 
 # Build final image
 #

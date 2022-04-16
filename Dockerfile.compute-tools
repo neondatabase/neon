@@ -1,6 +1,10 @@
 # First transient image to build compute_tools binaries
 # NB: keep in sync with rust image version in .circle/config.yml
-FROM zimg/rust:1.58 AS rust-build
+
+#FROM zimg/rust:1.58 AS rust-build
+FROM zenithdb/build:buster-20220414 AS rust-build
+
+WORKDIR /zenith
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
@@ -8,9 +12,12 @@ ARG AWS_SECRET_ACCESS_KEY
 
 COPY . .
 
-RUN cargo build -p compute_tools --release && cachepot -s
+#RUN cargo build -p compute_tools --release && cachepot -s
+ENV RUSTC_WRAPPER /usr/local/cargo/bin/cachepot
+RUN cargo build -p compute_tools --release && /usr/local/cargo/bin/cachepot -s
 
 # Final image that only has one binary
 FROM debian:buster-slim
 
-COPY --from=rust-build /home/circleci/project/target/release/zenith_ctl /usr/local/bin/zenith_ctl
+#COPY --from=rust-build /home/circleci/project/target/release/zenith_ctl /usr/local/bin/zenith_ctl
+COPY --from=rust-build /zenith/target/release/zenith_ctl /usr/local/bin/zenith_ctl
