@@ -9,7 +9,7 @@ COPY Makefile Makefile
 
 ENV BUILD_TYPE release
 RUN set -e \
-    && make -j $(nproc) -s postgres \
+    && mold -run make -j $(nproc) -s postgres \
     && rm -rf tmp_install/build \
     && tar -C tmp_install -czf /postgres_install.tar.gz .
 
@@ -26,7 +26,7 @@ COPY . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, loosing the compilation stats.
-RUN cargo build --release && cachepot -s
+RUN mold -run cargo build --release && cachepot -s
 
 # Build final image
 #
