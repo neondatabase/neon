@@ -17,7 +17,7 @@ RUN set -e \
 FROM zimg/rust:1.58 AS build
 ARG GIT_VERSION=local
 
-ARG CACHEPOT_BUCKET=zenith-rust-cachepot-docker
+ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
 
