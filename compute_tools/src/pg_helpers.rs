@@ -132,7 +132,14 @@ impl Role {
         let mut params: String = "LOGIN".to_string();
 
         if let Some(pass) = &self.encrypted_password {
-            params.push_str(&format!(" PASSWORD 'md5{}'", pass));
+            // Some time ago we supported only md5 and treated all encrypted_password as md5.
+            // Now we also support SCRAM-SHA-256 and to preserve compatibility
+            // we treat all encrypted_password as md5 unless they starts with SCRAM-SHA-256.
+            if pass.starts_with("SCRAM-SHA-256") {
+                params.push_str(&format!(" PASSWORD '{}'", pass));
+            } else {
+                params.push_str(&format!(" PASSWORD 'md5{}'", pass));
+            }
         } else {
             params.push_str(" PASSWORD NULL");
         }
