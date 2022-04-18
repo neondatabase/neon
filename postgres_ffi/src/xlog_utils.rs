@@ -350,19 +350,19 @@ pub fn main() {
 }
 
 impl XLogRecord {
-    pub fn from_slice(buf: &[u8]) -> XLogRecord {
+    pub fn from_slice(buf: &[u8]) -> Result<XLogRecord> {
         use zenith_utils::bin_ser::LeSer;
-        XLogRecord::des(buf).unwrap()
+        Ok(XLogRecord::des(buf)?)
     }
 
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogRecord {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogRecord> {
         use zenith_utils::bin_ser::LeSer;
-        XLogRecord::des_from(&mut buf.reader()).unwrap()
+        Ok(XLogRecord::des_from(&mut buf.reader())?)
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes> {
         use zenith_utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        Ok(self.ser()?.into())
     }
 
     // Is this record an XLOG_SWITCH record? They need some special processing,
@@ -372,30 +372,30 @@ impl XLogRecord {
 }
 
 impl XLogPageHeaderData {
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogPageHeaderData> {
         use zenith_utils::bin_ser::LeSer;
-        XLogPageHeaderData::des_from(&mut buf.reader()).unwrap()
+        Ok(XLogPageHeaderData::des_from(&mut buf.reader())?)
     }
 }
 
 impl XLogLongPageHeaderData {
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogLongPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogLongPageHeaderData> {
         use zenith_utils::bin_ser::LeSer;
-        XLogLongPageHeaderData::des_from(&mut buf.reader()).unwrap()
+        Ok(XLogLongPageHeaderData::des_from(&mut buf.reader())?)
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes> {
         use zenith_utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        Ok(self.ser()?.into())
     }
 }
 
 pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 
 impl CheckPoint {
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes> {
         use zenith_utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        Ok(self.ser()?.into())
     }
 
     pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
@@ -438,7 +438,7 @@ impl CheckPoint {
 // Generate new, empty WAL segment.
 // We need this segment to start compute node.
 //
-pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
+pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes> {
     let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
 
     let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
@@ -458,12 +458,12 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
-    let hdr_bytes = hdr.encode();
+    let hdr_bytes = hdr.encode()?;
     seg_buf.extend_from_slice(&hdr_bytes);
 
     //zero out the rest of the file
     seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
-    seg_buf.freeze()
+    Ok(seg_buf.freeze())
 }
 
 #[cfg(test)]

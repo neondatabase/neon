@@ -251,7 +251,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
-            let new_checkpoint_bytes = self.checkpoint.encode();
+            let new_checkpoint_bytes = self.checkpoint.encode()?;
 
             modification.put_checkpoint(new_checkpoint_bytes)?;
             self.checkpoint_modified = false;

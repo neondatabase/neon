@@ -274,7 +274,7 @@ fn import_control_file<R: Repository>(
 
     // Extract the checkpoint record and import it separately.
     let pg_control = ControlFileData::decode(&buffer)?;
-    let checkpoint_bytes = pg_control.checkPointCopy.encode();
+    let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
     modification.put_checkpoint(checkpoint_bytes)?;
 
     Ok(pg_control)

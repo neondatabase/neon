@@ -27,6 +27,10 @@ pub struct WalStreamDecoder {
     contlen: u32,
     padlen: u32,
 
+    // XXX why not just use AsyncRead?
+    // Because this is called from sync context. current solution is state machine.
+    // x) Wait no why not just use read?
+    //   x) The caller state machine goes over the network
     inputbuf: BytesMut,
 
     /// buffer used to reassemble records that cross page boundaries.
@@ -89,7 +93,12 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf);
+                let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
+                    WalDecodeError {
+                        msg: e.context("long header deserialization failed").to_string(),
+                        lsn: self.lsn,
+                    }
+                })?;
 
                 if hdr.std.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
@@ -106,7 +115,12 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf);
+                let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
+                    WalDecodeError {
+                        msg: e.context("header deserialization failed").to_string(),
+                        lsn: self.lsn,
+                    }
+                })?;
 
                 if hdr.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
@@ -128,7 +142,7 @@ impl WalStreamDecoder {
                 self.lsn += self.padlen as u64;
                 self.padlen = 0;
             } else if self.contlen == 0 {
-                assert!(self.recordbuf.is_empty());
+                // assert!(self.recordbuf.is_empty());
 
                 // need to have at least the xl_tot_len field
                 if self.inputbuf.remaining() < 4 {
@@ -188,7 +202,13 @@ impl WalStreamDecoder {
         }
 
         // We now have a record in the 'recordbuf' local variable.
-        let xlogrec = XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]);
+        let xlogrec =
+            XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
+                WalDecodeError {
+                    msg: e.context("xlog record deserialization failed").to_string(),
+                    lsn: self.lsn,
+                }
+            })?;
 
         let mut crc = 0;
         crc = crc32c_append(crc, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);

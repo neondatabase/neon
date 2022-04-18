@@ -511,7 +511,8 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    // TODO remove unwrap, propagate up
+    let xlogrec = XLogRecord::from_bytes(&mut buf).unwrap();
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
@@ -779,7 +780,8 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    // TODO remove unwrap
+    let xlogrec = XLogRecord::from_bytes(&mut buf).unwrap();
 
     let unknown_str: String;
 

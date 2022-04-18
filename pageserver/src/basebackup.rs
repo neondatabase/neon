@@ -315,7 +315,7 @@ impl<'a> Basebackup<'a> {
         let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier);
+        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier)?;
         ensure!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())
