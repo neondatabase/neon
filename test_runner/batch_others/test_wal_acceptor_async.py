@@ -9,7 +9,7 @@ from fixtures.log_helper import getLogger
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
 
-log = getLogger('root.wal_acceptor_async')
+log = getLogger('root.safekeeper_async')
 
 
 class BankClient(object):
@@ -207,9 +207,9 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_restarts_under_load')
+    env.zenith_cli.create_branch('test_safekeepers_restarts_under_load')
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
-    pg = env.postgres.create_start('test_wal_acceptors_restarts_under_load',
+    pg = env.postgres.create_start('test_safekeepers_restarts_under_load',
                                    config_lines=['max_replication_write_lag=1MB'])
 
     asyncio.run(run_restarts_under_load(env, pg, env.safekeepers))

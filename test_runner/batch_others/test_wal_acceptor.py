@@ -25,8 +25,8 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.broker = True
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_normal_work')
-    pg = env.postgres.create_start('test_wal_acceptors_normal_work')
+    env.zenith_cli.create_branch('test_safekeepers_normal_work')
+    pg = env.postgres.create_start('test_safekeepers_normal_work')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -56,7 +56,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     n_timelines = 3
 
     branch_names = [
-        "test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
+        "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
     ]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
     # that's not really human readable, so the branch names are introduced in Zenith CLI.
@@ -196,8 +196,8 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = n_acceptors
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_restarts')
-    pg = env.postgres.create_start('test_wal_acceptors_restarts')
+    env.zenith_cli.create_branch('test_safekeepers_restarts')
+    pg = env.postgres.create_start('test_safekeepers_restarts')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -223,7 +223,7 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
 start_delay_sec = 2
 
 
-def delayed_wal_acceptor_start(wa):
+def delayed_safekeeper_start(wa):
     time.sleep(start_delay_sec)
     wa.start()
 
@@ -233,8 +233,8 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_unavailability')
-    pg = env.postgres.create_start('test_wal_acceptors_unavailability')
+    env.zenith_cli.create_branch('test_safekeepers_unavailability')
+    pg = env.postgres.create_start('test_safekeepers_unavailability')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -248,7 +248,7 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     # shutdown one of two acceptors, that is, majority
     env.safekeepers[0].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[0], ))
+    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[0], ))
     proc.start()
 
     start = time.time()
@@ -260,7 +260,7 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     # for the world's balance, do the same with second acceptor
     env.safekeepers[1].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[1], ))
+    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[1], ))
     proc.start()
 
     start = time.time()
@@ -304,8 +304,8 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_race_conditions')
-    pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
+    env.zenith_cli.create_branch('test_safekeepers_race_conditions')
+    pg = env.postgres.create_start('test_safekeepers_race_conditions')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -396,7 +396,7 @@ class ProposerPostgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pgdata_dir, 'postgresql.conf')
 
-    def create_dir_config(self, wal_acceptors: str):
+    def create_dir_config(self, safekeepers: str):
         """ Create dir and config for running --sync-safekeepers """
 
         mkdir_if_needed(self.pg_data_dir_path())
@@ -407,7 +407,7 @@ class ProposerPostgres(PgProtocol):
                 f"zenith.zenith_timeline = '{self.timeline_id.hex}'\n",
                 f"zenith.zenith_tenant = '{self.tenant_id.hex}'\n",
                 f"zenith.page_server_connstring = ''\n",
-                f"wal_acceptors = '{wal_acceptors}'\n",
+                f"wal_acceptors = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
             ]
@@ -692,7 +692,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     env.safekeepers[3].stop()
     active_safekeepers = [1, 2, 3]
     pg = env.postgres.create('test_replace_safekeeper')
-    pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
+    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
     # learn zenith timeline from compute
@@ -732,7 +732,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     pg.stop_and_destroy().create('test_replace_safekeeper')
     active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
-    pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
+    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
     execute_payload(pg)

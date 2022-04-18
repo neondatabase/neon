@@ -612,7 +612,7 @@ class ZenithEnv:
             self.broker.start()
 
     def get_safekeeper_connstrs(self) -> str:
-        """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
+        """ Get list of safekeeper endpoints suitable for safekeepers GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
     @cached_property
@@ -1484,7 +1484,7 @@ class Postgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pg_data_dir_path(), 'postgresql.conf')
 
-    def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
+    def adjust_for_safekeepers(self, safekeepers: str) -> 'Postgres':
         """
         Adjust instance config for working with wal acceptors instead of
         pageserver (pre-configured by CLI) directly.
@@ -1499,12 +1499,12 @@ class Postgres(PgProtocol):
                 if ("synchronous_standby_names" in cfg_line or
                         # don't ask pageserver to fetch WAL from compute
                         "callmemaybe_connstring" in cfg_line or
-                        # don't repeat wal_acceptors multiple times
+                        # don't repeat safekeepers/wal_acceptors multiple times
                         "wal_acceptors" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.write("wal_acceptors = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':

@@ -331,14 +331,14 @@ impl PostgresNode {
             // Configure the node to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
-            let wal_acceptors = self
+            let safekeepers = self
                 .env
                 .safekeepers
                 .iter()
                 .map(|sk| format!("localhost:{}", sk.pg_port))
                 .collect::<Vec<String>>()
                 .join(",");
-            conf.append("wal_acceptors", &wal_acceptors);
+            conf.append("wal_acceptors", &safekeepers);
         } else {
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,

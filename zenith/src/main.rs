@@ -9,13 +9,13 @@ use pageserver::config::defaults::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
     DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
 };
-use std::collections::{BTreeSet, HashMap};
-use std::process::exit;
-use std::str::FromStr;
 use safekeeper::defaults::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
+use std::collections::{BTreeSet, HashMap};
+use std::process::exit;
+use std::str::FromStr;
 use zenith_utils::auth::{Claims, Scope};
 use zenith_utils::lsn::Lsn;
 use zenith_utils::postgres_backend::AuthType;
