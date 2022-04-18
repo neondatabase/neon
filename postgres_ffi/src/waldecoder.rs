@@ -138,7 +138,7 @@ impl WalStreamDecoder {
                 self.lsn += self.padlen as u64;
                 self.padlen = 0;
             } else if self.contlen == 0 {
-                // assert!(self.recordbuf.is_empty());
+                assert!(self.recordbuf.is_empty());
 
                 // need to have at least the xl_tot_len field
                 if self.inputbuf.remaining() < 4 {
