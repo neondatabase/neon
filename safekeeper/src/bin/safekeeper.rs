@@ -257,18 +257,18 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
 
     let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();
-    let wal_acceptor_thread = thread::Builder::new()
-        .name("WAL acceptor thread".into())
+    let safekeeper_thread = thread::Builder::new()
+        .name("Safekeeper thread".into())
         .spawn(|| {
             // thread code
             let thread_result = wal_service::thread_main(conf_cloned, pg_listener, tx);
             if let Err(e) = thread_result {
-                info!("wal_service thread terminated: {}", e);
+                info!("safekeeper thread terminated: {}", e);
             }
         })
         .unwrap();
 
-    threads.push(wal_acceptor_thread);
+    threads.push(safekeeper_thread);
 
     let conf_cloned = conf.clone();
     let callmemaybe_thread = thread::Builder::new()
