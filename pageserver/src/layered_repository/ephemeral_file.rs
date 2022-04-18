@@ -98,8 +98,8 @@ impl EphemeralFile {
 
     fn get_buf_for_write(&self, blkno: u32) -> Result<page_cache::PageWriteGuard, Error> {
         // Look up the right page
-        let cache = page_cache::get();
-        let mut write_guard = match cache.write_ephemeral_buf(self.file_id, blkno) {
+        let cache = &page_cache::get().ephemeral;
+        let mut write_guard = match cache.write_file_buf(self.file_id, blkno) {
             WriteBufResult::Found(guard) => guard,
             WriteBufResult::NotFound(mut guard) => {
                 // Read the page from disk into the buffer
@@ -136,8 +136,8 @@ impl FileExt for EphemeralFile {
         let read_guard;
         let mut write_guard;
 
-        let cache = page_cache::get();
-        let buf = match cache.read_ephemeral_buf(self.file_id, blkno) {
+        let cache = &page_cache::get().ephemeral;
+        let buf = match cache.read_file_buf(self.file_id, blkno) {
             ReadBufResult::Found(guard) => {
                 read_guard = guard;
                 read_guard.as_ref()
@@ -165,8 +165,8 @@ impl FileExt for EphemeralFile {
         let len = min(PAGE_SZ - off, srcbuf.len());
 
         let mut write_guard;
-        let cache = page_cache::get();
-        let buf = match cache.write_ephemeral_buf(self.file_id, blkno) {
+        let cache = &page_cache::get().ephemeral;
+        let buf = match cache.write_file_buf(self.file_id, blkno) {
             WriteBufResult::Found(guard) => {
                 write_guard = guard;
                 write_guard.deref_mut()
@@ -238,8 +238,8 @@ impl BlobWriter for EphemeralFile {
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
         // drop all pages from page cache
-        let cache = page_cache::get();
-        cache.drop_buffers_for_ephemeral(self.file_id);
+        let cache = &page_cache::get().ephemeral;
+        cache.drop_file_buffers(self.file_id);
 
         // remove entry from the hash map
         EPHEMERAL_FILES.write().unwrap().files.remove(&self.file_id);
@@ -267,9 +267,9 @@ impl BlockReader for EphemeralFile {
 
     fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
         // Look up the right page
-        let cache = page_cache::get();
+        let cache = &page_cache::get().ephemeral;
         loop {
-            match cache.read_ephemeral_buf(self.file_id, blknum) {
+            match cache.read_file_buf(self.file_id, blknum) {
                 ReadBufResult::Found(guard) => return Ok(guard),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer

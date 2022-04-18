@@ -55,14 +55,32 @@ use zenith_utils::{
 use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
 
-static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
+pub struct PageCaches {
+    pub ephemeral: PageCache,
+    pub immutable: PageCache,
+    pub materialized: PageCache,
+}
+
+static PAGE_CACHES: OnceCell<PageCaches> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
+
+/// TODO: may be move to parameters? Probability of hit for ephemeral/immutable
+/// page is assumed to be small. So there are not so much reasons to keep this cache large
+pub const EPHEMERAL_CACHE_SIZE: usize = 1024;
+pub const IMMUTABLE_CACHE_SIZE: usize = 1024;
 
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(size: usize) {
-    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
+pub fn init(ephemeral_size: usize, immutable_size: usize, materialized_size: usize) {
+    if PAGE_CACHES
+        .set(PageCaches {
+            ephemeral: PageCache::new(ephemeral_size),
+            immutable: PageCache::new(immutable_size),
+            materialized: PageCache::new(materialized_size),
+        })
+        .is_err()
+    {
         panic!("page cache already initialized");
     }
 }
@@ -70,16 +88,20 @@ pub fn init(size: usize) {
 ///
 /// Get a handle to the page cache.
 ///
-pub fn get() -> &'static PageCache {
+pub fn get() -> &'static PageCaches {
     //
     // In unit tests, page server startup doesn't happen and no one calls
     // page_cache::init(). Initialize it here with a tiny cache, so that the
     // page cache is usable in unit tests.
     //
     if cfg!(test) {
-        PAGE_CACHE.get_or_init(|| PageCache::new(TEST_PAGE_CACHE_SIZE))
+        PAGE_CACHES.get_or_init(|| PageCaches {
+            ephemeral: PageCache::new(TEST_PAGE_CACHE_SIZE),
+            immutable: PageCache::new(TEST_PAGE_CACHE_SIZE),
+            materialized: PageCache::new(TEST_PAGE_CACHE_SIZE),
+        })
     } else {
-        PAGE_CACHE.get().expect("page cache not initialized")
+        PAGE_CACHES.get().expect("page cache not initialized")
     }
 }
 
@@ -96,11 +118,7 @@ enum CacheKey {
         hash_key: MaterializedPageHashKey,
         lsn: Lsn,
     },
-    EphemeralPage {
-        file_id: u64,
-        blkno: u32,
-    },
-    ImmutableFilePage {
+    FilePage {
         file_id: u64,
         blkno: u32,
     },
@@ -176,9 +194,7 @@ pub struct PageCache {
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
-
-    immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    file_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -220,6 +236,7 @@ impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
 ///
 pub struct PageWriteGuard<'i> {
     inner: RwLockWriteGuard<'i, SlotInner>,
+    cache: &'static PageCache,
 
     // Are the page contents currently valid?
     valid: bool,
@@ -255,12 +272,10 @@ impl PageWriteGuard<'_> {
         );
         self.valid = true;
     }
+
     pub fn mark_dirty(&mut self) {
         // only ephemeral pages can be dirty ATM.
-        assert!(matches!(
-            self.inner.key,
-            Some(CacheKey::EphemeralPage { .. })
-        ));
+        assert!(matches!(self.inner.key, Some(CacheKey::FilePage { .. })));
         self.inner.dirty = true;
     }
 }
@@ -275,7 +290,7 @@ impl Drop for PageWriteGuard<'_> {
         assert!(self.inner.key.is_some());
         if !self.valid {
             let self_key = self.inner.key.as_ref().unwrap();
-            PAGE_CACHE.get().unwrap().remove_mapping(self_key);
+            self.cache.remove_mapping(self_key);
             self.inner.key = None;
             self.inner.dirty = false;
         }
@@ -306,7 +321,7 @@ impl PageCache {
     /// the given block, but not newer than 'lsn'. Returns the actual LSN of the
     /// returned page.
     pub fn lookup_materialized_page(
-        &self,
+        &'static self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         key: &Key,
@@ -336,7 +351,7 @@ impl PageCache {
     /// Store an image of the given page in the cache.
     ///
     pub fn memorize_materialized_page(
-        &self,
+        &'static self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         key: Key,
@@ -366,59 +381,29 @@ impl PageCache {
         }
     }
 
-    // Section 1.2: Public interface functions for working with Ephemeral pages.
+    // Section 1.2: Public interface functions for working with ephemeral/immutable pages.
 
-    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
-        let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
+    pub fn read_file_buf(&'static self, file_id: u64, blkno: u32) -> ReadBufResult {
+        let mut cache_key = CacheKey::FilePage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
-    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
-        let cache_key = CacheKey::EphemeralPage { file_id, blkno };
+    pub fn write_file_buf(&'static self, file_id: u64, blkno: u32) -> WriteBufResult {
+        let cache_key = CacheKey::FilePage { file_id, blkno };
 
         self.lock_for_write(&cache_key)
     }
 
     /// Immediately drop all buffers belonging to given file, without writeback
-    pub fn drop_buffers_for_ephemeral(&self, drop_file_id: u64) {
+    pub fn drop_file_buffers(&'static self, drop_file_id: u64) {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
             let mut inner = slot.inner.write().unwrap();
             if let Some(key) = &inner.key {
                 match key {
-                    CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
-                        // remove mapping for old buffer
-                        self.remove_mapping(key);
-                        inner.key = None;
-                        inner.dirty = false;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Section 1.3: Public interface functions for working with immutable file pages.
-
-    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
-        let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
-
-        self.lock_for_read(&mut cache_key)
-    }
-
-    /// Immediately drop all buffers belonging to given file, without writeback
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: u64) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
-
-            let mut inner = slot.inner.write().unwrap();
-            if let Some(key) = &inner.key {
-                match key {
-                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
-                        if *file_id == drop_file_id =>
-                    {
+                    CacheKey::FilePage { file_id, blkno: _ } if *file_id == drop_file_id => {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
@@ -447,7 +432,7 @@ impl PageCache {
     ///
     /// If no page is found, returns None and *cache_key is left unmodified.
     ///
-    fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
+    fn try_lock_for_read(&'static self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
         let cache_key_orig = cache_key.clone();
         if let Some(slot_idx) = self.search_mapping(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
@@ -495,7 +480,7 @@ impl PageCache {
     /// }
     /// ```
     ///
-    fn lock_for_read(&self, cache_key: &mut CacheKey) -> ReadBufResult {
+    fn lock_for_read(&'static self, cache_key: &mut CacheKey) -> ReadBufResult {
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
@@ -528,6 +513,7 @@ impl PageCache {
 
             return ReadBufResult::NotFound(PageWriteGuard {
                 inner,
+                cache: self,
                 valid: false,
             });
         }
@@ -537,7 +523,7 @@ impl PageCache {
     /// found, returns None.
     ///
     /// When locking a page for writing, the search criteria is always "exact".
-    fn try_lock_for_write(&self, cache_key: &CacheKey) -> Option<PageWriteGuard> {
+    fn try_lock_for_write(&'static self, cache_key: &CacheKey) -> Option<PageWriteGuard> {
         if let Some(slot_idx) = self.search_mapping_for_write(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we don't released the mapping
@@ -546,7 +532,11 @@ impl PageCache {
             let inner = slot.inner.write().unwrap();
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
-                return Some(PageWriteGuard { inner, valid: true });
+                return Some(PageWriteGuard {
+                    inner,
+                    cache: self,
+                    valid: true,
+                });
             }
         }
         None
@@ -556,7 +546,7 @@ impl PageCache {
     ///
     /// Similar to lock_for_read(), but the returned buffer is write-locked and
     /// may be modified by the caller even if it's already found in the cache.
-    fn lock_for_write(&self, cache_key: &CacheKey) -> WriteBufResult {
+    fn lock_for_write(&'static self, cache_key: &CacheKey) -> WriteBufResult {
         loop {
             // First check if the key already exists in the cache.
             if let Some(write_guard) = self.try_lock_for_write(cache_key) {
@@ -589,6 +579,7 @@ impl PageCache {
 
             return WriteBufResult::NotFound(PageWriteGuard {
                 inner,
+                cache: self,
                 valid: false,
             });
         }
@@ -608,7 +599,7 @@ impl PageCache {
     /// returns.  The caller is responsible for re-checking that the slot still
     /// contains the page with the same key before using it.
     ///
-    fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
+    fn search_mapping(&'static self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
@@ -623,12 +614,8 @@ impl PageCache {
                 *lsn = version.lsn;
                 Some(version.slot_idx)
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
-            }
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+            CacheKey::FilePage { file_id, blkno } => {
+                let map = self.file_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -638,7 +625,7 @@ impl PageCache {
     ///
     /// Like 'search_mapping, but performs an "exact" search. Used for
     /// allocating a new buffer.
-    fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
+    fn search_mapping_for_write(&'static self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
@@ -650,12 +637,8 @@ impl PageCache {
                     None
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
-                let map = self.ephemeral_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
-            }
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
+            CacheKey::FilePage { file_id, blkno } => {
+                let map = self.file_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -664,7 +647,7 @@ impl PageCache {
     ///
     /// Remove mapping for given key.
     ///
-    fn remove_mapping(&self, old_key: &CacheKey) {
+    fn remove_mapping(&'static self, old_key: &CacheKey) {
         match old_key {
             CacheKey::MaterializedPage {
                 hash_key: old_hash_key,
@@ -684,13 +667,8 @@ impl PageCache {
                     panic!("could not find old key in mapping")
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
-                    .expect("could not find old key in mapping");
-            }
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+            CacheKey::FilePage { file_id, blkno } => {
+                let mut map = self.file_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -702,7 +680,7 @@ impl PageCache {
     ///
     /// If a mapping already existed for the given key, returns the slot index
     /// of the existing mapping and leaves it untouched.
-    fn try_insert_mapping(&self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
+    fn try_insert_mapping(&'static self, new_key: &CacheKey, slot_idx: usize) -> Option<usize> {
         match new_key {
             CacheKey::MaterializedPage {
                 hash_key: new_key,
@@ -724,18 +702,8 @@ impl PageCache {
                     }
                 }
             }
-            CacheKey::EphemeralPage { file_id, blkno } => {
-                let mut map = self.ephemeral_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
-                    Entry::Occupied(entry) => Some(*entry.get()),
-                    Entry::Vacant(entry) => {
-                        entry.insert(slot_idx);
-                        None
-                    }
-                }
-            }
-            CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
+            CacheKey::FilePage { file_id, blkno } => {
+                let mut map = self.file_page_map.write().unwrap();
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -754,7 +722,7 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    fn find_victim(&self) -> (usize, RwLockWriteGuard<SlotInner>) {
+    fn find_victim(&'static self) -> (usize, RwLockWriteGuard<SlotInner>) {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -818,16 +786,9 @@ impl PageCache {
                 std::io::ErrorKind::Other,
                 "unexpected dirty materialized page",
             )),
-            CacheKey::EphemeralPage { file_id, blkno } => {
+            CacheKey::FilePage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }
-            CacheKey::ImmutableFilePage {
-                file_id: _,
-                blkno: _,
-            } => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "unexpected dirty immutable page",
-            )),
         }
     }
 
@@ -857,8 +818,7 @@ impl PageCache {
 
         Self {
             materialized_page_map: Default::default(),
-            ephemeral_page_map: Default::default(),
-            immutable_page_map: Default::default(),
+            file_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
         }

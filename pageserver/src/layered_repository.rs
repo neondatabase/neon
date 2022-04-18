@@ -1264,7 +1264,7 @@ impl LayeredTimeline {
     }
 
     fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
+        let cache = &page_cache::get().materialized;
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
@@ -2016,7 +2016,7 @@ impl LayeredTimeline {
                         .request_redo(key, request_lsn, base_img, data.records)?;
 
                 if img.len() == page_cache::PAGE_SZ {
-                    let cache = page_cache::get();
+                    let cache = &page_cache::get().materialized;
                     cache.memorize_materialized_page(
                         self.tenantid,
                         self.timelineid,

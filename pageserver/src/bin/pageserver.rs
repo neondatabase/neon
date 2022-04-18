@@ -162,7 +162,12 @@ fn main() -> anyhow::Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
-    page_cache::init(conf.page_cache_size);
+    // TODO: add ephemeral and immutable cache size to parameters
+    page_cache::init(
+        page_cache::EPHEMERAL_CACHE_SIZE,
+        page_cache::IMMUTABLE_CACHE_SIZE,
+        conf.page_cache_size,
+    );
 
     // Create repo and exit if init was requested
     if init {

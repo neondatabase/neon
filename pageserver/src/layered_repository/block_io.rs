@@ -157,9 +157,9 @@ where
 
     fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
         // Look up the right page
-        let cache = page_cache::get();
+        let cache = &page_cache::get().immutable;
         loop {
-            match cache.read_immutable_buf(self.file_id, blknum) {
+            match cache.read_file_buf(self.file_id, blknum) {
                 ReadBufResult::Found(guard) => break Ok(guard),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
