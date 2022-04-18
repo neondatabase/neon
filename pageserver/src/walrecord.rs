@@ -1,6 +1,7 @@
 //!
 //! Functions for parsing WAL records.
 //!
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
@@ -500,7 +501,7 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -511,8 +512,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    // TODO remove unwrap, propagate up
-    let xlogrec = XLogRecord::from_bytes(&mut buf).unwrap();
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
@@ -740,34 +740,32 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    DecodedWALRecord {
+    Ok(DecodedWALRecord {
         xl_xid: xlogrec.xl_xid,
         xl_info: xlogrec.xl_info,
         xl_rmid: xlogrec.xl_rmid,
         record,
         blocks,
         main_data_offset,
-    }
+    })
 }
 
 ///
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(rec: &ZenithWalRecord) -> String {
+pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String> {
     match rec {
-        ZenithWalRecord::Postgres { will_init, rec } => {
-            format!(
-                "will_init: {}, {}",
-                will_init,
-                describe_postgres_wal_record(rec)
-            )
-        }
-        _ => format!("{:?}", rec),
+        ZenithWalRecord::Postgres { will_init, rec } => Ok(format!(
+            "will_init: {}, {}",
+            will_init,
+            describe_postgres_wal_record(rec)?
+        )),
+        _ => Ok(format!("{:?}", rec)),
     }
 }
 
-fn describe_postgres_wal_record(record: &Bytes) -> String {
+fn describe_postgres_wal_record(record: &Bytes) -> Result<String> {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,
@@ -780,8 +778,7 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    // TODO remove unwrap
-    let xlogrec = XLogRecord::from_bytes(&mut buf).unwrap();
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     let unknown_str: String;
 
@@ -829,5 +826,5 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
         }
     };
 
-    String::from(result)
+    Ok(String::from(result))
 }

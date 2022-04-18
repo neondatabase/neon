@@ -82,7 +82,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ) -> Result<()> {
         let mut modification = timeline.begin_modification(lsn);
 
-        let mut decoded = decode_wal_record(recdata);
+        let mut decoded = decode_wal_record(recdata)?;
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
 

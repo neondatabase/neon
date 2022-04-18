@@ -27,10 +27,6 @@ pub struct WalStreamDecoder {
     contlen: u32,
     padlen: u32,
 
-    // XXX why not just use AsyncRead?
-    // Because this is called from sync context. current solution is state machine.
-    // x) Wait no why not just use read?
-    //   x) The caller state machine goes over the network
     inputbuf: BytesMut,
 
     /// buffer used to reassemble records that cross page boundaries.

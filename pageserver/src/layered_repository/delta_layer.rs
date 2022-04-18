@@ -359,7 +359,7 @@ impl Layer for DeltaLayer {
                                 write!(&mut desc, " img {} bytes", img.len()).unwrap();
                             }
                             Ok(Value::WalRecord(rec)) => {
-                                let wal_desc = walrecord::describe_wal_record(&rec);
+                                let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
                                 write!(
                                     &mut desc,
                                     " rec {} bytes will_init: {} {}",
