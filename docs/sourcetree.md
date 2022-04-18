@@ -57,12 +57,12 @@ PostgreSQL extension that implements storage manager API and network communicati
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
-`/walkeeper`:
+`/safekeeper`:
 
 The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
-For more detailed info, see `/walkeeper/README`
+For more detailed info, see `/safekeeper/README`
 
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.

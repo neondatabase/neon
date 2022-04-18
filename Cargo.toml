@@ -5,7 +5,7 @@ members = [
     "pageserver",
     "postgres_ffi",
     "proxy",
-    "walkeeper",
+    "safekeeper",
     "workspace_hack",
     "zenith",
     "zenith_metrics",

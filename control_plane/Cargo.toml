@@ -18,6 +18,6 @@ url = "2.2.2"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 pageserver = { path = "../pageserver" }
-walkeeper = { path = "../walkeeper" }
+safekeeper = { path = "../safekeeper" }
 zenith_utils = { path = "../zenith_utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }

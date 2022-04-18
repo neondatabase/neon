@@ -94,7 +94,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
             Ok(())
         } else {
-            bail!("Walkeeper received unexpected initial message: {:?}", sm);
+            bail!("Safekeeper received unexpected initial message: {:?}", sm);
         }
     }
 

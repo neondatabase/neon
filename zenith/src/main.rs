@@ -12,7 +12,7 @@ use pageserver::config::defaults::{
 use std::collections::{BTreeSet, HashMap};
 use std::process::exit;
 use std::str::FromStr;
-use walkeeper::defaults::{
+use safekeeper::defaults::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };

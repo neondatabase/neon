@@ -1,5 +1,5 @@
 [package]
-name = "walkeeper"
+name = "safekeeper"
 version = "0.1.0"
 edition = "2021"
 
