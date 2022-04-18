@@ -116,17 +116,17 @@ fn main() -> Result<()> {
     let pageserver_connstr = spec
         .cluster
         .settings
-        .find("zenith.page_server_connstring")
+        .find("neon.pageserver_connstring")
         .expect("pageserver connstr should be provided");
     let tenant = spec
         .cluster
         .settings
-        .find("zenith.zenith_tenant")
+        .find("neon.tenantid")
         .expect("tenant id should be provided");
     let timeline = spec
         .cluster
         .settings
-        .find("zenith.zenith_timeline")
+        .find("neon.timelineid")
         .expect("tenant id should be provided");
 
     let compute_state = ComputeNode {

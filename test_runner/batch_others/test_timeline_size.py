@@ -21,7 +21,7 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timelineid")
 
             # Create table, and insert the first 100 rows
             cur.execute("CREATE TABLE foo (t text)")
@@ -81,12 +81,12 @@ def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",
         # Set small limit for the test
-        config_lines=['zenith.max_cluster_size=30MB'])
+        config_lines=['neon.max_cluster_size=30MB'])
     log.info("postgres is running on 'test_timeline_size_quota' branch")
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION zenith")  # TODO move it to zenith_fixtures?
+            cur.execute("CREATE EXTENSION neon")  # TODO move it to zenith_fixtures?
 
             cur.execute("CREATE TABLE foo (t text)")
 

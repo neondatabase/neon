@@ -148,8 +148,8 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timeline_id: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
-        let tenant_id: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
+        let timeline_id: ZTimelineId = conf.parse_field("neon.timelineid", &context)?;
+        let tenant_id: ZTenantId = conf.parse_field("neon.tenantid", &context)?;
         let uses_wal_proposer = conf.get("wal_acceptors").is_some();
 
         // parse recovery_target_lsn, if any
@@ -303,11 +303,11 @@ impl PostgresNode {
             // uses only needed variables namely host, port, user, password.
             format!("postgresql://no_user:{}@{}:{}", password, host, port)
         };
-        conf.append("shared_preload_libraries", "zenith");
+        conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
-        conf.append("zenith.page_server_connstring", &pageserver_connstr);
-        conf.append("zenith.zenith_tenant", &self.tenant_id.to_string());
-        conf.append("zenith.zenith_timeline", &self.timeline_id.to_string());
+        conf.append("neon.pageserver_connstring", &pageserver_connstr);
+        conf.append("neon.tenantid", &self.tenant_id.to_string());
+        conf.append("neon.timelineid", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
@@ -352,7 +352,7 @@ impl PostgresNode {
             // This isn't really a supported configuration, but can be useful for
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
-            conf.append("zenith.callmemaybe_connstring", &self.connstr());
+            conf.append("neon.callmemaybe_connstring", &self.connstr());
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;

@@ -74,16 +74,16 @@ postgres-headers: postgres-configure
 	+@echo "Installing PostgreSQL headers"
 	$(MAKE) -C tmp_install/build/src/include MAKELEVEL=0 install
 
-# Compile and install PostgreSQL and contrib/zenith
+# Compile and install PostgreSQL and contrib/neon
 .PHONY: postgres
 postgres: postgres-configure \
 		  postgres-headers # to prevent `make install` conflicts with zenith's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
-	+@echo "Compiling contrib/zenith"
-	$(MAKE) -C tmp_install/build/contrib/zenith install
-	+@echo "Compiling contrib/zenith_test_utils"
-	$(MAKE) -C tmp_install/build/contrib/zenith_test_utils install
+	+@echo "Compiling contrib/neon"
+	$(MAKE) -C tmp_install/build/contrib/neon install
+	+@echo "Compiling contrib/neon_test_utils"
+	$(MAKE) -C tmp_install/build/contrib/neon_test_utils install
 	+@echo "Compiling pg_buffercache"
 	$(MAKE) -C tmp_install/build/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect"
