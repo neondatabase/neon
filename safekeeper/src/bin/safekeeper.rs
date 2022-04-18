@@ -12,18 +12,18 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use tracing::*;
 use url::{ParseError, Url};
-use walkeeper::control_file::{self};
 use zenith_utils::http::endpoint;
 use zenith_utils::zid::ZNodeId;
 use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
+use safekeeper::control_file::{self};
+use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use safekeeper::http;
+use safekeeper::s3_offload;
+use safekeeper::wal_service;
+use safekeeper::SafeKeeperConf;
+use safekeeper::{broker, callmemaybe};
 use tokio::sync::mpsc;
-use walkeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
-use walkeeper::http;
-use walkeeper::s3_offload;
-use walkeeper::wal_service;
-use walkeeper::SafeKeeperConf;
-use walkeeper::{broker, callmemaybe};
 use zenith_utils::shutdown::exit_now;
 use zenith_utils::signals;
 

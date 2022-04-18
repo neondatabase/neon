@@ -381,13 +381,13 @@ dependencies = [
  "postgres",
  "regex",
  "reqwest",
+ "safekeeper",
  "serde",
  "serde_with",
  "tar",
  "thiserror",
  "toml",
  "url",
- "walkeeper",
  "workspace_hack",
  "zenith_utils",
 ]
@@ -2291,6 +2291,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73b4b750c782965c211b42f022f59af1fbceabdd026623714f104152f1ec149f"
 
 [[package]]
+name = "safekeeper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "bytes",
+ "clap 3.0.14",
+ "const_format",
+ "crc32c",
+ "daemonize",
+ "etcd-client",
+ "fs2",
+ "hex",
+ "humantime",
+ "hyper",
+ "lazy_static",
+ "postgres",
+ "postgres-protocol",
+ "postgres_ffi",
+ "regex",
+ "rusoto_core",
+ "rusoto_s3",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tokio-util 0.7.0",
+ "tracing",
+ "url",
+ "walkdir",
+ "workspace_hack",
+ "zenith_metrics",
+ "zenith_utils",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3090,45 +3129,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "walkeeper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "bytes",
- "clap 3.0.14",
- "const_format",
- "crc32c",
- "daemonize",
- "etcd-client",
- "fs2",
- "hex",
- "humantime",
- "hyper",
- "lazy_static",
- "postgres",
- "postgres-protocol",
- "postgres_ffi",
- "regex",
- "rusoto_core",
- "rusoto_s3",
- "serde",
- "serde_json",
- "serde_with",
- "signal-hook",
- "tempfile",
- "tokio",
- "tokio-postgres",
- "tokio-util 0.7.0",
- "tracing",
- "url",
- "walkdir",
- "workspace_hack",
- "zenith_metrics",
- "zenith_utils",
-]
-
-[[package]]
 name = "want"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3369,8 +3369,8 @@ dependencies = [
  "pageserver",
  "postgres",
  "postgres_ffi",
+ "safekeeper",
  "serde_json",
- "walkeeper",
  "workspace_hack",
  "zenith_utils",
 ]

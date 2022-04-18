@@ -29,7 +29,7 @@ Each Branch lives in a corresponding timeline[] and has an ancestor[].
 
 NOTE: This is an overloaded term.
 
-A checkpoint record in the WAL marks a point in the WAL sequence at which it is guaranteed that all data files have been updated with all information from shared memory modified before that checkpoint; 
+A checkpoint record in the WAL marks a point in the WAL sequence at which it is guaranteed that all data files have been updated with all information from shared memory modified before that checkpoint;
 
 ### Checkpoint (Layered repository)
 
@@ -108,10 +108,10 @@ PostgreSQL LSNs and functions to monitor them:
 * `pg_current_wal_lsn()` - Returns the current write-ahead log write location.
 * `pg_current_wal_flush_lsn()` - Returns the current write-ahead log flush location.
 * `pg_last_wal_receive_lsn()` - Returns the last write-ahead log location that has been received and synced to disk by streaming replication. While streaming replication is in progress this will increase monotonically.
-* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically. 
+* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically.
 [source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
 
-Zenith safekeeper LSNs. For more check [walkeeper/README_PROTO.md](/walkeeper/README_PROTO.md)
+Zenith safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
@@ -190,7 +190,7 @@ or we do not support them in zenith yet (pg_commit_ts).
 Tenant represents a single customer, interacting with Zenith.
 Wal redo[] activity, timelines[], layers[] are managed for each tenant independently.
 One pageserver[] can serve multiple tenants at once.
-One safekeeper 
+One safekeeper
 
 See `docs/multitenancy.md` for more.
 

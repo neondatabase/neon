@@ -4,7 +4,7 @@
 //! This understands the WAL page and record format, enough to figure out where the WAL record
 //! boundaries are, and to reassemble WAL records that cross page boundaries.
 //!
-//! This functionality is needed by both the pageserver and the walkeepers. The pageserver needs
+//! This functionality is needed by both the pageserver and the safekeepers. The pageserver needs
 //! to look deeper into the WAL records to also understand which blocks they modify, the code
 //! for that is in pageserver/src/walrecord.rs
 //!

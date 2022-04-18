@@ -14,7 +14,7 @@ use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
-use walkeeper::http::models::TimelineCreateRequest;
+use safekeeper::http::models::TimelineCreateRequest;
 use zenith_utils::http::error::HttpErrorBody;
 use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
