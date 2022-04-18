@@ -337,8 +337,8 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
     # learn zenith timeline from compute
-    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
-    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenantid")[0][0]
+    timeline_id = pg.safe_psql("show neon.timelineid")[0][0]
 
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
@@ -384,8 +384,8 @@ def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
             cur.execute('CREATE TABLE t(key int primary key, value text)')
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
 
-    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
-    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenantid")[0][0]
+    timeline_id = pg.safe_psql("show neon.timelineid")[0][0]
 
     # force checkpoint to advance remote_consistent_lsn
     with closing(env.pageserver.connect()) as psconn:
@@ -497,10 +497,10 @@ class ProposerPostgres(PgProtocol):
         with open(self.config_file_path(), "w") as f:
             cfg = [
                 "synchronous_standby_names = 'walproposer'\n",
-                "shared_preload_libraries = 'zenith'\n",
-                f"zenith.zenith_timeline = '{self.timeline_id.hex}'\n",
-                f"zenith.zenith_tenant = '{self.tenant_id.hex}'\n",
-                f"zenith.page_server_connstring = ''\n",
+                "shared_preload_libraries = 'neon'\n",
+                f"neon.timelineid = '{self.timeline_id.hex}'\n",
+                f"neon.tenantid = '{self.tenant_id.hex}'\n",
+                f"neon.pageserver_connstring = ''\n",
                 f"wal_acceptors = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
@@ -612,8 +612,8 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     wa_http_cli.check_status()
 
     # learn zenith timeline from compute
-    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
-    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenantid")[0][0]
+    timeline_id = pg.safe_psql("show neon.timelineid")[0][0]
 
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
@@ -798,8 +798,8 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     pg.start()
 
     # learn zenith timeline from compute
-    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
-    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenantid")[0][0]
+    timeline_id = pg.safe_psql("show neon.timelineid")[0][0]
 
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)

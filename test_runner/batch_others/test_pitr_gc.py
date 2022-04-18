@@ -25,7 +25,7 @@ def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 
-    main_cur.execute("SHOW zenith.zenith_timeline")
+    main_cur.execute("SHOW neon.timelineid")
     timeline = main_cur.fetchone()[0]
 
     # Create table
