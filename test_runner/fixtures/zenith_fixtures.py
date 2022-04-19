@@ -40,8 +40,8 @@ from fixtures.log_helper import log
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
 
-A fixture is created with the decorator @zenfixture, which is a wrapper around
-the standard pytest.fixture with some extra behavior.
+A fixture is created with the decorator @pytest.fixture decorator.
+See docs: https://docs.pytest.org/en/6.2.x/fixture.html
 
 There are several environment variables that can control the running of tests:
 ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
@@ -155,25 +155,18 @@ def pytest_configure(config):
         raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
 
 
-def zenfixture(func: Fn) -> Fn:
+def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
+    """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
+
+    This function can be used as a scope like this:
+    @pytest.fixture(scope=shareable_scope)
+    def myfixture(...)
+       ...
     """
-    This is a python decorator for fixtures with a flexible scope.
-
-    By default every test function will set up and tear down a new
-    database. In pytest, this is called fixtures "function" scope.
-
-    If the environment variable TEST_SHARED_FIXTURES is set, then all
-    tests will share the same database. State, logs, etc. will be
-    stored in a directory called "shared".
-    """
-
-    scope: Literal['session', 'function'] = \
-        'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
-
-    return pytest.fixture(func, scope=scope)
+    return 'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def worker_seq_no(worker_id: str):
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -184,7 +177,7 @@ def worker_seq_no(worker_id: str):
     return int(worker_id[2:])
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def worker_base_port(worker_seq_no: int):
     # so we divide ports in ranges of 100 ports
     # so workers have disjoint set of ports for services
@@ -237,7 +230,7 @@ class PortDistributor:
                 'port range configured for test is exhausted, consider enlarging the range')
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def port_distributor(worker_base_port):
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
@@ -622,7 +615,7 @@ class ZenithEnv:
         return AuthKeys(pub=pub, priv=priv)
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
     """
     Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
