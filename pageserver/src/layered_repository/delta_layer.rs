@@ -248,6 +248,7 @@ impl Layer for DeltaLayer {
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
                 match &reconstruct_state.img {
+                    // Stop if we reach LSN of cached image. Empty sequence of WAL records is Ok in this case.
                     Some((cached_lsn, _)) if entry_lsn <= *cached_lsn => {
                         need_image = false;
                         return false;
