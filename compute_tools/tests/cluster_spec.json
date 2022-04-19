@@ -85,7 +85,7 @@
                 "vartype": "bool"
             },
             {
-                "name": "wal_acceptors",
+                "name": "safekeepers",
                 "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
                 "vartype": "string"
             },

@@ -451,7 +451,7 @@ class ProposerPostgres(PgProtocol):
                 f"neon.timelineid = '{self.timeline_id.hex}'\n",
                 f"neon.tenantid = '{self.tenant_id.hex}'\n",
                 f"neon.pageserver_connstring = ''\n",
-                f"wal_acceptors = '{safekeepers}'\n",
+                f"safekeepers = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
             ]

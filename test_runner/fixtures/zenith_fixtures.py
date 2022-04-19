@@ -1566,12 +1566,12 @@ class Postgres(PgProtocol):
                 if ("synchronous_standby_names" in cfg_line or
                         # don't ask pageserver to fetch WAL from compute
                         "callmemaybe_connstring" in cfg_line or
-                        # don't repeat safekeepers/wal_acceptors multiple times
-                        "wal_acceptors" in cfg_line):
+                        # don't repeat safekeepers multiple times
+                        "safekeepers" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(safekeepers))
+            f.write("safekeepers = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
