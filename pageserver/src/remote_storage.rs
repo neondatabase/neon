@@ -324,6 +324,9 @@ trait RemoteStorage: Send + Sync {
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        /// S3 PUT request requires the content length to be specified,
+        /// otherwise it starts to fail with the concurrent connection count increasing.
+        from_size_kb: usize,
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()>;
