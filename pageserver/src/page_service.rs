@@ -498,7 +498,7 @@ impl PageServerHandler {
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
         */
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)?;
+        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,

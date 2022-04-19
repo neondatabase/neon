@@ -50,6 +50,7 @@ where
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, ZenithWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
+    pub latest_version: bool,
 }
 
 /// Return value from Layer::get_page_reconstruct_data

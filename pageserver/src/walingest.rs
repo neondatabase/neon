@@ -514,7 +514,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn)?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }

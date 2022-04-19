@@ -128,6 +128,7 @@ struct SlotInner {
     key: Option<CacheKey>,
     buf: &'static mut [u8; PAGE_SZ],
     dirty: bool,
+    latest: bool,
 }
 
 impl Slot {
@@ -194,6 +195,12 @@ pub struct PageCache {
 ///
 pub struct PageReadGuard<'i>(RwLockReadGuard<'i, SlotInner>);
 
+impl PageReadGuard<'_> {
+    pub fn is_latest_version(&self) -> bool {
+        self.0.latest
+    }
+}
+
 impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
@@ -255,6 +262,12 @@ impl PageWriteGuard<'_> {
         );
         self.valid = true;
     }
+
+    pub fn set_latest(&mut self, latest: bool) {
+        assert!(self.inner.key.is_some());
+        self.inner.latest = latest;
+    }
+
     pub fn mark_dirty(&mut self) {
         // only ephemeral pages can be dirty ATM.
         assert!(matches!(
@@ -332,6 +345,26 @@ impl PageCache {
         }
     }
 
+    pub fn invalidate_latest_version(
+        &'static self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        key: Key,
+        lsn: Lsn,
+    ) {
+        let mut cache_key = CacheKey::MaterializedPage {
+            hash_key: MaterializedPageHashKey {
+                tenant_id,
+                timeline_id,
+                key,
+            },
+            lsn,
+        };
+        if let Some(mut write_guard) = self.try_lock_for_update(&mut cache_key) {
+            write_guard.set_latest(false);
+        }
+    }
+
     ///
     /// Store an image of the given page in the cache.
     ///
@@ -341,6 +374,7 @@ impl PageCache {
         timeline_id: ZTimelineId,
         key: Key,
         lsn: Lsn,
+        latest_version: bool,
         img: &[u8],
     ) {
         let cache_key = CacheKey::MaterializedPage {
@@ -362,6 +396,7 @@ impl PageCache {
             WriteBufResult::NotFound(mut write_guard) => {
                 write_guard.copy_from_slice(img);
                 write_guard.mark_valid();
+                write_guard.set_latest(latest_version);
             }
         }
     }
@@ -466,6 +501,25 @@ impl PageCache {
         None
     }
 
+    fn try_lock_for_update(&self, cache_key: &mut CacheKey) -> Option<PageWriteGuard> {
+        let cache_key_orig = cache_key.clone();
+        if let Some(slot_idx) = self.search_mapping(cache_key) {
+            // The page was found in the mapping. Lock the slot, and re-check
+            // that it's still what we expected (because we released the mapping
+            // lock already, another thread could have evicted the page)
+            let slot = &self.slots[slot_idx];
+            let inner = slot.inner.write().unwrap();
+            if inner.key.as_ref() == Some(cache_key) {
+                slot.inc_usage_count();
+                return Some(PageWriteGuard { inner, valid: true });
+            } else {
+                // search_mapping might have modified the search key; restore it.
+                *cache_key = cache_key_orig;
+            }
+        }
+        None
+    }
+
     /// Return a locked buffer for given block.
     ///
     /// Like try_lock_for_read(), if the search criteria is not exact and the
@@ -524,6 +578,7 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
             inner.dirty = false;
+            inner.latest = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
             return ReadBufResult::NotFound(PageWriteGuard {
@@ -585,6 +640,7 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
             inner.dirty = false;
+            inner.latest = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
             return WriteBufResult::NotFound(PageWriteGuard {
@@ -849,6 +905,7 @@ impl PageCache {
                         key: None,
                         buf,
                         dirty: false,
+                        latest: false,
                     }),
                     usage_count: AtomicU8::new(0),
                 }

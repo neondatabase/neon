@@ -881,32 +881,12 @@ impl Timeline for LayeredTimeline {
     /// Look up the value with the given a key
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
         debug_assert!(lsn <= self.get_last_record_lsn());
+        self.get_at(key, lsn, false)
+    }
 
-        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
-        // The cached image can be returned directly if there is no WAL between the cached image
-        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
-        // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
-
-        let mut reconstruct_state = ValueReconstructState {
-            records: Vec::new(),
-            img: cached_page_img,
-        };
-
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
-
-        self.reconstruct_time_histo
-            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+    fn get_latest(&self, key: Key) -> Result<Bytes> {
+        let lsn = self.get_last_record_lsn();
+        self.get_at(key, lsn, true)
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private
@@ -1130,6 +1110,39 @@ impl LayeredTimeline {
         Ok(())
     }
 
+    fn get_at(&self, key: Key, lsn: Lsn, latest_version: bool) -> Result<Bytes> {
+        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
+        // The cached image can be returned directly if there is no WAL between the cached image
+        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
+        // for redo.
+        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
+            Some((cached_lsn, cached_latest, cached_img)) => {
+                match cached_lsn.cmp(&lsn) {
+                    Ordering::Less => {
+                        if cached_latest && latest_version {
+                            return Ok(cached_img);
+                        }
+                    }
+                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+                }
+                Some((cached_lsn, cached_img))
+            }
+            None => None,
+        };
+
+        let mut reconstruct_state = ValueReconstructState {
+            records: Vec::new(),
+            img: cached_page_img,
+            latest_version,
+        };
+
+        self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
+
+        self.reconstruct_time_histo
+            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+    }
+
     ///
     /// Get a handle to a Layer for reading.
     ///
@@ -1263,7 +1276,7 @@ impl LayeredTimeline {
         }
     }
 
-    fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, bool, Bytes)> {
         let cache = page_cache::get();
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
@@ -1271,7 +1284,7 @@ impl LayeredTimeline {
         let (lsn, read_guard) =
             cache.lookup_materialized_page(self.tenantid, self.timelineid, key, lsn)?;
         let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
+        Some((lsn, read_guard.is_latest_version(), img))
     }
 
     fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
@@ -1337,6 +1350,8 @@ impl LayeredTimeline {
     fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
+        let cache = page_cache::get();
+        cache.invalidate_latest_version(self.tenantid, self.timelineid, key, lsn);
         layer.put_value(key, lsn, val)?;
         Ok(())
     }
@@ -2022,6 +2037,7 @@ impl LayeredTimeline {
                         self.timelineid,
                         key,
                         last_rec_lsn,
+                        data.latest_version,
                         &img,
                     );
                 }

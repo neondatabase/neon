@@ -350,6 +350,9 @@ pub trait Timeline: Send + Sync {
     ///
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
 
+    /// Lookup latest page version
+    fn get_latest(&self, key: Key) -> Result<Bytes>;
+
     /// Get the ancestor's timeline id
     fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
 

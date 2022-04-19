@@ -100,7 +100,13 @@ impl<R: Repository> DatadirTimeline<R> {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_rel_page_at_lsn(
+        &self,
+        tag: RelTag,
+        blknum: BlockNumber,
+        lsn: Lsn,
+        latest: bool,
+    ) -> Result<Bytes> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         let nblocks = self.get_rel_size(tag, lsn)?;
@@ -113,7 +119,11 @@ impl<R: Repository> DatadirTimeline<R> {
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.tline.get(key, lsn)
+        if latest {
+            self.tline.get_latest(key)
+        } else {
+            self.tline.get(key, lsn)
+        }
     }
 
     /// Get size of a relation file
