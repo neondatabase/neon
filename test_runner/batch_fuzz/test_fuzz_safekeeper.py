@@ -1,12 +1,9 @@
-
-
-
-
-
-
-
-
-
+# TODO PR execution plan:
+# 1. Write an adversarial proposer that successfully sends greeting
+#   1. Make pg connection
+#   2. Send a FeMessage::CopyData that contains ('g' as char as u8 as u64) in LittleEndian
+# 2. Send Elected, and see what happens
+# 3. Add TODOs, merge the harness into main, improve later
 
 
 def test_fuzz_safekeeper(zenith_env_builder: ZenithEnvBuilder):
