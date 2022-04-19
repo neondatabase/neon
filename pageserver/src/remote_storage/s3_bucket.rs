@@ -180,12 +180,16 @@ impl RemoteStorage for S3Bucket {
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from_size_kb: usize,
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         self.client
             .put_object(PutObjectRequest {
-                body: Some(StreamingBody::new(ReaderStream::new(from))),
+                body: Some(StreamingBody::new_with_size(
+                    ReaderStream::new(from),
+                    from_size_kb,
+                )),
                 bucket: self.bucket_name.clone(),
                 key: to.key().to_owned(),
                 metadata: metadata.map(|m| m.0),
