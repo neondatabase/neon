@@ -150,7 +150,7 @@ impl PostgresNode {
         let port: u16 = conf.parse_field("port", &context)?;
         let timeline_id: ZTimelineId = conf.parse_field("neon.timelineid", &context)?;
         let tenant_id: ZTenantId = conf.parse_field("neon.tenantid", &context)?;
-        let uses_wal_proposer = conf.get("wal_acceptors").is_some();
+        let uses_wal_proposer = conf.get("safekeepers").is_some();
 
         // parse recovery_target_lsn, if any
         let recovery_target_lsn: Option<Lsn> =
@@ -341,7 +341,7 @@ impl PostgresNode {
                 .map(|sk| format!("localhost:{}", sk.pg_port))
                 .collect::<Vec<String>>()
                 .join(",");
-            conf.append("wal_acceptors", &safekeepers);
+            conf.append("safekeepers", &safekeepers);
         } else {
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
