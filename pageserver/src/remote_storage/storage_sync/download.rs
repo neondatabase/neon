@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::PageServerConf,
@@ -45,25 +45,16 @@ where
         .download(&part_storage_path, &mut index_part_bytes)
         .await
         .with_context(|| {
-            format!(
-                "Failed to download an index part from storage path '{:?}'",
-                part_storage_path
-            )
+            format!("Failed to download an index part from storage path '{part_storage_path:?}'")
         })?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes).with_context(|| {
-        format!(
-            "Failed to deserialize index part file from storage path '{:?}'",
-            part_storage_path
-        )
+        format!("Failed to deserialize index part file from storage path '{part_storage_path:?}'")
     })?;
 
     let missing_files = index_part.missing_files();
     if !missing_files.is_empty() {
-        warn!(
-            "Found missing layers in index part for timeline {}: {:?}",
-            sync_id, missing_files
-        );
+        warn!("Found missing layers in index part for timeline {sync_id}: {missing_files:?}");
     }
 
     Ok(index_part)
@@ -100,21 +91,17 @@ where
     let remote_timeline = match remote_timeline {
         Some(remote_timeline) => {
             if !remote_timeline.awaits_download {
-                error!("Timeline with sync id {} is not awaiting download", sync_id);
+                error!("Timeline with sync id {sync_id} is not awaiting download");
                 return DownloadedTimeline::Abort;
             }
             remote_timeline
         }
         None => {
-            error!(
-                "Timeline with sync id {} is not present in the remote index",
-                sync_id
-            );
+            error!("Timeline with sync id {sync_id} is not present in the remote index");
             return DownloadedTimeline::Abort;
         }
     };
 
-    debug!("Downloading timeline layers for sync id {}", sync_id);
     let download = &mut download_data.data;
 
     let layers_to_download = remote_timeline
@@ -123,7 +110,8 @@ where
         .cloned()
         .collect::<Vec<_>>();
 
-    trace!("Layers to download: {:?}", layers_to_download);
+    debug!("Layers to download: {layers_to_download:?}");
+    info!("Downloading {} timeline layers", layers_to_download.len());
 
     let mut download_tasks = layers_to_download
         .into_iter()
@@ -157,16 +145,13 @@ where
                     .await
                     .with_context(|| {
                         format!(
-                            "Failed to download a layer from storage path '{:?}'",
-                            layer_storage_path
+                            "Failed to download a layer from storage path '{layer_storage_path:?}'"
                         )
                     })?;
             }
             Ok::<_, anyhow::Error>(layer_desination_path)
         })
         .collect::<FuturesUnordered<_>>();
-
-    debug!("Downloading {} layers of a timeline", download_tasks.len());
 
     let mut errors_happened = false;
     while let Some(download_result) = download_tasks.next().await {
@@ -176,21 +161,18 @@ where
             }
             Err(e) => {
                 errors_happened = true;
-                error!(
-                    "Failed to download a layer for timeline {}: {:?}",
-                    sync_id, e
-                );
+                error!("Failed to download a layer for timeline {sync_id}: {e:?}");
             }
         }
     }
 
     if errors_happened {
-        debug!("Reenqueuing failed download task for timeline {}", sync_id);
+        debug!("Reenqueuing failed download task for timeline {sync_id}");
         download_data.retries += 1;
         sync_queue::push(sync_id, SyncTask::Download(download_data));
         DownloadedTimeline::FailedAndRescheduled
     } else {
-        debug!("Finished downloading all timeline's layers");
+        info!("Successfully downloaded all layers");
         DownloadedTimeline::Successful(download_data)
     }
 }
@@ -266,10 +248,9 @@ mod tests {
         .await
         {
             DownloadedTimeline::Successful(data) => data,
-            wrong_result => panic!(
-                "Expected a successful download for timeline, but got: {:?}",
-                wrong_result
-            ),
+            wrong_result => {
+                panic!("Expected a successful download for timeline, but got: {wrong_result:?}")
+            }
         };
 
         assert_eq!(

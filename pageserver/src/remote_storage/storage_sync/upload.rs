@@ -5,7 +5,7 @@ use std::{fmt::Debug, path::PathBuf};
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::fs;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::PageServerConf,
@@ -53,10 +53,7 @@ where
         )
         .await
         .with_context(|| {
-            format!(
-                "Failed to upload index part to the storage path '{:?}'",
-                index_part_storage_path
-            )
+            format!("Failed to upload index part to the storage path '{index_part_storage_path:?}'")
         })
 }
 
@@ -89,10 +86,6 @@ where
 {
     let upload = &mut upload_data.data;
     let new_upload_lsn = upload.metadata.disk_consistent_lsn();
-    debug!(
-        "Uploading timeline layers for sync id {}, new lsn: {}",
-        sync_id, new_upload_lsn
-    );
 
     let already_uploaded_layers = remote_timeline
         .map(|timeline| timeline.stored_files())
@@ -105,7 +98,11 @@ where
         .cloned()
         .collect::<Vec<_>>();
 
-    trace!("Layers to upload: {:?}", layers_to_upload);
+    debug!("Layers to upload: {layers_to_upload:?}");
+    info!(
+        "Uploading {} timeline layers, new lsn: {new_upload_lsn}",
+        layers_to_upload.len(),
+    );
 
     let mut upload_tasks = layers_to_upload
         .into_iter()
@@ -157,8 +154,6 @@ where
         })
         .collect::<FuturesUnordered<_>>();
 
-    debug!("uploading {} layers of a timeline", upload_tasks.len());
-
     let mut errors_happened = false;
     let mut local_fs_updated = false;
     while let Some(upload_result) = upload_tasks.next().await {
@@ -170,16 +165,19 @@ where
             Err(e) => match e {
                 UploadError::Other(e) => {
                     errors_happened = true;
-                    error!("Failed to upload a layer for timeline {}: {:?}", sync_id, e);
+                    error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
                 }
                 UploadError::MissingLocalFile(source_path, e) => {
                     if source_path.exists() {
                         errors_happened = true;
-                        error!("Failed to upload a layer for timeline {}: {:?}", sync_id, e);
+                        error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
                     } else {
                         local_fs_updated = true;
                         upload.layers_to_upload.remove(&source_path);
-                        warn!("Missing locally a layer file scheduled for upload, skipping");
+                        warn!(
+                            "Missing locally a layer file {} scheduled for upload, skipping",
+                            source_path.display()
+                        );
                     }
                 }
             },
@@ -187,17 +185,16 @@ where
     }
 
     if errors_happened {
-        debug!("Reenqueuing failed upload task for timeline {}", sync_id);
+        debug!("Reenqueuing failed upload task for timeline {sync_id}");
         upload_data.retries += 1;
         sync_queue::push(sync_id, SyncTask::Upload(upload_data));
         UploadedTimeline::FailedAndRescheduled
+    } else if local_fs_updated {
+        info!("Successfully uploaded all layers, some local layers were removed during the upload");
+        UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data)
     } else {
-        debug!("Finished uploading all timeline's layers");
-        if local_fs_updated {
-            UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data)
-        } else {
-            UploadedTimeline::Successful(upload_data)
-        }
+        info!("Successfully uploaded all layers");
+        UploadedTimeline::Successful(upload_data)
     }
 }
 
@@ -253,10 +250,9 @@ mod tests {
 
         let upload_data = match upload_result {
             UploadedTimeline::Successful(upload_data) => upload_data,
-            wrong_result => panic!(
-                "Expected a successful upload for timeline, but got: {:?}",
-                wrong_result
-            ),
+            wrong_result => {
+                panic!("Expected a successful upload for timeline, but got: {wrong_result:?}")
+            }
         };
 
         assert_eq!(
@@ -344,8 +340,7 @@ mod tests {
         let upload_data = match upload_result {
             UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data) => upload_data,
             wrong_result => panic!(
-                "Expected a successful after local fs upload for timeline, but got: {:?}",
-                wrong_result
+                "Expected a successful after local fs upload for timeline, but got: {wrong_result:?}"
             ),
         };
 
