@@ -46,15 +46,17 @@ use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{ZTenantId, ZTimelineId};
 
-use zenith_metrics::{
+use metrics::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
     Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
 };
-use zenith_utils::crashsafe_dir;
-use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
-use zenith_utils::seqwait::SeqWait;
+use utils::{
+    crashsafe_dir,
+    lsn::{AtomicLsn, Lsn, RecordLsn},
+    seqwait::SeqWait,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 mod blob_io;
 pub mod block_io;

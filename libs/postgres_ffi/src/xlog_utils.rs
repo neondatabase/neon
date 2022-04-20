@@ -28,7 +28,7 @@ use std::io::prelude::*;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
 pub const XLOG_BLCKSZ: usize = 8192;
@@ -351,17 +351,17 @@ pub fn main() {
 
 impl XLogRecord {
     pub fn from_slice(buf: &[u8]) -> XLogRecord {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         XLogRecord::des(buf).unwrap()
     }
 
     pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogRecord {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         XLogRecord::des_from(&mut buf.reader()).unwrap()
     }
 
     pub fn encode(&self) -> Bytes {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         self.ser().unwrap().into()
     }
 
@@ -373,19 +373,19 @@ impl XLogRecord {
 
 impl XLogPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogPageHeaderData {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         XLogPageHeaderData::des_from(&mut buf.reader()).unwrap()
     }
 }
 
 impl XLogLongPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogLongPageHeaderData {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         XLogLongPageHeaderData::des_from(&mut buf.reader()).unwrap()
     }
 
     pub fn encode(&self) -> Bytes {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         self.ser().unwrap().into()
     }
 }
@@ -394,12 +394,12 @@ pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 
 impl CheckPoint {
     pub fn encode(&self) -> Bytes {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         self.ser().unwrap().into()
     }
 
     pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         Ok(CheckPoint::des(buf)?)
     }
 
@@ -477,7 +477,9 @@ mod tests {
     #[test]
     pub fn test_find_end_of_wal() {
         // 1. Run initdb to generate some WAL
-        let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
         let data_dir = top_path.join("test_output/test_find_end_of_wal");
         let initdb_path = top_path.join("tmp_install/bin/initdb");
         let lib_path = top_path.join("tmp_install/lib");

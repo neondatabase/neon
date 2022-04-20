@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
+use utils::zid::{ZNodeId, ZTenantTimelineId};
 
 pub mod broker;
 pub mod callmemaybe;

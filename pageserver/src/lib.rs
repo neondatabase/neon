@@ -22,13 +22,10 @@ pub mod walredo;
 
 use lazy_static::lazy_static;
 use tracing::info;
-use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
-use zenith_utils::{
-    postgres_backend,
-    zid::{ZTenantId, ZTimelineId},
-};
+use utils::postgres_backend;
 
 use crate::thread_mgr::ThreadKind;
+use metrics::{register_int_gauge_vec, IntGaugeVec};
 
 use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;

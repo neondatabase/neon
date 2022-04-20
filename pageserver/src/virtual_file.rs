@@ -11,15 +11,15 @@
 //! src/backend/storage/file/fd.c
 //!
 use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
-use zenith_metrics::{register_histogram_vec, register_int_gauge_vec, HistogramVec, IntGaugeVec};
 
-use once_cell::sync::OnceCell;
+use metrics::{register_histogram_vec, register_int_gauge_vec, HistogramVec, IntGaugeVec};
 
 // Metrics collected on disk IO operations
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[

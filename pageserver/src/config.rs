@@ -7,8 +7,10 @@
 use anyhow::{bail, ensure, Context, Result};
 use toml_edit;
 use toml_edit::{Document, Item};
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
+use utils::{
+    postgres_backend::AuthType,
+    zid::{ZNodeId, ZTenantId, ZTimelineId},
+};
 
 use std::convert::TryInto;
 use std::env;

@@ -5,7 +5,7 @@ use crate::stream::PqStream;
 use crate::{sasl, scram};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 
 /// Every authentication selector is supposed to implement this trait.
 pub trait AuthMethod {

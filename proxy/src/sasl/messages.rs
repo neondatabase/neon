@@ -1,9 +1,9 @@
 //! Definitions for SASL messages.
 
 use crate::parse::{split_at_const, split_cstr};
-use zenith_utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage};
+use utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage};
 
-/// SASL-specific payload of [`PasswordMessage`](zenith_utils::pq_proto::FeMessage::PasswordMessage).
+/// SASL-specific payload of [`PasswordMessage`](utils::pq_proto::FeMessage::PasswordMessage).
 #[derive(Debug)]
 pub struct FirstMessage<'a> {
     /// Authentication method, e.g. `"SCRAM-SHA-256"`.
@@ -31,7 +31,7 @@ impl<'a> FirstMessage<'a> {
 
 /// A single SASL message.
 /// This struct is deliberately decoupled from lower-level
-/// [`BeAuthenticationSaslMessage`](zenith_utils::pq_proto::BeAuthenticationSaslMessage).
+/// [`BeAuthenticationSaslMessage`](utils::pq_proto::BeAuthenticationSaslMessage).
 #[derive(Debug)]
 pub(super) enum ServerMessage<T> {
     /// We expect to see more steps.

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
+use utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
 
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {

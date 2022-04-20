@@ -12,9 +12,10 @@ use crate::{
     layered_repository::metadata::metadata_path,
     remote_storage::{
         storage_sync::{sync_queue, SyncTask},
-        RemoteStorage, ZTenantTimelineId,
+        RemoteStorage,
     },
 };
+use utils::zid::ZTenantTimelineId;
 
 use super::{
     index::{IndexPart, RemoteTimeline},
@@ -182,7 +183,7 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
 
     use tempfile::tempdir;
-    use zenith_utils::lsn::Lsn;
+    use utils::lsn::Lsn;
 
     use crate::{
         remote_storage::{

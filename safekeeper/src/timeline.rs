@@ -14,8 +14,11 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{ZNodeId, ZTenantTimelineId};
+use utils::{
+    lsn::Lsn,
+    pq_proto::ZenithFeedback,
+    zid::{ZNodeId, ZTenantTimelineId},
+};
 
 use crate::broker::SafekeeperInfo;
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
@@ -29,8 +32,6 @@ use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
-
-use zenith_utils::pq_proto::ZenithFeedback;
 
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 

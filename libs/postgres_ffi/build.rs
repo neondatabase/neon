@@ -88,8 +88,8 @@ fn main() {
         // 'pg_config --includedir-server' would perhaps be the more proper way to find it,
         // but this will do for now.
         //
-        .clang_arg("-I../tmp_install/include/server")
-        .clang_arg("-I../tmp_install/include/postgresql/server")
+        .clang_arg("-I../../tmp_install/include/server")
+        .clang_arg("-I../../tmp_install/include/postgresql/server")
         //
         // Finish the builder and generate the bindings.
         //

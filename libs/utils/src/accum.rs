@@ -5,7 +5,7 @@
 /// For example, to calculate the smallest value among some integers:
 ///
 /// ```
-/// use zenith_utils::accum::Accum;
+/// use utils::accum::Accum;
 ///
 /// let values = [1, 2, 3];
 ///

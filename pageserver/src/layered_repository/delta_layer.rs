@@ -35,7 +35,6 @@ use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::{ZTenantId, ZTimelineId};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,8 +50,11 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 ///
 /// Header stored in the beginning of the file

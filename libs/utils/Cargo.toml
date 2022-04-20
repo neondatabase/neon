@@ -1,5 +1,5 @@
 [package]
-name = "zenith_utils"
+name = "utils"
 version = "0.1.0"
 edition = "2021"
 
@@ -29,8 +29,8 @@ rustls-split = "0.3.0"
 git-version = "0.3.5"
 serde_with = "1.12.0"
 
-zenith_metrics = { path = "../zenith_metrics" }
-workspace_hack = { version = "0.1", path = "../workspace_hack" }
+metrics = { path = "../metrics" }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
 [dev-dependencies]
 byteorder = "1.4.3"

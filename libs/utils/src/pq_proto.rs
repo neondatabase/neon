@@ -107,7 +107,7 @@ impl FeMessage {
     ///
     /// ```
     /// # use std::io;
-    /// # use zenith_utils::pq_proto::FeMessage;
+    /// # use utils::pq_proto::FeMessage;
     /// #
     /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
     /// #     Ok(())

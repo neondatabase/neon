@@ -4,21 +4,22 @@ use serde::Serialize;
 use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
-use zenith_utils::http::json::json_request;
-use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::ZNodeId;
-use zenith_utils::zid::ZTenantTimelineId;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::GlobalTimelines;
 use crate::SafeKeeperConf;
-use zenith_utils::http::endpoint;
-use zenith_utils::http::error::ApiError;
-use zenith_utils::http::json::json_response;
-use zenith_utils::http::request::parse_request_param;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    http::{
+        endpoint,
+        error::ApiError,
+        json::{json_request, json_response},
+        request::parse_request_param,
+        RequestExt, RouterBuilder,
+    },
+    lsn::Lsn,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 use super::models::TimelineCreateRequest;
 

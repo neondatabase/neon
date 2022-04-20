@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::*;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
     static ref TENANTS: Mutex<HashMap<ZTenantId, Tenant>> = Mutex::new(HashMap::new());

@@ -16,8 +16,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task;
 use tokio_postgres::NoTls;
 use tracing::*;
-use zenith_utils::connstring::connection_host_port;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    connstring::connection_host_port,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 async fn request_callback(
     pageserver_connstr: String,

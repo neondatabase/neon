@@ -14,19 +14,21 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::repository::{Key, Value};
 use crate::walrecord;
-use crate::{ZTenantId, ZTimelineId};
 use anyhow::{bail, ensure, Result};
 use std::collections::HashMap;
 use tracing::*;
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    vec_map::VecMap,
+    zid::{ZTenantId, ZTimelineId},
+};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::vec_map::VecMap;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,

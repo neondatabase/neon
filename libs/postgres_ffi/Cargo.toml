@@ -17,8 +17,8 @@ log = "0.4.14"
 memoffset = "0.6.2"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-zenith_utils = { path = "../zenith_utils" }
-workspace_hack = { version = "0.1", path = "../workspace_hack" }
+utils = { path = "../utils" }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
 [build-dependencies]
 bindgen = "0.59.1"
