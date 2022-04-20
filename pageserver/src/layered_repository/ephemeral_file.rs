@@ -259,8 +259,17 @@ impl Drop for EphemeralFile {
 
 pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Error> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
-        file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64)?;
-        Ok(())
+        match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(std::io::Error::new(
+                ErrorKind::Other,
+                format!(
+                    "failed to write back to ephemeral file at {} error: {}",
+                    file.path.display(),
+                    e
+                ),
+            )),
+        }
     } else {
         Err(std::io::Error::new(
             ErrorKind::Other,
