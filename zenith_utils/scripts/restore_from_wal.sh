@@ -1,3 +1,4 @@
+#!/bin/bash
 PG_BIN=$1
 WAL_PATH=$2
 DATA_DIR=$3

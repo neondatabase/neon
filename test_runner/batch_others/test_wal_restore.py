@@ -1,7 +1,6 @@
 import os
 import subprocess
 
-from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import (ZenithEnvBuilder,
                                       VanillaPostgres,
                                       PortDistributor,
@@ -13,6 +12,7 @@ from fixtures.log_helper import log
 
 
 def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
+                     pg_bin: PgBin,
                      test_output_dir,
                      port_distributor: PortDistributor):
     zenith_env_builder.num_safekeepers = 1
@@ -24,15 +24,13 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
     env.zenith_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = os.path.join(test_output_dir, 'pgsql.restored')
-    restored = VanillaPostgres(data_dir, PgBin(test_output_dir), port)
-    subprocess.call([
-        'bash',
-        os.path.join(base_dir, 'zenith_utils/scripts/restore_from_wal.sh'),
-        os.path.join(pg_distrib_dir, 'bin'),
-        os.path.join(test_output_dir, 'repo/safekeepers/sk1/{}/*'.format(tenant_id)),
-        data_dir,
-        str(port)
-    ])
-    restored.start()
-    assert restored.safe_psql('select count(*) from t') == [(1000000, )]
-    restored.stop()
+    with VanillaPostgres(data_dir, PgBin(test_output_dir), port) as restored:
+        pg_bin.run_capture([
+            os.path.join(base_dir, 'zenith_utils/scripts/restore_from_wal.sh'),
+            os.path.join(pg_distrib_dir, 'bin'),
+            os.path.join(test_output_dir, 'repo/safekeepers/sk1/{}/*'.format(tenant_id)),
+            data_dir,
+            str(port)
+        ])
+        restored.start()
+        assert restored.safe_psql('select count(*) from t') == [(1000000, )]
