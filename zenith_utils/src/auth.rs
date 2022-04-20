@@ -1,8 +1,6 @@
 // For details about authentication see docs/authentication.md
-// TODO there are two issues for our use case in jsonwebtoken library which will be resolved in next release
-// The first one is that there is no way to disable expiration claim, but it can be excluded from validation, so use this as a workaround for now.
-// Relevant issue: https://github.com/Keats/jsonwebtoken/issues/190
-// The second one is that we wanted to use ed25519 keys, but they are also not supported until next version. So we go with RSA keys for now.
+//
+// TODO: use ed25519 keys
 // Relevant issue: https://github.com/Keats/jsonwebtoken/issues/162
 
 use serde;
@@ -59,19 +57,19 @@ pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<
 }
 
 pub struct JwtAuth {
-    decoding_key: DecodingKey<'static>,
+    decoding_key: DecodingKey,
     validation: Validation,
 }
 
 impl JwtAuth {
-    pub fn new(decoding_key: DecodingKey<'_>) -> Self {
+    pub fn new(decoding_key: DecodingKey) -> Self {
+        let mut validation = Validation::new(JWT_ALGORITHM);
+        // The default 'required_spec_claims' is 'exp'. But we don't want to require
+        // expiration.
+        validation.required_spec_claims = [].into();
         Self {
-            decoding_key: decoding_key.into_static(),
-            validation: Validation {
-                algorithms: vec![JWT_ALGORITHM],
-                validate_exp: false,
-                ..Default::default()
-            },
+            decoding_key,
+            validation,
         }
     }
 

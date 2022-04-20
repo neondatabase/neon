@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nix = "0.23.0"
 signal-hook = "0.3.10"
 rand = "0.8.3"
-jsonwebtoken = "7"
+jsonwebtoken = "8"
 hex = { version = "0.4.3", features = ["serde"] }
 rustls = "0.20.2"
 rustls-split = "0.3.0"
