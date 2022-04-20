@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use rustls::Session;
+use rustls::Connection;
 
 /// Wrapper supporting reads of a shared TcpStream.
 pub struct ArcTcpRead(Arc<TcpStream>);
@@ -56,7 +56,7 @@ impl BufStream {
 
 pub enum ReadStream {
     Tcp(BufReader<ArcTcpRead>),
-    Tls(rustls_split::ReadHalf<rustls::ServerSession>),
+    Tls(rustls_split::ReadHalf),
 }
 
 impl io::Read for ReadStream {
@@ -79,7 +79,7 @@ impl ReadStream {
 
 pub enum WriteStream {
     Tcp(Arc<TcpStream>),
-    Tls(rustls_split::WriteHalf<rustls::ServerSession>),
+    Tls(rustls_split::WriteHalf),
 }
 
 impl WriteStream {
@@ -107,11 +107,11 @@ impl io::Write for WriteStream {
     }
 }
 
-type TlsStream<T> = rustls::StreamOwned<rustls::ServerSession, T>;
+type TlsStream<T> = rustls::StreamOwned<rustls::ServerConnection, T>;
 
 pub enum BidiStream {
     Tcp(BufStream),
-    /// This variant is boxed, because [`rustls::ServerSession`] is quite larger than [`BufStream`].
+    /// This variant is boxed, because [`rustls::ServerConnection`] is quite larger than [`BufStream`].
     Tls(Box<TlsStream<BufStream>>),
 }
 
@@ -127,7 +127,7 @@ impl BidiStream {
                 if how == Shutdown::Read {
                     tls_boxed.sock.get_ref().shutdown(how)
                 } else {
-                    tls_boxed.sess.send_close_notify();
+                    tls_boxed.conn.send_close_notify();
                     let res = tls_boxed.flush();
                     tls_boxed.sock.get_ref().shutdown(how)?;
                     res
@@ -154,19 +154,23 @@ impl BidiStream {
                 // TODO would be nice to avoid the Arc here
                 let socket = Arc::try_unwrap(reader.into_inner().0).unwrap();
 
-                let (read_half, write_half) =
-                    rustls_split::split(socket, tls_boxed.sess, read_buf_cfg, write_buf_cfg);
+                let (read_half, write_half) = rustls_split::split(
+                    socket,
+                    Connection::Server(tls_boxed.conn),
+                    read_buf_cfg,
+                    write_buf_cfg,
+                );
                 (ReadStream::Tls(read_half), WriteStream::Tls(write_half))
             }
         }
     }
 
-    pub fn start_tls(self, mut session: rustls::ServerSession) -> io::Result<Self> {
+    pub fn start_tls(self, mut conn: rustls::ServerConnection) -> io::Result<Self> {
         match self {
             Self::Tcp(mut stream) => {
-                session.complete_io(&mut stream)?;
-                assert!(!session.is_handshaking());
-                Ok(Self::Tls(Box::new(TlsStream::new(session, stream))))
+                conn.complete_io(&mut stream)?;
+                assert!(!conn.is_handshaking());
+                Ok(Self::Tls(Box::new(TlsStream::new(conn, stream))))
             }
             Self::Tls { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

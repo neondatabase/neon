@@ -304,8 +304,8 @@ impl PostgresBackend {
     pub fn start_tls(&mut self) -> anyhow::Result<()> {
         match self.stream.take() {
             Some(Stream::Bidirectional(bidi_stream)) => {
-                let session = rustls::ServerSession::new(&self.tls_config.clone().unwrap());
-                self.stream = Some(Stream::Bidirectional(bidi_stream.start_tls(session)?));
+                let conn = rustls::ServerConnection::new(self.tls_config.clone().unwrap())?;
+                self.stream = Some(Stream::Bidirectional(bidi_stream.start_tls(conn)?));
                 Ok(())
             }
             stream => {

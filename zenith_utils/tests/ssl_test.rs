@@ -8,7 +8,6 @@ use std::{
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use rustls::Session;
 
 use zenith_utils::postgres_backend::{AuthType, Handler, PostgresBackend};
 
@@ -23,11 +22,11 @@ fn make_tcp_pair() -> (TcpStream, TcpStream) {
 lazy_static! {
     static ref KEY: rustls::PrivateKey = {
         let mut cursor = Cursor::new(include_bytes!("key.pem"));
-        rustls::internal::pemfile::rsa_private_keys(&mut cursor).unwrap()[0].clone()
+        rustls::PrivateKey(rustls_pemfile::rsa_private_keys(&mut cursor).unwrap()[0].clone())
     };
     static ref CERT: rustls::Certificate = {
         let mut cursor = Cursor::new(include_bytes!("cert.pem"));
-        rustls::internal::pemfile::certs(&mut cursor).unwrap()[0].clone()
+        rustls::Certificate(rustls_pemfile::certs(&mut cursor).unwrap()[0].clone())
     };
 }
 
@@ -45,17 +44,23 @@ fn ssl() {
         let ssl_response = client_sock.read_u8().unwrap();
         assert_eq!(b'S', ssl_response);
 
-        let mut cfg = rustls::ClientConfig::new();
-        cfg.root_store.add(&CERT).unwrap();
+        let cfg = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates({
+                let mut store = rustls::RootCertStore::empty();
+                store.add(&CERT).unwrap();
+                store
+            })
+            .with_no_client_auth();
         let client_config = Arc::new(cfg);
 
-        let dns_name = webpki::DNSNameRef::try_from_ascii_str("localhost").unwrap();
-        let mut session = rustls::ClientSession::new(&client_config, dns_name);
+        let dns_name = "localhost".try_into().unwrap();
+        let mut conn = rustls::ClientConnection::new(client_config, dns_name).unwrap();
 
-        session.complete_io(&mut client_sock).unwrap();
-        assert!(!session.is_handshaking());
+        conn.complete_io(&mut client_sock).unwrap();
+        assert!(!conn.is_handshaking());
 
-        let mut stream = rustls::Stream::new(&mut session, &mut client_sock);
+        let mut stream = rustls::Stream::new(&mut conn, &mut client_sock);
 
         // StartupMessage
         stream.write_u32::<BigEndian>(9).unwrap();
@@ -105,8 +110,10 @@ fn ssl() {
     }
     let mut handler = TestHandler { got_query: false };
 
-    let mut cfg = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-    cfg.set_single_cert(vec![CERT.clone()], KEY.clone())
+    let cfg = rustls::ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(vec![CERT.clone()], KEY.clone())
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
@@ -209,8 +216,10 @@ fn server_forces_ssl() {
     }
     let mut handler = TestHandler;
 
-    let mut cfg = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-    cfg.set_single_cert(vec![CERT.clone()], KEY.clone())
+    let cfg = rustls::ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(vec![CERT.clone()], KEY.clone())
         .unwrap();
     let tls_config = Some(Arc::new(cfg));
 
