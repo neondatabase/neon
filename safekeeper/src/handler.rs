@@ -14,11 +14,12 @@ use regex::Regex;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::info;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::{
+    lsn::Lsn,
+    postgres_backend::{self, PostgresBackend},
+    pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID},
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 use crate::callmemaybe::CallmeEvent;
 use tokio::sync::mpsc::UnboundedSender;

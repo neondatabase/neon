@@ -13,6 +13,6 @@ postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98
 pageserver = { path = "../pageserver" }
 control_plane = { path = "../control_plane" }
 safekeeper = { path = "../safekeeper" }
-postgres_ffi = { path = "../postgres_ffi" }
-zenith_utils = { path = "../zenith_utils" }
+postgres_ffi = { path = "../libs/postgres_ffi" }
+utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }

@@ -8,8 +8,8 @@ use std::io::{Read, Result, Write};
 ///
 /// ```
 /// # use std::io::{Result, Read};
-/// # use zenith_metrics::{register_int_counter, IntCounter};
-/// # use zenith_metrics::CountedReader;
+/// # use metrics::{register_int_counter, IntCounter};
+/// # use metrics::CountedReader;
 /// #
 /// # lazy_static::lazy_static! {
 /// #     static ref INT_COUNTER: IntCounter = register_int_counter!(
@@ -83,8 +83,8 @@ impl<T: Read> Read for CountedReader<'_, T> {
 ///
 /// ```
 /// # use std::io::{Result, Write};
-/// # use zenith_metrics::{register_int_counter, IntCounter};
-/// # use zenith_metrics::CountedWriter;
+/// # use metrics::{register_int_counter, IntCounter};
+/// # use metrics::CountedWriter;
 /// #
 /// # lazy_static::lazy_static! {
 /// #     static ref INT_COUNTER: IntCounter = register_int_counter!(

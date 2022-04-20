@@ -7,7 +7,7 @@ use crate::tenant_mgr::TenantState;
 use anyhow::Result;
 use std::time::Duration;
 use tracing::*;
-use zenith_utils::zid::ZTenantId;
+use utils::zid::ZTenantId;
 
 ///
 /// Compaction thread's main loop

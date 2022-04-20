@@ -17,14 +17,12 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTimelineId;
-use zenith_utils::{
-    lsn::Lsn,
-    zid::{ZNodeId, ZTenantTimelineId},
-};
 
 use crate::{safekeeper::Term, timeline::GlobalTimelines, SafeKeeperConf};
+use utils::{
+    lsn::Lsn,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;

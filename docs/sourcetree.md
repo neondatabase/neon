@@ -30,11 +30,6 @@ The pageserver has a few different duties:
 
 For more detailed info, see `/pageserver/README`
 
-`/postgres_ffi`:
-
-Utility functions for interacting with PostgreSQL file formats.
-Misc constants, copied from PostgreSQL headers.
-
 `/proxy`:
 
 Postgres protocol proxy/router.
@@ -74,13 +69,20 @@ We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
 Main entry point for the 'zenith' CLI utility.
 TODO: Doesn't it belong to control_plane?
 
-`/zenith_metrics`:
+`/libs`:
+Unites granular neon helper crates under the hood.
 
+`/libs/postgres_ffi`:
+
+Utility functions for interacting with PostgreSQL file formats.
+Misc constants, copied from PostgreSQL headers.
+
+`/libs/utils`:
+Generic helpers that are shared between other crates in this repository.
+A subject for future modularization.
+
+`/libs/metrics`:
 Helpers for exposing Prometheus metrics from the server.
-
-`/zenith_utils`:
-
-Helpers that are shared between other crates in this repository.
 
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,

@@ -33,8 +33,8 @@ tokio = { version = "1.17", features = ["macros"] }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 tokio-rustls = "0.23.0"
 
-zenith_utils = { path = "../zenith_utils" }
-zenith_metrics = { path = "../zenith_metrics" }
+utils = { path = "../libs/utils" }
+metrics = { path = "../libs/metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]

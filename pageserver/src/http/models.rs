@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use zenith_utils::{
+use utils::{
     lsn::Lsn,
     zid::{ZNodeId, ZTenantId, ZTimelineId},
 };

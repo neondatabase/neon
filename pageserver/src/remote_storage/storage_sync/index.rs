@@ -13,11 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
 
-use crate::{
-    config::PageServerConf, layered_repository::metadata::TimelineMetadata,
-    remote_storage::ZTenantTimelineId,
-};
-use zenith_utils::lsn::Lsn;
+use crate::{config::PageServerConf, layered_repository::metadata::TimelineMetadata};
+use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 /// A part of the filesystem path, that needs a root to become a path again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

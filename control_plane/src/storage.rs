@@ -15,15 +15,17 @@ use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
-use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    connstring::connection_address,
+    http::error::HttpErrorBody,
+    lsn::Lsn,
+    postgres_backend::AuthType,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
 use pageserver::tenant_mgr::TenantInfo;
-use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {

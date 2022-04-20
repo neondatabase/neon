@@ -5,7 +5,7 @@ use crate::safekeeper::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use tracing::*;
-use zenith_utils::{
+use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
     pq_proto::SystemId,

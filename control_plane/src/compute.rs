@@ -11,11 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use zenith_utils::connstring::connection_host_port;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    connstring::connection_host_port,
+    lsn::Lsn,
+    postgres_backend::AuthType,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;

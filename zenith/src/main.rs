@@ -16,11 +16,13 @@ use safekeeper::defaults::{
 use std::collections::{BTreeSet, HashMap};
 use std::process::exit;
 use std::str::FromStr;
-use zenith_utils::auth::{Claims, Scope};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
-use zenith_utils::GIT_VERSION;
+use utils::{
+    auth::{Claims, Scope},
+    lsn::Lsn,
+    postgres_backend::AuthType,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    GIT_VERSION,
+};
 
 use pageserver::timelines::TimelineInfo;
 

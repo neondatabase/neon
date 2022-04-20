@@ -9,7 +9,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 
-use zenith_utils::postgres_backend::{AuthType, Handler, PostgresBackend};
+use utils::postgres_backend::{AuthType, Handler, PostgresBackend};
 
 fn make_tcp_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

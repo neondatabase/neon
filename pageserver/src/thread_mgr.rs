@@ -47,7 +47,7 @@ use tracing::{debug, error, info, warn};
 
 use lazy_static::lazy_static;
 
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::shutdown_pageserver;
 

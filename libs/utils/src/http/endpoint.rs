@@ -5,12 +5,11 @@ use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
 use lazy_static::lazy_static;
+use metrics::{new_common_metric_name, register_int_counter, Encoder, IntCounter, TextEncoder};
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
 use tracing::info;
-use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
-use zenith_metrics::{Encoder, TextEncoder};
 
 use std::future::Future;
 use std::net::TcpListener;
@@ -36,7 +35,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
 
-    let metrics = zenith_metrics::gather();
+    let metrics = metrics::gather();
     encoder.encode(&metrics, &mut buffer).unwrap();
 
     let response = Response::builder()

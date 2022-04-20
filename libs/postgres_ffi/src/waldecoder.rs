@@ -18,7 +18,7 @@ use crc32c::*;
 use log::*;
 use std::cmp::min;
 use thiserror::Error;
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 pub struct WalStreamDecoder {
     lsn: Lsn,

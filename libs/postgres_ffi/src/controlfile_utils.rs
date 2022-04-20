@@ -43,7 +43,7 @@ impl ControlFileData {
     /// Interpret a slice of bytes as a Postgres control file.
     ///
     pub fn decode(buf: &[u8]) -> Result<ControlFileData> {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
 
         // Check that the slice has the expected size. The control file is
         // padded with zeros up to a 512 byte sector size, so accept a
@@ -77,7 +77,7 @@ impl ControlFileData {
     ///
     /// The CRC is recomputed to match the contents of the fields.
     pub fn encode(&self) -> Bytes {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
 
         // Serialize into a new buffer.
         let b = self.ser().unwrap();

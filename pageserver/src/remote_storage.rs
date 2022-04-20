@@ -117,7 +117,7 @@ use crate::{
         metadata::{TimelineMetadata, METADATA_FILE_NAME},
     },
 };
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 /// A timeline status to share with pageserver's sync counterpart,
 /// after comparing local and remote timeline state.

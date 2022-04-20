@@ -11,8 +11,6 @@ use std::cmp::min;
 use std::fmt;
 use std::io::Read;
 use tracing::*;
-use zenith_utils::zid::ZNodeId;
-use zenith_utils::zid::ZTenantTimelineId;
 
 use lazy_static::lazy_static;
 
@@ -20,13 +18,14 @@ use crate::broker::SafekeeperInfo;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
+use metrics::{register_gauge_vec, Gauge, GaugeVec};
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
-use zenith_metrics::{register_gauge_vec, Gauge, GaugeVec};
-use zenith_utils::bin_ser::LeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::pq_proto::SystemId;
-use zenith_utils::pq_proto::ZenithFeedback;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    bin_ser::LeSer,
+    lsn::Lsn,
+    pq_proto::{SystemId, ZenithFeedback},
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 4;

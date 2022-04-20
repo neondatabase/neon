@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use zenith_utils::zid;
+use utils::zid;
 
 pub fn bench_zid_stringify(c: &mut Criterion) {
     // Can only use public methods.

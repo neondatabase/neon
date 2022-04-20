@@ -12,7 +12,7 @@ use crate::waiters;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub use credentials::ClientCredentials;
 

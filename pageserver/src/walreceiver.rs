@@ -29,11 +29,11 @@ use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use tracing::*;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::pq_proto::ZenithFeedback;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTenantTimelineId;
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    lsn::Lsn,
+    pq_proto::ZenithFeedback,
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 //
 // We keep one WAL Receiver active per timeline.

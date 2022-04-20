@@ -2,14 +2,6 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{
-    auth::JwtAuth,
-    logging,
-    postgres_backend::AuthType,
-    tcp_listener,
-    zid::{ZTenantId, ZTimelineId},
-    GIT_VERSION,
-};
 
 use anyhow::{bail, Context, Result};
 
@@ -25,12 +17,20 @@ use pageserver::{
     thread_mgr::ThreadKind,
     timelines, virtual_file, LOG_FILE_NAME,
 };
-use zenith_utils::http::endpoint;
-use zenith_utils::shutdown::exit_now;
-use zenith_utils::signals::{self, Signal};
+use utils::{
+    auth::JwtAuth,
+    http::endpoint,
+    logging,
+    postgres_backend::AuthType,
+    shutdown::exit_now,
+    signals::{self, Signal},
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
 
 fn main() -> anyhow::Result<()> {
-    zenith_metrics::set_common_metrics_prefix("pageserver");
+    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(GIT_VERSION)

@@ -20,8 +20,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
+use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
 pub type BlockNumber = u32;
@@ -1212,7 +1211,7 @@ pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
 #[cfg(test)]
 pub fn create_test_timeline<R: Repository>(
     repo: R,
-    timeline_id: zenith_utils::zid::ZTimelineId,
+    timeline_id: utils::zid::ZTimelineId,
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let tline = DatadirTimeline::new(tline, 256 * 1024);

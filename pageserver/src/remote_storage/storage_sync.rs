@@ -86,10 +86,7 @@ use self::{
     index::{IndexPart, RemoteIndex, RemoteTimeline, RemoteTimelineIndex},
     upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
 };
-use super::{
-    LocalTimelineInitStatus, LocalTimelineInitStatuses, RemoteStorage, SyncStartupData,
-    ZTenantTimelineId,
-};
+use super::{LocalTimelineInitStatus, LocalTimelineInitStatuses, RemoteStorage, SyncStartupData};
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::{metadata_path, TimelineMetadata},
@@ -99,11 +96,11 @@ use crate::{
     thread_mgr::ThreadKind,
 };
 
-use zenith_metrics::{
+use metrics::{
     register_histogram_vec, register_int_counter, register_int_gauge, HistogramVec, IntCounter,
     IntGauge,
 };
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 pub use self::download::download_index_part;
 
@@ -145,7 +142,7 @@ mod sync_queue {
     use tracing::{debug, warn};
 
     use super::SyncTask;
-    use zenith_utils::zid::ZTenantTimelineId;
+    use utils::zid::ZTenantTimelineId;
 
     static SENDER: OnceCell<UnboundedSender<(ZTenantTimelineId, SyncTask)>> = OnceCell::new();
     static LENGTH: AtomicUsize = AtomicUsize::new(0);
@@ -1197,7 +1194,7 @@ fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Optio
 
 #[cfg(test)]
 mod test_utils {
-    use zenith_utils::lsn::Lsn;
+    use utils::lsn::Lsn;
 
     use crate::repository::repo_harness::RepoHarness;
 
@@ -1246,7 +1243,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{test_utils::dummy_metadata, *};
-    use zenith_utils::lsn::Lsn;
+    use utils::lsn::Lsn;
 
     #[test]
     fn download_sync_tasks_merge() {

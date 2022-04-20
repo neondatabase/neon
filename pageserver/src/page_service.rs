@@ -20,15 +20,13 @@ use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
 use tracing::*;
-use zenith_metrics::{register_histogram_vec, HistogramVec};
-use zenith_utils::auth::{self, JwtAuth};
-use zenith_utils::auth::{Claims, Scope};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::is_socket_read_timed_out;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::postgres_backend::{self, AuthType};
-use zenith_utils::pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    auth::{self, Claims, JwtAuth, Scope},
+    lsn::Lsn,
+    postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
+    pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::basebackup;
 use crate::config::PageServerConf;
@@ -41,6 +39,7 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
+use metrics::{register_histogram_vec, HistogramVec};
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {

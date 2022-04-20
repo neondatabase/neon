@@ -17,8 +17,7 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::*;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTimelineId;
+use utils::zid::{ZTenantId, ZTimelineId};
 
 use std::os::unix::fs::FileExt;
 

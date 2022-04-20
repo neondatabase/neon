@@ -11,8 +11,10 @@ use std::fmt::Display;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
-use zenith_utils::lsn::{Lsn, RecordLsn};
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    lsn::{Lsn, RecordLsn},
+    zid::ZTimelineId,
+};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
@@ -431,7 +433,7 @@ pub mod repo_harness {
 
     use super::*;
     use hex_literal::hex;
-    use zenith_utils::zid::ZTenantId;
+    use utils::zid::ZTenantId;
 
     pub const TIMELINE_ID: ZTimelineId =
         ZTimelineId::from_array(hex!("11223344556677881122334455667788"));

@@ -3,13 +3,11 @@ members = [
     "compute_tools",
     "control_plane",
     "pageserver",
-    "postgres_ffi",
     "proxy",
     "safekeeper",
     "workspace_hack",
     "zenith",
-    "zenith_metrics",
-    "zenith_utils",
+    "libs/*",
 ]
 
 [profile.release]

@@ -26,7 +26,7 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
     data_dir = os.path.join(test_output_dir, 'pgsql.restored')
     with VanillaPostgres(data_dir, PgBin(test_output_dir), port) as restored:
         pg_bin.run_capture([
-            os.path.join(base_dir, 'zenith_utils/scripts/restore_from_wal.sh'),
+            os.path.join(base_dir, 'libs/utils/scripts/restore_from_wal.sh'),
             os.path.join(pg_distrib_dir, 'bin'),
             os.path.join(test_output_dir, 'repo/safekeepers/sk1/{}/*'.format(tenant_id)),
             data_dir,

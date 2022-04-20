@@ -5,10 +5,10 @@ use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use lazy_static::lazy_static;
+use metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
-use zenith_utils::pq_proto::{BeMessage as Be, *};
+use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";

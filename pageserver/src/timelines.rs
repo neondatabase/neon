@@ -14,9 +14,11 @@ use std::{
 };
 use tracing::*;
 
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
-use zenith_utils::{crashsafe_dir, logging};
+use utils::{
+    crashsafe_dir, logging,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::{
     config::PageServerConf,

@@ -225,9 +225,6 @@ name = "cc"
 version = "1.0.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22a9137b95ea06864e018375b72adfb7db6e6f68cfc8df5a04d00288050485ee"
-dependencies = [
- "jobserver",
-]
 
 [[package]]
 name = "cexpr"
@@ -368,8 +365,8 @@ dependencies = [
  "thiserror",
  "toml",
  "url",
+ "utils",
  "workspace_hack",
- "zenith_utils",
 ]
 
 [[package]]
@@ -1138,15 +1135,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aab8fc367588b89dcee83ab0fd66b72b50b72fa1904d7095045ace2b0c81c35"
 
 [[package]]
-name = "jobserver"
-version = "0.1.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af25a77299a7f711a01975c35a6a424eb6862092cc2d6c72c4ed6cbc56dfc1fa"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1270,6 +1258,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metrics"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "once_cell",
+ "prometheus",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -1514,6 +1513,7 @@ dependencies = [
  "hyper",
  "itertools",
  "lazy_static",
+ "metrics",
  "nix",
  "once_cell",
  "postgres",
@@ -1539,9 +1539,8 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "utils",
  "workspace_hack",
- "zenith_metrics",
- "zenith_utils",
 ]
 
 [[package]]
@@ -1744,8 +1743,8 @@ dependencies = [
  "regex",
  "serde",
  "thiserror",
+ "utils",
  "workspace_hack",
- "zenith_utils",
 ]
 
 [[package]]
@@ -1853,6 +1852,7 @@ dependencies = [
  "hyper",
  "lazy_static",
  "md5",
+ "metrics",
  "parking_lot",
  "pin-project-lite",
  "rand",
@@ -1872,9 +1872,8 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
+ "utils",
  "workspace_hack",
- "zenith_metrics",
- "zenith_utils",
 ]
 
 [[package]]
@@ -2267,6 +2266,7 @@ dependencies = [
  "humantime",
  "hyper",
  "lazy_static",
+ "metrics",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
@@ -2283,10 +2283,9 @@ dependencies = [
  "tokio-util 0.7.0",
  "tracing",
  "url",
+ "utils",
  "walkdir",
  "workspace_hack",
- "zenith_metrics",
- "zenith_utils",
 ]
 
 [[package]]
@@ -3064,6 +3063,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "utils"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "byteorder",
+ "bytes",
+ "criterion",
+ "git-version",
+ "hex",
+ "hex-literal",
+ "hyper",
+ "jsonwebtoken",
+ "lazy_static",
+ "metrics",
+ "nix",
+ "pin-project-lite",
+ "postgres",
+ "postgres-protocol",
+ "rand",
+ "routerify",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-split",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "signal-hook",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "workspace_hack",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3272,7 +3308,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "cc",
  "chrono",
  "clap 2.34.0",
  "either",
@@ -3331,56 +3366,8 @@ dependencies = [
  "postgres_ffi",
  "safekeeper",
  "serde_json",
+ "utils",
  "workspace_hack",
- "zenith_utils",
-]
-
-[[package]]
-name = "zenith_metrics"
-version = "0.1.0"
-dependencies = [
- "lazy_static",
- "libc",
- "once_cell",
- "prometheus",
- "workspace_hack",
-]
-
-[[package]]
-name = "zenith_utils"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "byteorder",
- "bytes",
- "criterion",
- "git-version",
- "hex",
- "hex-literal",
- "hyper",
- "jsonwebtoken",
- "lazy_static",
- "nix",
- "pin-project-lite",
- "postgres",
- "postgres-protocol",
- "rand",
- "routerify",
- "rustls",
- "rustls-pemfile",
- "rustls-split",
- "serde",
- "serde_json",
- "serde_with",
- "signal-hook",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "workspace_hack",
- "zenith_metrics",
 ]
 
 [[package]]

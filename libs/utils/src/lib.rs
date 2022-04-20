@@ -1,4 +1,4 @@
-//! zenith_utils is intended to be a place to put code that is shared
+//! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
 
 #![allow(clippy::manual_range_contains)]
@@ -70,7 +70,7 @@ pub mod signals;
 // So the build script will be run only when GIT_VERSION envvar has changed.
 //
 // Why not to use buildscript to get git commit sha directly without procmacro from different crate?
-// Caching and workspaces complicates that. In case zenith_utils is not
+// Caching and workspaces complicates that. In case `utils` is not
 // recompiled due to caching then version may become outdated.
 // git_version crate handles that case by introducing a dependency on .git internals via include_bytes! macro,
 // so if we changed the index state git_version will pick that up and rerun the macro.

@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::*;
 
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::ZTenantTimelineId;
+use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::safekeeper::SafeKeeperState;
 
@@ -30,7 +29,7 @@ use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 use postgres_ffi::waldecoder::WalStreamDecoder;
 
-use zenith_metrics::{
+use metrics::{
     register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
     DISK_WRITE_SECONDS_BUCKETS,
 };

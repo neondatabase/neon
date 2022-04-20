@@ -4,19 +4,6 @@ use anyhow::{Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use tracing::*;
-use zenith_utils::auth::JwtAuth;
-use zenith_utils::http::endpoint::attach_openapi_ui;
-use zenith_utils::http::endpoint::auth_middleware;
-use zenith_utils::http::endpoint::check_permission;
-use zenith_utils::http::error::ApiError;
-use zenith_utils::http::{
-    endpoint,
-    error::HttpErrorBody,
-    json::{json_request, json_response},
-    request::parse_request_param,
-};
-use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::zid::{ZTenantTimelineId, ZTimelineId};
 
 use super::models::{
     StatusResponse, TenantCreateRequest, TenantCreateResponse, TimelineCreateRequest,
@@ -27,7 +14,18 @@ use crate::remote_storage::{
 };
 use crate::repository::Repository;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
-use crate::{config::PageServerConf, tenant_mgr, timelines, ZTenantId};
+use crate::{config::PageServerConf, tenant_mgr, timelines};
+use utils::{
+    auth::JwtAuth,
+    http::{
+        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission},
+        error::{ApiError, HttpErrorBody},
+        json::{json_request, json_response},
+        request::parse_request_param,
+        RequestExt, RouterBuilder,
+    },
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 struct State {
     conf: &'static PageServerConf,
