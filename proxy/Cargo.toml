@@ -20,7 +20,7 @@ parking_lot = "0.11.2"
 pin-project-lite = "0.2.7"
 rand = "0.8.3"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-routerify = "2"
+routerify = "3"
 rustls = "0.20.0"
 rustls-pemfile = "0.2.1"
 scopeguard = "1.1.0"
