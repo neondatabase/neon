@@ -16,6 +16,7 @@ use std::io::{Error, ErrorKind};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use tracing::*;
 use zenith_utils::zid::ZTenantId;
 use zenith_utils::zid::ZTimelineId;
 
@@ -244,9 +245,15 @@ impl Drop for EphemeralFile {
         // remove entry from the hash map
         EPHEMERAL_FILES.write().unwrap().files.remove(&self.file_id);
 
-        // unlink file
-        // FIXME: print error
-        let _ = std::fs::remove_file(&self.file.path);
+        // unlink the file
+        let res = std::fs::remove_file(&self.file.path);
+        if let Err(e) = res {
+            warn!(
+                "could not remove ephemeral file '{}': {}",
+                self.file.path.display(),
+                e
+            );
+        }
     }
 }
 
