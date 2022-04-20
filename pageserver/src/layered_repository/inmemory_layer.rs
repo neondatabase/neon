@@ -113,7 +113,7 @@ impl Layer for InMemoryLayer {
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start <= self.start_lsn);
+        ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
         let inner = self.inner.read().unwrap();
@@ -124,13 +124,6 @@ impl Layer for InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                match &reconstruct_state.img {
-                    Some((cached_lsn, _)) if entry_lsn <= cached_lsn => {
-                        return Ok(ValueReconstructResult::Complete)
-                    }
-                    _ => {}
-                }
-
                 let buf = reader.read_blob(*pos)?;
                 let value = Value::des(&buf)?;
                 match value {

@@ -1149,6 +1149,12 @@ impl LayeredTimeline {
 
         let mut path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
 
+        let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
+            *cached_lsn
+        } else {
+            Lsn(0)
+        };
+
         // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
         // to check that each iteration make some progress, to break infinite
         // looping if something goes wrong.
@@ -1159,10 +1165,14 @@ impl LayeredTimeline {
 
         'outer: loop {
             // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records", reconstruct_state.key, reconstruct_state.lsn, result, reconstruct_state.records.len());
+            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
                 ValueReconstructResult::Complete => return Ok(()),
                 ValueReconstructResult::Continue => {
+                    // If we reached an earlier cached page image, we're done.
+                    if cont_lsn == cached_lsn + 1 {
+                        return Ok(());
+                    }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
@@ -1216,12 +1226,15 @@ impl LayeredTimeline {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
+                    // Get all the data needed to reconstruct the page version from this layer.
+                    // But if we have an older cached page image, no need to go past that.
+                    let lsn_floor = max(cached_lsn + 1, start_lsn);
                     result = open_layer.get_value_reconstruct_data(
                         key,
-                        open_layer.get_lsn_range().start..cont_lsn,
+                        lsn_floor..cont_lsn,
                         reconstruct_state,
                     )?;
-                    cont_lsn = start_lsn;
+                    cont_lsn = lsn_floor;
                     path.push((result, cont_lsn, open_layer.clone()));
                     continue;
                 }
@@ -1230,12 +1243,13 @@ impl LayeredTimeline {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
+                    let lsn_floor = max(cached_lsn + 1, start_lsn);
                     result = frozen_layer.get_value_reconstruct_data(
                         key,
-                        frozen_layer.get_lsn_range().start..cont_lsn,
+                        lsn_floor..cont_lsn,
                         reconstruct_state,
                     )?;
-                    cont_lsn = start_lsn;
+                    cont_lsn = lsn_floor;
                     path.push((result, cont_lsn, frozen_layer.clone()));
                     continue 'outer;
                 }
@@ -1244,6 +1258,7 @@ impl LayeredTimeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
+                let lsn_floor = max(cached_lsn + 1, lsn_floor);
                 result = layer.get_value_reconstruct_data(
                     key,
                     lsn_floor..cont_lsn,

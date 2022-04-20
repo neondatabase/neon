@@ -222,6 +222,7 @@ impl Layer for DeltaLayer {
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start >= self.lsn_range.start);
         let mut need_image = true;
 
         ensure!(self.key_range.contains(&key));

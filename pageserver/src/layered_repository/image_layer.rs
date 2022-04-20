@@ -148,6 +148,7 @@ impl Layer for ImageLayer {
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.key_range.contains(&key));
+        assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
         let inner = self.load()?;
