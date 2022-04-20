@@ -49,8 +49,8 @@ use crate::CheckpointConfig;
 use crate::{ZTenantId, ZTimelineId};
 
 use zenith_metrics::{
-    register_histogram_vec, register_int_counter, register_int_gauge_vec, Histogram, HistogramVec,
-    IntCounter, IntGauge, IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
 };
 use zenith_utils::crashsafe_dir;
 use zenith_utils::lsn::{AtomicLsn, Lsn, RecordLsn};
@@ -96,6 +96,15 @@ lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_time",
         "Time spent on storage operations",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+lazy_static! {
+    static ref MATERIALIZED_PAGE_CACHE_HIT: IntCounterVec = register_int_counter_vec!(
+        "materialize_page_cache_hits",
+        "Number of cache hits from materialized page cache",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
@@ -778,6 +787,7 @@ pub struct LayeredTimeline {
 
     // Metrics
     reconstruct_time_histo: Histogram,
+    materialized_page_cache_hit_counter: IntCounter,
     flush_time_histo: Histogram,
     compact_time_histo: Histogram,
     create_images_time_histo: Histogram,
@@ -983,6 +993,9 @@ impl LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
+        let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
         let flush_time_histo = STORAGE_TIME
             .get_metric_with_label_values(&[
                 "layer flush",
@@ -1029,6 +1042,7 @@ impl LayeredTimeline {
             ancestor_lsn: metadata.ancestor_lsn(),
 
             reconstruct_time_histo,
+            materialized_page_cache_hit_counter,
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
@@ -1171,6 +1185,7 @@ impl LayeredTimeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
+                        self.materialized_page_cache_hit_counter.inc_by(1);
                         return Ok(());
                     }
                     if prev_lsn <= cont_lsn {
