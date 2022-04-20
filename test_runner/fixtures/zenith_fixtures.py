@@ -1273,10 +1273,14 @@ class VanillaPostgres(PgProtocol):
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
             conf_file.writelines(options)
 
-    def start(self):
+    def start(self, log_path: Optional[str] = None):
         assert not self.running
         self.running = True
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
+
+        if log_path is None:
+            log_path = os.path.join(self.pgdatadir, "pg.log")
+
+        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
