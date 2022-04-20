@@ -33,4 +33,4 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
             str(port)
         ])
         restored.start()
-        assert restored.safe_psql('select count(*) from t') == [(1000000, )]
+        assert restored.safe_psql('select count(*) from t', user='zenith_admin') == [(1000000, )]
