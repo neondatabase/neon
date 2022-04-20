@@ -37,7 +37,6 @@ byteorder = "1.4.3"
 bytes = "1.0.1"
 hex-literal = "0.3"
 tempfile = "3.2"
-webpki = "0.21"
 criterion = "0.3"
 rustls-pemfile = "0.2.1"
 
