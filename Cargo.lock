@@ -2047,15 +2047,18 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32c",
+ "env_logger",
  "hex",
  "lazy_static",
  "log",
  "memoffset",
+ "postgres",
  "rand",
  "regex",
  "serde",
  "thiserror",
  "utils",
+ "wal_generate",
  "workspace_hack",
 ]
 
@@ -3626,6 +3629,18 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "wal_generate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 3.0.14",
+ "env_logger",
+ "log",
+ "postgres",
+ "tempfile",
+]
 
 [[package]]
 name = "walkdir"
