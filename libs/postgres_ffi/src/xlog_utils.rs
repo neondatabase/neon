@@ -150,7 +150,7 @@ fn find_end_of_wal_segment(
     // step back to the beginning of the page to read it in...
     let mut offs: usize = start_offset - start_offset % XLOG_BLCKSZ;
     let mut contlen: usize = 0;
-    let mut wal_crc: u32 = 0;
+    let mut xl_crc: u32 = 0;
     let mut crc: u32 = 0;
     let mut rec_offs: usize = 0;
     let mut buf = [0u8; XLOG_BLCKSZ];
@@ -231,7 +231,7 @@ fn find_end_of_wal_segment(
             }
             if rec_offs <= XLOG_RECORD_CRC_OFFS && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
                 let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
-                wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
+                xl_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
                 crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
             } else {
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
@@ -243,14 +243,14 @@ fn find_end_of_wal_segment(
             if contlen == 0 {
                 crc = crc32c_append(crc, &rec_hdr);
                 offs = (offs + 7) & !7; // pad on 8 bytes boundary */
-                if crc == wal_crc {
+                if crc == xl_crc {
                     // record is valid, advance the result to its end (with
                     // alignment to the next record taken into account)
                     last_valid_rec_pos = offs;
                 } else {
                     info!(
                         "CRC mismatch {} vs {} at {}",
-                        crc, wal_crc, last_valid_rec_pos
+                        crc, xl_crc, last_valid_rec_pos
                     );
                     break;
                 }
