@@ -110,6 +110,8 @@ postgres-v14: postgres-v14-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
+	+@echo "Compiling remotexact v14"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/remotexact install
 
 .PHONY: postgres-v15
 postgres-v15: postgres-v15-configure \
@@ -122,6 +124,8 @@ postgres-v15: postgres-v15-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect v15"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pageinspect install
+	+@echo "Compiling remotexact v15"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/remotexact install
 
 # shorthand to build all Postgres versions
 postgres: postgres-v14 postgres-v15
