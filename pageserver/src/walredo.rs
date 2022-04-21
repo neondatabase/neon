@@ -700,7 +700,12 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
+            let n = loop {
+                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));

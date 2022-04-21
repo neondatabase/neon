@@ -100,6 +100,21 @@ pub struct FeExecuteMessage {
 #[derive(Debug)]
 pub struct FeCloseMessage {}
 
+/// Retry a read on EINTR
+///
+/// This runs the enclosed expression, and if it returns
+/// Err(io::ErrorKind::Interrupted), retries it.
+macro_rules! retry_read {
+    ( $x:expr ) => {
+        loop {
+            match $x {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                res => break res,
+            }
+        }
+    };
+}
+
 impl FeMessage {
     /// Read one message from the stream.
     /// This function returns `Ok(None)` in case of EOF.
@@ -141,12 +156,12 @@ impl FeMessage {
             // Each libpq message begins with a message type byte, followed by message length
             // If the client closes the connection, return None. But if the client closes the
             // connection in the middle of a message, we will return an error.
-            let tag = match stream.read_u8().await {
+            let tag = match retry_read!(stream.read_u8().await) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.into()),
             };
-            let len = stream.read_u32().await?;
+            let len = retry_read!(stream.read_u32().await)?;
 
             // The message length includes itself, so it better be at least 4
             let bodylen = len
@@ -207,7 +222,7 @@ impl FeStartupPacket {
             // reading 4 bytes, to be precise), return None to indicate that the connection
             // was closed. This matches the PostgreSQL server's behavior, which avoids noise
             // in the log if the client opens connection but closes it immediately.
-            let len = match stream.read_u32().await {
+            let len = match retry_read!(stream.read_u32().await) {
                 Ok(len) => len as usize,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.into()),
@@ -217,7 +232,7 @@ impl FeStartupPacket {
                 bail!("invalid message length");
             }
 
-            let request_code = stream.read_u32().await?;
+            let request_code = retry_read!(stream.read_u32().await)?;
 
             // the rest of startup packet are params
             let params_len = len - 8;
