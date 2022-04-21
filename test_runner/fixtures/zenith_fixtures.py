@@ -1259,6 +1259,25 @@ def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
 
 
+@dataclass
+class AdversarialProposerBin:
+    def say_hi(self, tenant_hex: str, timeline: str) -> str:
+        binpath = os.path.join(str(zenith_binpath), 'adversarial_proposer')
+        args = [
+            binpath,
+            tenant_hex,
+            timeline,
+            "just-say-hi",
+        ]
+        return subprocess.run(args)
+        # return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+
+
+@pytest.fixture(scope='function')
+def adversarial_proposer_bin(test_output_dir):
+    return AdversarialProposerBin()
+
+
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
         super().__init__(host='localhost', port=port, dbname='postgres')

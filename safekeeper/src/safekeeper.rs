@@ -1,6 +1,7 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
 use anyhow::{bail, Context, Result};
+use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
+use std::io::Cursor;
 use std::io::Read;
 use tracing::*;
 use zenith_utils::zid::ZNodeId;
@@ -247,7 +249,7 @@ impl SafeKeeperState {
 // protocol messages
 
 /// Initial Proposer -> Acceptor message
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ProposerGreeting {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
@@ -364,6 +366,23 @@ pub enum ProposerAcceptorMessage {
 }
 
 impl ProposerAcceptorMessage {
+
+    pub fn serialize(&self) -> Result<Bytes> {
+        match self {
+            ProposerAcceptorMessage::Greeting(msg) => {
+                let mut buf = Vec::<u8>::new();
+                buf.write_u64::<LittleEndian>('g' as u64);
+                msg.ser_into(&mut buf);
+                Ok(buf.into())
+            }
+            ProposerAcceptorMessage::VoteRequest(_) => todo!(),
+            ProposerAcceptorMessage::Elected(_) => todo!(),
+            ProposerAcceptorMessage::AppendRequest(_) => todo!(),
+            ProposerAcceptorMessage::NoFlushAppendRequest(_) => todo!(),
+            ProposerAcceptorMessage::FlushWAL => todo!(),
+        }
+    }
+
     /// Parse proposer message.
     pub fn parse(msg_bytes: Bytes) -> Result<ProposerAcceptorMessage> {
         // xxx using Reader is inefficient but easy to work with bincode
@@ -463,6 +482,10 @@ impl AcceptorProposerMessage {
         }
 
         Ok(())
+    }
+
+    pub fn parse(msg_bytes: Bytes) -> Result<AcceptorProposerMessage> {
+        todo!()
     }
 }
 
