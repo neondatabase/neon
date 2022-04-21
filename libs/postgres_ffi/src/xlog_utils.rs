@@ -234,16 +234,13 @@ fn find_end_of_wal_segment(
                 wal_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
                 crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
             } else {
-                crc ^= 0xFFFFFFFFu32;
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
             }
-            crc = !crc;
             rec_offs += n;
             offs += n;
             contlen -= n;
 
             if contlen == 0 {
-                crc = !crc;
                 crc = crc32c_append(crc, &rec_hdr);
                 offs = (offs + 7) & !7; // pad on 8 bytes boundary */
                 if crc == wal_crc {
