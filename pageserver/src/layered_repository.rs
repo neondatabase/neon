@@ -110,6 +110,12 @@ lazy_static! {
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
+    static ref WAIT_LSN_TIME: HistogramVec = register_histogram_vec!(
+        "wait_lsn_time",
+        "Time spent waiting for WAL to arrive",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
 }
 
 lazy_static! {
@@ -794,6 +800,7 @@ pub struct LayeredTimeline {
     compact_time_histo: Histogram,
     create_images_time_histo: Histogram,
     last_record_gauge: IntGauge,
+    wait_lsn_time_histo: Histogram,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_layers: AtomicBool,
@@ -873,14 +880,15 @@ impl Timeline for LayeredTimeline {
             "wait_lsn called by WAL receiver thread"
         );
 
-        self.last_record_lsn
-            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-            .with_context(|| {
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                )
-            })?;
+        self.wait_lsn_time_histo.observe_closure_duration(
+            || self.last_record_lsn
+                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
+                .with_context(|| {
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                    )
+                }))?;
 
         Ok(())
     }
@@ -1022,6 +1030,9 @@ impl LayeredTimeline {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
             .unwrap();
+        let wait_lsn_time_histo = WAIT_LSN_TIME
+            .get_metric_with_label_values(&[&tenantid.to_string(), &timelineid.to_string()])
+            .unwrap();
 
         LayeredTimeline {
             conf,
@@ -1049,6 +1060,7 @@ impl LayeredTimeline {
             compact_time_histo,
             create_images_time_histo,
             last_record_gauge,
+            wait_lsn_time_histo,
 
             upload_layers: AtomicBool::new(upload_layers),
 
