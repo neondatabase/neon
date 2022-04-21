@@ -7,6 +7,7 @@ pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
+pub mod profiling;
 pub mod reltag;
 pub mod remote_storage;
 pub mod repository;

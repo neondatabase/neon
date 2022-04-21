@@ -29,8 +29,9 @@ use utils::{
 };
 
 use crate::basebackup;
-use crate::config::PageServerConf;
+use crate::config::{PageServerConf, ProfilingConfig};
 use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::repository::Repository;
 use crate::repository::Timeline;
@@ -331,7 +332,10 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
         while !thread_mgr::is_shutdown_requested() {
-            match pgb.read_message() {
+            let msg = pgb.read_message();
+
+            let profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+            match msg {
                 Ok(message) => {
                     if let Some(message) = message {
                         trace!("query: {:?}", message);
@@ -383,6 +387,7 @@ impl PageServerHandler {
                     }
                 }
             }
+            drop(profiling_guard);
         }
         Ok(())
     }

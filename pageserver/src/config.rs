@@ -140,6 +140,27 @@ pub struct PageServerConf {
 
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
+
+    pub profiling: ProfilingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfilingConfig {
+    Disabled,
+    PageRequests,
+}
+
+impl FromStr for ProfilingConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<ProfilingConfig, Self::Err> {
+        let result = match s {
+            "disabled"  => ProfilingConfig::Disabled,
+            "page_requests"  => ProfilingConfig::PageRequests,
+            _ => bail!("invalid value \"{}\" for profiling option, valid values are \"disabled\" and \"page_requests\"", s),
+        };
+        Ok(result)
+    }
 }
 
 // use dedicated enum for builder to better indicate the intention
@@ -192,6 +213,8 @@ struct PageServerConfigBuilder {
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
     id: BuilderValue<ZNodeId>,
+
+    profiling: BuilderValue<ProfilingConfig>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -224,6 +247,7 @@ impl Default for PageServerConfigBuilder {
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
+            profiling: Set(ProfilingConfig::Disabled),
         }
     }
 }
@@ -308,6 +332,10 @@ impl PageServerConfigBuilder {
         self.id = BuilderValue::Set(node_id)
     }
 
+    pub fn profiling(&mut self, profiling: ProfilingConfig) {
+        self.profiling = BuilderValue::Set(profiling)
+    }
+
     pub fn build(self) -> Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -357,6 +385,7 @@ impl PageServerConfigBuilder {
                 .remote_storage_config
                 .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
             id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
+            profiling: self.profiling.ok_or(anyhow::anyhow!("missing profiling"))?,
         })
     }
 }
@@ -486,11 +515,12 @@ impl PageServerConf {
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
                     PathBuf::from(parse_toml_string(key, item)?),
                 )),
-                "auth_type" => builder.auth_type(parse_toml_auth_type(key, item)?),
+                "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
                 }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
+                "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
                 _ => bail!("unrecognized pageserver option '{}'", key),
             }
         }
@@ -623,6 +653,7 @@ impl PageServerConf {
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
+            profiling: ProfilingConfig::Disabled,
         }
     }
 }
@@ -656,11 +687,14 @@ fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
     Ok(humantime::parse_duration(s)?)
 }
 
-fn parse_toml_auth_type(name: &str, item: &Item) -> Result<AuthType> {
+fn parse_toml_from_str<T>(name: &str, item: &Item) -> Result<T>
+where
+    T: FromStr<Err = anyhow::Error>,
+{
     let v = item
         .as_str()
         .with_context(|| format!("configure option {} is not a string", name))?;
-    AuthType::from_str(v)
+    T::from_str(v)
 }
 
 #[cfg(test)]
@@ -733,6 +767,7 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                profiling: ProfilingConfig::Disabled,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -779,6 +814,7 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                profiling: ProfilingConfig::Disabled,
             },
             "Should be able to parse all basic config values correctly"
         );

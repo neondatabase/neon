@@ -3,6 +3,10 @@ name = "pageserver"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+profiling = ["pprof"]
+
 [dependencies]
 chrono = "0.4.19"
 rand = "0.8.3"
@@ -31,6 +35,8 @@ humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_with = "1.12.0"
+
+pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
 
 toml_edit = { version = "0.13", features = ["easy"] }
 scopeguard = "1.1.0"

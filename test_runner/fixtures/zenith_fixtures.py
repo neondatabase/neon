@@ -155,6 +155,18 @@ def pytest_configure(config):
         raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
 
 
+def profiling_supported():
+    """Return True if the pageserver was compiled with the 'profiling' feature
+    """
+    bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+    res = subprocess.run([bin_pageserver, '--version'],
+                         check=True,
+                         universal_newlines=True,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    return "profiling:true" in res.stdout
+
+
 def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
     """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
 

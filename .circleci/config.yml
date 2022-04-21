@@ -113,7 +113,7 @@ jobs:
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
               cov_prefix=()
-              CARGO_FLAGS=--release
+              CARGO_FLAGS="--release --features profiling"
             fi
 
             export CARGO_INCREMENTAL=0
@@ -369,7 +369,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
+            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output

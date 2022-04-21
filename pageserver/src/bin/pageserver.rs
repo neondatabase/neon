@@ -10,7 +10,7 @@ use daemonize::Daemonize;
 
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service,
+    http, page_cache, page_service, profiling,
     remote_storage::{self, SyncStartupData},
     repository::{Repository, TimelineSyncStatusUpdate},
     tenant_mgr, thread_mgr,
@@ -29,11 +29,15 @@ use utils::{
     GIT_VERSION,
 };
 
+fn version() -> String {
+    format!("{} profiling:{}", GIT_VERSION, cfg!(feature = "profiling"))
+}
+
 fn main() -> anyhow::Result<()> {
     metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
-        .version(GIT_VERSION)
+        .version(&*version())
         .arg(
             Arg::new("daemonize")
                 .short('d')
@@ -283,6 +287,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
+    // start profiler (if enabled)
+    let profiler_guard = profiling::init_profiler(conf);
+
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
     let auth_cloned = auth.clone();
@@ -315,6 +322,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
+            profiling::exit_profiler(conf, &profiler_guard);
             std::process::exit(111);
         }
 
@@ -323,6 +331,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
+            profiling::exit_profiler(conf, &profiler_guard);
             pageserver::shutdown_pageserver();
             unreachable!()
         }
