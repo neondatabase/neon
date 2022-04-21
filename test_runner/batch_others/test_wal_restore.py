@@ -19,7 +19,7 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
     env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_wal_restore")
     pg = env.postgres.create_start('test_wal_restore')
-    pg.safe_psql("create table t as select generate_series(1,1000000)")
+    pg.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
     env.zenith_cli.pageserver_stop()
     port = port_distributor.get_port()
@@ -33,4 +33,4 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
             str(port)
         ])
         restored.start()
-        assert restored.safe_psql('select count(*) from t', user='zenith_admin') == [(1000000, )]
+        assert restored.safe_psql('select count(*) from t', user='zenith_admin') == [(300000, )]
