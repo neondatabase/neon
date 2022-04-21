@@ -1466,10 +1466,10 @@ impl LayeredTimeline {
                 )?;
                 cont_lsn = lsn_floor;
                 path.push((result, cont_lsn, layer));
-            } else if self.ancestor_timeline.is_some() {
+            } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
-                cont_lsn = Lsn(self.ancestor_lsn.0 + 1);
+                cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
             } else {
                 // Nothing found
                 result = ValueReconstructResult::Missing;
