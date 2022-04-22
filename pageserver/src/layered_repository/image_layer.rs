@@ -254,7 +254,9 @@ impl ImageLayer {
             drop(inner);
             let mut inner = self.inner.write().unwrap();
             if !inner.loaded {
-                self.load_inner(&mut inner)?;
+                self.load_inner(&mut inner).with_context(|| {
+                    format!("Failed to load image layer {}", self.path().display())
+                })?
             } else {
                 // Another thread loaded it while we were not holding the lock.
             }
