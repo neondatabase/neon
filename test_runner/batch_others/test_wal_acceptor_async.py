@@ -140,11 +140,11 @@ async def run_restarts_under_load(env: ZenithEnv,
                                   pg: Postgres,
                                   acceptors: List[Safekeeper],
                                   n_workers=10,
-                                  n_accounts = 100,
-                                  init_amount = 100000,
-                                  max_transfer = 100,
-                                  period_time = 4,
-                                  iterations = 10):
+                                  n_accounts=100,
+                                  init_amount=100000,
+                                  max_transfer=100,
+                                  period_time=4,
+                                  iterations=10):
     # Set timeout for this test at 5 minutes. It should be enough for test to complete
     # and less than CircleCI's no_output_timeout, taking into account that this timeout
     # is checked only at the beginning of every iteration.
@@ -224,7 +224,12 @@ def test_restarts_frequent_checkpoints(zenith_env_builder: ZenithEnvBuilder):
     env.zenith_cli.create_branch('test_restarts_frequent_checkpoints')
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     pg = env.postgres.create_start('test_restarts_frequent_checkpoints',
-                                   config_lines=['max_replication_write_lag=1MB', 'min_wal_size=32MB', 'max_wal_size=32MB', 'log_checkpoints=on'])
+                                   config_lines=[
+                                       'max_replication_write_lag=1MB',
+                                       'min_wal_size=32MB',
+                                       'max_wal_size=32MB',
+                                       'log_checkpoints=on'
+                                   ])
 
     # we try to simulate large (flush_lsn - truncate_lsn) lag, to test that WAL segments
     # are not removed before broadcasted to all safekeepers, with the help of replication slot
