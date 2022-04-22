@@ -74,22 +74,28 @@ mod profiling_impl {
     }
 }
 
-/// Dummy implementation when compiling without profiling feature
+/// Dummy implementation when compiling without profiling feature or for non-linux OSes.
 #[cfg(not(feature = "profiling"))]
 mod profiling_impl {
     use super::*;
 
-    pub fn profpoint_start(_conf: &PageServerConf, _point: ProfilingConfig) -> () {
-        ()
+    pub struct DummyProfilerGuard;
+
+    pub fn profpoint_start(
+        _conf: &PageServerConf,
+        _point: ProfilingConfig,
+    ) -> Option<DummyProfilerGuard> {
+        None
     }
 
-    pub fn init_profiler(conf: &PageServerConf) -> () {
+    pub fn init_profiler(conf: &PageServerConf) -> Option<DummyProfilerGuard> {
         if conf.profiling != ProfilingConfig::Disabled {
             // shouldn't happen, we don't allow profiling in the config if the support
             // for it is disabled.
             panic!("profiling enabled but the binary was compiled without profiling support");
         }
+        None
     }
 
-    pub fn exit_profiler(_conf: &PageServerConf, _guard: &()) {}
+    pub fn exit_profiler(_conf: &PageServerConf, _guard: &Option<DummyProfilerGuard>) {}
 }
