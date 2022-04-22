@@ -2630,4 +2630,61 @@ pub mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_traverse_ancestors() -> Result<()> {
+        let repo = RepoHarness::create("test_traverse_ancestors")?.load();
+        let mut tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        const NUM_KEYS: usize = 100;
+        const NUM_TLINES: usize = 50;
+
+        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        // Track page mutation lsns across different timelines.
+        let mut updated = [[Lsn(0); NUM_KEYS]; NUM_TLINES];
+
+        let mut lsn = Lsn(0);
+        let mut tline_id = TIMELINE_ID;
+
+        #[allow(clippy::needless_range_loop)]
+        for idx in 0..NUM_TLINES {
+            let new_tline_id = ZTimelineId::generate();
+            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            tline = repo.get_timeline_load(new_tline_id)?;
+            tline_id = new_tline_id;
+
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = blknum as u32;
+                let writer = tline.writer();
+                writer.put(
+                    test_key,
+                    lsn,
+                    Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                )?;
+                println!("updating [{}][{}] at {}", idx, blknum, lsn);
+                writer.finish_write(lsn);
+                drop(writer);
+                updated[idx][blknum] = lsn;
+            }
+        }
+
+        // Read pages from leaf timeline across all ancestors.
+        for (idx, lsns) in updated.iter().enumerate() {
+            for (blknum, lsn) in lsns.iter().enumerate() {
+                // Skip empty mutations.
+                if lsn.0 == 0 {
+                    continue;
+                }
+                println!("chekcking [{}][{}] at {}", idx, blknum, lsn);
+                test_key.field6 = blknum as u32;
+                assert_eq!(
+                    tline.get(test_key, *lsn)?,
+                    TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))
+                );
+            }
+        }
+        Ok(())
+    }
 }
