@@ -12,11 +12,11 @@ fail = "0.5.0"
 futures = "0.3.13"
 hashbrown = "0.11.2"
 hex = "0.4.3"
-hmac = "0.10.1"
+hmac = "0.12.1"
 hyper = "0.14"
 lazy_static = "1.4.0"
 md5 = "0.7.0"
-parking_lot = "0.11.2"
+parking_lot = "0.12"
 pin-project-lite = "0.2.7"
 rand = "0.8.3"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -26,11 +26,11 @@ rustls-pemfile = "0.2.1"
 scopeguard = "1.1.0"
 serde = "1"
 serde_json = "1"
-sha2 = "0.9.8"
+sha2 = "0.10.2"
 socket2 = "0.4.4"
 thiserror = "1.0.30"
 tokio = { version = "1.17", features = ["macros"] }
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 tokio-rustls = "0.23.0"
 
 utils = { path = "../libs/utils" }
