@@ -272,9 +272,6 @@ impl PostgresNode {
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
-
-        // TODO: Do we have a problem with replication slot when streaming
-        // to pageserver? https://github.com/neondatabase/neon/issues/767
         conf.append("wal_keep_size", "0");
 
         // Configure the node to fetch pages from pageserver
