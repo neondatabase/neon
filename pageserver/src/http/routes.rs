@@ -453,7 +453,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     .await
     .map_err(ApiError::from_err)??;
 
-    Ok(json_response(StatusCode::OK, ())?)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
