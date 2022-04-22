@@ -31,7 +31,7 @@ broker_endpoints = ['some://etcd']
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user, 
+The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user,
 see the corresponding section below.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
@@ -54,7 +54,7 @@ Note that TOML distinguishes between strings and integers, the former require si
 
 A list of endpoints (etcd currently) to connect and pull the information from.
 Mandatory, does not have a default, since requires etcd to be started as a separate process,
-and its connection url should be specified separately. 
+and its connection url should be specified separately.
 
 #### broker_etcd_prefix
 
@@ -110,6 +110,20 @@ L0 delta layer threshold for L1 image layer creation. Default is 3.
 #### pitr_interval
 
 WAL retention duration for PITR branching. Default is 30 days.
+
+#### walreceiver_connect_timeout
+
+Time to wait to establish the wal receiver connection before failing
+
+#### lagging_wal_timeout
+
+Time the pageserver did not get any WAL updates from safekeeper (if any).
+Avoids lagging pageserver preemptively by forcing to switch it from stalled connections.
+
+#### max_lsn_wal_lag
+
+Difference between Lsn values of the latest available WAL on safekeepers: if currently connected safekeeper starts to lag too long and too much,
+it gets swapped to the different one.
 
 #### initial_superuser_name
 
