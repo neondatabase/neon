@@ -352,7 +352,6 @@ impl PostgresNode {
             // This isn't really a supported configuration, but can be useful for
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
-            conf.append("neon.callmemaybe_connstring", &self.connstr());
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;

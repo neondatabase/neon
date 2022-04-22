@@ -8,7 +8,6 @@ use anyhow::{bail, Context, Result};
 
 use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
 
-use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
@@ -17,7 +16,6 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
@@ -25,7 +23,6 @@ use utils::{
     postgres_backend::PostgresBackend,
     pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback},
     sock_split::ReadStream,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
@@ -80,40 +77,6 @@ struct ReplicationConnGuard {
 impl Drop for ReplicationConnGuard {
     fn drop(&mut self) {
         self.timeline.remove_replica(self.replica);
-    }
-}
-
-// XXX: Naming is a bit messy here.
-// This ReplicationStreamGuard lives as long as ReplicationConn
-// and current ReplicationConnGuard is tied to the background thread
-// that receives feedback.
-struct ReplicationStreamGuard {
-    tx: UnboundedSender<CallmeEvent>,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    pageserver_connstr: String,
-}
-
-impl Drop for ReplicationStreamGuard {
-    fn drop(&mut self) {
-        // the connection with pageserver is lost,
-        // resume callback subscription
-        debug!(
-            "Connection to pageserver is gone. Resume callmemaybe subsciption if necessary. tenantid {} timelineid {}",
-            self.tenant_id, self.timeline_id,
-        );
-
-        let subscription_key = SubscriptionStateKey::new(
-            self.tenant_id,
-            self.timeline_id,
-            self.pageserver_connstr.to_owned(),
-        );
-
-        self.tx
-            .send(CallmeEvent::Resume(subscription_key))
-            .unwrap_or_else(|e| {
-                error!("failed to send Resume request to callmemaybe thread {}", e);
-            });
     }
 }
 
@@ -255,36 +218,6 @@ impl ReplicationConn {
             None
         };
         info!("Start replication from {:?} till {:?}", start_pos, stop_pos);
-
-        // Don't spam pageserver with callmemaybe queries
-        // when replication connection with pageserver is already established.
-        let _guard = {
-            if spg.appname == Some("wal_proposer_recovery".to_string()) {
-                None
-            } else {
-                let pageserver_connstr = pageserver_connstr.expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
-                let zttid = spg.timeline.get().zttid;
-                let tx_clone = spg.timeline.get().callmemaybe_tx.clone();
-                let subscription_key = SubscriptionStateKey::new(
-                    zttid.tenant_id,
-                    zttid.timeline_id,
-                    pageserver_connstr.clone(),
-                );
-                tx_clone
-                    .send(CallmeEvent::Pause(subscription_key))
-                    .unwrap_or_else(|e| {
-                        error!("failed to send Pause request to callmemaybe thread {}", e);
-                    });
-
-                // create a guard to subscribe callback again, when this connection will exit
-                Some(ReplicationStreamGuard {
-                    tx: tx_clone,
-                    tenant_id: zttid.tenant_id,
-                    timeline_id: zttid.timeline_id,
-                    pageserver_connstr,
-                })
-            }
-        };
 
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse)?;

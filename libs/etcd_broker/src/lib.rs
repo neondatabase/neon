@@ -31,7 +31,7 @@ struct SafekeeperTimeline {
 
 /// Published data about safekeeper's timeline. Fields made optional for easy migrations.
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkTimelineInfo {
     /// Term of the last entry.
     pub last_log_term: Option<u64>,
@@ -55,7 +55,9 @@ pub struct SkTimelineInfo {
     #[serde(default)]
     pub peer_horizon_lsn: Option<Lsn>,
     #[serde(default)]
-    pub safekeeper_connection_string: Option<String>,
+    pub safekeeper_connstr: Option<String>,
+    #[serde(default)]
+    pub pageserver_connstr: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

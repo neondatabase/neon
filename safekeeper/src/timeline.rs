@@ -16,7 +16,7 @@ use std::fs::{self};
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tracing::*;
 
 use utils::{
@@ -25,7 +25,6 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTenantTimelineId},
 };
 
-use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
@@ -191,79 +190,33 @@ impl SharedState {
         self.wal_backup_active
     }
 
-    /// start/change walsender (via callmemaybe).
-    fn callmemaybe_sub(
+    /// Activate timeline's walsender: start/change timeline information propagated into etcd for further pageserver connections.
+    fn activate_walsender(
         &mut self,
         zttid: &ZTenantTimelineId,
-        pageserver_connstr: Option<&String>,
-        callmemaybe_tx: &UnboundedSender<CallmeEvent>,
-    ) -> Result<()> {
-        if let Some(ref pageserver_connstr) = self.pageserver_connstr {
-            // unsub old sub. xxx: callmemaybe is going out
-            let old_subscription_key = SubscriptionStateKey::new(
-                zttid.tenant_id,
-                zttid.timeline_id,
-                pageserver_connstr.to_owned(),
-            );
-            callmemaybe_tx
-                .send(CallmeEvent::Unsubscribe(old_subscription_key))
-                .unwrap_or_else(|e| {
-                    error!("failed to send Pause request to callmemaybe thread {}", e);
-                });
+        new_pageserver_connstr: Option<String>,
+    ) {
+        if self.pageserver_connstr != new_pageserver_connstr {
+            self.deactivate_walsender(zttid);
+
+            if new_pageserver_connstr.is_some() {
+                info!(
+                    "timeline {} has activated its walsender with connstr {new_pageserver_connstr:?}",
+                    zttid.timeline_id,
+                );
+            }
+            self.pageserver_connstr = new_pageserver_connstr;
         }
-        if let Some(pageserver_connstr) = pageserver_connstr {
-            let subscription_key = SubscriptionStateKey::new(
-                zttid.tenant_id,
-                zttid.timeline_id,
-                pageserver_connstr.to_owned(),
-            );
-            // xx: sending to channel under lock is not very cool, but
-            // shouldn't be a problem here. If it is, we can grab a counter
-            // here and later augment channel messages with it.
-            callmemaybe_tx
-                .send(CallmeEvent::Subscribe(subscription_key))
-                .unwrap_or_else(|e| {
-                    error!(
-                        "failed to send Subscribe request to callmemaybe thread {}",
-                        e
-                    );
-                });
-            info!(
-                "timeline {} is subscribed to callmemaybe to {}",
-                zttid.timeline_id, pageserver_connstr
-            );
-        }
-        self.pageserver_connstr = pageserver_connstr.map(|c| c.to_owned());
-        Ok(())
     }
 
-    /// Deactivate the timeline: stop callmemaybe.
-    fn callmemaybe_unsub(
-        &mut self,
-        zttid: &ZTenantTimelineId,
-        callmemaybe_tx: &UnboundedSender<CallmeEvent>,
-    ) -> Result<()> {
-        if let Some(ref pageserver_connstr) = self.pageserver_connstr {
-            let subscription_key = SubscriptionStateKey::new(
-                zttid.tenant_id,
-                zttid.timeline_id,
-                pageserver_connstr.to_owned(),
-            );
-            callmemaybe_tx
-                .send(CallmeEvent::Unsubscribe(subscription_key))
-                .unwrap_or_else(|e| {
-                    error!(
-                        "failed to send Unsubscribe request to callmemaybe thread {}",
-                        e
-                    );
-                });
+    /// Deactivate the timeline: stop sending the timeline data into etcd, so no pageserver can connect for WAL streaming.
+    fn deactivate_walsender(&mut self, zttid: &ZTenantTimelineId) {
+        if let Some(pageserver_connstr) = self.pageserver_connstr.take() {
             info!(
-                "timeline {} is unsubscribed from callmemaybe to {}",
+                "timeline {} had deactivated its wallsender with connstr {pageserver_connstr:?}",
                 zttid.timeline_id,
-                self.pageserver_connstr.as_ref().unwrap()
-            );
+            )
         }
-        Ok(())
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -332,7 +285,6 @@ impl SharedState {
 /// Database instance (tenant)
 pub struct Timeline {
     pub zttid: ZTenantTimelineId,
-    pub callmemaybe_tx: UnboundedSender<CallmeEvent>,
     /// Sending here asks for wal backup launcher attention (start/stop
     /// offloading). Sending zttid instead of concrete command allows to do
     /// sending without timeline lock.
@@ -348,7 +300,6 @@ pub struct Timeline {
 impl Timeline {
     fn new(
         zttid: ZTenantTimelineId,
-        callmemaybe_tx: UnboundedSender<CallmeEvent>,
         wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
         shared_state: SharedState,
     ) -> Timeline {
@@ -356,7 +307,6 @@ impl Timeline {
             watch::channel(shared_state.sk.inmem.commit_lsn);
         Timeline {
             zttid,
-            callmemaybe_tx,
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
@@ -378,7 +328,7 @@ impl Timeline {
             // should have kind of generations assigned by compute to distinguish
             // the latest one or even pass it through consensus to reliably deliver
             // to all safekeepers.
-            shared_state.callmemaybe_sub(&self.zttid, pageserver_connstr, &self.callmemaybe_tx)?;
+            shared_state.activate_walsender(&self.zttid, pageserver_connstr.cloned());
         }
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
@@ -414,7 +364,7 @@ impl Timeline {
             (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
             if stop {
-                shared_state.callmemaybe_unsub(&self.zttid, &self.callmemaybe_tx)?;
+                shared_state.deactivate_walsender(&self.zttid);
                 return Ok(true);
             }
         }
@@ -431,16 +381,14 @@ impl Timeline {
     /// Deactivates the timeline, assuming it is being deleted.
     /// Returns whether the timeline was already active.
     ///
-    /// The callmemaybe thread is stopped by the deactivation message. We assume all other threads
-    /// will stop by themselves eventually (possibly with errors, but no panics). There should be no
-    /// compute threads (as we're deleting the timeline), actually. Some WAL may be left unsent, but
+    /// We assume all threads will stop by themselves eventually (possibly with errors, but no panics).
+    /// There should be no compute threads (as we're deleting the timeline), actually. Some WAL may be left unsent, but
     /// we're deleting the timeline anyway.
     pub async fn deactivate_for_delete(&self) -> Result<bool> {
         let was_active: bool;
         {
-            let mut shared_state = self.mutex.lock().unwrap();
+            let shared_state = self.mutex.lock().unwrap();
             was_active = shared_state.active;
-            shared_state.callmemaybe_unsub(&self.zttid, &self.callmemaybe_tx)?;
         }
         self.wal_backup_launcher_tx.send(self.zttid).await?;
         Ok(was_active)
@@ -576,7 +524,8 @@ impl Timeline {
                 shared_state.sk.inmem.remote_consistent_lsn,
             )),
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
-            safekeeper_connection_string: Some(conf.listen_pg_addr.clone()),
+            safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
+            pageserver_connstr: shared_state.pageserver_connstr.clone(),
             backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
         })
     }
@@ -675,14 +624,12 @@ impl TimelineTools for Option<Arc<Timeline>> {
 
 struct GlobalTimelinesState {
     timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
-    callmemaybe_tx: Option<UnboundedSender<CallmeEvent>>,
     wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
 }
 
 lazy_static! {
     static ref TIMELINES_STATE: Mutex<GlobalTimelinesState> = Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
-        callmemaybe_tx: None,
         wal_backup_launcher_tx: None,
     });
 }
@@ -697,13 +644,8 @@ pub struct TimelineDeleteForceResult {
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
-    pub fn init(
-        callmemaybe_tx: UnboundedSender<CallmeEvent>,
-        wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
-    ) {
+    pub fn init(wal_backup_launcher_tx: Sender<ZTenantTimelineId>) {
         let mut state = TIMELINES_STATE.lock().unwrap();
-        assert!(state.callmemaybe_tx.is_none());
-        state.callmemaybe_tx = Some(callmemaybe_tx);
         assert!(state.wal_backup_launcher_tx.is_none());
         state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
     }
@@ -726,7 +668,6 @@ impl GlobalTimelines {
 
                 let new_tli = Arc::new(Timeline::new(
                     zttid,
-                    state.callmemaybe_tx.as_ref().unwrap().clone(),
                     state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
                     shared_state,
                 ));
@@ -778,7 +719,6 @@ impl GlobalTimelines {
 
                 let new_tli = Arc::new(Timeline::new(
                     zttid,
-                    state.callmemaybe_tx.as_ref().unwrap().clone(),
                     state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
                     shared_state,
                 ));
