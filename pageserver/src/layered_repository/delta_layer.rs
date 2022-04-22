@@ -290,7 +290,10 @@ impl Layer for DeltaLayer {
     }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
-        let inner = self.load().unwrap();
+        let inner = match self.load() {
+            Ok(inner) => inner,
+            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
+        };
 
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
@@ -422,7 +425,9 @@ impl DeltaLayer {
             drop(inner);
             let inner = self.inner.write().unwrap();
             if !inner.loaded {
-                self.load_inner(inner)?;
+                self.load_inner(inner).with_context(|| {
+                    format!("Failed to load delta layer {}", self.path().display())
+                })?;
             } else {
                 // Another thread loaded it while we were not holding the lock.
             }
