@@ -747,7 +747,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 # We have `wal_keep_size=0`, so postgres should trim WAL once it's broadcasted
 # to all safekeepers. This test checks that compute WAL can fit into small number
 # of WAL segments.
-def test_wal_keep_size(zenith_env_builder: ZenithEnvBuilder):
+def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
     # used to calculate delta in collect_stats
     last_lsn = .0
 
@@ -772,10 +772,10 @@ def test_wal_keep_size(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_keep_size')
+    env.zenith_cli.create_branch('test_wal_deleted_after_broadcast')
     # Adjust checkpoint config to prevent keeping old WAL segments
     pg = env.postgres.create_start(
-        'test_wal_keep_size',
+        'test_wal_deleted_after_broadcast',
         config_lines=['min_wal_size=32MB', 'max_wal_size=32MB', 'log_checkpoints=on'])
 
     pg_conn = pg.connect()
