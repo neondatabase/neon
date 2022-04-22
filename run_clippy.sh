@@ -12,4 +12,4 @@
 # * `-A unknown_lints` – do not warn about unknown lint suppressions
 #                        that people with newer toolchains might use
 # * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
-cargo clippy "${@:2}" --all-targets --all-features --all --tests -- -A unknown_lints -D warnings
+cargo clippy --all --all-targets --all-features -- -A unknown_lints -D warnings

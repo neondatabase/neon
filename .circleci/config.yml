@@ -132,20 +132,6 @@ jobs:
             - ~/.cargo/git
             - target
 
-        # Run style checks
-        # has to run separately from cargo fmt section
-        # since needs to run with dependencies
-      - run:
-          name: cargo clippy
-          command: |
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
-            "${cov_prefix[@]}" ./run_clippy.sh
-
         # Run rust unit tests
       - run:
           name: cargo test
