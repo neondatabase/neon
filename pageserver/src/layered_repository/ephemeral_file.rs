@@ -199,18 +199,24 @@ impl BlobWriter for EphemeralFile {
         let mut buf = self.get_buf_for_write(blknum)?;
 
         // Write the length field
-        let len_buf = u32::to_ne_bytes(srcbuf.len() as u32);
-        let thislen = PAGE_SZ - off;
-        if thislen < 4 {
-            // it needs to be split across pages
-            buf[off..(off + thislen)].copy_from_slice(&len_buf[..thislen]);
-            blknum += 1;
-            buf = self.get_buf_for_write(blknum)?;
-            buf[0..4 - thislen].copy_from_slice(&len_buf[thislen..]);
-            off = 4 - thislen;
+        if srcbuf.len() < 0x80 {
+            buf[off] = srcbuf.len() as u8;
+            off += 1;
         } else {
-            buf[off..off + 4].copy_from_slice(&len_buf);
-            off += 4;
+            let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
+            len_buf[0] |= 0x80;
+            let thislen = PAGE_SZ - off;
+            if thislen < 4 {
+                // it needs to be split across pages
+                buf[off..(off + thislen)].copy_from_slice(&len_buf[..thislen]);
+                blknum += 1;
+                buf = self.get_buf_for_write(blknum)?;
+                buf[0..4 - thislen].copy_from_slice(&len_buf[thislen..]);
+                off = 4 - thislen;
+            } else {
+                buf[off..off + 4].copy_from_slice(&len_buf);
+                off += 4;
+            }
         }
 
         // Write the payload
@@ -229,7 +235,13 @@ impl BlobWriter for EphemeralFile {
             buf_remain = &buf_remain[this_blk_len..];
         }
         drop(buf);
-        self.size += 4 + srcbuf.len() as u64;
+
+        if srcbuf.len() < 0x80 {
+            self.size += 1;
+        } else {
+            self.size += 4;
+        }
+        self.size += srcbuf.len() as u64;
 
         Ok(pos)
     }
@@ -384,6 +396,12 @@ mod tests {
         let mut blobs = Vec::new();
         for i in 0..10000 {
             let data = Vec::from(format!("blob{}", i).as_bytes());
+            let pos = file.write_blob(&data)?;
+            blobs.push((pos, data));
+        }
+        // also test with a large blobs
+        for i in 0..100 {
+            let data = format!("blob{}", i).as_bytes().repeat(100);
             let pos = file.write_blob(&data)?;
             blobs.push((pos, data));
         }
