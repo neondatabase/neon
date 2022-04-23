@@ -28,7 +28,8 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
         '--pageserver-config-override="gc_horizon"=1048576',
         '--pageserver-config-override="checkpoint_distance"=4194304',
         '--pageserver-config-override="compaction_period"="10 m"',
-        '--pageserver-config-override="compaction_threshold"=2'
+        '--pageserver-config-override="compaction_threshold"=2',
+        '--pageserver-config-override="compaction_target_size"=4194304'
     ])
     env.safekeepers[0].start()
 
@@ -51,7 +52,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     ''')
     branch0_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_100 = branch0_cur.fetchone()[0]
-    log.info(f'LSN after 100 rows: {lsn_100}')
+    log.info(f'LSN after 100k rows: {lsn_100}')
 
     # Create branch1.
     env.zenith_cli.create_branch('branch1', 'main', ancestor_start_lsn=lsn_100)
@@ -75,17 +76,17 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     ''')
     branch1_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_200 = branch1_cur.fetchone()[0]
-    log.info(f'LSN after 100 rows: {lsn_200}')
+    log.info(f'LSN after 200k rows: {lsn_200}')
 
     # Create branch2.
     env.zenith_cli.create_branch('branch2', 'branch1', ancestor_start_lsn=lsn_200)
     pg_branch2 = env.postgres.create_start('branch2')
-    log.info("postgres is running on 'branch1' branch")
-
+    log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
+
     branch2_cur.execute("SHOW zenith.zenith_timeline")
-    branch2_lsn = branch2_cur.fetchone()[0]
-    log.info(f"b2 timeline {branch1_timeline}")
+    branch2_timeline = branch2_cur.fetchone()[0]
+    log.info(f"b2 timeline {branch2_timeline}")
 
     branch2_cur.execute('SELECT pg_current_wal_insert_lsn()')
     branch2_lsn = branch2_cur.fetchone()[0]
@@ -99,7 +100,11 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     ''')
     branch2_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn_300 = branch2_cur.fetchone()[0]
-    log.info(f'LSN after 300 rows: {lsn_300}')
+    log.info(f'LSN after 300k rows: {lsn_300}')
+
+    # Run compaction on branch1.
+    psconn = env.pageserver.connect()
+    psconn.cursor().execute(f'''compact {env.initial_tenant.hex} {branch1_timeline} {lsn_200}''')
 
     branch0_cur.execute('SELECT count(*) FROM foo')
     assert branch0_cur.fetchone() == (100000, )
