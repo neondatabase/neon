@@ -1,6 +1,9 @@
 # Helm chart values for zenith-proxy.
 # This is a YAML-formatted file.
 
+image:
+  repository: neondatabase/neon
+
 settings:
   authEndpoint: "https://console.stage.zenith.tech/authenticate_proxy_request/"
   uri: "https://console.stage.zenith.tech/psql_session/"
