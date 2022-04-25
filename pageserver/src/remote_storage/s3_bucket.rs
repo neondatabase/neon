@@ -15,7 +15,7 @@ use rusoto_s3::{
     DeleteObjectRequest, GetObjectRequest, ListObjectsV2Request, PutObjectRequest, S3Client,
     StreamingBody, S3,
 };
-use tokio::io;
+use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
@@ -65,6 +65,10 @@ pub struct S3Bucket {
     client: S3Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
+    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
+    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
+    // The helps to ensure we don't exceed the thresholds.
+    concurrency_limiter: Semaphore,
 }
 
 impl S3Bucket {
@@ -119,6 +123,7 @@ impl S3Bucket {
             pageserver_workdir,
             bucket_name: aws_config.bucket_name.clone(),
             prefix_in_bucket,
+            concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
         })
     }
 }
@@ -147,6 +152,11 @@ impl RemoteStorage for S3Bucket {
 
         let mut continuation_token = None;
         loop {
+            let _guard = self
+                .concurrency_limiter
+                .acquire()
+                .await
+                .context("Concurrency limiter semaphore got closed during S3 list")?;
             let fetch_response = self
                 .client
                 .list_objects_v2(ListObjectsV2Request {
@@ -180,6 +190,11 @@ impl RemoteStorage for S3Bucket {
         to: &Self::StoragePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 upload")?;
         self.client
             .put_object(PutObjectRequest {
                 body: Some(StreamingBody::new_with_size(
@@ -200,6 +215,11 @@ impl RemoteStorage for S3Bucket {
         from: &Self::StoragePath,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<Option<StorageMetadata>> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 download")?;
         let object_output = self
             .client
             .get_object(GetObjectRequest {
@@ -231,6 +251,11 @@ impl RemoteStorage for S3Bucket {
             Some(end_inclusive) => format!("bytes={}-{}", start_inclusive, end_inclusive),
             None => format!("bytes={}-", start_inclusive),
         });
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 range download")?;
         let object_output = self
             .client
             .get_object(GetObjectRequest {
@@ -250,6 +275,11 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 delete")?;
         self.client
             .delete_object(DeleteObjectRequest {
                 bucket: self.bucket_name.clone(),
@@ -433,6 +463,7 @@ mod tests {
             client: S3Client::new("us-east-1".parse().unwrap()),
             bucket_name: "dummy-bucket".to_string(),
             prefix_in_bucket: Some("dummy_prefix/".to_string()),
+            concurrency_limiter: Semaphore::new(1),
         }
     }
 

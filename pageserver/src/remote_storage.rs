@@ -161,7 +161,7 @@ pub fn start_local_timeline_sync(
                     config,
                     local_timeline_files,
                     LocalFs::new(root.clone(), &config.workdir)?,
-                    storage_config.max_concurrent_sync,
+                    storage_config.max_concurrent_timelines_sync,
                     storage_config.max_sync_errors,
                 )
             },
@@ -172,7 +172,7 @@ pub fn start_local_timeline_sync(
                     config,
                     local_timeline_files,
                     S3Bucket::new(s3_config, &config.workdir)?,
-                    storage_config.max_concurrent_sync,
+                    storage_config.max_concurrent_timelines_sync,
                     storage_config.max_sync_errors,
                 )
             },
