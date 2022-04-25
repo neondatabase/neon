@@ -16,14 +16,24 @@ def test_branching(zenith_env_builder: ZenithEnvBuilder, pg_bin):
     #
     # See https://github.com/zenithdb/zenith/issues/1068
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
+    env = zenith_env_builder.init()
+
+    env.pageserver.start(overrides=[
+        '--pageserver-config-override="gc_period"="10 s"',
+        '--pageserver-config-override="gc_horizon"=1024',
+        '--pageserver-config-override="checkpoint_distance"=4194304',
+        '--pageserver-config-override="compaction_period"="10 m"',
+        '--pageserver-config-override="compaction_threshold"=2',
+        '--pageserver-config-override="compaction_target_size"=4194304'
+    ])
+    env.safekeepers[0].start()
 
     env.zenith_cli.create_branch('b0')
     pg = env.postgres.create_start('b0')
     connstr = pg.connstr()
-    branches = 100
+    branches = 10
 
-    pg_bin.run_capture(['pgbench', '-i', '-s', '1', connstr])
+    pg_bin.run_capture(['pgbench', '-i', '-s', '100', connstr])
     pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -N -M prepared'.split() + [connstr])
     pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -S -M prepared'.split() + [connstr])
 
@@ -33,3 +43,8 @@ def test_branching(zenith_env_builder: ZenithEnvBuilder, pg_bin):
         connstr = pg.connstr()
         pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -N -M prepared'.split() + [connstr])
         pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -S -M prepared'.split() + [connstr])
+
+    conn = pg.connect()
+    cur = conn.cursor()
+    cur.execute('SELECT count(aid) from pgbench_accounts')
+    assert cur.fetchone()[0] == 10000000

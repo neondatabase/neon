@@ -269,9 +269,9 @@ class PgProtocol:
         # change it by calling "SET statement_timeout" after
         # connecting.
         if 'options' in conn_options:
-            conn_options['options'] = f"-cstatement_timeout=120s " + conn_options['options']
+            conn_options['options'] = f"-cstatement_timeout=12000s " + conn_options['options']
         else:
-            conn_options['options'] = "-cstatement_timeout=120s"
+            conn_options['options'] = "-cstatement_timeout=12000s"
         return conn_options
 
     # autocommit=True here by default because that's what we need most of the time
