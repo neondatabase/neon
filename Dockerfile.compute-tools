@@ -8,7 +8,9 @@ ARG AWS_SECRET_ACCESS_KEY
 
 COPY . .
 
-RUN mold -run cargo build -p compute_tools --release && cachepot -s
+RUN set -e \
+    && sudo -E "PATH=$PATH" mold -run cargo build -p compute_tools --release \
+    && cachepot -s
 
 # Final image that only has one binary
 FROM debian:buster-slim
