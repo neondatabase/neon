@@ -62,7 +62,9 @@ pub mod index;
 mod upload;
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
+    ffi::OsStr,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     ops::ControlFlow,
@@ -89,7 +91,10 @@ use self::{
 use super::{LocalTimelineInitStatus, LocalTimelineInitStatuses, RemoteStorage, SyncStartupData};
 use crate::{
     config::PageServerConf,
-    layered_repository::metadata::{metadata_path, TimelineMetadata},
+    layered_repository::{
+        metadata::{metadata_path, TimelineMetadata},
+        LayeredRepository,
+    },
     repository::TimelineSyncStatusUpdate,
     tenant_mgr::apply_timeline_sync_status_updates,
     thread_mgr,
@@ -103,6 +108,7 @@ use metrics::{
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 pub use self::download::download_index_part;
+pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
 lazy_static! {
     static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
@@ -782,8 +788,14 @@ where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 {
-    match download_timeline_layers(storage, current_remote_timeline, sync_id, new_download_data)
-        .await
+    match download_timeline_layers(
+        conf,
+        storage,
+        current_remote_timeline,
+        sync_id,
+        new_download_data,
+    )
+    .await
     {
         DownloadedTimeline::Abort => {
             register_sync_status(sync_start, task_name, None);
@@ -852,18 +864,28 @@ async fn update_local_metadata(
 
     if local_lsn < Some(remote_lsn) {
         info!("Updating local timeline metadata from remote timeline: local disk_consistent_lsn={local_lsn:?}, remote disk_consistent_lsn={remote_lsn}");
-
-        let remote_metadata_bytes = remote_metadata
-            .to_bytes()
-            .context("Failed to serialize remote metadata to bytes")?;
-        fs::write(&local_metadata_path, &remote_metadata_bytes)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to write remote metadata bytes locally to path '{}'",
-                    local_metadata_path.display()
-                )
-            })?;
+        // clone because spawn_blocking requires static lifetime
+        let cloned_metadata = remote_metadata.to_owned();
+        let ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = sync_id;
+        tokio::task::spawn_blocking(move || {
+            LayeredRepository::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to join save_metadata task for {}",
+                local_metadata_path.display()
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "Failed to write remote metadata bytes locally to path '{}'",
+                local_metadata_path.display()
+            )
+        })?;
     } else {
         info!("Local metadata at path '{}' has later disk consistent Lsn ({local_lsn:?}) than the remote one ({remote_lsn}), skipping the update", local_metadata_path.display());
     }
@@ -1062,7 +1084,7 @@ where
                 debug!("Successfully fetched index part for {id}");
                 index_parts.insert(id, index_part);
             }
-            Err(e) => warn!("Failed to fetch index part for {id}: {e:?}"),
+            Err(e) => warn!("Failed to fetch index part for {id}: {e}"),
         }
     }
 
@@ -1190,6 +1212,20 @@ fn register_sync_status(sync_start: Instant, sync_name: &str, sync_status: Optio
         None => return,
     }
     .observe(secs_elapsed)
+}
+
+pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
+    let new_extension = match original_path
+        .as_ref()
+        .extension()
+        .map(OsStr::to_string_lossy)
+    {
+        Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
+        None => Cow::Borrowed(suffix),
+    };
+    original_path
+        .as_ref()
+        .with_extension(new_extension.as_ref())
 }
 
 #[cfg(test)]
@@ -1598,6 +1634,30 @@ mod tests {
         assert_eq!(
             upload.metadata, metadata_2,
             "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
+        );
+    }
+
+    #[test]
+    fn test_path_with_suffix_extension() {
+        let p = PathBuf::from("/foo/bar");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp").to_string_lossy(),
+            "/foo/bar.temp"
+        );
+        let p = PathBuf::from("/foo/bar");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            "/foo/bar.temp.temp"
+        );
+        let p = PathBuf::from("/foo/bar.baz");
+        assert_eq!(
+            &path_with_suffix_extension(&p, "temp.temp").to_string_lossy(),
+            "/foo/bar.baz.temp.temp"
+        );
+        let p = PathBuf::from("/foo/bar.baz");
+        assert_eq!(
+            &path_with_suffix_extension(&p, ".temp").to_string_lossy(),
+            "/foo/bar.baz..temp"
         );
     }
 }

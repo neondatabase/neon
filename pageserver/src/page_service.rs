@@ -667,7 +667,10 @@ impl postgres_backend::Handler for PageServerHandler {
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("failpoints ") {
+            ensure!(fail::has_failpoints(), "Cannot manage failpoints because pageserver was compiled without failpoints support");
+
             let (_, failpoints) = query_string.split_at("failpoints ".len());
+
             for failpoint in failpoints.split(';') {
                 if let Some((name, actions)) = failpoint.split_once('=') {
                     info!("cfg failpoint: {} {}", name, actions);

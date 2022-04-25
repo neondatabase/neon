@@ -17,6 +17,8 @@ use tokio::{
 };
 use tracing::*;
 
+use crate::remote_storage::storage_sync::path_with_suffix_extension;
+
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 
 pub struct LocalFs {
@@ -114,7 +116,7 @@ impl RemoteStorage for LocalFs {
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
         // cancelled the upload and partial file was left on the fs
-        let temp_file_path = path_with_suffix_extension(&target_file_path, ".temp");
+        let temp_file_path = path_with_suffix_extension(&target_file_path, "temp");
         let mut destination = io::BufWriter::new(
             fs::OpenOptions::new()
                 .write(true)
@@ -299,15 +301,8 @@ impl RemoteStorage for LocalFs {
     }
 }
 
-fn path_with_suffix_extension(original_path: &Path, suffix: &str) -> PathBuf {
-    let mut extension_with_suffix = original_path.extension().unwrap_or_default().to_os_string();
-    extension_with_suffix.push(suffix);
-
-    original_path.with_extension(extension_with_suffix)
-}
-
 fn storage_metadata_path(original_path: &Path) -> PathBuf {
-    path_with_suffix_extension(original_path, ".metadata")
+    path_with_suffix_extension(original_path, "metadata")
 }
 
 fn get_all_files<'a, P>(

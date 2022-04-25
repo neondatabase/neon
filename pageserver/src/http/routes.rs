@@ -179,43 +179,47 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
 
-    let span = info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id);
+    let (local_timeline_info, remote_timeline_info) = async {
+        // any error here will render local timeline as None
+        // XXX .in_current_span does not attach messages in spawn_blocking future to current future's span
+        let local_timeline_info = tokio::task::spawn_blocking(move || {
+            let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+            let local_timeline = {
+                repo.get_timeline(timeline_id)
+                    .as_ref()
+                    .map(|timeline| {
+                        LocalTimelineInfo::from_repo_timeline(
+                            tenant_id,
+                            timeline_id,
+                            timeline,
+                            include_non_incremental_logical_size,
+                        )
+                    })
+                    .transpose()?
+            };
+            Ok::<_, anyhow::Error>(local_timeline)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten();
 
-    let (local_timeline_info, span) = tokio::task::spawn_blocking(move || {
-        let entered = span.entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let local_timeline = {
-            repo.get_timeline(timeline_id)
-                .as_ref()
-                .map(|timeline| {
-                    LocalTimelineInfo::from_repo_timeline(
-                        tenant_id,
-                        timeline_id,
-                        timeline,
-                        include_non_incremental_logical_size,
-                    )
+        let remote_timeline_info = {
+            let remote_index_read = get_state(&request).remote_index.read().await;
+            remote_index_read
+                .timeline_entry(&ZTenantTimelineId {
+                    tenant_id,
+                    timeline_id,
                 })
-                .transpose()?
+                .map(|remote_entry| RemoteTimelineInfo {
+                    remote_consistent_lsn: remote_entry.metadata.disk_consistent_lsn(),
+                    awaits_download: remote_entry.awaits_download,
+                })
         };
-        Ok::<_, anyhow::Error>((local_timeline, entered.exit()))
-    })
-    .await
-    .map_err(ApiError::from_err)??;
-
-    let remote_timeline_info = {
-        let remote_index_read = get_state(&request).remote_index.read().await;
-        remote_index_read
-            .timeline_entry(&ZTenantTimelineId {
-                tenant_id,
-                timeline_id,
-            })
-            .map(|remote_entry| RemoteTimelineInfo {
-                remote_consistent_lsn: remote_entry.metadata.disk_consistent_lsn(),
-                awaits_download: remote_entry.awaits_download,
-            })
-    };
-
-    let _enter = span.entered();
+        (local_timeline_info, remote_timeline_info)
+    }
+    .instrument(info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id))
+    .await;
 
     if local_timeline_info.is_none() && remote_timeline_info.is_none() {
         return Err(ApiError::NotFound(

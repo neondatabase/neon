@@ -1,17 +1,20 @@
 //! Timeline synchrnonization logic to fetch the layer files from remote storage into pageserver's local directory.
 
-use std::fmt::Debug;
+use std::{collections::HashSet, fmt::Debug, path::Path};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::fs;
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::metadata_path,
     remote_storage::{
-        storage_sync::{sync_queue, SyncTask},
+        storage_sync::{path_with_suffix_extension, sync_queue, SyncTask},
         RemoteStorage,
     },
 };
@@ -21,6 +24,8 @@ use super::{
     index::{IndexPart, RemoteTimeline},
     SyncData, TimelineDownload,
 };
+
+pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 /// Retrieves index data from the remote storage for a given timeline.
 pub async fn download_index_part<P, S>(
@@ -46,7 +51,7 @@ where
         .download(&part_storage_path, &mut index_part_bytes)
         .await
         .with_context(|| {
-            format!("Failed to download an index part from storage path '{part_storage_path:?}'")
+            format!("Failed to download an index part from storage path {part_storage_path:?}")
         })?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes).with_context(|| {
@@ -80,6 +85,7 @@ pub(super) enum DownloadedTimeline {
 ///
 /// On an error, bumps the retries count and updates the files to skip with successful downloads, rescheduling the task.
 pub(super) async fn download_timeline_layers<'a, P, S>(
+    conf: &'static PageServerConf,
     storage: &'a S,
     remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
@@ -132,12 +138,24 @@ where
                         )
                     })?;
 
-                let mut destination_file = fs::File::create(&layer_desination_path)
-                    .await
-                    .with_context(|| {
+                // Perform a rename inspired by durable_rename from file_utils.c.
+                // The sequence:
+                //     write(tmp)
+                //     fsync(tmp)
+                //     rename(tmp, new)
+                //     fsync(new)
+                //     fsync(parent)
+                // For more context about durable_rename check this email from postgres mailing list:
+                // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
+                // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
+                let temp_file_path =
+                    path_with_suffix_extension(&layer_desination_path, TEMP_DOWNLOAD_EXTENSION);
+
+                let mut destination_file =
+                    fs::File::create(&temp_file_path).await.with_context(|| {
                         format!(
                             "Failed to create a destination file for layer '{}'",
-                            layer_desination_path.display()
+                            temp_file_path.display()
                         )
                     })?;
 
@@ -149,15 +167,55 @@ where
                             "Failed to download a layer from storage path '{layer_storage_path:?}'"
                         )
                     })?;
+
+                // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
+                // A file will not be closed immediately when it goes out of scope if there are any IO operations
+                // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
+                // you should call flush before dropping it.
+                //
+                // From the tokio code I see that it waits for pending operations to complete. There shouldt be any because
+                // we assume that `destination_file` file is fully written. I e there is no pending .write(...).await operations.
+                // But for additional safety lets check/wait for any pending operations.
+                destination_file.flush().await.with_context(|| {
+                    format!(
+                        "failed to flush source file at {}",
+                        temp_file_path.display()
+                    )
+                })?;
+
+                // not using sync_data because it can lose file size update
+                destination_file.sync_all().await.with_context(|| {
+                    format!(
+                        "failed to fsync source file at {}",
+                        temp_file_path.display()
+                    )
+                })?;
+                drop(destination_file);
+
+                fail::fail_point!("remote-storage-download-pre-rename", |_| {
+                    anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
+                });
+
+                fs::rename(&temp_file_path, &layer_desination_path).await?;
+
+                fsync_path(&layer_desination_path).await.with_context(|| {
+                    format!(
+                        "Cannot fsync layer destination path {}",
+                        layer_desination_path.display(),
+                    )
+                })?;
             }
             Ok::<_, anyhow::Error>(layer_desination_path)
         })
         .collect::<FuturesUnordered<_>>();
 
     let mut errors_happened = false;
+    // keep files we've downloaded to remove them from layers_to_skip if directory fsync fails
+    let mut undo = HashSet::new();
     while let Some(download_result) = download_tasks.next().await {
         match download_result {
             Ok(downloaded_path) => {
+                undo.insert(downloaded_path.clone());
                 download.layers_to_skip.insert(downloaded_path);
             }
             Err(e) => {
@@ -165,6 +223,24 @@ where
                 error!("Failed to download a layer for timeline {sync_id}: {e:?}");
             }
         }
+    }
+
+    // fsync timeline directory which is a parent directory for downloaded files
+    let ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    } = &sync_id;
+    let timeline_dir = conf.timeline_path(timeline_id, tenant_id);
+    if let Err(e) = fsync_path(&timeline_dir).await {
+        error!(
+            "Cannot fsync parent directory {} error {}",
+            timeline_dir.display(),
+            e
+        );
+        for item in undo {
+            download.layers_to_skip.remove(&item);
+        }
+        errors_happened = true;
     }
 
     if errors_happened {
@@ -176,6 +252,10 @@ where
         info!("Successfully downloaded all layers");
         DownloadedTimeline::Successful(download_data)
     }
+}
+
+async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
+    fs::File::open(path).await?.sync_all().await
 }
 
 #[cfg(test)]
@@ -236,6 +316,7 @@ mod tests {
         );
 
         let download_data = match download_timeline_layers(
+            harness.conf,
             &storage,
             Some(&remote_timeline),
             sync_id,
@@ -297,6 +378,7 @@ mod tests {
         let storage = LocalFs::new(tempdir()?.path().to_owned(), &harness.conf.workdir)?;
 
         let empty_remote_timeline_download = download_timeline_layers(
+            harness.conf,
             &storage,
             None,
             sync_id,
@@ -319,6 +401,7 @@ mod tests {
             "Should not expect download for the timeline"
         );
         let already_downloading_remote_timeline_download = download_timeline_layers(
+            harness.conf,
             &storage,
             Some(&not_expecting_download_remote_timeline),
             sync_id,

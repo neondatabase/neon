@@ -728,7 +728,7 @@ impl LayeredRepository {
     }
 
     /// Save timeline metadata to file
-    fn save_metadata(
+    pub fn save_metadata(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,

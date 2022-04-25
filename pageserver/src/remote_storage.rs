@@ -101,6 +101,7 @@ use anyhow::{bail, Context};
 use tokio::io;
 use tracing::{debug, error, info};
 
+use self::storage_sync::TEMP_DOWNLOAD_EXTENSION;
 pub use self::{
     local_fs::LocalFs,
     s3_bucket::S3Bucket,
@@ -304,12 +305,29 @@ fn collect_timeline_files(
             } else if is_ephemeral_file(&entry_path.file_name().unwrap().to_string_lossy()) {
                 debug!("skipping ephemeral file {}", entry_path.display());
                 continue;
+            } else if entry_path.extension().and_then(ffi::OsStr::to_str)
+                == Some(TEMP_DOWNLOAD_EXTENSION)
+            {
+                info!("removing temp download file at {}", entry_path.display());
+                fs::remove_file(&entry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp download file at {}",
+                        entry_path.display()
+                    )
+                })?;
             } else {
                 timeline_files.insert(entry_path);
             }
         }
     }
 
+    // FIXME (rodionov) if attach call succeeded, and then pageserver is restarted before download is completed
+    //   then attach is lost. There would be no retries for that,
+    //   initial collect will fail because there is no metadata.
+    //   We either need to start download if we see empty dir after restart or attach caller should
+    //   be aware of that and retry attach if awaits_download for timeline switched from true to false
+    //   but timelinne didnt appear locally.
+    //   Check what happens with remote index in that case.
     let timeline_metadata_path = match timeline_metadata_path {
         Some(path) => path,
         None => bail!("No metadata file found in the timeline directory"),
