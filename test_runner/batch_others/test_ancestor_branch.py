@@ -19,21 +19,22 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     #
     # See https://github.com/zenithdb/zenith/issues/1068
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
-    env.pageserver.start(overrides=[
-        '--pageserver-config-override="gc_period"="10 m"',
-        '--pageserver-config-override="gc_horizon"=1048576',
-        '--pageserver-config-override="checkpoint_distance"=4194304',
-        '--pageserver-config-override="compaction_period"="10 m"',
-        '--pageserver-config-override="compaction_threshold"=2',
-        '--pageserver-config-override="compaction_target_size"=4194304'
-    ])
-    env.safekeepers[0].start()
+    tenant = env.zenith_cli.create_tenant(
+        conf={
+            'gc_period': '10 m',
+            'gc_horizon': '1048576',
+            'checkpoint_distance': '4194304',
+            'compaction_period': '10 m',
+            'compaction_threshold': '2',
+            'compaction_target_size': '4194304',
+        })
 
-    pg_branch0 = env.postgres.create_start('main')
+    env.zenith_cli.create_timeline(f'main', tenant_id=tenant)
+    pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
     branch0_cur.execute("SHOW zenith.zenith_timeline")
     branch0_timeline = branch0_cur.fetchone()[0]
@@ -55,8 +56,8 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 100k rows: {lsn_100}')
 
     # Create branch1.
-    env.zenith_cli.create_branch('branch1', 'main', ancestor_start_lsn=lsn_100)
-    pg_branch1 = env.postgres.create_start('branch1')
+    env.zenith_cli.create_branch('branch1', 'main', tenant_id=tenant, ancestor_start_lsn=lsn_100)
+    pg_branch1 = env.postgres.create_start('branch1', tenant_id=tenant)
     log.info("postgres is running on 'branch1' branch")
 
     branch1_cur = pg_branch1.connect().cursor()
@@ -79,8 +80,8 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 200k rows: {lsn_200}')
 
     # Create branch2.
-    env.zenith_cli.create_branch('branch2', 'branch1', ancestor_start_lsn=lsn_200)
-    pg_branch2 = env.postgres.create_start('branch2')
+    env.zenith_cli.create_branch('branch2', 'branch1', tenant_id=tenant, ancestor_start_lsn=lsn_200)
+    pg_branch2 = env.postgres.create_start('branch2', tenant_id=tenant)
     log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
 
@@ -104,7 +105,8 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
 
     # Run compaction on branch1.
     psconn = env.pageserver.connect()
-    psconn.cursor().execute(f'''compact {env.initial_tenant.hex} {branch1_timeline} {lsn_200}''')
+    log.info(f'compact {tenant.hex} {branch1_timeline} {lsn_200}')
+    psconn.cursor().execute(f'''compact {tenant.hex} {branch1_timeline} {lsn_200}''')
 
     branch0_cur.execute('SELECT count(*) FROM foo')
     assert branch0_cur.fetchone() == (100000, )
