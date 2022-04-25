@@ -156,6 +156,9 @@ access_key_id = 'SOMEKEYAAAAASADSAH*#'
 
 # Secret access key to connect to the bucket ("password" part of the credentials)
 secret_access_key = 'SOMEsEcReTsd292v'
+
+# S3 API query limit to avoid getting errors/throttling from AWS.
+concurrency_limit = 100
 ```
 
 ###### General remote storage configuration
@@ -167,8 +170,8 @@ Besides, there are parameters common for all types of remote storage that can be
 
 ```toml
 [remote_storage]
-# Max number of concurrent connections to open for uploading to or downloading from the remote storage.
-max_concurrent_sync = 100
+# Max number of concurrent timeline synchronized (layers uploaded or downloaded) with the remote storage at the same time.
+max_concurrent_timelines_sync = 50
 
 # Max number of errors a single task can have before it's considered failed and not attempted to run anymore.
 max_sync_errors = 10

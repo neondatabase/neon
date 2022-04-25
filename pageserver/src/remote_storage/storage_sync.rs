@@ -62,7 +62,7 @@ pub mod index;
 mod upload;
 
 use std::{
-    collections::{hash_map, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     ops::ControlFlow,
@@ -132,7 +132,9 @@ lazy_static! {
 /// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
     use std::{
-        collections::{hash_map, HashMap},
+        collections::{hash_map, HashMap, HashSet},
+        num::NonZeroUsize,
+        ops::ControlFlow,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -179,7 +181,7 @@ mod sync_queue {
     /// Polls a new task from the queue, using its receiver counterpart.
     /// Does not block if the queue is empty, returning [`None`] instead.
     /// Needed to correctly track the queue length.
-    pub async fn next_task(
+    async fn next_task(
         receiver: &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
     ) -> Option<(ZTenantTimelineId, SyncTask)> {
         let task = receiver.recv().await;
@@ -195,15 +197,29 @@ mod sync_queue {
     /// or two (download and upload, if both were found in the queue during batch construction).
     pub async fn next_task_batch(
         receiver: &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
-        mut max_batch_size: usize,
-    ) -> HashMap<ZTenantTimelineId, SyncTask> {
-        if max_batch_size == 0 {
-            return HashMap::new();
-        }
-        let mut tasks: HashMap<ZTenantTimelineId, SyncTask> =
-            HashMap::with_capacity(max_batch_size);
+        max_timelines_to_sync: NonZeroUsize,
+    ) -> ControlFlow<(), HashMap<ZTenantTimelineId, SyncTask>> {
+        // request the first task in blocking fashion to do less meaningless work
+        let (first_sync_id, first_task) = if let Some(first_task) = next_task(receiver).await {
+            first_task
+        } else {
+            debug!("Queue sender part was dropped, aborting");
+            return ControlFlow::Break(());
+        };
+
+        let max_timelines_to_sync = max_timelines_to_sync.get();
+        let mut batched_timelines = HashSet::with_capacity(max_timelines_to_sync);
+        batched_timelines.insert(first_sync_id.timeline_id);
+
+        let mut tasks = HashMap::new();
+        tasks.insert(first_sync_id, first_task);
 
         loop {
+            if batched_timelines.len() >= max_timelines_to_sync {
+                debug!("Filled a full task batch with {max_timelines_to_sync} timeline sync operations");
+                break;
+            }
+
             match receiver.try_recv() {
                 Ok((sync_id, new_task)) => {
                     LENGTH.fetch_sub(1, Ordering::Relaxed);
@@ -216,24 +232,23 @@ mod sync_queue {
                             v.insert(new_task);
                         }
                     }
-
-                    max_batch_size -= 1;
-                    if max_batch_size == 0 {
-                        break;
-                    }
+                    batched_timelines.insert(sync_id.timeline_id);
                 }
                 Err(TryRecvError::Disconnected) => {
                     debug!("Sender disconnected, batch collection aborted");
                     break;
                 }
                 Err(TryRecvError::Empty) => {
-                    debug!("No more data in the sync queue, task batch is not full");
+                    debug!(
+                        "No more data in the sync queue, task batch is not full, length: {}, max allowed size: {max_timelines_to_sync}",
+                        batched_timelines.len()
+                    );
                     break;
                 }
             }
         }
 
-        tasks
+        ControlFlow::Continue(tasks)
     }
 
     /// Length of the queue, assuming that all receiver counterparts were only called using the queue api.
@@ -455,7 +470,7 @@ pub(super) fn spawn_storage_sync_thread<P, S>(
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
     storage: S,
-    max_concurrent_sync: NonZeroUsize,
+    max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) -> anyhow::Result<SyncStartupData>
 where
@@ -497,7 +512,7 @@ where
                 receiver,
                 Arc::new(storage),
                 loop_index,
-                max_concurrent_sync,
+                max_concurrent_timelines_sync,
                 max_sync_errors,
             );
             Ok(())
@@ -517,7 +532,7 @@ fn storage_sync_loop<P, S>(
     mut receiver: UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
     storage: Arc<S>,
     index: RemoteIndex,
-    max_concurrent_sync: NonZeroUsize,
+    max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) where
     P: Debug + Send + Sync + 'static,
@@ -534,7 +549,7 @@ fn storage_sync_loop<P, S>(
                     &mut receiver,
                     storage,
                     loop_index,
-                    max_concurrent_sync,
+                    max_concurrent_timelines_sync,
                     max_sync_errors,
                 )
                 .instrument(info_span!("storage_sync_loop_step")) => step,
@@ -568,33 +583,18 @@ async fn loop_step<P, S>(
     receiver: &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
     storage: Arc<S>,
     index: RemoteIndex,
-    max_concurrent_sync: NonZeroUsize,
+    max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) -> ControlFlow<(), HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>>
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 {
-    let max_concurrent_sync = max_concurrent_sync.get();
-
-    // request the first task in blocking fashion to do less meaningless work
-    let (first_sync_id, first_task) =
-        if let Some(first_task) = sync_queue::next_task(receiver).await {
-            first_task
-        } else {
-            return ControlFlow::Break(());
+    let batched_tasks =
+        match sync_queue::next_task_batch(receiver, max_concurrent_timelines_sync).await {
+            ControlFlow::Continue(batch) => batch,
+            ControlFlow::Break(()) => return ControlFlow::Break(()),
         };
-
-    let mut batched_tasks = sync_queue::next_task_batch(receiver, max_concurrent_sync - 1).await;
-    match batched_tasks.entry(first_sync_id) {
-        hash_map::Entry::Occupied(o) => {
-            let current = o.remove();
-            batched_tasks.insert(first_sync_id, current.merge(first_task));
-        }
-        hash_map::Entry::Vacant(v) => {
-            v.insert(first_task);
-        }
-    }
 
     let remaining_queue_length = sync_queue::len();
     REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
@@ -623,7 +623,7 @@ where
     let mut new_timeline_states: HashMap<
         ZTenantId,
         HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
-    > = HashMap::with_capacity(max_concurrent_sync);
+    > = HashMap::with_capacity(max_concurrent_timelines_sync.get());
     while let Some((sync_id, state_update)) = sync_results.next().await {
         debug!("Finished storage sync task for sync id {sync_id}");
         if let Some(state_update) = state_update {
