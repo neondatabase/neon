@@ -466,30 +466,40 @@ impl PageServerConf {
 
     pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
         let mut t_conf: TenantConfOpt = Default::default();
-        for (key, item) in item
-            .as_table()
-            .ok_or(anyhow::anyhow!("invalid tenant config"))?
-            .iter()
-        {
-            match key {
-                "checkpoint_distance" => {
-                    t_conf.checkpoint_distance = Some(parse_toml_u64(key, item)?)
-                }
-                "compaction_target_size" => {
-                    t_conf.compaction_target_size = Some(parse_toml_u64(key, item)?)
-                }
-                "compaction_period" => {
-                    t_conf.compaction_period = Some(parse_toml_duration(key, item)?)
-                }
-                "compaction_threshold" => {
-                    t_conf.compaction_threshold = Some(parse_toml_u64(key, item)? as usize)
-                }
-                "gc_horizon" => t_conf.gc_horizon = Some(parse_toml_u64(key, item)?),
-                "gc_period" => t_conf.gc_period = Some(parse_toml_duration(key, item)?),
-                "pitr_interval" => t_conf.pitr_interval = Some(parse_toml_duration(key, item)?),
-                _ => bail!("unrecognized tenant config option '{}'", key),
-            }
+        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
+            t_conf.checkpoint_distance =
+                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
         }
+
+        if let Some(compaction_target_size) = item.get("compaction_target_size") {
+            t_conf.compaction_target_size = Some(parse_toml_u64(
+                "compaction_target_size",
+                compaction_target_size,
+            )?);
+        }
+
+        if let Some(compaction_period) = item.get("compaction_period") {
+            t_conf.compaction_period =
+                Some(parse_toml_duration("compaction_period", compaction_period)?);
+        }
+
+        if let Some(compaction_threshold) = item.get("compaction_threshold") {
+            t_conf.compaction_threshold =
+                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
+        }
+
+        if let Some(gc_horizon) = item.get("gc_horizon") {
+            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
+        }
+
+        if let Some(gc_period) = item.get("gc_period") {
+            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
+        }
+
+        if let Some(pitr_interval) = item.get("pitr_interval") {
+            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
+        }
+
         Ok(t_conf)
     }
 
