@@ -27,7 +27,12 @@ use utils::{
 };
 
 fn version() -> String {
-    format!("{} profiling:{}", GIT_VERSION, cfg!(feature = "profiling"))
+    format!(
+        "{} profiling:{} failpoints:{}",
+        GIT_VERSION,
+        cfg!(feature = "profiling"),
+        fail::has_failpoints()
+    )
 }
 
 fn main() -> anyhow::Result<()> {
