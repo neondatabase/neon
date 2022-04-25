@@ -20,7 +20,7 @@ use tracing::*;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
+use crate::big_cache::{self, BIG_CACHE};
 use crate::config::PageServerConf;
 use crate::keyspace::KeySpace;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
@@ -1061,7 +1062,10 @@ impl Timeline for LayeredTimeline {
                 }
                 Some((cached_lsn, cached_img))
             }
-            None => None,
+            None => {
+                // XXX
+                BIG_CACHE.lookup(&key)?
+            }
         };
 
         let mut reconstruct_state = ValueReconstructState {
@@ -1070,6 +1074,13 @@ impl Timeline for LayeredTimeline {
         };
 
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
+
+        // println!("xxx_records {}", reconstruct_state.records.len());
+
+        // XXX logging
+        // for rec in &reconstruct_state.records {
+        //     println!("xxx_reconstructing {} {}", key, rec.0)
+        // }
 
         self.reconstruct_time_histo
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
@@ -1668,6 +1679,14 @@ impl LayeredTimeline {
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
     fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
+        // XXX Update big cache
+        let end_lsn = frozen_layer.get_lsn_range().end;
+        for key in frozen_layer.inner.read().unwrap().index.keys() {
+            let img = self.get(*key, end_lsn)?;
+            BIG_CACHE.memorize(*key, (end_lsn, img))?;
+        }
+
+        // Write frozen layer
         let new_delta = frozen_layer.write_to_disk()?;
         let new_delta_path = new_delta.path();
 

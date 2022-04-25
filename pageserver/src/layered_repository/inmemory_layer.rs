@@ -43,7 +43,7 @@ pub struct InMemoryLayer {
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
-    inner: RwLock<InMemoryLayerInner>,
+    pub inner: RwLock<InMemoryLayerInner>,
 }
 
 pub struct InMemoryLayerInner {
@@ -56,7 +56,7 @@ pub struct InMemoryLayerInner {
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
     ///
-    index: HashMap<Key, VecMap<Lsn, u64>>,
+    pub index: HashMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.

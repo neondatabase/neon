@@ -21,6 +21,7 @@ pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
+pub mod big_cache;
 
 use lazy_static::lazy_static;
 use tracing::info;
