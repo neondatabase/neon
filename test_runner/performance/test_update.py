@@ -9,7 +9,8 @@ from fixtures.compare_fixtures import PgCompare
 import pytest
 
 
-def test_update(zenith_with_baseline: PgCompare):
+@pytest.mark.parametrize('rows', [pytest.param(1000000)])
+def test_update(zenith_with_baseline: PgCompare, rows: int):
     env = zenith_with_baseline
 
     with closing(env.pg.connect()) as conn:
@@ -17,7 +18,7 @@ def test_update(zenith_with_baseline: PgCompare):
             cur.execute(
                 "create table t (pk integer, val bigint default 0, t text default repeat(' ', 100))"
             )
-            cur.execute('insert into t (pk) values (generate_series(1,10000000))')
+            cur.execute(f'insert into t (pk) values (generate_series(1,{rows}))')
             with env.record_duration('update'):
                 cur.execute('update t set val=val+1')
             with env.record_duration('select'):
