@@ -47,6 +47,7 @@ pub struct TenantConf {
     // This parameter determines L1 layer file size.
     pub compaction_target_size: u64,
     // How often to check if there's compaction work to be done.
+    #[serde(with = "humantime_serde")]
     pub compaction_period: Duration,
     // Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
@@ -56,11 +57,13 @@ pub struct TenantConf {
     // Page versions older than this are garbage collected away.
     pub gc_horizon: u64,
     // Interval at which garbage collection is triggered.
+    #[serde(with = "humantime_serde")]
     pub gc_period: Duration,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is time.
     // Page versions older than this are garbage collected away.
+    #[serde(with = "humantime_serde")]
     pub pitr_interval: Duration,
 }
 
@@ -70,10 +73,13 @@ pub struct TenantConf {
 pub struct TenantConfOpt {
     pub checkpoint_distance: Option<u64>,
     pub compaction_target_size: Option<u64>,
+    #[serde(with = "humantime_serde")]
     pub compaction_period: Option<Duration>,
     pub compaction_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
+    #[serde(with = "humantime_serde")]
     pub gc_period: Option<Duration>,
+    #[serde(with = "humantime_serde")]
     pub pitr_interval: Option<Duration>,
 }
 

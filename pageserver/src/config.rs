@@ -439,7 +439,7 @@ impl PageServerConf {
                 "remote_storage" => {
                     builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
                 }
-                "tenant_conf" => {
+                "tenant_config" => {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),

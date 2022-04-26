@@ -690,7 +690,7 @@ impl LayeredRepository {
         let mut tenant_conf: TenantConfOpt = Default::default();
         for (key, item) in toml.iter() {
             match key {
-                "tenant_conf" => {
+                "tenant_config" => {
                     tenant_conf = PageServerConf::parse_toml_tenant_conf(item)?;
                 }
                 _ => bail!("unrecognized pageserver option '{}'", key),
@@ -712,7 +712,7 @@ impl LayeredRepository {
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
-# [tenant_config]
+[tenant_config]
 "#
         .to_string();
 
