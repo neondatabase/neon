@@ -1683,6 +1683,7 @@ impl LayeredTimeline {
         let end_lsn = frozen_layer.get_lsn_range().end;
         for key in frozen_layer.inner.read().unwrap().index.keys() {
             let img = self.get(*key, end_lsn)?;
+            // TODO maybe don't memorize all pages, but most updates ones only
             BIG_CACHE.memorize(*key, (end_lsn, img))?;
         }
 
