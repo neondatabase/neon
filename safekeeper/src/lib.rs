@@ -13,6 +13,7 @@ pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod receive_wal;
+pub mod remove_wal;
 pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;

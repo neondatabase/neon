@@ -5,6 +5,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use postgres_ffi::xlog_utils::TimeLineID;
+
+use postgres_ffi::xlog_utils::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -880,6 +882,24 @@ where
         }
         Ok(())
     }
+
+    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
+    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+    /// offloading.
+    /// While it is safe to use inmem values for determining horizon,
+    /// we use persistent to make possible normal states less surprising.
+    pub fn get_horizon_segno(&self) -> XLogSegNo {
+        let horizon_lsn = min(
+            min(
+                self.state.remote_consistent_lsn,
+                self.state.peer_horizon_lsn,
+            ),
+            self.state.s3_wal_lsn,
+        );
+        let res = horizon_lsn.segment_number(self.state.server.wal_seg_size as usize);
+        info!("horizon is {}, res {}", horizon_lsn, res);
+        res
+    }
 }
 
 #[cfg(test)]
@@ -934,6 +954,10 @@ mod tests {
 
         fn flush_wal(&mut self) -> Result<()> {
             Ok(())
+        }
+
+        fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
+            Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
         }
     }
 

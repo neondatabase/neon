@@ -4,6 +4,7 @@
 use anyhow::{bail, Context, Result};
 
 use lazy_static::lazy_static;
+use postgres_ffi::xlog_utils::XLogSegNo;
 
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -88,6 +89,7 @@ struct SharedState {
     active: bool,
     num_computes: u32,
     pageserver_connstr: Option<String>,
+    last_removed_segno: XLogSegNo,
 }
 
 impl SharedState {
@@ -109,6 +111,7 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
+            last_removed_segno: 0,
         })
     }
 
@@ -127,6 +130,7 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
+            last_removed_segno: 0,
         })
     }
 
@@ -458,6 +462,26 @@ impl Timeline {
     pub fn get_end_of_wal(&self) -> Lsn {
         let shared_state = self.mutex.lock().unwrap();
         shared_state.sk.wal_store.flush_lsn()
+    }
+
+    pub fn remove_old_wal(&self) -> Result<()> {
+        let horizon_segno: XLogSegNo;
+        let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
+        {
+            let shared_state = self.mutex.lock().unwrap();
+            horizon_segno = shared_state.sk.get_horizon_segno();
+            remover = shared_state.sk.wal_store.remove_up_to();
+            if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
+                return Ok(());
+            }
+            // release the lock before removing
+        }
+        let _enter =
+            info_span!("", timeline = %self.zttid.tenant_id, tenant = %self.zttid.timeline_id)
+                .entered();
+        remover(horizon_segno - 1)?;
+        self.mutex.lock().unwrap().last_removed_segno = horizon_segno;
+        Ok(())
     }
 }
 

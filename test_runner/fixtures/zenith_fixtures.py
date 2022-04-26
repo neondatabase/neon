@@ -1738,6 +1738,9 @@ class Safekeeper:
     def http_client(self) -> SafekeeperHttpClient:
         return SafekeeperHttpClient(port=self.port.http)
 
+    def data_dir(self) -> str:
+        return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
+
 
 @dataclass
 class SafekeeperTimelineStatus:
@@ -1769,6 +1772,12 @@ class SafekeeperHttpClient(requests.Session):
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'],
                                         remote_consistent_lsn=resj['remote_consistent_lsn'])
+
+    def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
+            json=body)
+        res.raise_for_status()
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")

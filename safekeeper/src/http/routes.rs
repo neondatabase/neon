@@ -5,6 +5,7 @@ use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
 
+use crate::broker::SafekeeperInfo;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::GlobalTimelines;
@@ -123,6 +124,20 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::CREATED, ())
 }
 
+/// Used only in tests to hand craft required data.
+async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let zttid = ZTenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    let safekeeper_info: SafekeeperInfo = json_request(&mut request).await?;
+
+    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    tli.record_safekeeper_info(&safekeeper_info, ZNodeId(1))?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let router = endpoint::make_router();
@@ -134,4 +149,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             timeline_status_handler,
         )
         .post("/v1/timeline", timeline_create_handler)
+        // for tests
+        .post(
+            "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
+            record_safekeeper_info,
+        )
 }
