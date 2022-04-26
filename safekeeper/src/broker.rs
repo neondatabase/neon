@@ -32,23 +32,28 @@ const ZENITH_PREFIX: &str = "zenith";
 
 /// Published data about safekeeper. Fields made optional for easy migrations.
 #[serde_as]
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SafekeeperInfo {
     /// Term of the last entry.
     pub last_log_term: Option<Term>,
     /// LSN of the last record.
     #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
     pub flush_lsn: Option<Lsn>,
     /// Up to which LSN safekeeper regards its WAL as committed.
     #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
     pub commit_lsn: Option<Lsn>,
     /// LSN up to which safekeeper offloaded WAL to s3.
     #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
     pub s3_wal_lsn: Option<Lsn>,
     /// LSN of last checkpoint uploaded by pageserver.
     #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
     pub remote_consistent_lsn: Option<Lsn>,
     #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
     pub peer_horizon_lsn: Option<Lsn>,
 }
 

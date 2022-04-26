@@ -370,6 +370,55 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
         time.sleep(0.5)
 
 
+# Test that old WAL consumed by peers and pageserver is removed from safekeepers.
+@pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
+def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 2
+    zenith_env_builder.broker = True
+    # to advance remote_consistent_llsn
+    zenith_env_builder.enable_local_fs_remote_storage()
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch('test_safekeepers_wal_removal')
+    pg = env.postgres.create_start('test_safekeepers_wal_removal')
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            # we rely upon autocommit after each statement
+            # as waiting for acceptors happens there
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+
+    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
+    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    # force checkpoint to advance remote_consistent_lsn
+    with closing(env.pageserver.connect()) as psconn:
+        with psconn.cursor() as pscur:
+            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+
+    # We will wait for first segment removal. Make sure they exist for starter.
+    first_segments = [
+        os.path.join(sk.data_dir(), tenant_id, timeline_id, '000000010000000000000001')
+        for sk in env.safekeepers
+    ]
+    assert all(os.path.exists(p) for p in first_segments)
+
+    http_cli = env.safekeepers[0].http_client()
+    # Pretend WAL is offloaded to s3.
+    http_cli.record_safekeeper_info(tenant_id, timeline_id, {'s3_wal_lsn': 'FFFFFFFF/FEFFFFFF'})
+
+    # wait till first segment is removed on all safekeepers
+    started_at = time.time()
+    while True:
+        if all(not os.path.exists(p) for p in first_segments):
+            break
+        elapsed = time.time() - started_at
+        if elapsed > 20:
+            raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
+        time.sleep(0.5)
+
+
 class ProposerPostgres(PgProtocol):
     """Object for running postgres without ZenithEnv"""
     def __init__(self,
