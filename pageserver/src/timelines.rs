@@ -204,7 +204,7 @@ pub fn create_repo(
 
     let repo_dir = conf.tenant_path(&tenant_id);
     ensure!(
-        repo_dir.exists(),
+        !repo_dir.exists(),
         "cannot create new tenant repo: '{}' directory already exists",
         tenant_id
     );

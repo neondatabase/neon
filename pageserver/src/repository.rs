@@ -259,7 +259,7 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    /// detaches locally available timeline by stopping all threads and removing all the data.
+    /// detaches timeline-related in-memory data.
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.

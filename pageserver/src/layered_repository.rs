@@ -161,7 +161,7 @@ pub struct LayeredRepository {
     // This is necessary to allow global config updates.
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenantid: ZTenantId,
+    tenant_id: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -223,10 +223,10 @@ impl Repository for LayeredRepository {
         let mut timelines = self.timelines.lock().unwrap();
 
         // Create the timeline directory, and write initial metadata to file.
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenantid))?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenant_id))?;
 
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        Self::save_metadata(self.conf, timelineid, self.tenantid, &metadata, true)?;
+        Self::save_metadata(self.conf, timelineid, self.tenant_id, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
@@ -234,7 +234,7 @@ impl Repository for LayeredRepository {
             metadata,
             None,
             timelineid,
-            self.tenantid,
+            self.tenant_id,
             Arc::clone(&self.walredo_mgr),
             self.upload_layers,
         );
@@ -283,7 +283,7 @@ impl Repository for LayeredRepository {
         };
 
         // create a new timeline directory
-        let timelinedir = self.conf.timeline_path(&dst, &self.tenantid);
+        let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
 
         crashsafe_dir::create_dir(&timelinedir)?;
 
@@ -298,8 +298,8 @@ impl Repository for LayeredRepository {
             *src_timeline.latest_gc_cutoff_lsn.read().unwrap(),
             src_timeline.initdb_lsn,
         );
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenantid))?;
-        Self::save_metadata(self.conf, dst, self.tenantid, &metadata, true)?;
+        crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
+        Self::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
         timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
@@ -322,7 +322,7 @@ impl Repository for LayeredRepository {
             .unwrap_or_else(|| "-".to_string());
 
         STORAGE_TIME
-            .with_label_values(&["gc", &self.tenantid.to_string(), &timeline_str])
+            .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
             })
@@ -342,7 +342,7 @@ impl Repository for LayeredRepository {
 
         for (timelineid, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("compact", timeline = %timelineid, tenant = %self.tenantid).entered();
+                info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
             match timeline {
                 LayeredTimelineEntry::Loaded(timeline) => {
                     timeline.compact()?;
@@ -383,27 +383,16 @@ impl Repository for LayeredRepository {
 
         for (timelineid, timeline) in &timelines_to_compact {
             let _entered =
-                info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenantid).entered();
+                info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenant_id)
+                    .entered();
             timeline.checkpoint(CheckpointConfig::Flush)?;
         }
 
         Ok(())
     }
 
-    // Detaches the timeline from the repository.
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
-        let mut timelines = self.timelines.lock().unwrap();
-        if timelines.remove(&timeline_id).is_none() {
-            bail!("cannot detach timeline that is not available locally");
-        }
-
-        // Release the lock to shutdown and remove the files without holding it
-        drop(timelines);
-        // shutdown the timeline (this shuts down the walreceiver)
-        thread_mgr::shutdown_threads(None, Some(self.tenantid), Some(timeline_id));
-
-        // remove timeline files (maybe avoid this for ease of debugging if something goes wrong)
-        fs::remove_dir_all(self.conf.timeline_path(&timeline_id, &self.tenantid))?;
+    fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+        self.timelines.lock().unwrap().remove(&timeline_id);
         Ok(())
     }
 
@@ -422,7 +411,7 @@ impl Repository for LayeredRepository {
                     Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
                     Entry::Vacant(entry) => {
                         // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                        let metadata = Self::load_metadata(self.conf, timeline_id, self.tenantid).context("failed to load local metadata")?;
+                        let metadata = Self::load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
                         // finally we make newly downloaded timeline visible to repository
                         entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
                     },
@@ -547,7 +536,7 @@ impl LayeredRepository {
 
         tenant_conf.update(&new_tenant_conf);
 
-        LayeredRepository::persist_tenant_config(self.conf, self.tenantid, *tenant_conf)?;
+        LayeredRepository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
         Ok(())
     }
 
@@ -605,7 +594,7 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
     ) -> anyhow::Result<Arc<LayeredTimeline>> {
-        let metadata = Self::load_metadata(self.conf, timelineid, self.tenantid)
+        let metadata = Self::load_metadata(self.conf, timelineid, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
@@ -631,7 +620,7 @@ impl LayeredRepository {
             metadata,
             ancestor,
             timelineid,
-            self.tenantid,
+            self.tenant_id,
             Arc::clone(&self.walredo_mgr),
             self.upload_layers,
         );
@@ -646,12 +635,12 @@ impl LayeredRepository {
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
     ) -> LayeredRepository {
         LayeredRepository {
-            tenantid,
+            tenant_id,
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
@@ -806,7 +795,7 @@ impl LayeredRepository {
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenantid, timeline = ?target_timelineid)
+            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timelineid)
                 .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -889,6 +878,10 @@ impl LayeredRepository {
 
         totals.elapsed = now.elapsed();
         Ok(totals)
+    }
+
+    pub fn tenant_id(&self) -> ZTenantId {
+        self.tenant_id
     }
 }
 
