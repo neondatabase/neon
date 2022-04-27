@@ -1,11 +1,22 @@
 //! Pageserver benchmark tool
 //!
-//! Usually it's easier to write python perf tests, but here the performance
-//! of the tester matters, and the pagestream API is easier to call from rust.
+//! This tool connects directly to a pageserver, issues queries and measures performance.
+//!
+//! Ideally the tool would be ablle to stream WAL into the pageserver, and (possibly
+//! simultaneously) make read requests. Currently wal streaming is not implemented,
+//! so this tool assumes the pageserver is prepopulated with some data, and only
+//! issues read queries. It also currently assumes that the pageserver writes out some
+//! metadata describing the write access pattern on the workload that was performed on it.
+//!
+//! This tool runs a variety of workloads. See the Args enum below, or run the tool
+//! with --help to see the available workloads.
+//!
 use bytes::{BufMut, BytesMut};
 use clap::{Parser, Subcommand};
 use futures::future;
 use pageserver::wal_metadata::{Page, WalEntryMetadata};
+use postgres_ffi::pg_constants::BLCKSZ;
+use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -17,15 +28,13 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use zenith_utils::zid::{ZTenantId, ZTimelineId};
 use zenith_utils::{
     lsn::Lsn,
     pq_proto::{BeMessage, FeMessage},
 };
-use rand::seq::SliceRandom;
 
 use anyhow::Result;
-
-const BYTES_IN_PAGE: usize = 8 * 1024;
 
 /// Client for the pageserver's pagestream API
 struct PagestreamApi {
@@ -34,7 +43,7 @@ struct PagestreamApi {
 
 /// Good enough implementation for these tests
 impl PagestreamApi {
-    async fn connect(tenant_hex: &str, timeline: &str) -> Result<PagestreamApi> {
+    async fn connect(tenant: &ZTenantId, timeline: &ZTimelineId) -> Result<PagestreamApi> {
         let mut stream = TcpStream::connect("localhost:15000").await?;
 
         // Connect to pageserver
@@ -48,9 +57,9 @@ impl PagestreamApi {
             .await?;
 
         // Enter pagestream protocol
-        let init_query = format!("pagestream {} {}", tenant_hex, timeline);
+        let init_query = format!("pagestream {} {}", tenant, timeline);
         tokio::select! {
-            _ = conn => panic!("AAAA"),
+            _ = conn => panic!("connection closed during pagestream initialization"),
             _ = client.query(init_query.as_str(), &[]) => (),
         };
 
@@ -90,7 +99,7 @@ impl PagestreamApi {
                 102 => {
                     let mut page = Vec::<u8>::new();
                     cursor.read_to_end(&mut page).await?;
-                    if page.len() != BYTES_IN_PAGE {
+                    if page.len() != (BLCKSZ as usize) {
                         panic!("Expected 8kb page, got: {:?}", page.len());
                     }
                     page
@@ -165,9 +174,9 @@ impl Metadata {
             latencies[latencies.len() / 2].as_micros()
         );
         println!(
-            "lower_is_better average {:.3} microseconds",
-            (latencies.iter().map(|l| l.as_micros()).sum::<u128>() as f64) / (
-                latencies.len() as f64)
+            "lower_is_better average {:.2} microseconds",
+            (latencies.iter().map(|l| l.as_micros()).sum::<u128>() as f64)
+                / (latencies.len() as f64)
         );
         println!(
             "lower_is_better p99 {:?} microseconds",
@@ -182,7 +191,12 @@ impl Metadata {
 }
 
 /// Sequentially get the latest version of each page and report latencies
-async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Result<Vec<Duration>> {
+async fn test_latest_pages(
+    tenant: &ZTenantId,
+    timeline: &ZTimelineId,
+    metadata: &Metadata,
+) -> Result<Vec<Duration>> {
+    let mut api = PagestreamApi::connect(tenant, timeline).await.unwrap();
     let mut latencies: Vec<Duration> = vec![];
     let mut page_order: Vec<&Page> = metadata.affected_pages.iter().collect();
     page_order.shuffle(&mut thread_rng());
@@ -198,12 +212,12 @@ async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Resu
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
+    // TODO maybe one metadata file per timeline?
     wal_metadata_path: PathBuf,
 
     // TODO get these from wal metadata
-    // TODO test multi-timeline parallel reads
-    tenant_hex: String,
-    timeline: String,
+    tenant: ZTenantId,
+    timeline: ZTimelineId,
 
     // TODO change to `clients_per_timeline`
     #[clap(long, default_value = "1")]
@@ -215,15 +229,15 @@ struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 enum PsbenchTest {
+    /// Query the latest version of each page, in a random sequential order.
+    /// If multiple clients are used, all clients will independently query
+    /// every page in a different random order.
     GetLatestPages,
-}
-
-async fn run_client(args: Args, metadata: Metadata) -> Vec<Duration> {
-    let mut pagestream = PagestreamApi::connect(&args.tenant_hex, &args.timeline).await.unwrap();
-    match args.test {
-        PsbenchTest::GetLatestPages => test_latest_pages(&mut pagestream, &metadata),
-    }
-    .await.unwrap()
+    // TODO add more tests:
+    // - Query with realistic read pattern
+    // - Query every page after every change of that page
+    // - Query all pages at given point in time
+    // - etc.
 }
 
 #[tokio::main]
@@ -231,10 +245,20 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let metadata = Metadata::build(&args.wal_metadata_path).unwrap();
 
-    // TODO explicitly spawn a thread for each?
-    let latencies: Vec<Duration> = future::join_all((0..args.num_clients).map(|_| {
-        run_client(args.clone(), metadata.clone())
-    })).await.into_iter().flatten().collect();
+    let latencies: Vec<Duration> = match args.test {
+        PsbenchTest::GetLatestPages => {
+            // TODO explicitly spawn a thread for each?
+            future::join_all(
+                (0..args.num_clients)
+                    .map(|_| test_latest_pages(&args.tenant, &args.timeline, &metadata)),
+            )
+            .await
+            .into_iter()
+            .map(|v| v.unwrap())
+            .flatten()
+            .collect()
+        }
+    };
 
     println!("test_param num_clients {}", args.num_clients);
     metadata.report_latency(&latencies).unwrap();

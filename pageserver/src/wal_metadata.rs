@@ -21,6 +21,7 @@ use zenith_utils::lsn::Lsn;
 
 use crate::{config::PageServerConf, walrecord::DecodedBkpBlock};
 
+// TODO make a directory instead, and write one file per (tenant, timeline).
 pub static WAL_METADATA_FILE: OnceCell<File> = OnceCell::new();
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -73,7 +74,6 @@ impl From<&DecodedBkpBlock> for Page {
     }
 }
 
-// TODO include tenant and timeline
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalEntryMetadata {
     pub lsn: Lsn,
