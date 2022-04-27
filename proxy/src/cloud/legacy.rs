@@ -1,42 +1,19 @@
+//! Cloud API V1.
+
+use super::api::DatabaseInfo;
 use crate::auth::ClientCredentials;
-use crate::compute::DatabaseInfo;
 use crate::error::UserFacingError;
-use crate::mgmt;
-use crate::waiters::{self, Waiter, Waiters};
-use lazy_static::lazy_static;
+use crate::waiters;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-lazy_static! {
-    static ref CPLANE_WAITERS: Waiters<mgmt::ComputeReady> = Default::default();
-}
-
-/// Give caller an opportunity to wait for cplane's reply.
-pub async fn with_waiter<R, T, E>(
-    psql_session_id: impl Into<String>,
-    action: impl FnOnce(Waiter<'static, mgmt::ComputeReady>) -> R,
-) -> Result<T, E>
-where
-    R: std::future::Future<Output = Result<T, E>>,
-    E: From<waiters::RegisterError>,
-{
-    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
-    action(waiter).await
-}
-
-pub fn notify(
-    psql_session_id: &str,
-    msg: Result<DatabaseInfo, String>,
-) -> Result<(), waiters::NotifyError> {
-    CPLANE_WAITERS.notify(psql_session_id, msg)
-}
-
-/// Zenith console API wrapper.
-pub struct CPlaneApi {
+/// Neon cloud API provider.
+pub struct Legacy {
     auth_endpoint: reqwest::Url,
 }
 
-impl CPlaneApi {
+impl Legacy {
+    /// Construct a new legacy cloud API provider.
     pub fn new(auth_endpoint: reqwest::Url) -> Self {
         Self { auth_endpoint }
     }
@@ -95,7 +72,17 @@ impl UserFacingError for AuthError {
     }
 }
 
-impl CPlaneApi {
+// NOTE: the order of constructors is important.
+// https://serde.rs/enum-representations.html#untagged
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum ProxyAuthResponse {
+    Ready { conn_info: DatabaseInfo },
+    Error { error: String },
+    NotReady { ready: bool }, // TODO: get rid of `ready`
+}
+
+impl Legacy {
     pub async fn authenticate_proxy_client(
         &self,
         creds: ClientCredentials,
@@ -111,8 +98,8 @@ impl CPlaneApi {
             .append_pair("salt", &hex::encode(salt))
             .append_pair("psql_session_id", psql_session_id);
 
-        with_waiter(psql_session_id, |waiter| async {
-            println!("cplane request: {}", url);
+        super::with_waiter(psql_session_id, |waiter| async {
+            println!("cloud request: {}", url);
             // TODO: leverage `reqwest::Client` to reuse connections
             let resp = reqwest::get(url).await?;
             if !resp.status().is_success() {
@@ -133,16 +120,6 @@ impl CPlaneApi {
         })
         .await
     }
-}
-
-// NOTE: the order of constructors is important.
-// https://serde.rs/enum-representations.html#untagged
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(untagged)]
-enum ProxyAuthResponse {
-    Ready { conn_info: DatabaseInfo },
-    Error { error: String },
-    NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
 #[cfg(test)]

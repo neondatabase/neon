@@ -9,9 +9,11 @@
 mod exchange;
 mod key;
 mod messages;
-mod password;
 mod secret;
 mod signature;
+
+#[cfg(test)]
+mod password;
 
 pub use exchange::Exchange;
 pub use key::ScramKey;
