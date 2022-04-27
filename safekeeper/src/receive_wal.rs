@@ -85,16 +85,10 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", next_msg),
         }
 
-        // Register the connection and defer unregister.
-        spg.timeline
-            .get()
-            .on_compute_connect(self.pageserver_connstr.as_ref())?;
-        let _guard = ComputeConnectionGuard {
-            timeline: Arc::clone(spg.timeline.get()),
-        };
-
         let mut next_msg = Some(next_msg);
 
+        let mut first_time_through = true;
+        let mut _guard: Option<ComputeConnectionGuard> = None;
         loop {
             if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
                 // poll AppendRequest's without blocking and write WAL to disk without flushing,
@@ -121,6 +115,18 @@ impl<'pg> ReceiveWalConn<'pg> {
                 if let Some(reply) = reply {
                     self.write_msg(&reply)?;
                 }
+            }
+            if first_time_through {
+                // Register the connection and defer unregister. Do that only
+                // after processing first message, as it sets wal_seg_size,
+                // wanted by many.
+                spg.timeline
+                    .get()
+                    .on_compute_connect(self.pageserver_connstr.as_ref())?;
+                _guard = Some(ComputeConnectionGuard {
+                    timeline: Arc::clone(spg.timeline.get()),
+                });
+                first_time_through = false;
             }
 
             // blocking wait for the next message
