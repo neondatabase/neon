@@ -16,6 +16,10 @@ impl ScramKey {
     pub fn sha256(&self) -> Self {
         super::sha256([self.as_ref()]).into()
     }
+
+    pub fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
+        self.bytes
+    }
 }
 
 impl From<[u8; SCRAM_KEY_LEN]> for ScramKey {

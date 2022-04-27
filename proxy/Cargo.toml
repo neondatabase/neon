@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
 base64 = "0.13.0"
 bytes = { version = "1.0.1", features = ['serde'] }
 clap = "3.0"
@@ -37,7 +38,6 @@ metrics = { path = "../libs/metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]
-async-trait = "0.1"
 rcgen = "0.8.14"
 rstest = "0.12"
 tokio-postgres-rustls = "0.9.0"

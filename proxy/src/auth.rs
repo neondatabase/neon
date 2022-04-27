@@ -1,22 +1,16 @@
 mod credentials;
-
-#[cfg(test)]
 mod flow;
 
-use crate::compute::DatabaseInfo;
-use crate::config::ProxyConfig;
-use crate::cplane_api::{self, CPlaneApi};
+use crate::config::{CloudApi, ProxyConfig};
 use crate::error::UserFacingError;
 use crate::stream::PqStream;
-use crate::waiters;
+use crate::{cloud, compute, waiters};
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub use credentials::ClientCredentials;
-
-#[cfg(test)]
 pub use flow::*;
 
 /// Common authentication error.
@@ -24,9 +18,14 @@ pub use flow::*;
 pub enum AuthErrorImpl {
     /// Authentication error reported by the console.
     #[error(transparent)]
-    Console(#[from] cplane_api::AuthError),
+    Console(#[from] cloud::AuthError),
 
-    #[cfg(test)]
+    #[error(transparent)]
+    GetAuthInfo(#[from] cloud::api::GetAuthInfoError),
+
+    #[error(transparent)]
+    WakeCompute(#[from] cloud::api::WakeComputeError),
+
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
 
@@ -41,19 +40,19 @@ pub enum AuthErrorImpl {
 
 impl AuthErrorImpl {
     pub fn auth_failed(msg: impl Into<String>) -> Self {
-        AuthErrorImpl::Console(cplane_api::AuthError::auth_failed(msg))
+        AuthErrorImpl::Console(cloud::AuthError::auth_failed(msg))
     }
 }
 
 impl From<waiters::RegisterError> for AuthErrorImpl {
     fn from(e: waiters::RegisterError) -> Self {
-        AuthErrorImpl::Console(cplane_api::AuthError::from(e))
+        AuthErrorImpl::Console(cloud::AuthError::from(e))
     }
 }
 
 impl From<waiters::WaitError> for AuthErrorImpl {
     fn from(e: waiters::WaitError) -> Self {
-        AuthErrorImpl::Console(cplane_api::AuthError::from(e))
+        AuthErrorImpl::Console(cloud::AuthError::from(e))
     }
 }
 
@@ -81,40 +80,28 @@ impl UserFacingError for AuthError {
     }
 }
 
-async fn handle_static(
-    host: String,
-    port: u16,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    creds: ClientCredentials,
-) -> Result<DatabaseInfo, AuthError> {
-    client
-        .write_message(&Be::AuthenticationCleartextPassword)
-        .await?;
-
-    // Read client's password bytes
-    let msg = client.read_password_message().await?;
-    let cleartext_password = parse_password(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
-
-    let db_info = DatabaseInfo {
-        host,
-        port,
-        dbname: creds.dbname.clone(),
-        user: creds.user.clone(),
-        password: Some(cleartext_password.into()),
-    };
-
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
-
-    Ok(db_info)
-}
-
-async fn handle_existing_user(
+async fn handle_user(
     config: &ProxyConfig,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     creds: ClientCredentials,
-) -> Result<DatabaseInfo, AuthError> {
+) -> Result<compute::NodeInfo, AuthError> {
+    if creds.is_existing_user() {
+        match &config.cloud_endpoint {
+            CloudApi::V1(api) => handle_existing_user_v1(api, client, creds).await,
+            CloudApi::V2(api) => handle_existing_user_v2(api.as_ref(), client, creds).await,
+        }
+    } else {
+        let redirect_uri = config.redirect_uri.as_ref();
+        handle_new_user(redirect_uri, client).await
+    }
+}
+
+/// Authenticate user via a legacy cloud API endpoint.
+async fn handle_existing_user_v1(
+    cloud: &cloud::Legacy,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    creds: ClientCredentials,
+) -> Result<compute::NodeInfo, AuthError> {
     let psql_session_id = new_psql_session_id();
     let md5_salt = rand::random();
 
@@ -126,8 +113,7 @@ async fn handle_existing_user(
     let msg = client.read_password_message().await?;
     let md5_response = parse_password(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
 
-    let cplane = CPlaneApi::new(config.auth_endpoint.clone());
-    let db_info = cplane
+    let db_info = cloud
         .authenticate_proxy_client(creds, md5_response, &md5_salt, &psql_session_id)
         .await?;
 
@@ -135,17 +121,53 @@ async fn handle_existing_user(
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
-    Ok(db_info)
+    Ok(compute::NodeInfo {
+        db_info,
+        scram_keys: None,
+    })
+}
+
+/// Authenticate user via a new cloud API endpoint which supports SCRAM.
+async fn handle_existing_user_v2(
+    cloud: &(impl cloud::Api + ?Sized),
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    creds: ClientCredentials,
+) -> Result<compute::NodeInfo, AuthError> {
+    let auth_info = cloud.get_auth_info(&creds).await?;
+
+    let flow = AuthFlow::new(client);
+    let scram_keys = match auth_info {
+        cloud::api::AuthInfo::Md5(_) => {
+            // TODO: decide if we should support MD5 in api v2
+            return Err(AuthErrorImpl::auth_failed("MD5 is not supported").into());
+        }
+        cloud::api::AuthInfo::Scram(secret) => {
+            let scram = Scram(&secret);
+            Some(compute::ScramKeys {
+                client_key: flow.begin(scram).await?.authenticate().await?.as_bytes(),
+                server_key: secret.server_key.as_bytes(),
+            })
+        }
+    };
+
+    client
+        .write_message_noflush(&Be::AuthenticationOk)?
+        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+
+    Ok(compute::NodeInfo {
+        db_info: cloud.wake_compute(&creds).await?,
+        scram_keys,
+    })
 }
 
 async fn handle_new_user(
-    config: &ProxyConfig,
+    redirect_uri: &str,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<DatabaseInfo, AuthError> {
+) -> Result<compute::NodeInfo, AuthError> {
     let psql_session_id = new_psql_session_id();
-    let greeting = hello_message(&config.redirect_uri, &psql_session_id);
+    let greeting = hello_message(redirect_uri, &psql_session_id);
 
-    let db_info = cplane_api::with_waiter(psql_session_id, |waiter| async {
+    let db_info = cloud::with_waiter(psql_session_id, |waiter| async {
         // Give user a URL to spawn a new database
         client
             .write_message_noflush(&Be::AuthenticationOk)?
@@ -160,7 +182,10 @@ async fn handle_new_user(
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
-    Ok(db_info)
+    Ok(compute::NodeInfo {
+        db_info,
+        scram_keys: None,
+    })
 }
 
 fn new_psql_session_id() -> String {
