@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use etcd_broker::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
+use tokio::sync::watch;
 
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -23,7 +24,7 @@ use utils::{
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-
+use crate::wal_backup;
 use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
@@ -102,8 +103,15 @@ impl SharedState {
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
+
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
+
+        let (lsn_committed_sender, lsn_committed_receiver) = watch::channel(Lsn::INVALID);
+        let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
+        let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
+
+        wal_backup::create(conf, zttid, control_store.backup_lsn, wal_seg_size_receiver, lsn_committed_receiver, lsn_backed_up_sender)?;
+        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id, lsn_committed_sender, lsn_backed_up_receiver, wal_seg_size_sender)?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -119,15 +127,24 @@ impl SharedState {
 
     /// Restore SharedState from control file.
     /// If file doesn't exist, bails out.
-    fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
+    fn restore(
+        conf: &SafeKeeperConf,
+        zttid: &ZTenantTimelineId,
+    ) -> Result<Self> {
         let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
 
         info!("timeline {} restored", zttid.timeline_id);
 
+        let (lsn_committed_sender, lsn_committed_receiver) = watch::channel(Lsn::INVALID);
+        let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
+        let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
+
+        wal_backup::create(conf, zttid, control_store.backup_lsn, wal_seg_size_receiver, lsn_committed_receiver, lsn_backed_up_sender)?;
+
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
+            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id, lsn_committed_sender, lsn_backed_up_receiver, wal_seg_size_sender)?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
@@ -428,7 +445,7 @@ impl Timeline {
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
-            s3_wal_lsn: Some(shared_state.sk.inmem.s3_wal_lsn),
+            // backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
             // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: Some(max(
                 shared_state.get_replicas_state().remote_consistent_lsn,
@@ -447,6 +464,7 @@ impl Timeline {
                 })
                 .transpose()
                 .context("Failed to get the pageserver callmemaybe connstr")?,
+            backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
         })
     }
 
@@ -560,12 +578,14 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         peer_ids: Vec<ZNodeId>,
     ) -> Result<Arc<Timeline>> {
+
         match timelines.get(&zttid) {
             Some(_) => bail!("timeline {} already exists", zttid),
             None => {
                 // TODO: check directory existence
                 let dir = conf.timeline_dir(&zttid);
                 fs::create_dir_all(dir)?;
+
                 let shared_state = SharedState::create(conf, &zttid, peer_ids)
                     .context("failed to create shared state")?;
 
@@ -597,8 +617,9 @@ impl GlobalTimelines {
         match timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
+
                 let shared_state =
-                    SharedState::restore(conf, &zttid).context("failed to restore shared state");
+                    SharedState::restore(conf, &zttid);
 
                 let shared_state = match shared_state {
                     Ok(shared_state) => shared_state,

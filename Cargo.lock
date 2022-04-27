@@ -2608,6 +2608,7 @@ name = "safekeeper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "byteorder",
  "bytes",
  "clap 3.0.14",

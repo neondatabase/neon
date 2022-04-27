@@ -39,10 +39,10 @@ pub struct SkTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
     pub commit_lsn: Option<Lsn>,
-    /// LSN up to which safekeeper offloaded WAL to s3.
+    /// LSN up to which safekeeper has backed WAL.
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
-    pub s3_wal_lsn: Option<Lsn>,
+    pub backup_lsn: Option<Lsn>,
     /// LSN of last checkpoint uploaded by pageserver.
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
