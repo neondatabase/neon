@@ -244,7 +244,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     );
 
     tokio::task::spawn_blocking(move || {
-        if tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).is_ok() {
+        if tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id).is_ok() {
             // TODO: maybe answer with 309 Not Modified here?
             anyhow::bail!("Timeline is already present locally")
         };
@@ -365,7 +365,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
         crate::tenant_mgr::list_tenants()
     })
     .await
-    .map_err(ApiError::from_err)??;
+    .map_err(ApiError::from_err)?;
 
     json_response(StatusCode::OK, response_data)
 }
@@ -377,7 +377,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let remote_index = get_state(&request).remote_index.clone();
 
-    let mut tenant_conf: TenantConfOpt = Default::default();
+    let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period =
             Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);

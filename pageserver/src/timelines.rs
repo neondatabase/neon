@@ -2,7 +2,7 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -106,7 +106,7 @@ impl LocalTimelineInfo {
         match repo_timeline {
             RepositoryTimeline::Loaded(_) => {
                 let datadir_tline =
-                    tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id)?;
+                    tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
                 Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
             }
             RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
@@ -152,7 +152,7 @@ pub fn init_pageserver(
 
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        let repo = create_repo(conf, Default::default(), tenant_id, CreateRepo::Dummy)
+        let repo = create_repo(conf, TenantConfOpt::default(), tenant_id, CreateRepo::Dummy)
             .context("failed to create repo")?;
         let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
         bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
@@ -203,9 +203,11 @@ pub fn create_repo(
     };
 
     let repo_dir = conf.tenant_path(&tenant_id);
-    if repo_dir.exists() {
-        bail!("tenant {} directory already exists", tenant_id);
-    }
+    ensure!(
+        repo_dir.exists(),
+        "cannot create new tenant repo: '{}' directory already exists",
+        tenant_id
+    );
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&repo_dir)
@@ -383,7 +385,7 @@ pub(crate) fn create_timeline(
             repo.branch_timeline(ancestor_timeline_id, new_timeline_id, start_lsn)?;
             // load the timeline into memory
             let loaded_timeline =
-                tenant_mgr::get_timeline_for_tenant_load(tenant_id, new_timeline_id)?;
+                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
             LocalTimelineInfo::from_loaded_timeline(&loaded_timeline, false)
                 .context("cannot fill timeline info")?
         }
@@ -391,7 +393,7 @@ pub(crate) fn create_timeline(
             bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
             // load the timeline into memory
             let new_timeline =
-                tenant_mgr::get_timeline_for_tenant_load(tenant_id, new_timeline_id)?;
+                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
             LocalTimelineInfo::from_loaded_timeline(&new_timeline, false)
                 .context("cannot fill timeline info")?
         }
