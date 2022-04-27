@@ -3,6 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
+use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::remote_storage::{self, LocalTimelineInitStatus, RemoteIndex, SyncStartupData};
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::tenant_config::TenantConfOpt;
@@ -12,7 +13,7 @@ use crate::timelines;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
@@ -125,18 +126,11 @@ pub fn apply_timeline_sync_status_updates(
                 continue;
             }
         };
-
-        for (timeline_id, status_update) in status_updates {
-            match repo.apply_timeline_remote_sync_status_update(timeline_id, status_update)
-            {
-                Ok(()) => debug!("successfully applied timeline sync status update: {timeline_id} -> {status_update}"),
-                Err(e) => error!(
-                    "Failed to apply timeline sync status update for tenant {tenant_id}. timeline {timeline_id} update {status_update} Error: {e:?}"
-                ),
-            }
-            match status_update {
-                TimelineSyncStatusUpdate::Downloaded => todo!("TODO kb "),
-            }
+        match register_new_timelines(&repo, status_updates) {
+            Ok(()) => info!("successfully applied tenant {tenant_id} sync status updates"),
+            Err(e) => error!(
+                "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
+            ),
         }
     }
 }
@@ -302,19 +296,46 @@ pub fn get_local_timeline_with_load(
     if let Some(page_tline) = tenant.local_timelines.get(&timeline_id) {
         return Ok(Arc::clone(page_tline));
     }
-    // First access to this timeline. Create a DatadirTimeline wrapper for it
-    let tline = tenant
-        .repo
-        .get_timeline_load(timeline_id)
-        .with_context(|| format!("Timeline {timeline_id} not found for tenant {tenant_id}"))?;
 
-    let repartition_distance = tenant.repo.get_checkpoint_distance() / 10;
-
-    let page_tline = Arc::new(DatadirTimelineImpl::new(tline, repartition_distance));
-    page_tline.init_logical_size()?;
+    let page_tline = new_local_timeline(&tenant.repo, timeline_id)
+        .with_context(|| format!("Failed to create new local timeline for tenant {tenant_id}"))?;
     tenant
         .local_timelines
         .insert(timeline_id, Arc::clone(&page_tline));
+    Ok(page_tline)
+}
+
+pub fn detach_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    // shutdown the timeline threads (this shuts down the walreceiver)
+    thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
+
+    match tenants_state::write_tenants().get_mut(&tenant_id) {
+        Some(tenant) => {
+            tenant
+                .repo
+                .detach_timeline(timeline_id)
+                .context("Failed to detach inmem tenant timeline")?;
+            tenant.local_timelines.remove(&timeline_id);
+        }
+        None => bail!("Tenant {tenant_id} not found in local tenant state"),
+    }
+
+    Ok(())
+}
+
+fn new_local_timeline(
+    repo: &RepositoryImpl,
+    timeline_id: ZTimelineId,
+) -> anyhow::Result<Arc<DatadirTimeline<LayeredRepository>>> {
+    let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
+        format!("Inmem timeline {timeline_id} not found in tenant's repository")
+    })?;
+    let repartition_distance = repo.get_checkpoint_distance() / 10;
+    let page_tline = Arc::new(DatadirTimelineImpl::new(
+        inmem_timeline,
+        repartition_distance,
+    ));
+    page_tline.init_logical_size()?;
     Ok(page_tline)
 }
 
@@ -344,35 +365,70 @@ fn init_local_repositories(
     for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
         // initialize local tenant
         let repo = load_local_repo(conf, tenant_id, remote_index)
-            .with_context(|| format!("Failed to load repo for tenant {}", tenant_id))?;
+            .with_context(|| format!("Failed to load repo for tenant {tenant_id}"))?;
+
+        let mut status_updates = HashMap::with_capacity(local_timeline_init_statuses.len());
         for (timeline_id, init_status) in local_timeline_init_statuses {
             match init_status {
                 LocalTimelineInitStatus::LocallyComplete => {
-                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", timeline_id, tenant_id);
-                    // Lets fail here loudly to be on the safe side.
-                    // XXX: It may be a better api to actually distinguish between repository startup
-                    //   and processing of newly downloaded timelines.
-                    repo.apply_timeline_remote_sync_status_update(
-                        timeline_id,
-                        TimelineSyncStatusUpdate::Downloaded,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "Failed to bootstrap timeline {} for tenant {}",
-                            timeline_id, tenant_id
-                        )
-                    })?
+                    debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
+                    status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
                 }
                 LocalTimelineInitStatus::NeedsSync => {
                     debug!(
-                        "timeline {} for tenant {} needs sync, \
-                         so skipped for adding into repository until sync is finished",
-                        tenant_id, timeline_id
+                        "timeline {tenant_id} for tenant {timeline_id} needs sync, \
+                         so skipped for adding into repository until sync is finished"
                     );
                 }
             }
         }
+
+        // Lets fail here loudly to be on the safe side.
+        // XXX: It may be a better api to actually distinguish between repository startup
+        //   and processing of newly downloaded timelines.
+        register_new_timelines(&repo, status_updates)
+            .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?
     }
+    Ok(())
+}
+
+fn register_new_timelines(
+    repo: &LayeredRepository,
+    status_updates: HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
+) -> anyhow::Result<()> {
+    let mut registration_queue = Vec::with_capacity(status_updates.len());
+
+    // first need to register the in-mem representations, to avoid missing ancestors during the local disk data registration
+    for (timeline_id, status_update) in status_updates {
+        repo.apply_timeline_remote_sync_status_update(timeline_id, status_update)
+            .with_context(|| {
+                format!("Failed to load timeline {timeline_id} into in-memory repository")
+            })?;
+        match status_update {
+            TimelineSyncStatusUpdate::Downloaded => registration_queue.push(timeline_id),
+        }
+    }
+
+    for timeline_id in registration_queue {
+        let tenant_id = repo.tenant_id();
+        match tenants_state::write_tenants().get_mut(&tenant_id) {
+            Some(tenant) => match tenant.local_timelines.entry(timeline_id) {
+                Entry::Occupied(_) => {
+                    bail!("Local timeline {timeline_id} already registered")
+                }
+                Entry::Vacant(v) => {
+                    v.insert(new_local_timeline(repo, timeline_id).with_context(|| {
+                        format!("Failed to register new local timeline for tenant {tenant_id}")
+                    })?);
+                }
+            },
+            None => bail!(
+                "Tenant {} not found in local tenant state",
+                repo.tenant_id()
+            ),
+        }
+    }
+
     Ok(())
 }
 

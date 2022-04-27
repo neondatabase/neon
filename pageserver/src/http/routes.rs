@@ -347,8 +347,7 @@ async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body
         let _enter =
             info_span!("timeline_detach_handler", tenant = %tenant_id, timeline = %timeline_id)
                 .entered();
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        repo.detach_timeline(timeline_id)
+        tenant_mgr::detach_timeline(tenant_id, timeline_id)
     })
     .await
     .map_err(ApiError::from_err)??;
