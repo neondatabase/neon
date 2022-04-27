@@ -19,6 +19,7 @@ use lazy_static::lazy_static;
 
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
+
 use crate::wal_storage;
 use metrics::{register_gauge_vec, Gauge, GaugeVec};
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
@@ -141,7 +142,7 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
-    s3_wal_lsn: Lsn,
+    backup_lsn: Lsn,
     /// Term of the last entry.
     term: Term,
     /// LSN of the last record.
@@ -153,7 +154,7 @@ pub struct PeerInfo {
 impl PeerInfo {
     fn new() -> Self {
         Self {
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn::INVALID,
             term: INVALID_TERM,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
@@ -193,9 +194,9 @@ pub struct SafeKeeperState {
     /// Part of WAL acknowledged by quorum and available locally. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
-    /// First LSN not yet offloaded to s3. Useful to persist to avoid finding
-    /// out offloading progress on boot.
-    pub s3_wal_lsn: Lsn,
+    /// LSN that points to the end of the last backed up segment. Useful to
+    /// persist to avoid finding out offloading progress on boot.
+    pub backup_lsn: Lsn,
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
@@ -217,7 +218,7 @@ pub struct SafeKeeperState {
 // are not flushed yet.
 pub struct SafekeeperMemState {
     pub commit_lsn: Lsn,
-    pub s3_wal_lsn: Lsn, // TODO: keep only persistent version
+    pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
     pub proposer_uuid: PgUuid,
@@ -241,7 +242,7 @@ impl SafeKeeperState {
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: Lsn(0),
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn::INVALID,
             peer_horizon_lsn: Lsn(0),
             remote_consistent_lsn: Lsn(0),
             peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
@@ -559,7 +560,7 @@ where
             epoch_start_lsn: Lsn(0),
             inmem: SafekeeperMemState {
                 commit_lsn: state.commit_lsn,
-                s3_wal_lsn: state.s3_wal_lsn,
+                backup_lsn: state.backup_lsn,
                 peer_horizon_lsn: state.peer_horizon_lsn,
                 remote_consistent_lsn: state.remote_consistent_lsn,
                 proposer_uuid: state.proposer_uuid,
@@ -649,7 +650,6 @@ where
             self.state.persist(&state)?;
         }
 
-        // pass wal_seg_size to read WAL and find flush_lsn
         self.wal_store.init_storage(&self.state)?;
 
         info!(
@@ -764,6 +764,14 @@ where
         self.inmem.commit_lsn = commit_lsn;
         self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
+        // We got our first commit_lsn, which means we should sync
+        // everything to disk, to initialize the state.
+        if self.state.commit_lsn == Lsn::INVALID && commit_lsn != Lsn::INVALID {
+            self.inmem.backup_lsn = self.inmem.commit_lsn; // initialize backup_lsn
+            self.wal_store.flush_wal()?;
+            self.persist_control_file()?;
+        }
+
         // If new commit_lsn reached epoch switch, force sync of control
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
@@ -775,22 +783,14 @@ where
             self.persist_control_file()?;
         }
 
-        // We got our first commit_lsn, which means we should sync
-        // everything to disk, to initialize the state.
-        if self.state.commit_lsn == Lsn(0) && commit_lsn > Lsn(0) {
-            self.wal_store.flush_wal()?;
-            self.persist_control_file()?;
-        }
-
         Ok(())
     }
 
     /// Persist in-memory state to the disk.
     fn persist_control_file(&mut self) -> Result<()> {
         let mut state = self.state.clone();
-
         state.commit_lsn = self.inmem.commit_lsn;
-        state.s3_wal_lsn = self.inmem.s3_wal_lsn;
+        state.backup_lsn = self.inmem.backup_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
         state.remote_consistent_lsn = self.inmem.remote_consistent_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
@@ -898,11 +898,11 @@ where
                 self.update_commit_lsn()?;
             }
         }
-        if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
-            let new_s3_wal_lsn = max(s3_wal_lsn, self.inmem.s3_wal_lsn);
+        if let Some(backup_lsn) = sk_info.backup_lsn {
+            let new_backup_lsn = max(backup_lsn, self.inmem.backup_lsn);
             sync_control_file |=
-                self.state.s3_wal_lsn + (self.state.server.wal_seg_size as u64) < new_s3_wal_lsn;
-            self.inmem.s3_wal_lsn = new_s3_wal_lsn;
+                self.state.backup_lsn + (self.state.server.wal_seg_size as u64) < new_backup_lsn;
+            self.inmem.backup_lsn = new_backup_lsn;
         }
         if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
             let new_remote_consistent_lsn =
@@ -930,29 +930,23 @@ where
     /// offloading.
     /// While it is safe to use inmem values for determining horizon,
     /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self, s3_offload_enabled: bool) -> XLogSegNo {
-        let s3_offload_horizon = if s3_offload_enabled {
-            self.state.s3_wal_lsn
-        } else {
-            Lsn(u64::MAX)
-        };
-        let horizon_lsn = min(
-            min(
-                self.state.remote_consistent_lsn,
-                self.state.peer_horizon_lsn,
-            ),
-            s3_offload_horizon,
+    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
+        let mut horizon_lsn = min(
+            self.state.remote_consistent_lsn,
+            self.state.peer_horizon_lsn,
         );
+        if wal_backup_enabled {
+            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
+        }
         horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use super::*;
     use crate::wal_storage::Storage;
+    use std::ops::Deref;
 
     // fake storage for tests
     struct InMemoryState {
@@ -1013,6 +1007,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
+
         let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
@@ -1028,6 +1023,7 @@ mod tests {
         let storage = InMemoryState {
             persisted_state: state,
         };
+
         sk = SafeKeeper::new(ztli, storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
@@ -1045,6 +1041,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
+
         let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {

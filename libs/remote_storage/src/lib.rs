@@ -16,8 +16,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
+use anyhow::{bail, Context};
+
 use tokio::io;
+use toml_edit::Item;
 use tracing::info;
 
 pub use self::{
@@ -201,6 +203,90 @@ pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str)
     original_path
         .as_ref()
         .with_extension(new_extension.as_ref())
+}
+
+impl RemoteStorageConfig {
+    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
+        let local_path = toml.get("local_path");
+        let bucket_name = toml.get("bucket_name");
+        let bucket_region = toml.get("bucket_region");
+
+        let max_concurrent_syncs = NonZeroUsize::new(
+            parse_optional_integer("max_concurrent_syncs", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
+        )
+        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
+
+        let max_sync_errors = NonZeroU32::new(
+            parse_optional_integer("max_sync_errors", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
+        )
+        .context("Failed to parse 'max_sync_errors' as a positive integer")?;
+
+        let concurrency_limit = NonZeroUsize::new(
+            parse_optional_integer("concurrency_limit", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+        )
+        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
+
+        let storage = match (local_path, bucket_name, bucket_region) {
+            (None, None, None) => bail!("no 'local_path' nor 'bucket_name' option"),
+            (_, Some(_), None) => {
+                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
+            }
+            (_, None, Some(_)) => {
+                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
+            }
+            (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
+                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
+                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
+                prefix_in_bucket: toml
+                    .get("prefix_in_bucket")
+                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
+                    .transpose()?,
+                endpoint: toml
+                    .get("endpoint")
+                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
+                    .transpose()?,
+                concurrency_limit,
+            }),
+            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
+                parse_toml_string("local_path", local_path)?,
+            )),
+            (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
+        };
+
+        Ok(RemoteStorageConfig {
+            max_concurrent_syncs,
+            max_sync_errors,
+            storage,
+        })
+    }
+}
+
+// Helper functions to parse a toml Item
+fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
+where
+    I: TryFrom<i64, Error = E>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let toml_integer = match item.get(name) {
+        Some(item) => item
+            .as_integer()
+            .with_context(|| format!("configure option {name} is not an integer"))?,
+        None => return Ok(None),
+    };
+
+    I::try_from(toml_integer)
+        .map(Some)
+        .with_context(|| format!("configure option {name} is too large"))
+}
+
+fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
+    let s = item
+        .as_str()
+        .with_context(|| format!("configure option {name} is not a string"))?;
+    Ok(s.to_string())
 }
 
 #[cfg(test)]
