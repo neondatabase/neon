@@ -332,7 +332,7 @@ mod tests {
         .await;
         assert!(
             matches!(
-                dbg!(already_downloading_remote_timeline_download),
+                already_downloading_remote_timeline_download,
                 DownloadedTimeline::Abort,
             ),
             "Should not allow downloading for remote timeline that does not expect it"
