@@ -73,7 +73,8 @@ impl From<&DecodedBkpBlock> for Page {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+// TODO include tenant and timeline
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalEntryMetadata {
     pub lsn: Lsn,
     pub size: usize,

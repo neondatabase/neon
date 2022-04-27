@@ -1271,13 +1271,15 @@ class PsbenchBin:
     """A helper class for running the pageserver benchmarker tool."""
     wal_metadata_path: str
 
-    def test_latest_pages(self, tenant_hex: str, timeline: str) -> str:
+    def test_latest_pages(self, tenant_hex: str, timeline: str, num_clients=None) -> str:
+        num_clients = num_clients or 1
         psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
         args = [
             psbench_binpath,
             self.wal_metadata_path,
             tenant_hex,
             timeline,
+            f"--num-clients={num_clients}",
             "get-latest-pages",
         ]
         return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()

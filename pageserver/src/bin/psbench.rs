@@ -4,7 +4,9 @@
 //! of the tester matters, and the pagestream API is easier to call from rust.
 use bytes::{BufMut, BytesMut};
 use clap::{Parser, Subcommand};
+use futures::future;
 use pageserver::wal_metadata::{Page, WalEntryMetadata};
+use rand::thread_rng;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,6 +21,7 @@ use zenith_utils::{
     lsn::Lsn,
     pq_proto::{BeMessage, FeMessage},
 };
+use rand::seq::SliceRandom;
 
 use anyhow::Result;
 
@@ -108,6 +111,7 @@ impl PagestreamApi {
 
 /// Parsed wal_metadata file with additional derived
 /// statistics for convenience.
+#[derive(Clone)]
 struct Metadata {
     // Parsed from metadata file
     wal_metadata: Vec<WalEntryMetadata>,
@@ -146,6 +150,9 @@ impl Metadata {
 
     /// Print results in a format readable by benchmark_fixture.py
     fn report_latency(&self, latencies: &[Duration]) -> Result<()> {
+        let mut latencies: Vec<&Duration> = latencies.iter().collect();
+        latencies.sort();
+
         println!("test_param num_pages {}", self.affected_pages.len());
         println!("test_param num_wal_entries {}", self.wal_metadata.len());
         println!("test_param total_wal_size {} bytes", self.total_wal_size);
@@ -156,6 +163,11 @@ impl Metadata {
         println!(
             "lower_is_better median {:?} microseconds",
             latencies[latencies.len() / 2].as_micros()
+        );
+        println!(
+            "lower_is_better average {:.3} microseconds",
+            (latencies.iter().map(|l| l.as_micros()).sum::<u128>() as f64) / (
+                latencies.len() as f64)
         );
         println!(
             "lower_is_better p99 {:?} microseconds",
@@ -172,47 +184,59 @@ impl Metadata {
 /// Sequentially get the latest version of each page and report latencies
 async fn test_latest_pages(api: &mut PagestreamApi, metadata: &Metadata) -> Result<Vec<Duration>> {
     let mut latencies: Vec<Duration> = vec![];
-    for page in &metadata.affected_pages {
+    let mut page_order: Vec<&Page> = metadata.affected_pages.iter().collect();
+    page_order.shuffle(&mut thread_rng());
+    for page in page_order {
         let start = Instant::now();
         let _page_bytes = api.get_page(&metadata.latest_lsn, page, true).await?;
         let duration = start.elapsed();
 
         latencies.push(duration);
     }
-    latencies.sort();
     Ok(latencies)
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 struct Args {
     wal_metadata_path: PathBuf,
+
+    // TODO get these from wal metadata
+    // TODO test multi-timeline parallel reads
     tenant_hex: String,
     timeline: String,
+
+    // TODO change to `clients_per_timeline`
+    #[clap(long, default_value = "1")]
+    num_clients: usize,
 
     #[clap(subcommand)]
     test: PsbenchTest,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum PsbenchTest {
     GetLatestPages,
+}
+
+async fn run_client(args: Args, metadata: Metadata) -> Vec<Duration> {
+    let mut pagestream = PagestreamApi::connect(&args.tenant_hex, &args.timeline).await.unwrap();
+    match args.test {
+        PsbenchTest::GetLatestPages => test_latest_pages(&mut pagestream, &metadata),
+    }
+    .await.unwrap()
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let metadata = Metadata::build(&args.wal_metadata_path).unwrap();
 
-    // Initialize setup
-    let metadata = Metadata::build(&args.wal_metadata_path)?;
-    let mut pagestream = PagestreamApi::connect(&args.tenant_hex, &args.timeline).await?;
+    // TODO explicitly spawn a thread for each?
+    let latencies: Vec<Duration> = future::join_all((0..args.num_clients).map(|_| {
+        run_client(args.clone(), metadata.clone())
+    })).await.into_iter().flatten().collect();
 
-    // Run test
-    let latencies = match args.test {
-        PsbenchTest::GetLatestPages => test_latest_pages(&mut pagestream, &metadata),
-    }
-    .await?;
-
-    // Report results
-    metadata.report_latency(&latencies)?;
+    println!("test_param num_clients {}", args.num_clients);
+    metadata.report_latency(&latencies).unwrap();
     Ok(())
 }
