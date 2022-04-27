@@ -29,11 +29,11 @@ use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use tracing::*;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::pq_proto::ZenithFeedback;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTenantTimelineId;
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    lsn::Lsn,
+    pq_proto::ZenithFeedback,
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 //
 // We keep one WAL Receiver active per timeline.
@@ -93,7 +93,7 @@ pub fn launch_wal_receiver(
             receivers.insert((tenantid, timelineid), receiver);
 
             // Update tenant state and start tenant threads, if they are not running yet.
-            tenant_mgr::activate_tenant(conf, tenantid)?;
+            tenant_mgr::activate_tenant(tenantid)?;
         }
     };
     Ok(())
@@ -305,7 +305,7 @@ fn walreceiver_main(
                         tenant_id,
                         timeline_id,
                     })
-                    .and_then(|e| e.disk_consistent_lsn())
+                    .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
                     .unwrap_or(Lsn(0)) // no checkpoint was uploaded
             });
 

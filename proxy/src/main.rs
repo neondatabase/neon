@@ -30,7 +30,7 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::future::Future;
 use tokio::{net::TcpListener, task::JoinError};
-use zenith_utils::GIT_VERSION;
+use utils::GIT_VERSION;
 
 use crate::config::{ClientAuthMethod, RouterConfig};
 
@@ -43,7 +43,7 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    zenith_metrics::set_common_metrics_prefix("zenith_proxy");
+    metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = Command::new("Zenith proxy/router")
         .version(GIT_VERSION)
         .arg(

@@ -20,7 +20,7 @@ use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
 use postgres_ffi::{Oid, TransactionId};
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 ///
 /// Import all relation data pages from local disk into the repository.

@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
-use zenith_utils::{
+use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };

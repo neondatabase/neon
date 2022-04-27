@@ -244,3 +244,24 @@ pub fn handle_databases(spec: &ClusterSpec, client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+// Grant CREATE ON DATABASE to the database owner
+// to allow clients create trusted extensions.
+pub fn handle_grants(spec: &ClusterSpec, client: &mut Client) -> Result<()> {
+    info!("cluster spec grants:");
+
+    for db in &spec.cluster.databases {
+        let dbname = &db.name;
+
+        let query: String = format!(
+            "GRANT CREATE ON DATABASE {} TO {}",
+            dbname.quote(),
+            db.owner.quote()
+        );
+        info!("grant query {}", &query);
+
+        client.execute(query.as_str(), &[])?;
+    }
+
+    Ok(())
+}

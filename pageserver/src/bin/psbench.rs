@@ -28,8 +28,8 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
-use zenith_utils::{
+use utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
     lsn::Lsn,
     pq_proto::{BeMessage, FeMessage},
 };

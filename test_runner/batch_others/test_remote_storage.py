@@ -18,6 +18,7 @@ import pytest
 #   * starts a pageserver with remote storage, stores specific data in its tables
 #   * triggers a checkpoint (which produces a local data scheduled for backup), gets the corresponding timeline id
 #   * polls the timeline status to ensure it's copied remotely
+#   * inserts more data in the pageserver and repeats the process, to check multiple checkpoints case
 #   * stops the pageserver, clears all local directories
 #
 # 2. Second pageserver
@@ -50,27 +51,30 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
     timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute(f'''
-                CREATE TABLE t1(id int primary key, secret text);
-                INSERT INTO t1 VALUES ({data_id}, '{data_secret}');
-            ''')
-            cur.execute("SELECT pg_current_wal_flush_lsn()")
-            current_lsn = lsn_from_hex(cur.fetchone()[0])
+    checkpoint_numbers = range(1, 3)
 
-    # wait until pageserver receives that data
-    wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
+    for checkpoint_number in checkpoint_numbers:
+        with closing(pg.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'''
+                    CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
+                    INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                ''')
+                cur.execute("SELECT pg_current_wal_flush_lsn()")
+                current_lsn = lsn_from_hex(cur.fetchone()[0])
 
-    # run checkpoint manually to be sure that data landed in remote storage
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
-            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+        # wait until pageserver receives that data
+        wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
 
-    log.info("waiting for upload")
-    # wait until pageserver successfully uploaded a checkpoint to remote storage
-    wait_for_upload(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
-    log.info("upload is done")
+        # run checkpoint manually to be sure that data landed in remote storage
+        with closing(env.pageserver.connect()) as psconn:
+            with psconn.cursor() as pscur:
+                pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+
+        log.info(f'waiting for checkpoint {checkpoint_number} upload')
+        # wait until pageserver successfully uploaded a checkpoint to remote storage
+        wait_for_upload(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
+        log.info(f'upload of checkpoint {checkpoint_number} is done')
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
@@ -93,5 +97,6 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     pg = env.postgres.create_start('main')
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute(f'SELECT secret FROM t1 WHERE id = {data_id};')
-            assert cur.fetchone() == (data_secret, )
+            for checkpoint_number in checkpoint_numbers:
+                cur.execute(f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};')
+                assert cur.fetchone() == (f'{data_secret}|{checkpoint_number}', )

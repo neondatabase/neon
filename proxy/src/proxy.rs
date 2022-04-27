@@ -5,10 +5,10 @@ use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use lazy_static::lazy_static;
+use metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
-use zenith_utils::pq_proto::{BeMessage as Be, *};
+use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -265,14 +265,24 @@ mod tests {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let server_config = {
-            let mut config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-            config.set_single_cert(vec![cert], key)?;
+            let config = rustls::ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)?;
+
             config.into()
         };
 
         let client_config = {
-            let mut config = rustls::ClientConfig::new();
-            config.root_store.add(&ca)?;
+            let config = rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates({
+                    let mut store = rustls::RootCertStore::empty();
+                    store.add(&ca)?;
+                    store
+                })
+                .with_no_client_auth();
+
             ClientConfig { config, hostname }
         };
 

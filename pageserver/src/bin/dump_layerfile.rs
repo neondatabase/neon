@@ -7,7 +7,7 @@ use pageserver::layered_repository::dump_layerfile_from_path;
 use pageserver::page_cache;
 use pageserver::virtual_file;
 use std::path::PathBuf;
-use zenith_utils::GIT_VERSION;
+use utils::GIT_VERSION;
 
 fn main() -> Result<()> {
     let arg_matches = Command::new("Zenith dump_layerfile utility")

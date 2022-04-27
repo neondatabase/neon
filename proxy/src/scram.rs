@@ -18,7 +18,7 @@ pub use secret::*;
 pub use exchange::Exchange;
 pub use secret::ServerSecret;
 
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 // TODO: add SCRAM-SHA-256-PLUS
@@ -40,7 +40,7 @@ fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N
 /// This function essentially is `Hmac(sha256, key, input)`.
 /// Further reading: <https://datatracker.ietf.org/doc/html/rfc2104>.
 fn hmac_sha256<'a>(key: &[u8], parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_varkey(key).expect("bad key size");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("bad key size");
     parts.into_iter().for_each(|s| mac.update(s));
 
     // TODO: maybe newer `hmac` et al already migrated to regular arrays?

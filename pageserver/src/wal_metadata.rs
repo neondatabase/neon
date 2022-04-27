@@ -17,7 +17,7 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use tokio::io::AsyncReadExt;
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 use crate::{config::PageServerConf, walrecord::DecodedBkpBlock};
 

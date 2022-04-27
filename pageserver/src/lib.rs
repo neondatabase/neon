@@ -7,9 +7,11 @@ pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
+pub mod profiling;
 pub mod reltag;
 pub mod remote_storage;
 pub mod repository;
+pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_threads;
 pub mod thread_mgr;
@@ -23,13 +25,10 @@ pub mod walredo;
 
 use lazy_static::lazy_static;
 use tracing::info;
-use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
-use zenith_utils::{
-    postgres_backend,
-    zid::{ZTenantId, ZTimelineId},
-};
+use utils::postgres_backend;
 
 use crate::thread_mgr::ThreadKind;
+use metrics::{register_int_gauge_vec, IntGaugeVec};
 
 use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;

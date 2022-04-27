@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.zenith_fixtures import PgBin, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
-from fixtures.utils import etcd_path, lsn_to_hex, mkdir_if_needed, lsn_from_hex
+from fixtures.utils import etcd_path, get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
@@ -25,8 +25,8 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.broker = True
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_normal_work')
-    pg = env.postgres.create_start('test_wal_acceptors_normal_work')
+    env.zenith_cli.create_branch('test_safekeepers_normal_work')
+    pg = env.postgres.create_start('test_safekeepers_normal_work')
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -56,7 +56,7 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
     n_timelines = 3
 
     branch_names = [
-        "test_wal_acceptors_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
+        "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
     ]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
     # that's not really human readable, so the branch names are introduced in Zenith CLI.
@@ -196,8 +196,8 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = n_acceptors
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_restarts')
-    pg = env.postgres.create_start('test_wal_acceptors_restarts')
+    env.zenith_cli.create_branch('test_safekeepers_restarts')
+    pg = env.postgres.create_start('test_safekeepers_restarts')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -223,7 +223,7 @@ def test_restarts(zenith_env_builder: ZenithEnvBuilder):
 start_delay_sec = 2
 
 
-def delayed_wal_acceptor_start(wa):
+def delayed_safekeeper_start(wa):
     time.sleep(start_delay_sec)
     wa.start()
 
@@ -233,8 +233,8 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_unavailability')
-    pg = env.postgres.create_start('test_wal_acceptors_unavailability')
+    env.zenith_cli.create_branch('test_safekeepers_unavailability')
+    pg = env.postgres.create_start('test_safekeepers_unavailability')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -248,7 +248,7 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     # shutdown one of two acceptors, that is, majority
     env.safekeepers[0].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[0], ))
+    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[0], ))
     proc.start()
 
     start = time.time()
@@ -260,7 +260,7 @@ def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
     # for the world's balance, do the same with second acceptor
     env.safekeepers[1].stop()
 
-    proc = Process(target=delayed_wal_acceptor_start, args=(env.safekeepers[1], ))
+    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[1], ))
     proc.start()
 
     start = time.time()
@@ -304,8 +304,8 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_acceptors_race_conditions')
-    pg = env.postgres.create_start('test_wal_acceptors_race_conditions')
+    env.zenith_cli.create_branch('test_safekeepers_race_conditions')
+    pg = env.postgres.create_start('test_safekeepers_race_conditions')
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
@@ -370,6 +370,55 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
         time.sleep(0.5)
 
 
+# Test that old WAL consumed by peers and pageserver is removed from safekeepers.
+@pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
+def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 2
+    zenith_env_builder.broker = True
+    # to advance remote_consistent_llsn
+    zenith_env_builder.enable_local_fs_remote_storage()
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch('test_safekeepers_wal_removal')
+    pg = env.postgres.create_start('test_safekeepers_wal_removal')
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            # we rely upon autocommit after each statement
+            # as waiting for acceptors happens there
+            cur.execute('CREATE TABLE t(key int primary key, value text)')
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+
+    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
+    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    # force checkpoint to advance remote_consistent_lsn
+    with closing(env.pageserver.connect()) as psconn:
+        with psconn.cursor() as pscur:
+            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+
+    # We will wait for first segment removal. Make sure they exist for starter.
+    first_segments = [
+        os.path.join(sk.data_dir(), tenant_id, timeline_id, '000000010000000000000001')
+        for sk in env.safekeepers
+    ]
+    assert all(os.path.exists(p) for p in first_segments)
+
+    http_cli = env.safekeepers[0].http_client()
+    # Pretend WAL is offloaded to s3.
+    http_cli.record_safekeeper_info(tenant_id, timeline_id, {'s3_wal_lsn': 'FFFFFFFF/FEFFFFFF'})
+
+    # wait till first segment is removed on all safekeepers
+    started_at = time.time()
+    while True:
+        if all(not os.path.exists(p) for p in first_segments):
+            break
+        elapsed = time.time() - started_at
+        if elapsed > 20:
+            raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
+        time.sleep(0.5)
+
+
 class ProposerPostgres(PgProtocol):
     """Object for running postgres without ZenithEnv"""
     def __init__(self,
@@ -396,7 +445,7 @@ class ProposerPostgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pgdata_dir, 'postgresql.conf')
 
-    def create_dir_config(self, wal_acceptors: str):
+    def create_dir_config(self, safekeepers: str):
         """ Create dir and config for running --sync-safekeepers """
 
         mkdir_if_needed(self.pg_data_dir_path())
@@ -407,7 +456,7 @@ class ProposerPostgres(PgProtocol):
                 f"zenith.zenith_timeline = '{self.timeline_id.hex}'\n",
                 f"zenith.zenith_tenant = '{self.tenant_id.hex}'\n",
                 f"zenith.page_server_connstring = ''\n",
-                f"wal_acceptors = '{wal_acceptors}'\n",
+                f"wal_acceptors = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
             ]
@@ -692,7 +741,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     env.safekeepers[3].stop()
     active_safekeepers = [1, 2, 3]
     pg = env.postgres.create('test_replace_safekeeper')
-    pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
+    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
     # learn zenith timeline from compute
@@ -732,7 +781,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     pg.stop_and_destroy().create('test_replace_safekeeper')
     active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
-    pg.adjust_for_wal_acceptors(safekeepers_guc(env, active_safekeepers))
+    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
     execute_payload(pg)
@@ -742,3 +791,56 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     env.safekeepers[1].stop(immediate=True)
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+
+# We have `wal_keep_size=0`, so postgres should trim WAL once it's broadcasted
+# to all safekeepers. This test checks that compute WAL can fit into small number
+# of WAL segments.
+def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
+    # used to calculate delta in collect_stats
+    last_lsn = .0
+
+    # returns LSN and pg_wal size, all in MB
+    def collect_stats(pg: Postgres, cur, enable_logs=True):
+        nonlocal last_lsn
+        assert pg.pgdata_dir is not None
+
+        log.info('executing INSERT to generate WAL')
+        cur.execute("select pg_current_wal_lsn()")
+        current_lsn = lsn_from_hex(cur.fetchone()[0]) / 1024 / 1024
+        pg_wal_size = get_dir_size(os.path.join(pg.pgdata_dir, 'pg_wal')) / 1024 / 1024
+        if enable_logs:
+            log.info(f"LSN delta: {current_lsn - last_lsn} MB, current WAL size: {pg_wal_size} MB")
+        last_lsn = current_lsn
+        return current_lsn, pg_wal_size
+
+    # generates about ~20MB of WAL, to create at least one new segment
+    def generate_wal(cur):
+        cur.execute("INSERT INTO t SELECT generate_series(1,300000), 'payload'")
+
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch('test_wal_deleted_after_broadcast')
+    # Adjust checkpoint config to prevent keeping old WAL segments
+    pg = env.postgres.create_start(
+        'test_wal_deleted_after_broadcast',
+        config_lines=['min_wal_size=32MB', 'max_wal_size=32MB', 'log_checkpoints=on'])
+
+    pg_conn = pg.connect()
+    cur = pg_conn.cursor()
+    cur.execute('CREATE TABLE t(key int, value text)')
+
+    collect_stats(pg, cur)
+
+    # generate WAL to simulate normal workload
+    for i in range(5):
+        generate_wal(cur)
+        collect_stats(pg, cur)
+
+    log.info('executing checkpoint')
+    cur.execute('CHECKPOINT')
+    wal_size_after_checkpoint = collect_stats(pg, cur)[1]
+
+    # there shouldn't be more than 2 WAL segments (but dir may have archive_status files)
+    assert wal_size_after_checkpoint < 16 * 2.5

@@ -30,12 +30,10 @@ use crate::layered_repository::storage_layer::{
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
-use crate::{ZTenantId, ZTimelineId};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use log::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -43,9 +41,13 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard};
+use tracing::*;
 
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -148,6 +150,7 @@ impl Layer for ImageLayer {
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.key_range.contains(&key));
+        assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
         let inner = self.load()?;
@@ -251,7 +254,9 @@ impl ImageLayer {
             drop(inner);
             let mut inner = self.inner.write().unwrap();
             if !inner.loaded {
-                self.load_inner(&mut inner)?;
+                self.load_inner(&mut inner).with_context(|| {
+                    format!("Failed to load image layer {}", self.path().display())
+                })?
             } else {
                 // Another thread loaded it while we were not holding the lock.
             }

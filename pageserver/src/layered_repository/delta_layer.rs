@@ -35,11 +35,10 @@ use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::{ZTenantId, ZTimelineId};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use log::*;
 use serde::{Deserialize, Serialize};
+use tracing::*;
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
@@ -51,8 +50,11 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -222,6 +224,7 @@ impl Layer for DeltaLayer {
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start >= self.lsn_range.start);
         let mut need_image = true;
 
         ensure!(self.key_range.contains(&key));
@@ -287,7 +290,10 @@ impl Layer for DeltaLayer {
     }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
-        let inner = self.load().unwrap();
+        let inner = match self.load() {
+            Ok(inner) => inner,
+            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
+        };
 
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
@@ -419,7 +425,9 @@ impl DeltaLayer {
             drop(inner);
             let inner = self.inner.write().unwrap();
             if !inner.loaded {
-                self.load_inner(inner)?;
+                self.load_inner(inner).with_context(|| {
+                    format!("Failed to load delta layer {}", self.path().display())
+                })?;
             } else {
                 // Another thread loaded it while we were not holding the lock.
             }

@@ -40,8 +40,8 @@ from fixtures.log_helper import log
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
 
-A fixture is created with the decorator @zenfixture, which is a wrapper around
-the standard pytest.fixture with some extra behavior.
+A fixture is created with the decorator @pytest.fixture decorator.
+See docs: https://docs.pytest.org/en/6.2.x/fixture.html
 
 There are several environment variables that can control the running of tests:
 ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
@@ -155,25 +155,30 @@ def pytest_configure(config):
         raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
 
 
-def zenfixture(func: Fn) -> Fn:
+def profiling_supported():
+    """Return True if the pageserver was compiled with the 'profiling' feature
     """
-    This is a python decorator for fixtures with a flexible scope.
+    bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+    res = subprocess.run([bin_pageserver, '--version'],
+                         check=True,
+                         universal_newlines=True,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    return "profiling:true" in res.stdout
 
-    By default every test function will set up and tear down a new
-    database. In pytest, this is called fixtures "function" scope.
 
-    If the environment variable TEST_SHARED_FIXTURES is set, then all
-    tests will share the same database. State, logs, etc. will be
-    stored in a directory called "shared".
+def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
+    """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
+
+    This function can be used as a scope like this:
+    @pytest.fixture(scope=shareable_scope)
+    def myfixture(...)
+       ...
     """
-
-    scope: Literal['session', 'function'] = \
-        'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
-
-    return pytest.fixture(func, scope=scope)
+    return 'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def worker_seq_no(worker_id: str):
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -184,7 +189,7 @@ def worker_seq_no(worker_id: str):
     return int(worker_id[2:])
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def worker_base_port(worker_seq_no: int):
     # so we divide ports in ranges of 100 ports
     # so workers have disjoint set of ports for services
@@ -237,7 +242,7 @@ class PortDistributor:
                 'port range configured for test is exhausted, consider enlarging the range')
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def port_distributor(worker_base_port):
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
@@ -612,7 +617,7 @@ class ZenithEnv:
             self.broker.start()
 
     def get_safekeeper_connstrs(self) -> str:
-        """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
+        """ Get list of safekeeper endpoints suitable for safekeepers GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
     @cached_property
@@ -622,7 +627,7 @@ class ZenithEnv:
         return AuthKeys(pub=pub, priv=priv)
 
 
-@zenfixture
+@pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
     """
     Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -830,15 +835,34 @@ class ZenithCli:
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def create_tenant(self,
+                      tenant_id: Optional[uuid.UUID] = None,
+                      conf: Optional[Dict[str, str]] = None) -> uuid.UUID:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
-        res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        if conf is None:
+            res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        else:
+            res = self.raw_cli(
+                ['tenant', 'create', '--tenant-id', tenant_id.hex] +
+                sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
         res.check_returncode()
         return tenant_id
+
+    def config_tenant(self, tenant_id: uuid.UUID, conf: Dict[str, str]):
+        """
+        Update tenant config.
+        """
+        if conf is None:
+            res = self.raw_cli(['tenant', 'config', '--tenant-id', tenant_id.hex])
+        else:
+            res = self.raw_cli(
+                ['tenant', 'config', '--tenant-id', tenant_id.hex] +
+                sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
+        res.check_returncode()
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
         res = self.raw_cli(['tenant', 'list'])
@@ -1305,10 +1329,14 @@ class VanillaPostgres(PgProtocol):
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
             conf_file.writelines(options)
 
-    def start(self):
+    def start(self, log_path: Optional[str] = None):
         assert not self.running
         self.running = True
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
+
+        if log_path is None:
+            log_path = os.path.join(self.pgdatadir, "pg.log")
+
+        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
@@ -1509,7 +1537,7 @@ class Postgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pg_data_dir_path(), 'postgresql.conf')
 
-    def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
+    def adjust_for_safekeepers(self, safekeepers: str) -> 'Postgres':
         """
         Adjust instance config for working with wal acceptors instead of
         pageserver (pre-configured by CLI) directly.
@@ -1524,12 +1552,12 @@ class Postgres(PgProtocol):
                 if ("synchronous_standby_names" in cfg_line or
                         # don't ask pageserver to fetch WAL from compute
                         "callmemaybe_connstring" in cfg_line or
-                        # don't repeat wal_acceptors multiple times
+                        # don't repeat safekeepers/wal_acceptors multiple times
                         "wal_acceptors" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.write("wal_acceptors = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -1735,6 +1763,9 @@ class Safekeeper:
     def http_client(self) -> SafekeeperHttpClient:
         return SafekeeperHttpClient(port=self.port.http)
 
+    def data_dir(self) -> str:
+        return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
+
 
 @dataclass
 class SafekeeperTimelineStatus:
@@ -1766,6 +1797,12 @@ class SafekeeperHttpClient(requests.Session):
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'],
                                         remote_consistent_lsn=resj['remote_consistent_lsn'])
+
+    def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
+            json=body)
+        res.raise_for_status()
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")

@@ -2,14 +2,6 @@
 
 use std::{env, path::Path, str::FromStr};
 use tracing::*;
-use zenith_utils::{
-    auth::JwtAuth,
-    logging,
-    postgres_backend::AuthType,
-    tcp_listener,
-    zid::{ZTenantId, ZTimelineId},
-    GIT_VERSION,
-};
 
 use anyhow::{bail, Context, Result};
 
@@ -18,22 +10,34 @@ use daemonize::Daemonize;
 
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service,
+    http, page_cache, page_service, profiling,
     remote_storage::{self, SyncStartupData},
     repository::{Repository, TimelineSyncStatusUpdate},
     tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
     timelines, virtual_file, LOG_FILE_NAME,
 };
-use zenith_utils::http::endpoint;
-use zenith_utils::shutdown::exit_now;
-use zenith_utils::signals::{self, Signal};
+use utils::{
+    auth::JwtAuth,
+    http::endpoint,
+    logging,
+    postgres_backend::AuthType,
+    shutdown::exit_now,
+    signals::{self, Signal},
+    tcp_listener,
+    zid::{ZTenantId, ZTimelineId},
+    GIT_VERSION,
+};
+
+fn version() -> String {
+    format!("{} profiling:{}", GIT_VERSION, cfg!(feature = "profiling"))
+}
 
 fn main() -> anyhow::Result<()> {
-    zenith_metrics::set_common_metrics_prefix("pageserver");
+    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = Command::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
-        .version(GIT_VERSION)
+        .version(&*version())
         .arg(
             Arg::new("daemonize")
                 .short('d')
@@ -245,11 +249,12 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
     for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
         // initialize local tenant
-        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index);
+        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index)
+            .with_context(|| format!("Failed to load repo for tenant {}", tenant_id))?;
         for (timeline_id, init_status) in local_timeline_init_statuses {
             match init_status {
                 remote_storage::LocalTimelineInitStatus::LocallyComplete => {
-                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", tenant_id, timeline_id);
+                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", timeline_id, tenant_id);
                     // Lets fail here loudly to be on the safe side.
                     // XXX: It may be a better api to actually distinguish between repository startup
                     //   and processing of newly downloaded timelines.
@@ -286,6 +291,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
+    // start profiler (if enabled)
+    let profiler_guard = profiling::init_profiler(conf);
+
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
     let auth_cloned = auth.clone();
@@ -296,7 +304,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         "http_endpoint_thread",
         false,
         move || {
-            let router = http::make_router(conf, auth_cloned, remote_index);
+            let router = http::make_router(conf, auth_cloned, remote_index)?;
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;
@@ -318,6 +326,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
+            profiling::exit_profiler(conf, &profiler_guard);
             std::process::exit(111);
         }
 
@@ -326,6 +335,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
+            profiling::exit_profiler(conf, &profiler_guard);
             pageserver::shutdown_pageserver();
             unreachable!()
         }

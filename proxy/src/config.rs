@@ -1,10 +1,9 @@
-use anyhow::{anyhow, bail, ensure, Context};
-use rustls::{internal::pemfile, NoClientAuth, ProtocolVersion, ServerConfig};
+use anyhow::{bail, ensure, Context};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-pub type TlsConfig = Arc<ServerConfig>;
+pub type TlsConfig = Arc<rustls::ServerConfig>;
 
 #[non_exhaustive]
 pub enum ClientAuthMethod {
@@ -61,21 +60,28 @@ pub struct ProxyConfig {
 pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
     let key = {
         let key_bytes = std::fs::read(key_path).context("SSL key file")?;
-        let mut keys = pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-            .map_err(|_| anyhow!("couldn't read TLS keys"))?;
+        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
+            .context("couldn't read TLS keys")?;
+
         ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-        keys.pop().unwrap()
+        keys.pop().map(rustls::PrivateKey).unwrap()
     };
 
     let cert_chain = {
         let cert_chain_bytes = std::fs::read(cert_path).context("SSL cert file")?;
-        pemfile::certs(&mut &cert_chain_bytes[..])
-            .map_err(|_| anyhow!("couldn't read TLS certificates"))?
+        rustls_pemfile::certs(&mut &cert_chain_bytes[..])
+            .context("couldn't read TLS certificate chain")?
+            .into_iter()
+            .map(rustls::Certificate)
+            .collect()
     };
 
-    let mut config = ServerConfig::new(NoClientAuth::new());
-    config.set_single_cert(cert_chain, key)?;
-    config.versions = vec![ProtocolVersion::TLSv1_3];
+    let config = rustls::ServerConfig::builder()
+        .with_safe_default_cipher_suites()
+        .with_safe_default_kx_groups()
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)?;
 
     Ok(config.into())
 }
