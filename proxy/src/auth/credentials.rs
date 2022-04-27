@@ -48,10 +48,6 @@ impl ClientCredentials {
         config: &ProxyConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> Result<DatabaseInfo, AuthError> {
-        fail::fail_point!("proxy-authenticate", |_| {
-            Err(AuthError::auth_failed("failpoint triggered"))
-        });
-
         use crate::config::ClientAuthMethod::*;
         use crate::config::RouterConfig::*;
         match &config.router_config {

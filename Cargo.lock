@@ -2002,7 +2002,6 @@ dependencies = [
  "base64",
  "bytes",
  "clap 3.0.14",
- "fail",
  "futures",
  "hashbrown",
  "hex",
