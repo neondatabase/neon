@@ -589,11 +589,14 @@ class ZenithEnv:
                 http=self.port_distributor.get_port(),
             )
             id = i  # assign ids sequentially
+            # TODO: antons configure passing --backup-storage
             toml += textwrap.dedent(f"""
                 [[safekeepers]]
                 id = {id}
                 pg_port = {port.pg}
                 http_port = {port.http}
+                backup_storage = '{"local_path": "../walbackup"}'
+                backup_threads = 7
                 sync = false # Disable fsyncs to make the tests go faster
             """)
             safekeeper = Safekeeper(env=self, id=id, port=port)
@@ -1754,7 +1757,6 @@ class Safekeeper:
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
-
 
 @dataclass
 class SafekeeperTimelineStatus:

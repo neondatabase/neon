@@ -44,6 +44,122 @@ fn timeline_safekeeper_path(
     )
 }
 
+/// get a lease with default ttl
+pub async fn get_lease(conf: &SafeKeeperConf) -> Result<i64> {
+    info!("Getting a etcd lease {:?}", conf);
+
+    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None)
+        .await
+        .context("Could not connect to etcd")?;
+
+    let lease = client
+        .lease_grant(LEASE_TTL_SEC, None)
+        .await
+        .context("Could not acquire a lease");
+
+    lease.map(|l| l.id())
+}
+
+// create keepalive task with default heatbeat interval
+pub async fn lease_keep_alive(lease_id: i64, conf: SafeKeeperConf) -> Result<()> {
+    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None)
+        .await
+        .context("failed to get etcd client")?;
+
+    let (mut keeper, mut ka_stream) = client
+        .lease_keep_alive(lease_id)
+        .await
+        .context("failed to create keepalive stream")?;
+
+    loop {
+        let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
+
+        keeper
+            .keep_alive()
+            .await
+            .context("failed to send LeaseKeepAliveRequest")?;
+
+        ka_stream
+            .message()
+            .await
+            .context("failed to receive LeaseKeepAliveResponse")?;
+
+        sleep(push_interval).await;
+    }
+}
+
+pub fn get_campaign_name(
+    election_name: String,
+    broker_prefix: String,
+    timeline_id: &ZTenantTimelineId,
+) -> String {
+    return format!(
+        "{}/{}",
+        SkTimelineSubscriptionKind::timeline(broker_prefix, *timeline_id).watch_key(),
+        election_name
+    );
+}
+
+pub fn get_candiate_name(conf: &SafeKeeperConf) -> String {
+    format!("id_{}", conf.my_id)
+}
+
+pub async fn is_leader(
+    election_name: String,
+    timeline_id: &ZTenantTimelineId,
+    conf: &SafeKeeperConf,
+) -> Result<bool> {
+    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None)
+        .await
+        .context("failed to get etcd client")?;
+
+    let campaign_name =
+        get_campaign_name(election_name, conf.broker_etcd_prefix.clone(), timeline_id);
+    let resp = client.leader(campaign_name).await?;
+
+    let kv = resp.kv().expect("failed to get leader response");
+    let leader = kv.value_str().expect("failed to get campaign leader value");
+
+    let my_candidate_name = get_candiate_name(conf);
+    Ok(leader == my_candidate_name)
+}
+
+/// create an election for a given timeline and wait to become a leader
+pub async fn become_leader(
+    lease_id: i64,
+    election_name: String,
+    timeline_id: &ZTenantTimelineId,
+    conf: &SafeKeeperConf,
+) -> Result<()> {
+    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None).await?;
+
+    info!(
+        "Electing a leader for {} timeline {}",
+        election_name, timeline_id
+    );
+
+    let campaign_name = get_campaign_name(
+        election_name.clone(),
+        conf.broker_etcd_prefix.clone(),
+        timeline_id,
+    );
+    let candidate_name = get_candiate_name(conf);
+
+    let resp = client
+        .campaign(campaign_name, candidate_name, lease_id)
+        .await?;
+    let leader = resp.leader().unwrap();
+
+    info!(
+        "Leader elected for {} on timeline {}. leader id {:?}",
+        election_name,
+        timeline_id,
+        leader.key_str()
+    );
+
+    Ok(())
+}
+
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
     let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;

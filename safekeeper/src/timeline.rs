@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use etcd_broker::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
+use tokio::sync::watch;
 
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -23,13 +24,13 @@ use utils::{
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-
 use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState,
 };
 use crate::send_wal::HotStandbyFeedback;
+use crate::wal_backup;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
@@ -102,8 +103,30 @@ impl SharedState {
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
+
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
+
+        let (lsn_committed_sender, lsn_committed_receiver) = watch::channel(Lsn::INVALID);
+        let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
+        let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
+
+        wal_backup::create(
+            conf,
+            zttid,
+            control_store.backup_lsn,
+            wal_seg_size_receiver,
+            lsn_committed_receiver,
+            lsn_backed_up_sender,
+        )?;
+        let sk = SafeKeeper::new(
+            zttid.timeline_id,
+            control_store,
+            wal_store,
+            conf.my_id,
+            lsn_committed_sender,
+            lsn_backed_up_receiver,
+            wal_seg_size_sender,
+        )?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -125,9 +148,30 @@ impl SharedState {
 
         info!("timeline {} restored", zttid.timeline_id);
 
+        let (lsn_committed_sender, lsn_committed_receiver) = watch::channel(Lsn::INVALID);
+        let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
+        let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
+
+        wal_backup::create(
+            conf,
+            zttid,
+            control_store.backup_lsn,
+            wal_seg_size_receiver,
+            lsn_committed_receiver,
+            lsn_backed_up_sender,
+        )?;
+
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
+            sk: SafeKeeper::new(
+                zttid.timeline_id,
+                control_store,
+                wal_store,
+                conf.my_id,
+                lsn_committed_sender,
+                lsn_backed_up_receiver,
+                wal_seg_size_sender,
+            )?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
@@ -428,7 +472,6 @@ impl Timeline {
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
-            s3_wal_lsn: Some(shared_state.sk.inmem.s3_wal_lsn),
             // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: Some(max(
                 shared_state.get_replicas_state().remote_consistent_lsn,
@@ -447,6 +490,7 @@ impl Timeline {
                 })
                 .transpose()
                 .context("Failed to get the pageserver callmemaybe connstr")?,
+            backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
         })
     }
 
@@ -479,7 +523,7 @@ impl Timeline {
         shared_state.sk.wal_store.flush_lsn()
     }
 
-    pub fn remove_old_wal(&self, s3_offload_enabled: bool) -> Result<()> {
+    pub fn remove_old_wal(&self, wal_backup_enabled: bool) -> Result<()> {
         let horizon_segno: XLogSegNo;
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
@@ -488,7 +532,7 @@ impl Timeline {
             if shared_state.sk.state.server.wal_seg_size == 0 {
                 return Ok(());
             }
-            horizon_segno = shared_state.sk.get_horizon_segno(s3_offload_enabled);
+            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(());
@@ -566,6 +610,7 @@ impl GlobalTimelines {
                 // TODO: check directory existence
                 let dir = conf.timeline_dir(&zttid);
                 fs::create_dir_all(dir)?;
+
                 let shared_state = SharedState::create(conf, &zttid, peer_ids)
                     .context("failed to create shared state")?;
 
@@ -597,8 +642,7 @@ impl GlobalTimelines {
         match timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-                let shared_state =
-                    SharedState::restore(conf, &zttid).context("failed to restore shared state");
+                let shared_state = SharedState::restore(conf, &zttid);
 
                 let shared_state = match shared_state {
                     Ok(shared_state) => shared_state,

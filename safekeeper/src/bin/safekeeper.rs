@@ -6,6 +6,7 @@ use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
+use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -16,11 +17,11 @@ use url::{ParseError, Url};
 
 use safekeeper::control_file::{self};
 use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use safekeeper::http;
 use safekeeper::remove_wal;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
-use safekeeper::{http, s3_offload};
 use utils::{
     http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
 };
@@ -108,20 +109,16 @@ fn main() -> Result<()> {
             .long("broker-endpoints")
             .takes_value(true)
             .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
+        ).arg(
+            Arg::new("backup-threads").long("backup-threads").takes_value(true).help("number of threads for wal backup: integer")
+        ).arg(
+            Arg::new("backup-storage").long("backup-storage").takes_value(true).help("backup storage configuration: e.g. {\"max_concurrent_syncs\": \"17\", \"max_sync_errors\": \"13\", \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": \"119\"} ")
         )
         .arg(
             Arg::new("broker-etcd-prefix")
             .long("broker-etcd-prefix")
             .takes_value(true)
             .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
-        )
-        .arg(
-            Arg::new("enable-s3-offload")
-                .long("enable-s3-offload")
-                .takes_value(true)
-                .default_value("true")
-                .default_missing_value("true")
-                .help("Enable/disable s3 offloading. When disabled, safekeeper removes WAL ignoring s3 WAL horizon."),
         )
         .get_matches();
 
@@ -155,10 +152,6 @@ fn main() -> Result<()> {
         conf.listen_http_addr = addr.to_owned();
     }
 
-    if let Some(ttl) = arg_matches.value_of("ttl") {
-        conf.ttl = Some(humantime::parse_duration(ttl)?);
-    }
-
     if let Some(recall) = arg_matches.value_of("recall") {
         conf.recall_period = humantime::parse_duration(recall)?;
     }
@@ -180,12 +173,19 @@ fn main() -> Result<()> {
         conf.broker_etcd_prefix = prefix.to_string();
     }
 
-    // Seems like there is no better way to accept bool values explicitly in clap.
-    conf.s3_offload_enabled = arg_matches
-        .value_of("enable-s3-offload")
-        .unwrap()
-        .parse()
-        .context("failed to parse bool enable-s3-offload bool")?;
+    if let Some(backup_threads) = arg_matches.value_of("backup-threads") {
+        conf.backup_runtime_threads = Some(
+            backup_threads
+                .parse()
+                .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?,
+        );
+    }
+
+    if let Some(storage_conf) = arg_matches.value_of("backup-storage") {
+        conf.backup_storage = Some(RemoteStorageConfig::from_json_string(
+            storage_conf.to_string(),
+        )?);
+    }
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
@@ -265,17 +265,6 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
                 .unwrap();
             })?,
     );
-
-    if conf.ttl.is_some() {
-        let conf_ = conf.clone();
-        threads.push(
-            thread::Builder::new()
-                .name("S3 offload thread".into())
-                .spawn(|| {
-                    s3_offload::thread_main(conf_);
-                })?,
-        );
-    }
 
     let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();

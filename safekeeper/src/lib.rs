@@ -1,4 +1,5 @@
 //
+use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
@@ -14,10 +15,10 @@ pub mod http;
 pub mod json_ctrl;
 pub mod receive_wal;
 pub mod remove_wal;
-pub mod s3_offload;
 pub mod safekeeper;
 pub mod send_wal;
 pub mod timeline;
+pub mod wal_backup;
 pub mod wal_service;
 pub mod wal_storage;
 
@@ -48,12 +49,12 @@ pub struct SafeKeeperConf {
     pub no_sync: bool,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
-    pub ttl: Option<Duration>,
     pub recall_period: Duration,
+    pub backup_storage: Option<RemoteStorageConfig>,
+    pub backup_runtime_threads: Option<u32>,
     pub my_id: ZNodeId,
     pub broker_endpoints: Option<Vec<Url>>,
     pub broker_etcd_prefix: String,
-    pub s3_offload_enabled: bool,
 }
 
 impl SafeKeeperConf {
@@ -75,12 +76,12 @@ impl Default for SafeKeeperConf {
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            ttl: None,
+            backup_storage: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: ZNodeId(0),
+            backup_runtime_threads: None,
             broker_endpoints: None,
             broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
-            s3_offload_enabled: true,
         }
     }
 }
