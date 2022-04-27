@@ -185,10 +185,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 
         // Authenticate and connect to a compute node.
         let auth = creds.authenticate(config, &mut stream).await;
-        let db_info = async { auth }.or_else(|e| stream.throw_error(e)).await?;
+        let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
         let (db, version, cancel_closure) =
-            db_info.connect().or_else(|e| stream.throw_error(e)).await?;
+            node.connect().or_else(|e| stream.throw_error(e)).await?;
         let cancel_key_data = session.enable_cancellation(cancel_closure);
 
         stream

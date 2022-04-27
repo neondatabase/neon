@@ -1,4 +1,4 @@
-use crate::{compute::DatabaseInfo, cplane_api};
+use crate::cloud;
 use anyhow::Context;
 use serde::Deserialize;
 use std::{
@@ -75,12 +75,12 @@ struct PsqlSessionResponse {
 
 #[derive(Deserialize)]
 enum PsqlSessionResult {
-    Success(DatabaseInfo),
+    Success(cloud::api::DatabaseInfo),
     Failure(String),
 }
 
 /// A message received by `mgmt` when a compute node is ready.
-pub type ComputeReady = Result<DatabaseInfo, String>;
+pub type ComputeReady = Result<cloud::api::DatabaseInfo, String>;
 
 impl PsqlSessionResult {
     fn into_compute_ready(self) -> ComputeReady {
@@ -111,7 +111,7 @@ fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::R
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 
-    match cplane_api::notify(&resp.session_id, resp.result.into_compute_ready()) {
+    match cloud::notify(&resp.session_id, resp.result.into_compute_ready()) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
