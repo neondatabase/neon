@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.zenith_fixtures import PgBin, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
-from fixtures.utils import etcd_path, lsn_to_hex, mkdir_if_needed, lsn_from_hex
+from fixtures.utils import etcd_path, get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
@@ -791,3 +791,56 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     env.safekeepers[1].stop(immediate=True)
     execute_payload(pg)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+
+# We have `wal_keep_size=0`, so postgres should trim WAL once it's broadcasted
+# to all safekeepers. This test checks that compute WAL can fit into small number
+# of WAL segments.
+def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
+    # used to calculate delta in collect_stats
+    last_lsn = .0
+
+    # returns LSN and pg_wal size, all in MB
+    def collect_stats(pg: Postgres, cur, enable_logs=True):
+        nonlocal last_lsn
+        assert pg.pgdata_dir is not None
+
+        log.info('executing INSERT to generate WAL')
+        cur.execute("select pg_current_wal_lsn()")
+        current_lsn = lsn_from_hex(cur.fetchone()[0]) / 1024 / 1024
+        pg_wal_size = get_dir_size(os.path.join(pg.pgdata_dir, 'pg_wal')) / 1024 / 1024
+        if enable_logs:
+            log.info(f"LSN delta: {current_lsn - last_lsn} MB, current WAL size: {pg_wal_size} MB")
+        last_lsn = current_lsn
+        return current_lsn, pg_wal_size
+
+    # generates about ~20MB of WAL, to create at least one new segment
+    def generate_wal(cur):
+        cur.execute("INSERT INTO t SELECT generate_series(1,300000), 'payload'")
+
+    zenith_env_builder.num_safekeepers = 3
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch('test_wal_deleted_after_broadcast')
+    # Adjust checkpoint config to prevent keeping old WAL segments
+    pg = env.postgres.create_start(
+        'test_wal_deleted_after_broadcast',
+        config_lines=['min_wal_size=32MB', 'max_wal_size=32MB', 'log_checkpoints=on'])
+
+    pg_conn = pg.connect()
+    cur = pg_conn.cursor()
+    cur.execute('CREATE TABLE t(key int, value text)')
+
+    collect_stats(pg, cur)
+
+    # generate WAL to simulate normal workload
+    for i in range(5):
+        generate_wal(cur)
+        collect_stats(pg, cur)
+
+    log.info('executing checkpoint')
+    cur.execute('CHECKPOINT')
+    wal_size_after_checkpoint = collect_stats(pg, cur)[1]
+
+    # there shouldn't be more than 2 WAL segments (but dir may have archive_status files)
+    assert wal_size_after_checkpoint < 16 * 2.5

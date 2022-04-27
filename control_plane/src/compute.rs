@@ -273,12 +273,7 @@ impl PostgresNode {
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
-
-        // Never clean up old WAL. TODO: We should use a replication
-        // slot or something proper, to prevent the compute node
-        // from removing WAL that hasn't been streamed to the safekeeper or
-        // page server yet. (gh issue #349)
-        conf.append("wal_keep_size", "10TB");
+        conf.append("wal_keep_size", "0");
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
