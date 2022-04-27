@@ -19,21 +19,22 @@ def test_branch_and_gc(zenith_env_builder: ZenithEnvBuilder):
     #
     # See https://github.com/zenithdb/zenith/issues/1068
     zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init()
+    env = zenith_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
-    env.pageserver.start(overrides=[
-        '--pageserver-config-override="gc_period"="10 m"',
-        '--pageserver-config-override="gc_horizon"=1048576',
-        '--pageserver-config-override="checkpoint_distance"=4194304',
-        '--pageserver-config-override="compaction_period"="10 m"',
-        '--pageserver-config-override="compaction_threshold"=2'
-    ])
-    env.safekeepers[0].start()
+    tenant = env.zenith_cli.create_tenant(
+        conf={
+            'gc_period': '10 m',
+            'gc_horizon': '1048576',
+            'checkpoint_distance': '4194304',
+            'compaction_period': '10 m',
+            'compaction_threshold': '2',
+            'compaction_target_size': '4194304',
+        })
 
-    env.zenith_cli.create_branch('test_main')
-    pgmain = env.postgres.create_start('test_main')
+    env.zenith_cli.create_timeline(f'test_main', tenant_id=tenant)
+    pgmain = env.postgres.create_start('test_main', tenant_id=tenant)
     log.info("postgres is running on 'test_main' branch")
 
     main_cur = pgmain.connect().cursor()
@@ -54,8 +55,11 @@ def test_branch_and_gc(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 100 rows: {lsn_100}')
 
     # Create branch.
-    env.zenith_cli.create_branch('test_branch', 'test_main', ancestor_start_lsn=lsn_100)
-    pg_branch = env.postgres.create_start('test_branch')
+    env.zenith_cli.create_branch('test_branch',
+                                 'test_main',
+                                 tenant_id=tenant,
+                                 ancestor_start_lsn=lsn_100)
+    pg_branch = env.postgres.create_start('test_branch', tenant_id=tenant)
 
     # Append more rows to generate multiple layers in ancestor's branch.
     main_cur.execute('''
@@ -69,7 +73,7 @@ def test_branch_and_gc(zenith_env_builder: ZenithEnvBuilder):
 
     # Run gc on main branch at current lsn.
     psconn = env.pageserver.connect()
-    psconn.cursor().execute(f'''do_gc {env.initial_tenant.hex} {timeline} {lsn_200100}''')
+    psconn.cursor().execute(f'''do_gc {tenant.hex} {timeline} {lsn_200100}''')
 
     # Insert some rows on descendent's branch to diverge.
     branch_cur = pg_branch.connect().cursor()
