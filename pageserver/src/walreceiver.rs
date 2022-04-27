@@ -184,7 +184,7 @@ fn walreceiver_main(
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
     let timeline =
-        tenant_mgr::get_timeline_for_tenant_load(tenant_id, timeline_id).with_context(|| {
+        tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id).with_context(|| {
             format!(
                 "local timeline {} not found for tenant {}",
                 timeline_id, tenant_id

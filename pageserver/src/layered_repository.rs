@@ -1814,7 +1814,7 @@ impl LayeredTimeline {
         let target_file_size = self.get_checkpoint_distance();
 
         // Define partitioning schema if needed
-        if let Ok(pgdir) = tenant_mgr::get_timeline_for_tenant_load(self.tenantid, self.timelineid)
+        if let Ok(pgdir) = tenant_mgr::get_local_timeline_with_load(self.tenantid, self.timelineid)
         {
             let (partitioning, lsn) = pgdir.repartition(
                 self.get_last_record_lsn(),
