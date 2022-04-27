@@ -56,7 +56,7 @@ struct Tenant {
     /// Contains in-memory state, including the timeline that might not yet flushed on disk or loaded form disk.
     repo: Arc<RepositoryImpl>,
     /// Timelines, located locally in the pageserver's datadir.
-    /// Whatever manipulations happen, local timelines are not removed, only incremented with files.
+    /// Timelines can entirely be removed entirely by the `detach` operation only.
     ///
     /// Local timelines have more metadata that's loaded into memory,
     /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
@@ -126,8 +126,8 @@ pub fn apply_timeline_sync_status_updates(
                 continue;
             }
         };
-        match register_new_timelines(&repo, status_updates) {
-            Ok(()) => info!("successfully applied tenant {tenant_id} sync status updates"),
+        match apply_timeline_remote_sync_status_updates(&repo, status_updates) {
+            Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
             Err(e) => error!(
                 "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
             ),
@@ -305,7 +305,11 @@ pub fn get_local_timeline_with_load(
     Ok(page_tline)
 }
 
-pub fn detach_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+pub fn detach_timeline(
+    conf: &'static PageServerConf,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> anyhow::Result<()> {
     // shutdown the timeline threads (this shuts down the walreceiver)
     thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
 
@@ -319,6 +323,14 @@ pub fn detach_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow
         }
         None => bail!("Tenant {tenant_id} not found in local tenant state"),
     }
+
+    let local_timeline_directory = conf.timeline_path(&timeline_id, &tenant_id);
+    std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+        format!(
+            "Failed to remove local timeline directory '{}'",
+            local_timeline_directory.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -386,13 +398,13 @@ fn init_local_repositories(
         // Lets fail here loudly to be on the safe side.
         // XXX: It may be a better api to actually distinguish between repository startup
         //   and processing of newly downloaded timelines.
-        register_new_timelines(&repo, status_updates)
+        apply_timeline_remote_sync_status_updates(&repo, status_updates)
             .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?
     }
     Ok(())
 }
 
-fn register_new_timelines(
+fn apply_timeline_remote_sync_status_updates(
     repo: &LayeredRepository,
     status_updates: HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
 ) -> anyhow::Result<()> {

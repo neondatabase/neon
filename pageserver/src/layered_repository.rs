@@ -392,7 +392,11 @@ impl Repository for LayeredRepository {
     }
 
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
-        self.timelines.lock().unwrap().remove(&timeline_id);
+        let mut timelines = self.timelines.lock().unwrap();
+        ensure!(
+            timelines.remove(&timeline_id).is_some(),
+            "cannot detach timeline {timeline_id} that is not available locally"
+        );
         Ok(())
     }
 
