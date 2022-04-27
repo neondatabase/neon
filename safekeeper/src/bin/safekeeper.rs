@@ -6,22 +6,27 @@ use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
+use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tokio::sync::mpsc;
+use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
 
 use safekeeper::control_file::{self};
-use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use safekeeper::defaults::{
+    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+};
+use safekeeper::http;
 use safekeeper::remove_wal;
 use safekeeper::timeline::GlobalTimelines;
+use safekeeper::wal_backup;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
-use safekeeper::{http, s3_offload};
 use utils::{
     http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
     zid::NodeId,
@@ -72,12 +77,6 @@ fn main() -> anyhow::Result<()> {
                 .takes_value(true),
         )
         .arg(
-            Arg::new("ttl")
-                .long("ttl")
-                .takes_value(true)
-                .help("interval for keeping WAL at safekeeper node, after which them will be uploaded to S3 and removed locally"),
-        )
-        .arg(
             Arg::new("recall")
                 .long("recall")
                 .takes_value(true)
@@ -118,12 +117,20 @@ fn main() -> anyhow::Result<()> {
             .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
         )
         .arg(
-            Arg::new("enable-s3-offload")
-                .long("enable-s3-offload")
+            Arg::new("wal-backup-threads").long("backup-threads").takes_value(true).help(formatcp!("number of threads for wal backup (default {DEFAULT_WAL_BACKUP_RUNTIME_THREADS}")),
+        ).arg(
+            Arg::new("remote-storage")
+                .long("remote-storage")
+                .takes_value(true)
+                .help("Remote storage configuration for WAL backup (offloading to s3) as TOML inline table, e.g. {\"max_concurrent_syncs\" = 17, \"max_sync_errors\": 13, \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": 119}.\nSafekeeper offloads WAL to [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring structure on the file system.")
+        )
+        .arg(
+            Arg::new("enable-wal-backup")
+                .long("enable-wal-backup")
                 .takes_value(true)
                 .default_value("true")
                 .default_missing_value("true")
-                .help("Enable/disable s3 offloading. When disabled, safekeeper removes WAL ignoring s3 WAL horizon."),
+                .help("Enable/disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring WAL backup horizon."),
         )
         .get_matches();
 
@@ -157,10 +164,6 @@ fn main() -> anyhow::Result<()> {
         conf.listen_http_addr = addr.to_owned();
     }
 
-    if let Some(ttl) = arg_matches.value_of("ttl") {
-        conf.ttl = Some(humantime::parse_duration(ttl)?);
-    }
-
     if let Some(recall) = arg_matches.value_of("recall") {
         conf.recall_period = humantime::parse_duration(recall)?;
     }
@@ -182,9 +185,21 @@ fn main() -> anyhow::Result<()> {
         conf.broker_etcd_prefix = prefix.to_string();
     }
 
+    if let Some(backup_threads) = arg_matches.value_of("wal-backup-threads") {
+        conf.backup_runtime_threads = backup_threads
+            .parse()
+            .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?;
+    }
+    if let Some(storage_conf) = arg_matches.value_of("remote-storage") {
+        // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
+        let storage_conf_toml = format!("remote_storage = {}", storage_conf);
+        let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
+        let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
+        conf.remote_storage = Some(RemoteStorageConfig::from_toml(storage_conf_parsed_toml)?);
+    }
     // Seems like there is no better way to accept bool values explicitly in clap.
-    conf.s3_offload_enabled = arg_matches
-        .value_of("enable-s3-offload")
+    conf.wal_backup_enabled = arg_matches
+        .value_of("enable-wal-backup")
         .unwrap()
         .parse()
         .context("failed to parse bool enable-s3-offload bool")?;
@@ -252,7 +267,8 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (callmemaybe_tx, callmemaybe_rx) = mpsc::unbounded_channel();
-    GlobalTimelines::set_callmemaybe_tx(callmemaybe_tx);
+    let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
+    GlobalTimelines::init(callmemaybe_tx, wal_backup_launcher_tx);
 
     let conf_ = conf.clone();
     threads.push(
@@ -269,17 +285,6 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
                 .unwrap();
             })?,
     );
-
-    if conf.ttl.is_some() {
-        let conf_ = conf.clone();
-        threads.push(
-            thread::Builder::new()
-                .name("S3 offload thread".into())
-                .spawn(|| {
-                    s3_offload::thread_main(conf_);
-                })?,
-        );
-    }
 
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
@@ -327,6 +332,15 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
             .name("WAL removal thread".into())
             .spawn(|| {
                 remove_wal::thread_main(conf_);
+            })?,
+    );
+
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("wal backup launcher thread".into())
+            .spawn(move || {
+                wal_backup::wal_backup_launcher_thread_main(conf_, wal_backup_launcher_rx);
             })?,
     );
 

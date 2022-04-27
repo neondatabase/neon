@@ -12,7 +12,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
-from fixtures.zenith_fixtures import PgBin, Etcd, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
+from fixtures.zenith_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
 from fixtures.utils import get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
@@ -401,7 +401,7 @@ def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
 
     http_cli = env.safekeepers[0].http_client()
     # Pretend WAL is offloaded to s3.
-    http_cli.record_safekeeper_info(tenant_id, timeline_id, {'s3_wal_lsn': 'FFFFFFFF/FEFFFFFF'})
+    http_cli.record_safekeeper_info(tenant_id, timeline_id, {'backup_lsn': 'FFFFFFFF/FEFFFFFF'})
 
     # wait till first segment is removed on all safekeepers
     started_at = time.time()
@@ -412,6 +412,56 @@ def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
         if elapsed > 20:
             raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
         time.sleep(0.5)
+
+
+@pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
+def test_wal_backup(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
+    zenith_env_builder.num_safekeepers = 3
+    if storage_type == 'local_fs':
+        zenith_env_builder.enable_local_fs_remote_storage()
+    elif storage_type == 'mock_s3':
+        zenith_env_builder.enable_s3_mock_remote_storage('test_safekeepers_wal_backup')
+    else:
+        raise RuntimeError(f'Unknown storage type: {storage_type}')
+    zenith_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+
+    env = zenith_env_builder.init_start()
+
+    env.zenith_cli.create_branch('test_safekeepers_wal_backup')
+    pg = env.postgres.create_start('test_safekeepers_wal_backup')
+
+    # learn zenith timeline from compute
+    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
+    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+
+    pg_conn = pg.connect()
+    cur = pg_conn.cursor()
+    cur.execute('create table t(key int, value text)')
+
+    # Shut down subsequently each of safekeepers and fill a segment while sk is
+    # down; ensure segment gets offloaded by others.
+    offloaded_seg_end = ['0/2000000', '0/3000000', '0/4000000']
+    for victim, seg_end in zip(env.safekeepers, offloaded_seg_end):
+        victim.stop()
+        # roughly fills one segment
+        cur.execute("insert into t select generate_series(1,250000), 'payload'")
+        live_sk = [sk for sk in env.safekeepers if sk != victim][0]
+        http_cli = live_sk.http_client()
+
+        started_at = time.time()
+        while True:
+            tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+            log.info(f"live sk status is {tli_status}")
+
+            if lsn_from_hex(tli_status.backup_lsn) >= lsn_from_hex(seg_end):
+                break
+            elapsed = time.time() - started_at
+            if elapsed > 20:
+                raise RuntimeError(
+                    f"timed out waiting {elapsed:.0f}s segment ending at {seg_end} get offloaded")
+            time.sleep(0.5)
+
+        victim.start()
 
 
 class ProposerPostgres(PgProtocol):
