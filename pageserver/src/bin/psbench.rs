@@ -85,7 +85,7 @@ impl PagestreamApi {
             buf.freeze()
         };
 
-        self.stream.write(&msg).await?;
+        self.stream.write_all(&msg).await?;
 
         let response = match FeMessage::read_fut(&mut self.stream).await? {
             Some(FeMessage::CopyData(page)) => page,
@@ -145,8 +145,7 @@ impl Metadata {
         let total_wal_size: usize = wal_metadata.iter().map(|m| m.size).sum();
         let affected_pages: HashSet<_> = wal_metadata
             .iter()
-            .map(|m| m.affected_pages.clone())
-            .flatten()
+            .flat_map(|m| m.affected_pages.clone())
             .collect();
         let latest_lsn = wal_metadata.iter().map(|m| m.lsn).max().unwrap();
 
@@ -255,8 +254,7 @@ async fn main() -> Result<()> {
             )
             .await
             .into_iter()
-            .map(|v| v.unwrap())
-            .flatten()
+            .flat_map(|v| v.unwrap())
             .collect()
         }
     };
