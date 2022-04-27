@@ -7,8 +7,9 @@
 //! so this tool assumes the pageserver is prepopulated with some data, and only
 //! issues read queries. It also currently assumes that the pageserver writes out some
 //! metadata describing the write access pattern on the workload that was performed on it.
+//! See the python tests that use psbench for usage example.
 //!
-//! This tool runs a variety of workloads. See the Args enum below, or run the tool
+//! This tool runs a variety of workloads. See the PsbenchTest enum below, or run the tool
 //! with --help to see the available workloads.
 //!
 use bytes::{BufMut, BytesMut};
