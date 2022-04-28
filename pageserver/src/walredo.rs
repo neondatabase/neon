@@ -387,7 +387,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids } => {
+            ZenithWalRecord::ClogSetCommitted { xids, timestamp: _ } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(

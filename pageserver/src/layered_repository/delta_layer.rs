@@ -35,6 +35,7 @@ use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
+use crate::walrecord::ZenithWalRecord;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -216,6 +217,50 @@ impl Layer for DeltaLayer {
 
     fn filename(&self) -> PathBuf {
         PathBuf::from(self.layer_name().to_string())
+    }
+
+    fn find_record_lsn(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>> {
+        // Open the file and lock the metadata in memory
+        let inner = self.load()?;
+
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+        let search_key = DeltaKey::from_key_lsn(&key, lsn);
+
+        let mut offsets: Vec<(Lsn, u64)> = Vec::new();
+
+        tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
+            let blob_ref = BlobRef(value);
+            if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                return false;
+            }
+            let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+            offsets.push((entry_lsn, blob_ref.pos()));
+            true
+        })?;
+
+        // Ok, 'offsets' now contains the offsets of all the entries we need to read
+        let mut cursor = file.block_cursor();
+        for (entry_lsn, pos) in offsets {
+            let buf = cursor.read_blob(pos)?;
+            let val = Value::des(&buf)?;
+            if let Value::WalRecord(rec) = val {
+                if filter(rec) {
+                    return Ok(Some(entry_lsn));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn get_value_reconstruct_data(

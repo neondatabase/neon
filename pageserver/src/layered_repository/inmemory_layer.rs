@@ -14,6 +14,7 @@ use crate::layered_repository::storage_layer::{
 };
 use crate::repository::{Key, Value};
 use crate::walrecord;
+use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
 use std::collections::HashMap;
 use tracing::*;
@@ -106,6 +107,32 @@ impl Layer for InMemoryLayer {
             Lsn(u64::MAX)
         };
         self.start_lsn..end_lsn
+    }
+
+    fn find_record_lsn(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>> {
+        let inner = self.inner.read().unwrap();
+
+        let mut reader = inner.file.block_cursor();
+
+        // Scan the page versions backwards, starting from `lsn`.
+        if let Some(vec_map) = inner.index.get(&key) {
+            let slice = vec_map.slice_range(..lsn);
+            for (entry_lsn, pos) in slice.iter().rev() {
+                let buf = reader.read_blob(*pos)?;
+                let val = Value::des(&buf)?;
+                if let Value::WalRecord(rec) = val {
+                    if filter(rec) {
+                        return Ok(Some(*entry_lsn));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Look up given value in the layer.

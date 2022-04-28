@@ -332,6 +332,9 @@ pub trait Timeline: Send + Sync {
     // Public GET functions
     //------------------------------------------------------------------------------
 
+    /// Get timeline_id
+    fn get_timeline_id(&self) -> ZTimelineId;
+
     ///
     /// Wait until WAL has been received and processed up to this LSN.
     ///
@@ -352,6 +355,16 @@ pub trait Timeline: Send + Sync {
     /// branch, for exampel, or waste a lot of cycles chasing the non-existing key.
     ///
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
+
+    /// Find latest LSN of wal record matching specified criteria.
+    /// This function traverse WAL records associated with specified page in reverse order,
+    /// until `filter` functions returns true.
+    fn find_record_lsn(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<(ZTimelineId, Lsn)>>;
 
     /// Get the ancestor's timeline id
     fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
@@ -377,7 +390,7 @@ pub trait Timeline: Send + Sync {
     /// Mutate the timeline with a [`TimelineWriter`].
     ///
     /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
+    /// is a generic type in this trai t. But that doesn't currently work in
     /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
 

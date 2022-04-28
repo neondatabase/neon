@@ -79,37 +79,38 @@ impl LayerMap {
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn, delta_only: bool) -> Result<Option<SearchResult>> {
         // linear search
         // Find the latest image layer that covers the given key
         let mut latest_img: Option<Arc<dyn Layer>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
-        for l in self.historic_layers.iter() {
-            if l.is_incremental() {
-                continue;
-            }
-            if !l.get_key_range().contains(&key) {
-                continue;
-            }
-            let img_lsn = l.get_lsn_range().start;
+        if !delta_only {
+            for l in self.historic_layers.iter() {
+                if l.is_incremental() {
+                    continue;
+                }
+                if !l.get_key_range().contains(&key) {
+                    continue;
+                }
+                let img_lsn = l.get_lsn_range().start;
 
-            if img_lsn >= end_lsn {
-                // too new
-                continue;
-            }
-            if Lsn(img_lsn.0 + 1) == end_lsn {
-                // found exact match
-                return Ok(Some(SearchResult {
-                    layer: Arc::clone(l),
-                    lsn_floor: img_lsn,
-                }));
-            }
-            if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
-                latest_img = Some(Arc::clone(l));
-                latest_img_lsn = Some(img_lsn);
+                if img_lsn >= end_lsn {
+                    // too new
+                    continue;
+                }
+                if Lsn(img_lsn.0 + 1) == end_lsn {
+                    // found exact match
+                    return Ok(Some(SearchResult {
+                        layer: Arc::clone(l),
+                        lsn_floor: img_lsn,
+                    }));
+                }
+                if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
+                    latest_img = Some(Arc::clone(l));
+                    latest_img_lsn = Some(img_lsn);
+                }
             }
         }
-
         // Search the delta layers
         let mut latest_delta: Option<Arc<dyn Layer>> = None;
         for l in self.historic_layers.iter() {

@@ -13,13 +13,15 @@
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
+use postgres_ffi::xlog_utils::to_pg_timestamp;
+use postgres_ffi::TransactionId;
 use regex::Regex;
 use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
@@ -800,6 +802,58 @@ impl postgres_backend::Handler for PageServerHandler {
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("get_lsn_by_xid ") {
+            // Locate LSN of transaction with given XID
+            // TODO lazy static
+            let re = Regex::new(r"^get_lsn_by_xid ([[:xdigit:]]+) ([[:xdigit:]]+) ([[:digit:]]+)$")
+                .unwrap();
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("invalid get_lsn_by_xid: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let xid: TransactionId =
+                TransactionId::from_str_radix(caps.get(3).unwrap().as_str(), 10)?;
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::int8_col(
+                b"lsn",
+            )]))?;
+            if let Some((_timeline_id, lsn)) = timeline.lookup_lsn(None, Some(xid))? {
+                pgb.write_message_noflush(&BeMessage::DataRow(&[Some(
+                    lsn.0.to_string().as_bytes(),
+                )]))?;
+            }
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("get_lsn_by_timestamp ") {
+            // Locate LSN of last transaction with timestamp less or equal than sppecified
+            // TODO lazy static
+            let re =
+                Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let lag = humantime::parse_duration(caps.get(3).unwrap().as_str())?;
+            let timestamp = to_pg_timestamp(SystemTime::now().checked_sub(lag).unwrap());
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::int8_col(
+                b"lsn",
+            )]))?;
+            if let Some((_timeline_id, lsn)) = timeline.lookup_lsn(Some(timestamp), None)? {
+                pgb.write_message_noflush(&BeMessage::DataRow(&[Some(
+                    lsn.0.to_string().as_bytes(),
+                )]))?;
+            }
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

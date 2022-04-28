@@ -13,6 +13,7 @@ use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
+use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
+use utils::zid::ZTimelineId;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
@@ -200,6 +202,55 @@ impl<R: Repository> DatadirTimeline<R> {
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
+    }
+
+    /// Locater latest commit record which timestamp greater or equal than specified or xid is equal to specified.
+    /// We assume that transaction commit timestamp order matches the LSN order. It is not strictly true, but in this case time delta
+    /// between this transactions will be very small so it is not safe to rely on timestamp to specify exact PITR point.
+    pub fn lookup_lsn(
+        &self,
+        timestamp_opt: Option<TimestampTz>,
+        xid_opt: Option<TransactionId>,
+    ) -> Result<Option<(ZTimelineId, Lsn)>> {
+        let lsn = self.tline.get_last_record_lsn();
+        let mut segments: Vec<u32> = self
+            .list_slru_segments(SlruKind::Clog, lsn)?
+            .into_iter()
+            .collect();
+        segments.sort_unstable();
+        let mut latest_match: Option<(ZTimelineId, Lsn)> = None;
+        for &segno in segments.iter().rev() {
+            let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, lsn)?;
+            for blknum in (0..nblocks).rev() {
+                let key = slru_block_to_key(SlruKind::Clog, segno, blknum);
+                if let Some((timeline_id, rec_lsn)) =
+                    self.tline.find_record_lsn(key, lsn, &|rec| {
+                        if let ZenithWalRecord::ClogSetCommitted { xids, timestamp } = rec {
+                            if let Some(xact_xid) = xid_opt {
+                                if xids.contains(&xact_xid) {
+                                    return true;
+                                }
+                            }
+                            if let Some(xact_timestamp) = timestamp_opt {
+                                if timestamp <= xact_timestamp {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    })?
+                {
+                    if let Some(pair) = latest_match {
+                        if pair.1 > rec_lsn {
+                            latest_match = Some((timeline_id, rec_lsn));
+                        }
+                    } else {
+                        latest_match = Some((timeline_id, rec_lsn));
+                    }
+                }
+            }
+        }
+        Ok(latest_match)
     }
 
     /// Get a list of SLRU segments

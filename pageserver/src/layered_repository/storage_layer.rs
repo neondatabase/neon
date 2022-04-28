@@ -124,6 +124,15 @@ pub trait Layer: Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
     ) -> Result<ValueReconstructResult>;
 
+    /// Find LSN of latest commit record matching specified criteria.
+    /// `lsn` parameter specified upper LSN boundary.
+    fn find_record_lsn(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>>;
+
     /// Does this layer only contain some data for the key-range (incremental),
     /// or does it contain a version of every page? This is important to know
     /// for garbage collecting old layers: an incremental layer depends on

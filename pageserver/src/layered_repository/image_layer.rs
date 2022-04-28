@@ -30,6 +30,7 @@ use crate::layered_repository::storage_layer::{
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
+use crate::walrecord::ZenithWalRecord;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -140,6 +141,15 @@ impl Layer for ImageLayer {
     fn get_lsn_range(&self) -> Range<Lsn> {
         // End-bound is exclusive
         self.lsn..(self.lsn + 1)
+    }
+
+    fn find_record_lsn(
+        &self,
+        _key: Key,
+        _lsn: Lsn,
+        _filter: &dyn Fn(ZenithWalRecord) -> bool,
+    ) -> Result<Option<Lsn>> {
+        Ok(None)
     }
 
     /// Look up given page in the file
