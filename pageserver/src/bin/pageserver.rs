@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 
+use fail::FailScenario;
 use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, tenant_mgr, thread_mgr,
@@ -84,7 +85,22 @@ fn main() -> anyhow::Result<()> {
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
+        .arg(
+            Arg::new("enabled-features")
+                .long("enabled-features")
+                .takes_value(false)
+                .help("Show enabled compile time features"),
+        )
         .get_matches();
+
+    if arg_matches.is_present("enabled-features") {
+        let features: &[&str] = &[
+            #[cfg(feature = "failpoints")]
+            "failpoints",
+        ];
+        println!("{{\"features\": {features:?} }}");
+        return Ok(());
+    }
 
     let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
     let workdir = workdir
@@ -166,6 +182,14 @@ fn main() -> anyhow::Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+    // If failpoints are used, terminate the whole pageserver process if they are hit.
+    let scenario = FailScenario::setup();
+    if fail::has_failpoints() {
+        std::panic::set_hook(Box::new(|_| {
+            std::process::exit(1);
+        }));
+    }
+
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
@@ -181,10 +205,12 @@ fn main() -> anyhow::Result<()> {
                 cfg_file_path.display()
             )
         })?;
-        Ok(())
     } else {
-        start_pageserver(conf, daemonize).context("Failed to start pageserver")
+        start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
     }
+
+    scenario.teardown();
+    Ok(())
 }
 
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
