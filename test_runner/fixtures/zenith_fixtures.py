@@ -980,6 +980,19 @@ class ZenithCli:
             res.check_returncode()
             return res
 
+    def pageserver_enabled_features(self) -> Any:
+        bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+        args = [bin_pageserver, '--enabled-features']
+        log.info('Running command "{}"'.format(' '.join(args)))
+
+        res = subprocess.run(args,
+                             check=True,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        log.info(f"pageserver_enabled_features success: {res.stdout}")
+        return json.loads(res.stdout)
+
     def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start', *overrides]
         append_pageserver_param_overrides(start_args,
