@@ -5,7 +5,7 @@ use tracing::*;
 
 use anyhow::{bail, Context, Result};
 
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use daemonize::Daemonize;
 
 use pageserver::{
@@ -37,7 +37,7 @@ fn version() -> String {
 
 fn main() -> anyhow::Result<()> {
     metrics::set_common_metrics_prefix("pageserver");
-    let arg_matches = App::new("Zenith page server")
+    let arg_matches = Command::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
         .arg(
@@ -190,6 +190,9 @@ fn main() -> anyhow::Result<()> {
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
+
+    // Initialize wal metadata logger, if necessary
+    pageserver::wal_metadata::init(conf).expect("wal_metadata init failed");
 
     info!("version: {}", GIT_VERSION);
 

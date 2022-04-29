@@ -1290,6 +1290,31 @@ def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
 
 
+@dataclass
+class PsbenchBin:
+    """A helper class for running the pageserver benchmarker tool."""
+    wal_metadata_path: str
+
+    def test_latest_pages(self, tenant_hex: str, timeline: str, num_clients=None) -> str:
+        num_clients = num_clients or 1
+        psbench_binpath = os.path.join(str(zenith_binpath), 'psbench')
+        args = [
+            psbench_binpath,
+            self.wal_metadata_path,
+            tenant_hex,
+            timeline,
+            f"--num-clients={num_clients}",
+            "get-latest-pages",
+        ]
+        return subprocess.run(args, capture_output=True).stdout.decode("UTF-8").strip()
+
+
+@pytest.fixture(scope='function')
+def psbench_bin(test_output_dir):
+    wal_metadata_path = os.path.join(test_output_dir, "repo", "wal_metadata.log")
+    return PsbenchBin(wal_metadata_path)
+
+
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
         super().__init__(host='localhost', port=port, dbname='postgres')
