@@ -327,17 +327,18 @@ impl InMemoryLayer {
 
         let mut cursor = inner.file.block_cursor();
 
-        // First learn dictionary */
-        for (_key, vec_map) in keys.iter() {
+        // First learn dictionary
+        'train: for (_key, vec_map) in keys.iter() {
             // Write all page versions
             for (_lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
                 samples.push(buf.clone());
                 if samples.len() == config::ZSTD_MAX_SAMPLES {
-                    break;
+                    break 'train;
                 }
             }
         }
+
         let dictionary = if samples.len() >= config::ZSTD_MIN_SAMPLES {
             zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?
         } else {

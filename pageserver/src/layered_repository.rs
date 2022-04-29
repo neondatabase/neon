@@ -1989,13 +1989,17 @@ impl LayeredTimeline {
                     prefetched.push((key, lsn, value));
 
                     while let Some(y) = all_values_iter.next() {
-                        let (key, lsn, value) = y?;
-                        samples.push(Value::ser(&value)?);
-                        prefetched.push((key, lsn, value));
-                        if samples.len() == config::ZSTD_MAX_SAMPLES {
+                        if let Ok((key, lsn, value)) = y {
+                            samples.push(Value::ser(&value)?);
+                            prefetched.push((key, lsn, value));
+                            if samples.len() == config::ZSTD_MAX_SAMPLES {
+                                break;
+                            }
+                        } else {
                             break;
                         }
                     }
+
                     let dictionary = if samples.len() >= config::ZSTD_MIN_SAMPLES {
                         zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?
                     } else {
