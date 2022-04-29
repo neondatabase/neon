@@ -17,6 +17,7 @@ use fail::fail_point;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use tracing::*;
+use utils::bin_ser::BeSer;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
@@ -32,6 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
+use crate::config;
 use crate::config::PageServerConf;
 use crate::keyspace::KeySpace;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
@@ -1938,78 +1940,102 @@ impl LayeredTimeline {
             .map(|l| l.get_lsn_range())
             .reduce(|a, b| min(a.start, b.start)..max(a.end, b.end))
             .unwrap();
-
-        let all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
-            if let Ok((a_key, a_lsn, _)) = a {
-                if let Ok((b_key, b_lsn, _)) = b {
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
+        let mut new_layers = Vec::new();
+        {
+            let mut all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
+                if let Ok((a_key, a_lsn, _)) = a {
+                    if let Ok((b_key, b_lsn, _)) = b {
+                        match a_key.cmp(b_key) {
+                            Ordering::Less => true,
+                            Ordering::Equal => a_lsn <= b_lsn,
+                            Ordering::Greater => false,
+                        }
+                    } else {
+                        false
                     }
                 } else {
-                    false
+                    true
                 }
-            } else {
-                true
-            }
-        });
+            });
 
-        // Merge the contents of all the input delta layers into a new set
-        // of delta layers, based on the current partitioning.
-        //
-        // TODO: this actually divides the layers into fixed-size chunks, not
-        // based on the partitioning.
-        //
-        // TODO: we should also opportunistically materialize and
-        // garbage collect what we can.
-        let mut new_layers = Vec::new();
-        let mut prev_key: Option<Key> = None;
-        let mut writer: Option<DeltaLayerWriter> = None;
-        for x in all_values_iter {
-            let (key, lsn, value) = x?;
+            // Merge the contents of all the input delta layers into a new set
+            // of delta layers, based on the current partitioning.
+            //
+            // TODO: this actually divides the layers into fixed-size chunks, not
+            // based on the partitioning.
+            //
+            // TODO: we should also opportunistically materialize and
+            // garbage collect what we can.
+            let mut prev_key: Option<Key> = None;
+            let mut writer: Option<DeltaLayerWriter> = None;
 
-            if let Some(prev_key) = prev_key {
-                if key != prev_key && writer.is_some() {
-                    let size = writer.as_mut().unwrap().size();
-                    if size > target_file_size {
-                        new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
-                        writer = None;
+            while let Some(x) = all_values_iter.next() {
+                let (key, lsn, value) = x?;
+
+                if let Some(prev_key) = prev_key {
+                    if key != prev_key && writer.is_some() {
+                        let size = writer.as_mut().unwrap().size();
+                        if size > target_file_size {
+                            new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
+                            writer = None;
+                        }
                     }
                 }
+
+                if writer.is_none() {
+                    let mut samples: Vec<Vec<u8>> = Vec::with_capacity(config::ZSTD_MAX_SAMPLES);
+                    let mut prefetched = Vec::with_capacity(config::ZSTD_MAX_SAMPLES);
+                    samples.push(Value::ser(&value)?);
+                    prefetched.push((key, lsn, value));
+
+                    while let Some(y) = all_values_iter.next() {
+                        let (key, lsn, value) = y?;
+                        samples.push(Value::ser(&value)?);
+                        prefetched.push((key, lsn, value));
+                        if samples.len() == config::ZSTD_MAX_SAMPLES {
+                            break;
+                        }
+                    }
+                    let dictionary =
+                        zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?;
+
+                    writer = Some(DeltaLayerWriter::new(
+                        self.conf,
+                        self.timelineid,
+                        self.tenantid,
+                        key,
+                        lsn_range.clone(),
+                        dictionary,
+                    )?);
+
+                    // Number of sample is relatively small, so we should not exceed target file limit
+                    for (key, lsn, value) in prefetched {
+                        writer.as_mut().unwrap().put_value(key, lsn, value)?;
+                        prev_key = Some(key);
+                    }
+                } else {
+                    writer.as_mut().unwrap().put_value(key, lsn, value)?;
+                    prev_key = Some(key);
+                }
+            }
+            if let Some(writer) = writer {
+                new_layers.push(writer.finish(prev_key.unwrap().next())?);
             }
 
-            if writer.is_none() {
-                writer = Some(DeltaLayerWriter::new(
-                    self.conf,
-                    self.timelineid,
-                    self.tenantid,
-                    key,
-                    lsn_range.clone(),
-                )?);
+            // Sync layers
+            if !new_layers.is_empty() {
+                let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
+
+                // also sync the directory
+                layer_paths.push(self.conf.timeline_path(&self.timelineid, &self.tenantid));
+
+                // Fsync all the layer files and directory using multiple threads to
+                // minimize latency.
+                par_fsync::par_fsync(&layer_paths)?;
+
+                layer_paths.pop().unwrap();
             }
-
-            writer.as_mut().unwrap().put_value(key, lsn, value)?;
-            prev_key = Some(key);
         }
-        if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next())?);
-        }
-
-        // Sync layers
-        if !new_layers.is_empty() {
-            let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
-
-            // also sync the directory
-            layer_paths.push(self.conf.timeline_path(&self.timelineid, &self.tenantid));
-
-            // Fsync all the layer files and directory using multiple threads to
-            // minimize latency.
-            par_fsync::par_fsync(&layer_paths)?;
-
-            layer_paths.pop().unwrap();
-        }
-
         let mut layers = self.layers.write().unwrap();
         for l in new_layers {
             layers.insert_historic(Arc::new(l));

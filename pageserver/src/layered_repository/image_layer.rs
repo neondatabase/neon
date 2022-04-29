@@ -19,6 +19,7 @@
 //! layer, and offsets to the other parts. The "index" is a B-tree,
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
+use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::layered_repository::block_io::{BlockBuf, BlockReader, FileBlockReader};
@@ -168,7 +169,8 @@ impl Layer for ImageLayer {
                     offset
                 )
             })?;
-            let value = Bytes::from(blob);
+            let decompressed = zstd::bulk::decompress(&blob, PAGE_SZ)?;
+            let value = Bytes::from(decompressed);
 
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
@@ -456,7 +458,8 @@ impl ImageLayerWriter {
     ///
     pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
+        let compressed = zstd::bulk::compress(img, config::ZSTD_COMPRESSION_LEVEL)?;
+        let off = self.blob_writer.write_blob(&compressed)?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);

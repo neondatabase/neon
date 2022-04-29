@@ -20,6 +20,10 @@ use utils::{
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
+pub const ZSTD_MAX_SAMPLES: usize = 1024;
+pub const ZSTD_MAX_DICTIONARY_SIZE: usize = 64 * 1024;
+pub const ZSTD_COMPRESSION_LEVEL: i32 = 0; // default compression level
+
 pub mod defaults {
     use crate::tenant_config::defaults::*;
     use const_format::formatcp;

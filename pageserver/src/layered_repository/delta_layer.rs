@@ -23,6 +23,7 @@
 //! "values" part.  The actual page images and WAL records are stored in the
 //! "values" part.
 //!
+use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::layered_repository::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
@@ -43,7 +44,7 @@ use tracing::*;
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
@@ -55,6 +56,8 @@ use utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
+
+const DICTIONARY_OFFSET: u64 = PAGE_SZ as u64;
 
 ///
 /// Header stored in the beginning of the file
@@ -195,6 +198,9 @@ pub struct DeltaLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+
+    /// Compression dictionary. (None if not loaded yet)
+    dictionary: Option<Vec<u8>>,
 }
 
 impl Layer for DeltaLayer {
@@ -257,6 +263,7 @@ impl Layer for DeltaLayer {
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
+            let dictionary = inner.dictionary.as_ref().unwrap();
             for (entry_lsn, pos) in offsets {
                 let buf = cursor.read_blob(pos).with_context(|| {
                     format!(
@@ -264,7 +271,11 @@ impl Layer for DeltaLayer {
                         file.file.path.display()
                     )
                 })?;
-                let val = Value::des(&buf).with_context(|| {
+                let buf = cursor.read_blob(pos)?;
+                let mut decoder = zstd::Decoder::with_dictionary(&*buf, dictionary)?;
+                let mut decompressed: Vec<u8> = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                let val = Value::des(&decompressed).with_context(|| {
                     format!(
                         "Failed to deserialize file blob from virtual file {}",
                         file.file.path.display()
@@ -487,6 +498,10 @@ impl DeltaLayer {
             }
         }
 
+        let mut cursor = file.block_cursor();
+        let dictionary = cursor.read_blob(DICTIONARY_OFFSET)?;
+        inner.dictionary = Some(dictionary);
+
         inner.index_start_blk = actual_summary.index_start_blk;
         inner.index_root_blk = actual_summary.index_root_blk;
 
@@ -512,6 +527,7 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
+                dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -539,6 +555,7 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
+                dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -586,6 +603,7 @@ pub struct DeltaLayerWriter {
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
     blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
+    dictionary: Vec<u8>,
 }
 
 impl DeltaLayerWriter {
@@ -598,6 +616,7 @@ impl DeltaLayerWriter {
         tenantid: ZTenantId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        dictionary: Vec<u8>,
     ) -> Result<DeltaLayerWriter> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
@@ -613,14 +632,16 @@ impl DeltaLayerWriter {
         ));
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(DICTIONARY_OFFSET))?;
         let buf_writer = BufWriter::new(file);
-        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
+        let mut blob_writer = WriteBlobWriter::new(buf_writer, DICTIONARY_OFFSET);
+
+        let off = blob_writer.write_blob(&dictionary)?;
+        assert!(off == DICTIONARY_OFFSET);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
         let tree_builder = DiskBtreeBuilder::new(block_buf);
-
         Ok(DeltaLayerWriter {
             conf,
             path,
@@ -630,6 +651,7 @@ impl DeltaLayerWriter {
             lsn_range,
             tree: tree_builder,
             blob_writer,
+            dictionary,
         })
     }
 
@@ -641,7 +663,17 @@ impl DeltaLayerWriter {
     pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
-        let off = self.blob_writer.write_blob(&Value::ser(&val)?)?;
+        let body = &Value::ser(&val)?;
+        let mut compressed: Vec<u8> = Vec::new();
+        let mut encoder = zstd::Encoder::with_dictionary(
+            &mut compressed,
+            config::ZSTD_COMPRESSION_LEVEL,
+            &self.dictionary,
+        )?;
+        encoder.write_all(&body)?;
+        encoder.finish()?;
+
+        let off = self.blob_writer.write_blob(&compressed)?;
 
         let blob_ref = BlobRef::new(off, val.will_init());
 
@@ -698,6 +730,7 @@ impl DeltaLayerWriter {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
+                dictionary: None,
                 index_start_blk,
                 index_root_blk,
             }),
@@ -773,7 +806,6 @@ impl<'a> DeltaValueIter<'a> {
                 true
             },
         )?;
-
         let iter = DeltaValueIter {
             all_offsets,
             next_idx: 0,
@@ -791,7 +823,13 @@ impl<'a> DeltaValueIter<'a> {
             let lsn = delta_key.lsn();
 
             let buf = self.reader.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
+            let mut decoder = zstd::Decoder::with_dictionary(
+                &*buf,
+                self.reader.reader.0.dictionary.as_ref().unwrap(),
+            )?;
+            let mut decompressed: Vec<u8> = Vec::new();
+            decoder.read_to_end(&mut decompressed)?;
+            let val = Value::des(&decompressed)?;
             self.next_idx += 1;
             Ok(Some((key, lsn, val)))
         } else {
