@@ -73,7 +73,7 @@ pub async fn thread_main(
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -148,6 +148,8 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     .or_else(|e| stream.throw_error(e))
                     .await?;
 
+                // TODO: set creds.cluster here when SNI info is available
+
                 break Ok(Some((stream, creds)));
             }
             CancelRequest(cancel_key_data) => {
@@ -174,7 +176,7 @@ impl<S> Client<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(
         self,

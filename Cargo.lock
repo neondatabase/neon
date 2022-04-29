@@ -2040,6 +2040,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
+ "url",
  "utils",
  "workspace_hack",
 ]

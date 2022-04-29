@@ -1,35 +1,39 @@
-use crate::cloud;
-use anyhow::{bail, ensure, Context};
-use std::sync::Arc;
+use anyhow::{ensure, Context};
+use std::{str::FromStr, sync::Arc};
+
+#[non_exhaustive]
+pub enum AuthBackendType {
+    LegacyConsole,
+    Console,
+    Postgres,
+    Link,
+}
+
+impl FromStr for AuthBackendType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        println!("ClientAuthMethod::from_str: '{}'", s);
+        use AuthBackendType::*;
+        match s {
+            "legacy" => Ok(LegacyConsole),
+            "console" => Ok(Console),
+            "postgres" => Ok(Postgres),
+            "link" => Ok(Link),
+            _ => Err(anyhow::anyhow!("Invlid option for auth method")),
+        }
+    }
+}
 
 pub struct ProxyConfig {
-    /// Unauthenticated users will be redirected to this URL.
-    pub redirect_uri: reqwest::Url,
-
-    /// Cloud API endpoint for user authentication.
-    pub cloud_endpoint: CloudApi,
-
     /// TLS configuration for the proxy.
     pub tls_config: Option<TlsConfig>,
-}
 
-/// Cloud API configuration.
-pub enum CloudApi {
-    /// We'll drop this one when [`CloudApi::V2`] is stable.
-    V1(crate::cloud::Legacy),
-    /// The new version of the cloud API.
-    V2(crate::cloud::BoxedApi),
-}
+    pub auth_backend: AuthBackendType,
 
-impl CloudApi {
-    /// Configure Cloud API provider.
-    pub fn new(version: &str, url: reqwest::Url) -> anyhow::Result<Self> {
-        Ok(match version {
-            "v1" => Self::V1(cloud::Legacy::new(url)),
-            "v2" => Self::V2(cloud::new(url)?),
-            _ => bail!("unknown cloud API version: {}", version),
-        })
-    }
+    pub auth_endpoint: reqwest::Url,
+
+    pub auth_link_uri: reqwest::Url,
 }
 
 pub type TlsConfig = Arc<rustls::ServerConfig>;

@@ -5,8 +5,8 @@
 //! in somewhat transparent manner (again via communication with control plane API).
 
 mod auth;
+mod auth_backend;
 mod cancellation;
-mod cloud;
 mod compute;
 mod config;
 mod error;
@@ -48,18 +48,11 @@ async fn main() -> anyhow::Result<()> {
                 .default_value("127.0.0.1:4432"),
         )
         .arg(
-            Arg::new("auth-method")
-                .long("auth-method")
+            Arg::new("auth-backend")
+                .long("auth-backend")
                 .takes_value(true)
-                .help("Possible values: password | link | mixed")
-                .default_value("mixed"),
-        )
-        .arg(
-            Arg::new("static-router")
-                .short('s')
-                .long("static-router")
-                .takes_value(true)
-                .help("Route all clients to host:port"),
+                .help("Possible values: legacy | console | postgres | link")
+                .default_value("legacy"),
         )
         .arg(
             Arg::new("mgmt")
@@ -82,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
                 .short('u')
                 .long("uri")
                 .takes_value(true)
-                .help("redirect unauthenticated users to given uri")
+                .help("redirect unauthenticated users to the given uri in case of link auth")
                 .default_value("http://localhost:3000/psql_session/"),
         )
         .arg(
@@ -92,14 +85,6 @@ async fn main() -> anyhow::Result<()> {
                 .takes_value(true)
                 .help("cloud API endpoint for authenticating users")
                 .default_value("http://localhost:3000/authenticate_proxy_request/"),
-        )
-        .arg(
-            Arg::new("api-version")
-                .long("api-version")
-                .takes_value(true)
-                .default_value("v1")
-                .possible_values(["v1", "v2"])
-                .help("cloud API version to be used for authentication"),
         )
         .arg(
             Arg::new("tls-key")
@@ -132,15 +117,11 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
-    let cloud_endpoint = config::CloudApi::new(
-        arg_matches.value_of("api-version").unwrap(),
-        arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-    )?;
-
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
-        redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        cloud_endpoint,
         tls_config,
+        auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
+        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
+        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
     }));
 
     println!("Version: {}", GIT_VERSION);

@@ -1382,8 +1382,8 @@ def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
 class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
         super().__init__(host="127.0.0.1",
-                         user="pytest",
-                         password="pytest",
+                         user="proxy_user",
+                         password="pytest2",
                          port=port,
                          dbname='postgres')
         self.http_port = 7001
@@ -1399,8 +1399,8 @@ class ZenithProxy(PgProtocol):
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
-        args.extend(["--auth-method", "password"])
-        args.extend(["--static-router", addr])
+        args.extend(["--auth-backend", "postgres"])
+        args.extend(["--auth-endpoint", "postgres://proxy_auth:pytest1@localhost:5432/postgres"])
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1422,7 +1422,8 @@ class ZenithProxy(PgProtocol):
 def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
     """Zenith proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+    vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
+    vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
     with ZenithProxy(4432) as proxy:
         proxy.start_static()
