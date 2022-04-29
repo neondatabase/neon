@@ -5,7 +5,6 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    ffi::OsString,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -18,7 +17,7 @@ use tokio::{
 };
 use tracing::*;
 
-use super::{strip_path_prefix, RemoteStorage};
+use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 
 pub struct LocalFs {
     pageserver_workdir: &'static Path,
@@ -54,6 +53,32 @@ impl LocalFs {
             )
         }
     }
+
+    async fn read_storage_metadata(
+        &self,
+        file_path: &Path,
+    ) -> anyhow::Result<Option<StorageMetadata>> {
+        let metadata_path = storage_metadata_path(file_path);
+        if metadata_path.exists() && metadata_path.is_file() {
+            let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
+                format!(
+                    "Failed to read metadata from the local storage at '{}'",
+                    metadata_path.display()
+                )
+            })?;
+
+            serde_json::from_str(&metadata_string)
+                .with_context(|| {
+                    format!(
+                        "Failed to deserialize metadata from the local storage at '{}'",
+                        metadata_path.display()
+                    )
+                })
+                .map(|metadata| Some(StorageMetadata(metadata)))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,21 +104,17 @@ impl RemoteStorage for LocalFs {
 
     async fn upload(
         &self,
-        mut from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from_size_bytes: usize,
         to: &Self::StoragePath,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
         create_target_directory(&target_file_path).await?;
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
         // cancelled the upload and partial file was left on the fs
-        let mut temp_extension = target_file_path
-            .extension()
-            .unwrap_or_default()
-            .to_os_string();
-
-        temp_extension.push(OsString::from(".temp"));
-        let temp_file_path = target_file_path.with_extension(temp_extension);
+        let temp_file_path = path_with_suffix_extension(&target_file_path, ".temp");
         let mut destination = io::BufWriter::new(
             fs::OpenOptions::new()
                 .write(true)
@@ -108,7 +129,11 @@ impl RemoteStorage for LocalFs {
                 })?,
         );
 
-        io::copy(&mut from, &mut destination)
+        let from_size_bytes = from_size_bytes as u64;
+        // Require to read 1 byte more than the expected to check later, that the stream and its size match.
+        let mut buffer_to_read = from.take(from_size_bytes + 1);
+
+        let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
             .with_context(|| {
                 format!(
@@ -116,6 +141,19 @@ impl RemoteStorage for LocalFs {
                     temp_file_path.display()
                 )
             })?;
+
+        ensure!(
+            bytes_read == from_size_bytes,
+            "Provided stream has actual size {} fthat is smaller than the given stream size {}",
+            bytes_read,
+            from_size_bytes
+        );
+
+        ensure!(
+            buffer_to_read.read(&mut [0]).await? == 0,
+            "Provided stream has bigger size than the given stream size {}",
+            from_size_bytes
+        );
 
         destination.flush().await.with_context(|| {
             format!(
@@ -132,6 +170,23 @@ impl RemoteStorage for LocalFs {
                     target_file_path.display()
                 )
             })?;
+
+        if let Some(storage_metadata) = metadata {
+            let storage_metadata_path = storage_metadata_path(&target_file_path);
+            fs::write(
+                &storage_metadata_path,
+                serde_json::to_string(&storage_metadata.0)
+                    .context("Failed to serialize storage metadata as json")?,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write metadata to the local storage at '{}'",
+                    storage_metadata_path.display()
+                )
+            })?;
+        }
+
         Ok(())
     }
 
@@ -139,7 +194,7 @@ impl RemoteStorage for LocalFs {
         &self,
         from: &Self::StoragePath,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<StorageMetadata>> {
         let file_path = self.resolve_in_storage(from)?;
 
         if file_path.exists() && file_path.is_file() {
@@ -162,7 +217,8 @@ impl RemoteStorage for LocalFs {
                 )
             })?;
             source.flush().await?;
-            Ok(())
+
+            self.read_storage_metadata(&file_path).await
         } else {
             bail!(
                 "File '{}' either does not exist or is not a file",
@@ -177,7 +233,7 @@ impl RemoteStorage for LocalFs {
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<StorageMetadata>> {
         if let Some(end_exclusive) = end_exclusive {
             ensure!(
                 end_exclusive > start_inclusive,
@@ -186,7 +242,7 @@ impl RemoteStorage for LocalFs {
                 end_exclusive
             );
             if start_inclusive == end_exclusive.saturating_sub(1) {
-                return Ok(());
+                return Ok(None);
             }
         }
         let file_path = self.resolve_in_storage(from)?;
@@ -220,7 +276,8 @@ impl RemoteStorage for LocalFs {
                     file_path.display()
                 )
             })?;
-            Ok(())
+
+            self.read_storage_metadata(&file_path).await
         } else {
             bail!(
                 "File '{}' either does not exist or is not a file",
@@ -240,6 +297,17 @@ impl RemoteStorage for LocalFs {
             )
         }
     }
+}
+
+fn path_with_suffix_extension(original_path: &Path, suffix: &str) -> PathBuf {
+    let mut extension_with_suffix = original_path.extension().unwrap_or_default().to_os_string();
+    extension_with_suffix.push(suffix);
+
+    original_path.with_extension(extension_with_suffix)
+}
+
+fn storage_metadata_path(original_path: &Path) -> PathBuf {
+    path_with_suffix_extension(original_path, ".metadata")
 }
 
 fn get_all_files<'a, P>(
@@ -451,7 +519,7 @@ mod fs_tests {
     use super::*;
     use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
-    use std::io::Write;
+    use std::{collections::HashMap, io::Write};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -459,13 +527,13 @@ mod fs_tests {
         let repo_harness = RepoHarness::create("upload_file")?;
         let storage = create_storage()?;
 
-        let source = create_file_for_upload(
+        let (file, size) = create_file_for_upload(
             &storage.pageserver_workdir.join("whatever"),
             "whatever_contents",
         )
         .await?;
         let target_path = PathBuf::from("/").join("somewhere").join("else");
-        match storage.upload(source, &target_path).await {
+        match storage.upload(file, size, &target_path, None).await {
             Ok(()) => panic!("Should not allow storing files with wrong target path"),
             Err(e) => {
                 let message = format!("{:?}", e);
@@ -475,14 +543,14 @@ mod fs_tests {
         }
         assert!(storage.list().await?.is_empty());
 
-        let target_path_1 = upload_dummy_file(&repo_harness, &storage, "upload_1").await?;
+        let target_path_1 = upload_dummy_file(&repo_harness, &storage, "upload_1", None).await?;
         assert_eq!(
             storage.list().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&repo_harness, &storage, "upload_2").await?;
+        let target_path_2 = upload_dummy_file(&repo_harness, &storage, "upload_2", None).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -503,12 +571,16 @@ mod fs_tests {
         let repo_harness = RepoHarness::create("download_file")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
+        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
 
         let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        storage.download(&upload_target, &mut content_bytes).await?;
-        content_bytes.flush().await?;
+        let metadata = storage.download(&upload_target, &mut content_bytes).await?;
+        assert!(
+            metadata.is_none(),
+            "No metadata should be returned for no metadata upload"
+        );
 
+        content_bytes.flush().await?;
         let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
         assert_eq!(
             dummy_contents(upload_name),
@@ -533,12 +605,16 @@ mod fs_tests {
         let repo_harness = RepoHarness::create("download_file_range_positive")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
+        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
 
         let mut full_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        storage
+        let metadata = storage
             .download_range(&upload_target, 0, None, &mut full_range_bytes)
             .await?;
+        assert!(
+            metadata.is_none(),
+            "No metadata should be returned for no metadata upload"
+        );
         full_range_bytes.flush().await?;
         assert_eq!(
             dummy_contents(upload_name),
@@ -548,7 +624,7 @@ mod fs_tests {
 
         let mut zero_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let same_byte = 1_000_000_000;
-        storage
+        let metadata = storage
             .download_range(
                 &upload_target,
                 same_byte,
@@ -556,6 +632,10 @@ mod fs_tests {
                 &mut zero_range_bytes,
             )
             .await?;
+        assert!(
+            metadata.is_none(),
+            "No metadata should be returned for no metadata upload"
+        );
         zero_range_bytes.flush().await?;
         assert!(
             zero_range_bytes.into_inner().into_inner().is_empty(),
@@ -566,7 +646,7 @@ mod fs_tests {
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
         let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        storage
+        let metadata = storage
             .download_range(
                 &upload_target,
                 0,
@@ -574,6 +654,11 @@ mod fs_tests {
                 &mut first_part_remote,
             )
             .await?;
+        assert!(
+            metadata.is_none(),
+            "No metadata should be returned for no metadata upload"
+        );
+
         first_part_remote.flush().await?;
         let first_part_remote = first_part_remote.into_inner().into_inner();
         assert_eq!(
@@ -583,7 +668,7 @@ mod fs_tests {
         );
 
         let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        storage
+        let metadata = storage
             .download_range(
                 &upload_target,
                 first_part_local.len() as u64,
@@ -591,6 +676,11 @@ mod fs_tests {
                 &mut second_part_remote,
             )
             .await?;
+        assert!(
+            metadata.is_none(),
+            "No metadata should be returned for no metadata upload"
+        );
+
         second_part_remote.flush().await?;
         let second_part_remote = second_part_remote.into_inner().into_inner();
         assert_eq!(
@@ -607,7 +697,7 @@ mod fs_tests {
         let repo_harness = RepoHarness::create("download_file_range_negative")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
+        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
 
         let start = 10000;
         let end = 234;
@@ -645,7 +735,7 @@ mod fs_tests {
         let repo_harness = RepoHarness::create("delete_file")?;
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name).await?;
+        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
 
         storage.delete(&upload_target).await?;
         assert!(storage.list().await?.is_empty());
@@ -661,31 +751,84 @@ mod fs_tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn file_with_metadata() -> anyhow::Result<()> {
+        let repo_harness = RepoHarness::create("download_file")?;
+        let storage = create_storage()?;
+        let upload_name = "upload_1";
+        let metadata = StorageMetadata(HashMap::from([
+            ("one".to_string(), "1".to_string()),
+            ("two".to_string(), "2".to_string()),
+        ]));
+        let upload_target =
+            upload_dummy_file(&repo_harness, &storage, upload_name, Some(metadata.clone())).await?;
+
+        let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        let full_download_metadata = storage.download(&upload_target, &mut content_bytes).await?;
+
+        content_bytes.flush().await?;
+        let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
+        assert_eq!(
+            dummy_contents(upload_name),
+            contents,
+            "We should upload and download the same contents"
+        );
+
+        assert_eq!(
+            full_download_metadata.as_ref(),
+            Some(&metadata),
+            "We should get the same metadata back for full download"
+        );
+
+        let uploaded_bytes = dummy_contents(upload_name).into_bytes();
+        let (first_part_local, _) = uploaded_bytes.split_at(3);
+
+        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        let partial_download_metadata = storage
+            .download_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                &mut first_part_remote,
+            )
+            .await?;
+        first_part_remote.flush().await?;
+        let first_part_remote = first_part_remote.into_inner().into_inner();
+        assert_eq!(
+            first_part_local,
+            first_part_remote.as_slice(),
+            "First part bytes should be returned when requested"
+        );
+
+        assert_eq!(
+            partial_download_metadata.as_ref(),
+            Some(&metadata),
+            "We should get the same metadata back for partial download"
+        );
+
+        Ok(())
+    }
+
     async fn upload_dummy_file(
         harness: &RepoHarness<'_>,
         storage: &LocalFs,
         name: &str,
+        metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<PathBuf> {
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         let relative_timeline_path = timeline_path.strip_prefix(&harness.conf.workdir)?;
         let storage_path = storage.root.join(relative_timeline_path).join(name);
-        storage
-            .upload(
-                create_file_for_upload(
-                    &storage.pageserver_workdir.join(name),
-                    &dummy_contents(name),
-                )
-                .await?,
-                &storage_path,
-            )
-            .await?;
+
+        let from_path = storage.pageserver_workdir.join(name);
+        let (file, size) = create_file_for_upload(&from_path, &dummy_contents(name)).await?;
+        storage.upload(file, size, &storage_path, metadata).await?;
         Ok(storage_path)
     }
 
     async fn create_file_for_upload(
         path: &Path,
         contents: &str,
-    ) -> anyhow::Result<io::BufReader<fs::File>> {
+    ) -> anyhow::Result<(io::BufReader<fs::File>, usize)> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         let mut file_for_writing = std::fs::OpenOptions::new()
             .write(true)
@@ -693,8 +836,10 @@ mod fs_tests {
             .open(path)?;
         write!(file_for_writing, "{}", contents)?;
         drop(file_for_writing);
-        Ok(io::BufReader::new(
-            fs::OpenOptions::new().read(true).open(&path).await?,
+        let file_size = path.metadata()?.len() as usize;
+        Ok((
+            io::BufReader::new(fs::OpenOptions::new().read(true).open(&path).await?),
+            file_size,
         ))
     }
 

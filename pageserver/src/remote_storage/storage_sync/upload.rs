@@ -1,512 +1,452 @@
 //! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
 
-use std::{borrow::Cow, collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{fmt::Debug, path::PathBuf};
 
-use tracing::{debug, error, warn};
+use anyhow::Context;
+use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::fs;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::PageServerConf,
+    layered_repository::metadata::metadata_path,
     remote_storage::{
-        storage_sync::{
-            compression, fetch_full_index,
-            index::{RemoteTimeline, TimelineIndexEntry, TimelineIndexEntryInner},
-            sync_queue, SyncKind, SyncTask,
-        },
-        RemoteStorage, ZTenantTimelineId,
+        storage_sync::{index::RemoteTimeline, sync_queue, SyncTask},
+        RemoteStorage,
     },
 };
+use utils::zid::ZTenantTimelineId;
 
-use super::{compression::ArchiveHeader, NewCheckpoint, RemoteIndex};
+use super::{index::IndexPart, SyncData, TimelineUpload};
 
-/// Attempts to compress and upload given checkpoint files.
-/// No extra checks for overlapping files is made: download takes care of that, ensuring no non-metadata local timeline files are overwritten.
+/// Serializes and uploads the given index part data to the remote storage.
+pub(super) async fn upload_index_part<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    sync_id: ZTenantTimelineId,
+    index_part: IndexPart,
+) -> anyhow::Result<()>
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+{
+    let index_part_bytes = serde_json::to_vec(&index_part)
+        .context("Failed to serialize index part file into bytes")?;
+    let index_part_size = index_part_bytes.len();
+    let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
+
+    let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
+        .with_file_name(IndexPart::FILE_NAME)
+        .with_extension(IndexPart::FILE_EXTENSION);
+    let index_part_storage_path = storage.storage_path(&index_part_path).with_context(|| {
+        format!(
+            "Failed to get the index part storage path for local path '{}'",
+            index_part_path.display()
+        )
+    })?;
+
+    storage
+        .upload(
+            index_part_bytes,
+            index_part_size,
+            &index_part_storage_path,
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to upload index part to the storage path '{index_part_storage_path:?}'")
+        })
+}
+
+/// Timeline upload result, with extra data, needed for uploading.
+#[derive(Debug)]
+pub(super) enum UploadedTimeline {
+    /// Upload failed due to some error, the upload task is rescheduled for another retry.
+    FailedAndRescheduled,
+    /// No issues happened during the upload, all task files were put into the remote storage.
+    Successful(SyncData<TimelineUpload>),
+    /// No failures happened during the upload, but some files were removed locally before the upload task completed
+    /// (could happen due to retries, for instance, if GC happens in the interim).
+    /// Such files are considered "not needed" and ignored, but the task's metadata should be discarded and the new one loaded from the local file.
+    SuccessfulAfterLocalFsUpdate(SyncData<TimelineUpload>),
+}
+
+/// Attempts to upload given layer files.
+/// No extra checks for overlapping files is made and any files that are already present remotely will be overwritten, if submitted during the upload.
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
-/// On success, populates index data with new downloads.
-pub(super) async fn upload_timeline_checkpoint<
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    remote_assets: Arc<(S, RemoteIndex)>,
+pub(super) async fn upload_timeline_layers<'a, P, S>(
+    storage: &'a S,
+    remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
-    new_checkpoint: NewCheckpoint,
-    retries: u32,
-) -> Option<bool> {
-    debug!("Uploading checkpoint for sync id {}", sync_id);
-    let new_upload_lsn = new_checkpoint.metadata.disk_consistent_lsn();
+    mut upload_data: SyncData<TimelineUpload>,
+) -> UploadedTimeline
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+{
+    let upload = &mut upload_data.data;
+    let new_upload_lsn = upload.metadata.disk_consistent_lsn();
 
-    let index = &remote_assets.1;
+    let already_uploaded_layers = remote_timeline
+        .map(|timeline| timeline.stored_files())
+        .cloned()
+        .unwrap_or_default();
 
-    let ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    } = sync_id;
-    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
+    let layers_to_upload = upload
+        .layers_to_upload
+        .difference(&already_uploaded_layers)
+        .cloned()
+        .collect::<Vec<_>>();
 
-    let index_read = index.read().await;
-    let remote_timeline = match index_read.timeline_entry(&sync_id) {
-        None => None,
-        Some(entry) => match entry.inner() {
-            TimelineIndexEntryInner::Full(remote_timeline) => Some(Cow::Borrowed(remote_timeline)),
-            TimelineIndexEntryInner::Description(_) => {
-                debug!("Found timeline description for the given ids, downloading the full index");
-                match fetch_full_index(remote_assets.as_ref(), &timeline_dir, sync_id).await {
-                    Ok(remote_timeline) => Some(Cow::Owned(remote_timeline)),
-                    Err(e) => {
-                        error!("Failed to download full timeline index: {:?}", e);
-                        sync_queue::push(SyncTask::new(
-                            sync_id,
-                            retries,
-                            SyncKind::Upload(new_checkpoint),
-                        ));
-                        return Some(false);
+    debug!("Layers to upload: {layers_to_upload:?}");
+    info!(
+        "Uploading {} timeline layers, new lsn: {new_upload_lsn}",
+        layers_to_upload.len(),
+    );
+
+    let mut upload_tasks = layers_to_upload
+        .into_iter()
+        .map(|source_path| async move {
+            let storage_path = storage
+                .storage_path(&source_path)
+                .with_context(|| {
+                    format!(
+                        "Failed to get the layer storage path for local path '{}'",
+                        source_path.display()
+                    )
+                })
+                .map_err(UploadError::Other)?;
+
+            let source_file = match fs::File::open(&source_path).await.with_context(|| {
+                format!(
+                    "Failed to upen a source file for layer '{}'",
+                    source_path.display()
+                )
+            }) {
+                Ok(file) => file,
+                Err(e) => return Err(UploadError::MissingLocalFile(source_path, e)),
+            };
+
+            let source_size = source_file
+                .metadata()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to get the source file metadata for layer '{}'",
+                        source_path.display()
+                    )
+                })
+                .map_err(UploadError::Other)?
+                .len() as usize;
+
+            match storage
+                .upload(source_file, source_size, &storage_path, None)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to upload a layer from local path '{}'",
+                        source_path.display()
+                    )
+                }) {
+                Ok(()) => Ok(source_path),
+                Err(e) => Err(UploadError::MissingLocalFile(source_path, e)),
+            }
+        })
+        .collect::<FuturesUnordered<_>>();
+
+    let mut errors_happened = false;
+    let mut local_fs_updated = false;
+    while let Some(upload_result) = upload_tasks.next().await {
+        match upload_result {
+            Ok(uploaded_path) => {
+                upload.layers_to_upload.remove(&uploaded_path);
+                upload.uploaded_layers.insert(uploaded_path);
+            }
+            Err(e) => match e {
+                UploadError::Other(e) => {
+                    errors_happened = true;
+                    error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
+                }
+                UploadError::MissingLocalFile(source_path, e) => {
+                    if source_path.exists() {
+                        errors_happened = true;
+                        error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
+                    } else {
+                        local_fs_updated = true;
+                        upload.layers_to_upload.remove(&source_path);
+                        warn!(
+                            "Missing locally a layer file {} scheduled for upload, skipping",
+                            source_path.display()
+                        );
                     }
                 }
-            }
-        },
-    };
-
-    let already_contains_upload_lsn = remote_timeline
-        .as_ref()
-        .map(|remote_timeline| remote_timeline.contains_checkpoint_at(new_upload_lsn))
-        .unwrap_or(false);
-    if already_contains_upload_lsn {
-        warn!(
-            "Received a checkpoint with Lsn {} that's already been uploaded to remote storage, skipping the upload.",
-            new_upload_lsn
-        );
-        return None;
+            },
+        }
     }
 
-    let already_uploaded_files = remote_timeline
-        .map(|timeline| timeline.stored_files(&timeline_dir))
-        .unwrap_or_default();
-    drop(index_read);
-
-    match try_upload_checkpoint(
-        config,
-        Arc::clone(&remote_assets),
-        sync_id,
-        &new_checkpoint,
-        already_uploaded_files,
-    )
-    .await
-    {
-        Some(Ok((archive_header, header_size))) => {
-            let mut index_write = index.write().await;
-            match index_write
-                .timeline_entry_mut(&sync_id)
-                .map(|e| e.inner_mut())
-            {
-                None => {
-                    let mut new_timeline = RemoteTimeline::empty();
-                    new_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                    index_write.add_timeline_entry(
-                        sync_id,
-                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
-                    )
-                }
-                Some(TimelineIndexEntryInner::Full(remote_timeline)) => {
-                    remote_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                }
-                Some(TimelineIndexEntryInner::Description(_)) => {
-                    let mut new_timeline = RemoteTimeline::empty();
-                    new_timeline.update_archive_contents(
-                        new_checkpoint.metadata.disk_consistent_lsn(),
-                        archive_header,
-                        header_size,
-                    );
-                    index_write.add_timeline_entry(
-                        sync_id,
-                        TimelineIndexEntry::new(TimelineIndexEntryInner::Full(new_timeline), false),
-                    )
-                }
-            }
-            debug!("Checkpoint uploaded successfully");
-            Some(true)
-        }
-        Some(Err(e)) => {
-            error!(
-                "Failed to upload checkpoint: {:?}, requeueing the upload",
-                e
-            );
-            sync_queue::push(SyncTask::new(
-                sync_id,
-                retries,
-                SyncKind::Upload(new_checkpoint),
-            ));
-            Some(false)
-        }
-        None => Some(true),
+    if errors_happened {
+        debug!("Reenqueuing failed upload task for timeline {sync_id}");
+        upload_data.retries += 1;
+        sync_queue::push(sync_id, SyncTask::Upload(upload_data));
+        UploadedTimeline::FailedAndRescheduled
+    } else if local_fs_updated {
+        info!("Successfully uploaded all layers, some local layers were removed during the upload");
+        UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data)
+    } else {
+        info!("Successfully uploaded all layers");
+        UploadedTimeline::Successful(upload_data)
     }
 }
 
-async fn try_upload_checkpoint<
-    P: Send + Sync + 'static,
-    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
->(
-    config: &'static PageServerConf,
-    remote_assets: Arc<(S, RemoteIndex)>,
-    sync_id: ZTenantTimelineId,
-    new_checkpoint: &NewCheckpoint,
-    files_to_skip: BTreeSet<PathBuf>,
-) -> Option<anyhow::Result<(ArchiveHeader, u64)>> {
-    let ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    } = sync_id;
-    let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
-
-    let files_to_upload = new_checkpoint
-        .layers
-        .iter()
-        .filter(|&path_to_upload| {
-            if files_to_skip.contains(path_to_upload) {
-                warn!(
-                    "Skipping file upload '{}', since it was already uploaded",
-                    path_to_upload.display()
-                );
-                false
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if files_to_upload.is_empty() {
-        warn!(
-            "No files to upload. Upload request was: {:?}, already uploaded files: {:?}",
-            new_checkpoint.layers, files_to_skip
-        );
-        return None;
-    }
-
-    let upload_result = compression::archive_files_as_stream(
-        &timeline_dir,
-        files_to_upload.into_iter(),
-        &new_checkpoint.metadata,
-        move |archive_streamer, archive_name| async move {
-            let timeline_dir = config.timeline_path(&timeline_id, &tenant_id);
-            let remote_storage = &remote_assets.0;
-            remote_storage
-                .upload(
-                    archive_streamer,
-                    &remote_storage.storage_path(&timeline_dir.join(&archive_name))?,
-                )
-                .await
-        },
-    )
-    .await
-    .map(|(header, header_size, _)| (header, header_size));
-
-    Some(upload_result)
+enum UploadError {
+    MissingLocalFile(PathBuf, anyhow::Error),
+    Other(anyhow::Error),
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashSet};
+
     use tempfile::tempdir;
-    use zenith_utils::lsn::Lsn;
+    use utils::lsn::Lsn;
 
     use crate::{
         remote_storage::{
-            local_fs::LocalFs,
             storage_sync::{
-                index::ArchiveId,
-                test_utils::{
-                    assert_index_descriptions, create_local_timeline, dummy_metadata,
-                    ensure_correct_timeline_upload, expect_timeline,
-                },
+                index::RelativePath,
+                test_utils::{create_local_timeline, dummy_metadata},
             },
+            LocalFs,
         },
         repository::repo_harness::{RepoHarness, TIMELINE_ID},
     };
 
-    use super::*;
+    use super::{upload_index_part, *};
 
     #[tokio::test]
-    async fn reupload_timeline() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("reupload_timeline")?;
-        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RemoteIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-        );
-        let remote_assets = Arc::new((storage, index));
-        let index = &remote_assets.1;
+    async fn regular_layer_upload() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("regular_layer_upload")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let first_upload_metadata = dummy_metadata(Lsn(0x10));
-        let first_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            first_upload_metadata.clone(),
-        )?;
-        let local_timeline_path = repo_harness.timeline_path(&TIMELINE_ID);
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            first_checkpoint,
+        let layer_files = ["a", "b"];
+        let storage = LocalFs::new(tempdir()?.path().to_path_buf(), &harness.conf.workdir)?;
+        let current_retries = 3;
+        let metadata = dummy_metadata(Lsn(0x30));
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let timeline_upload =
+            create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
+        assert!(
+            storage.list().await?.is_empty(),
+            "Storage should be empty before any uploads are made"
+        );
+
+        let upload_result = upload_timeline_layers(
+            &storage,
+            None,
+            sync_id,
+            SyncData::new(current_retries, timeline_upload.clone()),
         )
         .await;
 
-        let uploaded_timeline = expect_timeline(index, sync_id).await;
-        let uploaded_archives = uploaded_timeline
-            .checkpoints()
-            .map(ArchiveId)
-            .collect::<Vec<_>>();
+        let upload_data = match upload_result {
+            UploadedTimeline::Successful(upload_data) => upload_data,
+            wrong_result => {
+                panic!("Expected a successful upload for timeline, but got: {wrong_result:?}")
+            }
+        };
+
         assert_eq!(
-            uploaded_archives.len(),
-            1,
-            "Only one archive is expected after a first upload"
+            current_retries, upload_data.retries,
+            "On successful upload, retries are not expected to change"
         );
-        let first_uploaded_archive = uploaded_archives.first().copied().unwrap();
-        assert_eq!(
-            uploaded_timeline.checkpoints().last(),
-            Some(first_upload_metadata.disk_consistent_lsn()),
-            "Metadata that was uploaded, should have its Lsn stored"
-        );
-        assert_eq!(
-            uploaded_timeline
-                .archive_data(uploaded_archives.first().copied().unwrap())
-                .unwrap()
-                .disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
+        let upload = &upload_data.data;
+        assert!(
+            upload.layers_to_upload.is_empty(),
+            "Successful upload should have no layers left to upload"
         );
         assert_eq!(
-            uploaded_timeline.stored_files(&local_timeline_path),
-            vec![local_timeline_path.join("a"), local_timeline_path.join("b")]
-                .into_iter()
+            upload
+                .uploaded_layers
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            layer_files
+                .iter()
+                .map(|layer_file| local_timeline_path.join(layer_file))
                 .collect(),
-            "Should have all files from the first checkpoint"
+            "Successful upload should have all layers uploaded"
+        );
+        assert_eq!(
+            upload.metadata, metadata,
+            "Successful upload should not chage its metadata"
         );
 
-        let second_upload_metadata = dummy_metadata(Lsn(0x40));
-        let second_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["b", "c"],
-            second_upload_metadata.clone(),
-        )?;
-        assert!(
-            first_upload_metadata.disk_consistent_lsn()
-                < second_upload_metadata.disk_consistent_lsn()
+        let storage_files = storage.list().await?;
+        assert_eq!(
+            storage_files.len(),
+            layer_files.len(),
+            "All layers should be uploaded"
         );
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            second_checkpoint,
+        assert_eq!(
+            storage_files
+                .into_iter()
+                .map(|storage_path| storage.local_path(&storage_path))
+                .collect::<anyhow::Result<BTreeSet<_>>>()?,
+            layer_files
+                .into_iter()
+                .map(|file| local_timeline_path.join(file))
+                .collect(),
+            "Uploaded files should match with the local ones"
+        );
+
+        Ok(())
+    }
+
+    // Currently, GC can run between upload retries, removing local layers scheduled for upload. Test this scenario.
+    #[tokio::test]
+    async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("layer_upload_after_local_fs_update")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
+
+        let layer_files = ["a1", "b1"];
+        let storage = LocalFs::new(tempdir()?.path().to_owned(), &harness.conf.workdir)?;
+        let current_retries = 5;
+        let metadata = dummy_metadata(Lsn(0x40));
+
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+        let layers_to_upload = {
+            let mut layers = layer_files.to_vec();
+            layers.push("layer_to_remove");
+            layers
+        };
+        let timeline_upload =
+            create_local_timeline(&harness, TIMELINE_ID, &layers_to_upload, metadata.clone())
+                .await?;
+        assert!(
+            storage.list().await?.is_empty(),
+            "Storage should be empty before any uploads are made"
+        );
+
+        fs::remove_file(local_timeline_path.join("layer_to_remove")).await?;
+
+        let upload_result = upload_timeline_layers(
+            &storage,
+            None,
+            sync_id,
+            SyncData::new(current_retries, timeline_upload.clone()),
         )
         .await;
 
-        let updated_timeline = expect_timeline(index, sync_id).await;
-        let mut updated_archives = updated_timeline
-            .checkpoints()
-            .map(ArchiveId)
-            .collect::<Vec<_>>();
+        let upload_data = match upload_result {
+            UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data) => upload_data,
+            wrong_result => panic!(
+                "Expected a successful after local fs upload for timeline, but got: {wrong_result:?}"
+            ),
+        };
+
         assert_eq!(
-            updated_archives.len(),
-            2,
-            "Two archives are expected after a successful update of the upload"
+            current_retries, upload_data.retries,
+            "On successful upload, retries are not expected to change"
         );
-        updated_archives.retain(|archive_id| archive_id != &first_uploaded_archive);
+        let upload = &upload_data.data;
+        assert!(
+                upload.layers_to_upload.is_empty(),
+                "Successful upload should have no layers left to upload, even those that were removed from the local fs"
+            );
         assert_eq!(
-            updated_archives.len(),
-            1,
-            "Only one new archive is expected among the uploaded"
-        );
-        let second_uploaded_archive = updated_archives.last().copied().unwrap();
-        assert_eq!(
-            updated_timeline.checkpoints().max(),
-            Some(second_upload_metadata.disk_consistent_lsn()),
-            "Metadata that was uploaded, should have its Lsn stored"
-        );
-        assert_eq!(
-            updated_timeline
-                .archive_data(second_uploaded_archive)
-                .unwrap()
-                .disk_consistent_lsn(),
-            second_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
+            upload
+                .uploaded_layers
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            layer_files
+                .iter()
+                .map(|layer_file| local_timeline_path.join(layer_file))
+                .collect(),
+            "Successful upload should have all layers uploaded"
         );
         assert_eq!(
-            updated_timeline.stored_files(&local_timeline_path),
-            vec![
-                local_timeline_path.join("a"),
-                local_timeline_path.join("b"),
-                local_timeline_path.join("c"),
-            ]
-            .into_iter()
-            .collect(),
-            "Should have all files from both checkpoints without duplicates"
+            upload.metadata, metadata,
+            "Successful upload should not chage its metadata"
         );
 
-        let third_upload_metadata = dummy_metadata(Lsn(0x20));
-        let third_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["d"],
-            third_upload_metadata.clone(),
-        )?;
-        assert_ne!(
-            third_upload_metadata.disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn()
-        );
-        assert!(
-            third_upload_metadata.disk_consistent_lsn()
-                < second_upload_metadata.disk_consistent_lsn()
-        );
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            third_checkpoint,
-        )
-        .await;
-
-        let updated_timeline = expect_timeline(index, sync_id).await;
-        let mut updated_archives = updated_timeline
-            .checkpoints()
-            .map(ArchiveId)
-            .collect::<Vec<_>>();
+        let storage_files = storage.list().await?;
         assert_eq!(
-            updated_archives.len(),
-            3,
-            "Three archives are expected after two successful updates of the upload"
-        );
-        updated_archives.retain(|archive_id| {
-            archive_id != &first_uploaded_archive && archive_id != &second_uploaded_archive
-        });
-        assert_eq!(
-            updated_archives.len(),
-            1,
-            "Only one new archive is expected among the uploaded"
-        );
-        let third_uploaded_archive = updated_archives.last().copied().unwrap();
-        assert!(
-            updated_timeline.checkpoints().max().unwrap()
-                > third_upload_metadata.disk_consistent_lsn(),
-            "Should not influence the last lsn by uploading an older checkpoint"
+            storage_files.len(),
+            layer_files.len(),
+            "All layers should be uploaded"
         );
         assert_eq!(
-            updated_timeline
-                .archive_data(third_uploaded_archive)
-                .unwrap()
-                .disk_consistent_lsn(),
-            third_upload_metadata.disk_consistent_lsn(),
-            "Uploaded archive should have corresponding Lsn"
-        );
-        assert_eq!(
-            updated_timeline.stored_files(&local_timeline_path),
-            vec![
-                local_timeline_path.join("a"),
-                local_timeline_path.join("b"),
-                local_timeline_path.join("c"),
-                local_timeline_path.join("d"),
-            ]
-            .into_iter()
-            .collect(),
-            "Should have all files from three checkpoints without duplicates"
+            storage_files
+                .into_iter()
+                .map(|storage_path| storage.local_path(&storage_path))
+                .collect::<anyhow::Result<BTreeSet<_>>>()?,
+            layer_files
+                .into_iter()
+                .map(|file| local_timeline_path.join(file))
+                .collect(),
+            "Uploaded files should match with the local ones"
         );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn reupload_timeline_rejected() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("reupload_timeline_rejected")?;
-        let sync_id = ZTenantTimelineId::new(repo_harness.tenant_id, TIMELINE_ID);
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), &repo_harness.conf.workdir)?;
-        let index = RemoteIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            storage
-                .list()
-                .await?
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
-        );
-        let remote_assets = Arc::new((storage, index));
-        let storage = &remote_assets.0;
-        let index = &remote_assets.1;
+    async fn test_upload_index_part() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("test_upload_index_part")?;
+        let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let first_upload_metadata = dummy_metadata(Lsn(0x10));
-        let first_checkpoint = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["a", "b"],
-            first_upload_metadata.clone(),
-        )?;
-        ensure_correct_timeline_upload(
-            &repo_harness,
-            Arc::clone(&remote_assets),
-            TIMELINE_ID,
-            first_checkpoint,
-        )
-        .await;
-        let after_first_uploads = RemoteIndex::try_parse_descriptions_from_paths(
-            repo_harness.conf,
-            remote_assets
-                .0
-                .list()
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|storage_path| storage.local_path(&storage_path).unwrap()),
+        let storage = LocalFs::new(tempdir()?.path().to_owned(), &harness.conf.workdir)?;
+        let metadata = dummy_metadata(Lsn(0x40));
+        let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let index_part = IndexPart::new(
+            HashSet::from([
+                RelativePath::new(&local_timeline_path, local_timeline_path.join("one"))?,
+                RelativePath::new(&local_timeline_path, local_timeline_path.join("two"))?,
+            ]),
+            HashSet::from([RelativePath::new(
+                &local_timeline_path,
+                local_timeline_path.join("three"),
+            )?]),
+            metadata.disk_consistent_lsn(),
+            metadata.to_bytes()?,
         );
 
-        let normal_upload_metadata = dummy_metadata(Lsn(0x20));
-        assert_ne!(
-            normal_upload_metadata.disk_consistent_lsn(),
-            first_upload_metadata.disk_consistent_lsn()
+        assert!(
+            storage.list().await?.is_empty(),
+            "Storage should be empty before any uploads are made"
+        );
+        upload_index_part(harness.conf, &storage, sync_id, index_part.clone()).await?;
+
+        let storage_files = storage.list().await?;
+        assert_eq!(
+            storage_files.len(),
+            1,
+            "Should have only the index part file uploaded"
         );
 
-        let checkpoint_with_no_files = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &[],
-            normal_upload_metadata.clone(),
-        )?;
-        upload_timeline_checkpoint(
-            repo_harness.conf,
-            Arc::clone(&remote_assets),
-            sync_id,
-            checkpoint_with_no_files,
-            0,
-        )
-        .await;
-        assert_index_descriptions(index, &after_first_uploads).await;
+        let index_part_path = storage_files.first().unwrap();
+        assert_eq!(
+            index_part_path.file_stem().and_then(|name| name.to_str()),
+            Some(IndexPart::FILE_NAME),
+            "Remote index part should have the correct name"
+        );
+        assert_eq!(
+            index_part_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some(IndexPart::FILE_EXTENSION),
+            "Remote index part should have the correct extension"
+        );
 
-        let checkpoint_with_uploaded_lsn = create_local_timeline(
-            &repo_harness,
-            TIMELINE_ID,
-            &["something", "new"],
-            first_upload_metadata.clone(),
-        )?;
-        upload_timeline_checkpoint(
-            repo_harness.conf,
-            Arc::clone(&remote_assets),
-            sync_id,
-            checkpoint_with_uploaded_lsn,
-            0,
-        )
-        .await;
-        assert_index_descriptions(index, &after_first_uploads).await;
+        let remote_index_part: IndexPart =
+            serde_json::from_slice(&fs::read(&index_part_path).await?)?;
+        assert_eq!(
+            index_part, remote_index_part,
+            "Remote index part should match the local one"
+        );
 
         Ok(())
     }

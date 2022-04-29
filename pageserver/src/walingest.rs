@@ -38,7 +38,7 @@ use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::TransactionId;
 use postgres_ffi::{pg_constants, CheckPoint};
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 

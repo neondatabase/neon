@@ -39,9 +39,7 @@ impl PartialOrd for RelTag {
 
 impl Ord for RelTag {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp;
-
-        cmp = self.spcnode.cmp(&other.spcnode);
+        let mut cmp = self.spcnode.cmp(&other.spcnode);
         if cmp != Ordering::Equal {
             return cmp;
         }

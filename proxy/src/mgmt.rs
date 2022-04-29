@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
-use zenith_utils::{
+use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
@@ -107,7 +107,7 @@ impl postgres_backend::Handler for MgmtHandler {
 }
 
 fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::Result<()> {
-    println!("Got mgmt query: '{}'", query_string);
+    println!("Got mgmt query [redacted]"); // Content contains password, don't print it
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 

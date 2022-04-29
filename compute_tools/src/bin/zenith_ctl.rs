@@ -38,6 +38,7 @@ use clap::Arg;
 use log::info;
 use postgres::{Client, NoTls};
 
+use compute_tools::checker::create_writablity_check_data;
 use compute_tools::config;
 use compute_tools::http_api::launch_http_server;
 use compute_tools::logger::*;
@@ -128,6 +129,8 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 
     handle_roles(&read_state.spec, &mut client)?;
     handle_databases(&read_state.spec, &mut client)?;
+    handle_grants(&read_state.spec, &mut client)?;
+    create_writablity_check_data(&mut client)?;
 
     // 'Close' connection
     drop(client);
@@ -155,7 +158,7 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 }
 
 fn main() -> Result<()> {
-    // TODO: re-use `zenith_utils::logging` later
+    // TODO: re-use `utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
     // Env variable is set by `cargo`

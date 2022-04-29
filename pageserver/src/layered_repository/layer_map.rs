@@ -16,12 +16,12 @@ use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
 use lazy_static::lazy_static;
+use metrics::{register_int_gauge, IntGauge};
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use tracing::*;
-use zenith_metrics::{register_int_gauge, IntGauge};
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 lazy_static! {
     static ref NUM_ONDISK_LAYERS: IntGauge =
@@ -296,9 +296,7 @@ impl LayerMap {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
-        let mut points: Vec<Key>;
-
-        points = vec![key_range.start];
+        let mut points = vec![key_range.start];
         for l in self.historic_layers.iter() {
             if l.get_lsn_range().start > lsn {
                 continue;

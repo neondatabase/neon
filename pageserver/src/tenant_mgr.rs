@@ -5,6 +5,7 @@ use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::remote_storage::RemoteIndex;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
+use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
@@ -13,14 +14,14 @@ use crate::walredo::PostgresRedoManager;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
-use log::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use tracing::*;
+use utils::zid::{ZTenantId, ZTimelineId};
 
 lazy_static! {
     static ref TENANTS: Mutex<HashMap<ZTenantId, Tenant>> = Mutex::new(HashMap::new());
@@ -63,13 +64,13 @@ fn access_tenants() -> MutexGuard<'static, HashMap<ZTenantId, Tenant>> {
     TENANTS.lock().unwrap()
 }
 
-// Sets up wal redo manager and repository for tenant. Reduces code duplocation.
+// Sets up wal redo manager and repository for tenant. Reduces code duplication.
 // Used during pageserver startup, or when new tenant is attached to pageserver.
 pub fn load_local_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
-) -> Arc<RepositoryImpl> {
+) -> Result<Arc<RepositoryImpl>> {
     let mut m = access_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
         // Set up a WAL redo manager, for applying WAL records.
@@ -78,6 +79,7 @@ pub fn load_local_repo(
         // Set up an object repository, for actual data storage.
         let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(
             conf,
+            Default::default(),
             Arc::new(walredo_mgr),
             tenant_id,
             remote_index.clone(),
@@ -89,13 +91,18 @@ pub fn load_local_repo(
             timelines: HashMap::new(),
         }
     });
-    Arc::clone(&tenant.repo)
+
+    // Restore tenant config
+    let tenant_conf = LayeredRepository::load_tenant_config(conf, tenant_id)?;
+    tenant.repo.update_tenant_config(tenant_conf)?;
+
+    Ok(Arc::clone(&tenant.repo))
 }
 
 /// Updates tenants' repositories, changing their timelines state in memory.
 pub fn apply_timeline_sync_status_updates(
     conf: &'static PageServerConf,
-    remote_index: RemoteIndex,
+    remote_index: &RemoteIndex,
     sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
 ) {
     if sync_status_updates.is_empty() {
@@ -109,7 +116,16 @@ pub fn apply_timeline_sync_status_updates(
     trace!("Sync status updates: {:?}", sync_status_updates);
 
     for (tenant_id, tenant_timelines_sync_status_updates) in sync_status_updates {
-        let repo = load_local_repo(conf, tenant_id, &remote_index);
+        let repo = match load_local_repo(conf, tenant_id, remote_index) {
+            Ok(repo) => repo,
+            Err(e) => {
+                error!(
+                    "Failed to load repo for tenant {} Error: {:#}",
+                    tenant_id, e
+                );
+                continue;
+            }
+        };
 
         for (timeline_id, timeline_sync_status_update) in tenant_timelines_sync_status_updates {
             match repo.apply_timeline_remote_sync_status_update(timeline_id, timeline_sync_status_update)
@@ -174,6 +190,7 @@ pub fn shutdown_all_tenants() {
 
 pub fn create_tenant_repository(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
     tenantid: ZTenantId,
     remote_index: RemoteIndex,
 ) -> Result<Option<ZTenantId>> {
@@ -186,6 +203,7 @@ pub fn create_tenant_repository(
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenantid));
             let repo = timelines::create_repo(
                 conf,
+                tenant_conf,
                 tenantid,
                 CreateRepo::Real {
                     wal_redo_manager,
@@ -202,6 +220,14 @@ pub fn create_tenant_repository(
     }
 }
 
+pub fn update_tenant_config(tenant_conf: TenantConfOpt, tenantid: ZTenantId) -> Result<()> {
+    info!("configuring tenant {}", tenantid);
+    let repo = get_repository_for_tenant(tenantid)?;
+
+    repo.update_tenant_config(tenant_conf)?;
+    Ok(())
+}
+
 pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
     Some(access_tenants().get(&tenantid)?.state)
 }
@@ -210,7 +236,7 @@ pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
 /// Change the state of a tenant to Active and launch its compactor and GC
 /// threads. If the tenant was already in Active state or Stopping, does nothing.
 ///
-pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Result<()> {
+pub fn activate_tenant(tenant_id: ZTenantId) -> Result<()> {
     let mut m = access_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -230,7 +256,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 None,
                 "Compactor thread",
                 true,
-                move || crate::tenant_threads::compact_loop(tenant_id, conf),
+                move || crate::tenant_threads::compact_loop(tenant_id),
             )?;
 
             let gc_spawn_result = thread_mgr::spawn(
@@ -239,7 +265,7 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 None,
                 "GC thread",
                 true,
-                move || crate::tenant_threads::gc_loop(tenant_id, conf),
+                move || crate::tenant_threads::gc_loop(tenant_id),
             )
             .with_context(|| format!("Failed to launch GC thread for tenant {}", tenant_id));
 
@@ -251,7 +277,6 @@ pub fn activate_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> R
                 thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
                 return gc_spawn_result;
             }
-
             tenant.state = TenantState::Active;
         }
 
@@ -290,7 +315,7 @@ pub fn get_timeline_for_tenant_load(
         .get_timeline_load(timelineid)
         .with_context(|| format!("Timeline {} not found for tenant {}", timelineid, tenantid))?;
 
-    let repartition_distance = tenant.repo.conf.checkpoint_distance / 10;
+    let repartition_distance = tenant.repo.get_checkpoint_distance() / 10;
 
     let page_tline = Arc::new(DatadirTimelineImpl::new(tline, repartition_distance));
     page_tline.init_logical_size()?;

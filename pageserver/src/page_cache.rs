@@ -47,7 +47,7 @@ use std::{
 
 use once_cell::sync::OnceCell;
 use tracing::error;
-use zenith_utils::{
+use utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
@@ -56,7 +56,7 @@ use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
-const TEST_PAGE_CACHE_SIZE: usize = 10;
+const TEST_PAGE_CACHE_SIZE: usize = 50;
 
 ///
 /// Initialize the page cache. This must be called once at page server startup.
@@ -90,12 +90,17 @@ const MAX_USAGE_COUNT: u8 = 5;
 /// CacheKey uniquely identifies a "thing" to cache in the page cache.
 ///
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[allow(clippy::enum_variant_names)]
 enum CacheKey {
     MaterializedPage {
         hash_key: MaterializedPageHashKey,
         lsn: Lsn,
     },
     EphemeralPage {
+        file_id: u64,
+        blkno: u32,
+    },
+    ImmutableFilePage {
         file_id: u64,
         blkno: u32,
     },
@@ -173,6 +178,8 @@ pub struct PageCache {
 
     ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
 
+    immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
+
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
 
@@ -191,6 +198,12 @@ impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
+        self.0.buf
+    }
+}
+
+impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
+    fn as_ref(&self) -> &[u8; PAGE_SZ] {
         self.0.buf
     }
 }
@@ -222,6 +235,12 @@ impl std::ops::Deref for PageWriteGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
+        self.inner.buf
+    }
+}
+
+impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
+    fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
         self.inner.buf
     }
 }
@@ -370,6 +389,36 @@ impl PageCache {
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::EphemeralPage { file_id, blkno: _ } if *file_id == drop_file_id => {
+                        // remove mapping for old buffer
+                        self.remove_mapping(key);
+                        inner.key = None;
+                        inner.dirty = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Section 1.3: Public interface functions for working with immutable file pages.
+
+    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+        let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
+
+        self.lock_for_read(&mut cache_key)
+    }
+
+    /// Immediately drop all buffers belonging to given file, without writeback
+    pub fn drop_buffers_for_immutable(&self, drop_file_id: u64) {
+        for slot_idx in 0..self.slots.len() {
+            let slot = &self.slots[slot_idx];
+
+            let mut inner = slot.inner.write().unwrap();
+            if let Some(key) = &inner.key {
+                match key {
+                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
+                        if *file_id == drop_file_id =>
+                    {
                         // remove mapping for old buffer
                         self.remove_mapping(key);
                         inner.key = None;
@@ -578,6 +627,10 @@ impl PageCache {
                 let map = self.ephemeral_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let map = self.immutable_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
         }
     }
 
@@ -599,6 +652,10 @@ impl PageCache {
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 let map = self.ephemeral_page_map.read().unwrap();
+                Some(*map.get(&(*file_id, *blkno))?)
+            }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let map = self.immutable_page_map.read().unwrap();
                 Some(*map.get(&(*file_id, *blkno))?)
             }
         }
@@ -629,6 +686,11 @@ impl PageCache {
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
+                map.remove(&(*file_id, *blkno))
+                    .expect("could not find old key in mapping");
+            }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let mut map = self.immutable_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
             }
@@ -664,6 +726,16 @@ impl PageCache {
             }
             CacheKey::EphemeralPage { file_id, blkno } => {
                 let mut map = self.ephemeral_page_map.write().unwrap();
+                match map.entry((*file_id, *blkno)) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(slot_idx);
+                        None
+                    }
+                }
+            }
+            CacheKey::ImmutableFilePage { file_id, blkno } => {
+                let mut map = self.immutable_page_map.write().unwrap();
                 match map.entry((*file_id, *blkno)) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
@@ -749,6 +821,13 @@ impl PageCache {
             CacheKey::EphemeralPage { file_id, blkno } => {
                 writeback_ephemeral_file(*file_id, *blkno, buf)
             }
+            CacheKey::ImmutableFilePage {
+                file_id: _,
+                blkno: _,
+            } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "unexpected dirty immutable page",
+            )),
         }
     }
 
@@ -779,6 +858,7 @@ impl PageCache {
         Self {
             materialized_page_map: Default::default(),
             ephemeral_page_map: Default::default(),
+            immutable_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
         }

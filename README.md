@@ -1,19 +1,22 @@
-# Zenith
+# Neon
 
-Zenith is a serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributing data across a cluster of nodes.
+Neon is a serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributing data across a cluster of nodes.
+
+The project used to be called "Zenith". Many of the commands and code comments
+still refer to "zenith", but we are in the process of renaming things.
 
 ## Architecture overview
 
-A Zenith installation consists of compute nodes and Zenith storage engine.
+A Neon installation consists of compute nodes and Neon storage engine.
 
-Compute nodes are stateless PostgreSQL nodes, backed by Zenith storage engine.
+Compute nodes are stateless PostgreSQL nodes, backed by Neon storage engine.
 
-Zenith storage engine consists of two major components:
+Neon storage engine consists of two major components:
 - Pageserver. Scalable storage backend for compute nodes.
 - WAL service. The service that receives WAL from compute node and ensures that it is stored durably.
 
 Pageserver consists of:
-- Repository - Zenith storage implementation.
+- Repository - Neon storage implementation.
 - WAL receiver - service that receives WAL from WAL service and stores it in the repository.
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
 - WAL redo - service that builds pages from base images and WAL records on Page service request.
@@ -28,17 +31,17 @@ apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libsec
 libssl-dev clang pkg-config libpq-dev
 ```
 
-[Rust] 1.56.1 or later is also required.
+[Rust] 1.58 or later is also required.
 
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
 Python (3.7 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
 
-2. Build zenith and patched postgres
+2. Build neon and patched postgres
 ```sh
-git clone --recursive https://github.com/zenithdb/zenith.git
-cd zenith
+git clone --recursive https://github.com/neondatabase/neon.git
+cd neon
 make -j5
 ```
 
@@ -126,7 +129,7 @@ INSERT 0 1
 ## Running tests
 
 ```sh
-git clone --recursive https://github.com/zenithdb/zenith.git
+git clone --recursive https://github.com/neondatabase/neon.git
 make # builds also postgres and installs it to ./tmp_install
 ./scripts/pytest
 ```
@@ -141,14 +144,14 @@ To view your `rustdoc` documentation in a browser, try running `cargo doc --no-d
 
 ### Postgres-specific terms
 
-Due to Zenith's very close relation with PostgreSQL internals, there are numerous specific terms used.
+Due to Neon's very close relation with PostgreSQL internals, there are numerous specific terms used.
 Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
 
 To get more familiar with this aspect, refer to:
 
-- [Zenith glossary](/docs/glossary.md)
+- [Neon glossary](/docs/glossary.md)
 - [PostgreSQL glossary](https://www.postgresql.org/docs/13/glossary.html)
-- Other PostgreSQL documentation and sources (Zenith fork sources can be found [here](https://github.com/zenithdb/postgres))
+- Other PostgreSQL documentation and sources (Neon fork sources can be found [here](https://github.com/neondatabase/postgres))
 
 ## Join the development
 

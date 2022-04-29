@@ -4,22 +4,24 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{bail, ensure, Context, Result};
-use toml_edit;
-use toml_edit::{Document, Item};
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
-
-use std::convert::TryInto;
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::env;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
+use toml_edit;
+use toml_edit::{Document, Item};
+use utils::{
+    postgres_backend::AuthType,
+    zid::{ZNodeId, ZTenantId, ZTimelineId},
+};
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
+use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 pub mod defaults {
+    use crate::tenant_config::defaults::*;
     use const_format::formatcp;
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
@@ -27,27 +29,22 @@ pub mod defaults {
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
 
-    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
-    // would be more appropriate. But a low value forces the code to be exercised more,
-    // which is good for now to trigger bugs.
-    // This parameter actually determines L0 layer file size.
-    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
-
-    pub const DEFAULT_COMPACTION_PERIOD: &str = "1 s";
-
-    pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-    pub const DEFAULT_GC_PERIOD: &str = "100 s";
-
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 10;
+    /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
+    /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
+    /// during start (where local and remote timelines are compared and initial sync tasks are scheduled) and timeline attach.
+    /// Both cases may trigger timeline download, that might download a lot of layers. This concurrency is limited by the clients internally, if needed.
+    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC: usize = 50;
     pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
+    /// Currently, sync happens with AWS S3, that has two limits on requests per second:
+    /// ~200 RPS for IAM services
+    /// https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html
+    /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
+    /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
+    pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -62,13 +59,6 @@ pub mod defaults {
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
-#checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
-#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
-#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
-
-#gc_period = '{DEFAULT_GC_PERIOD}'
-#gc_horizon = {DEFAULT_GC_HORIZON}
-
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
 #wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
@@ -76,6 +66,16 @@ pub mod defaults {
 
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = '{DEFAULT_SUPERUSER}'
+
+# [tenant_config]
+#checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
+#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
+#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
+#compaction_threshold = '{DEFAULT_COMPACTION_THRESHOLD}'
+
+#gc_period = '{DEFAULT_GC_PERIOD}'
+#gc_horizon = {DEFAULT_GC_HORIZON}
+#pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 # [remote_storage]
 
@@ -93,22 +93,6 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
-
-    // Flush out an inmemory layer, if it's holding WAL older than this
-    // This puts a backstop on how much WAL needs to be re-digested if the
-    // page server crashes.
-    // This parameter actually determines L0 layer file size.
-    pub checkpoint_distance: u64,
-
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub compaction_target_size: u64,
-
-    // How often to check if there's compaction work to be done.
-    pub compaction_period: Duration,
-
-    pub gc_horizon: u64,
-    pub gc_period: Duration,
 
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
@@ -134,6 +118,28 @@ pub struct PageServerConf {
 
     pub auth_validation_public_key_path: Option<PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
+
+    pub profiling: ProfilingConfig,
+    pub default_tenant_conf: TenantConf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfilingConfig {
+    Disabled,
+    PageRequests,
+}
+
+impl FromStr for ProfilingConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<ProfilingConfig, Self::Err> {
+        let result = match s {
+            "disabled"  => ProfilingConfig::Disabled,
+            "page_requests"  => ProfilingConfig::PageRequests,
+            _ => bail!("invalid value \"{s}\" for profiling option, valid values are \"disabled\" and \"page_requests\""),
+        };
+        Ok(result)
+    }
 }
 
 // use dedicated enum for builder to better indicate the intention
@@ -158,14 +164,6 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
-    checkpoint_distance: BuilderValue<u64>,
-
-    compaction_target_size: BuilderValue<u64>,
-    compaction_period: BuilderValue<Duration>,
-
-    gc_horizon: BuilderValue<u64>,
-    gc_period: BuilderValue<Duration>,
-
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -185,6 +183,8 @@ struct PageServerConfigBuilder {
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
     id: BuilderValue<ZNodeId>,
+
+    profiling: BuilderValue<ProfilingConfig>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -194,13 +194,6 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
-            checkpoint_distance: Set(DEFAULT_CHECKPOINT_DISTANCE),
-            compaction_target_size: Set(DEFAULT_COMPACTION_TARGET_SIZE),
-            compaction_period: Set(humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
-                .expect("cannot parse default compaction period")),
-            gc_horizon: Set(DEFAULT_GC_HORIZON),
-            gc_period: Set(humantime::parse_duration(DEFAULT_GC_PERIOD)
-                .expect("cannot parse default gc period")),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -216,6 +209,7 @@ impl Default for PageServerConfigBuilder {
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
+            profiling: Set(ProfilingConfig::Disabled),
         }
     }
 }
@@ -227,26 +221,6 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
-    }
-
-    pub fn checkpoint_distance(&mut self, checkpoint_distance: u64) {
-        self.checkpoint_distance = BuilderValue::Set(checkpoint_distance)
-    }
-
-    pub fn compaction_target_size(&mut self, compaction_target_size: u64) {
-        self.compaction_target_size = BuilderValue::Set(compaction_target_size)
-    }
-
-    pub fn compaction_period(&mut self, compaction_period: Duration) {
-        self.compaction_period = BuilderValue::Set(compaction_period)
-    }
-
-    pub fn gc_horizon(&mut self, gc_horizon: u64) {
-        self.gc_horizon = BuilderValue::Set(gc_horizon)
-    }
-
-    pub fn gc_period(&mut self, gc_period: Duration) {
-        self.gc_period = BuilderValue::Set(gc_period)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -296,52 +270,46 @@ impl PageServerConfigBuilder {
         self.id = BuilderValue::Set(node_id)
     }
 
+    pub fn profiling(&mut self, profiling: ProfilingConfig) {
+        self.profiling = BuilderValue::Set(profiling)
+    }
+
     pub fn build(self) -> Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
-                .ok_or(anyhow::anyhow!("missing listen_pg_addr"))?,
+                .ok_or(anyhow!("missing listen_pg_addr"))?,
             listen_http_addr: self
                 .listen_http_addr
-                .ok_or(anyhow::anyhow!("missing listen_http_addr"))?,
-            checkpoint_distance: self
-                .checkpoint_distance
-                .ok_or(anyhow::anyhow!("missing checkpoint_distance"))?,
-            compaction_target_size: self
-                .compaction_target_size
-                .ok_or(anyhow::anyhow!("missing compaction_target_size"))?,
-            compaction_period: self
-                .compaction_period
-                .ok_or(anyhow::anyhow!("missing compaction_period"))?,
-            gc_horizon: self
-                .gc_horizon
-                .ok_or(anyhow::anyhow!("missing gc_horizon"))?,
-            gc_period: self.gc_period.ok_or(anyhow::anyhow!("missing gc_period"))?,
+                .ok_or(anyhow!("missing listen_http_addr"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
-                .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,
+                .ok_or(anyhow!("missing wait_lsn_timeout"))?,
             wal_redo_timeout: self
                 .wal_redo_timeout
-                .ok_or(anyhow::anyhow!("missing wal_redo_timeout"))?,
-            superuser: self.superuser.ok_or(anyhow::anyhow!("missing superuser"))?,
+                .ok_or(anyhow!("missing wal_redo_timeout"))?,
+            superuser: self.superuser.ok_or(anyhow!("missing superuser"))?,
             page_cache_size: self
                 .page_cache_size
-                .ok_or(anyhow::anyhow!("missing page_cache_size"))?,
+                .ok_or(anyhow!("missing page_cache_size"))?,
             max_file_descriptors: self
                 .max_file_descriptors
-                .ok_or(anyhow::anyhow!("missing max_file_descriptors"))?,
-            workdir: self.workdir.ok_or(anyhow::anyhow!("missing workdir"))?,
+                .ok_or(anyhow!("missing max_file_descriptors"))?,
+            workdir: self.workdir.ok_or(anyhow!("missing workdir"))?,
             pg_distrib_dir: self
                 .pg_distrib_dir
-                .ok_or(anyhow::anyhow!("missing pg_distrib_dir"))?,
-            auth_type: self.auth_type.ok_or(anyhow::anyhow!("missing auth_type"))?,
+                .ok_or(anyhow!("missing pg_distrib_dir"))?,
+            auth_type: self.auth_type.ok_or(anyhow!("missing auth_type"))?,
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
-                .ok_or(anyhow::anyhow!("missing auth_validation_public_key_path"))?,
+                .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
             remote_storage_config: self
                 .remote_storage_config
-                .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
-            id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
+                .ok_or(anyhow!("missing remote_storage_config"))?,
+            id: self.id.ok_or(anyhow!("missing id"))?,
+            profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
+            // TenantConf is handled separately
+            default_tenant_conf: TenantConf::default(),
         })
     }
 }
@@ -350,7 +318,7 @@ impl PageServerConfigBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
     /// Max allowed number of concurrent sync operations between pageserver and the remote storage.
-    pub max_concurrent_sync: NonZeroUsize,
+    pub max_concurrent_timelines_sync: NonZeroUsize,
     /// Max allowed errors before the sync task is considered failed and evicted.
     pub max_sync_errors: NonZeroU32,
     /// The storage connection configuration.
@@ -391,6 +359,9 @@ pub struct S3Config {
     ///
     /// Example: `http://127.0.0.1:5000`
     pub endpoint: Option<String>,
+    /// AWS S3 has various limits on its API calls, we need not to exceed those.
+    /// See [`defaults::DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
+    pub concurrency_limit: NonZeroUsize,
 }
 
 impl std::fmt::Debug for S3Config {
@@ -399,6 +370,7 @@ impl std::fmt::Debug for S3Config {
             .field("bucket_name", &self.bucket_name)
             .field("bucket_region", &self.bucket_region)
             .field("prefix_in_bucket", &self.prefix_in_bucket)
+            .field("concurrency_limit", &self.concurrency_limit)
             .finish()
     }
 }
@@ -444,17 +416,12 @@ impl PageServerConf {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
+        let mut t_conf: TenantConfOpt = Default::default();
+
         for (key, item) in toml.iter() {
             match key {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
-                "checkpoint_distance" => builder.checkpoint_distance(parse_toml_u64(key, item)?),
-                "compaction_target_size" => {
-                    builder.compaction_target_size(parse_toml_u64(key, item)?)
-                }
-                "compaction_period" => builder.compaction_period(parse_toml_duration(key, item)?),
-                "gc_horizon" => builder.gc_horizon(parse_toml_u64(key, item)?),
-                "gc_period" => builder.gc_period(parse_toml_duration(key, item)?),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -468,12 +435,16 @@ impl PageServerConf {
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
                     PathBuf::from(parse_toml_string(key, item)?),
                 )),
-                "auth_type" => builder.auth_type(parse_toml_auth_type(key, item)?),
+                "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
                 }
+                "tenant_conf" => {
+                    t_conf = Self::parse_toml_tenant_conf(item)?;
+                }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
-                _ => bail!("unrecognized pageserver option '{}'", key),
+                "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
+                _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
 
@@ -499,7 +470,50 @@ impl PageServerConf {
             );
         }
 
+        conf.default_tenant_conf = t_conf.merge(TenantConf::default());
+
         Ok(conf)
+    }
+
+    // subroutine of parse_and_validate to parse `[tenant_conf]` section
+
+    pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
+        let mut t_conf: TenantConfOpt = Default::default();
+        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
+            t_conf.checkpoint_distance =
+                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
+        }
+
+        if let Some(compaction_target_size) = item.get("compaction_target_size") {
+            t_conf.compaction_target_size = Some(parse_toml_u64(
+                "compaction_target_size",
+                compaction_target_size,
+            )?);
+        }
+
+        if let Some(compaction_period) = item.get("compaction_period") {
+            t_conf.compaction_period =
+                Some(parse_toml_duration("compaction_period", compaction_period)?);
+        }
+
+        if let Some(compaction_threshold) = item.get("compaction_threshold") {
+            t_conf.compaction_threshold =
+                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
+        }
+
+        if let Some(gc_horizon) = item.get("gc_horizon") {
+            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
+        }
+
+        if let Some(gc_period) = item.get("gc_period") {
+            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
+        }
+
+        if let Some(pitr_interval) = item.get("pitr_interval") {
+            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
+        }
+
+        Ok(t_conf)
     }
 
     /// subroutine of parse_config(), to parse the `[remote_storage]` table.
@@ -508,32 +522,23 @@ impl PageServerConf {
         let bucket_name = toml.get("bucket_name");
         let bucket_region = toml.get("bucket_region");
 
-        let max_concurrent_sync: NonZeroUsize = if let Some(s) = toml.get("max_concurrent_sync") {
-            parse_toml_u64("max_concurrent_sync", s)
-                .and_then(|toml_u64| {
-                    toml_u64.try_into().with_context(|| {
-                        format!("'max_concurrent_sync' value {} is too large", toml_u64)
-                    })
-                })
-                .ok()
-                .and_then(NonZeroUsize::new)
-                .context("'max_concurrent_sync' must be a non-zero positive integer")?
-        } else {
-            NonZeroUsize::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC).unwrap()
-        };
-        let max_sync_errors: NonZeroU32 = if let Some(s) = toml.get("max_sync_errors") {
-            parse_toml_u64("max_sync_errors", s)
-                .and_then(|toml_u64| {
-                    toml_u64.try_into().with_context(|| {
-                        format!("'max_sync_errors' value {} is too large", toml_u64)
-                    })
-                })
-                .ok()
-                .and_then(NonZeroU32::new)
-                .context("'max_sync_errors' must be a non-zero positive integer")?
-        } else {
-            NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS).unwrap()
-        };
+        let max_concurrent_timelines_sync = NonZeroUsize::new(
+            parse_optional_integer("max_concurrent_timelines_sync", toml)?
+                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC),
+        )
+        .context("Failed to parse 'max_concurrent_timelines_sync' as a positive integer")?;
+
+        let max_sync_errors = NonZeroU32::new(
+            parse_optional_integer("max_sync_errors", toml)?
+                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
+        )
+        .context("Failed to parse 'max_sync_errors' as a positive integer")?;
+
+        let concurrency_limit = NonZeroUsize::new(
+            parse_optional_integer("concurrency_limit", toml)?
+                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+        )
+        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
         let storage = match (local_path, bucket_name, bucket_region) {
             (None, None, None) => bail!("no 'local_path' nor 'bucket_name' option"),
@@ -564,6 +569,7 @@ impl PageServerConf {
                     .get("endpoint")
                     .map(|endpoint| parse_toml_string("endpoint", endpoint))
                     .transpose()?,
+                concurrency_limit,
             }),
             (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
                 parse_toml_string("local_path", local_path)?,
@@ -572,7 +578,7 @@ impl PageServerConf {
         };
 
         Ok(RemoteStorageConfig {
-            max_concurrent_sync,
+            max_concurrent_timelines_sync,
             max_sync_errors,
             storage,
         })
@@ -580,18 +586,13 @@ impl PageServerConf {
 
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> PathBuf {
-        PathBuf::from(format!("../tmp_check/test_{}", test_name))
+        PathBuf::from(format!("../tmp_check/test_{test_name}"))
     }
 
     #[cfg(test)]
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
             id: ZNodeId(0),
-            checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-            compaction_target_size: 4 * 1024 * 1024,
-            compaction_period: Duration::from_secs(10),
-            gc_horizon: defaults::DEFAULT_GC_HORIZON,
-            gc_period: Duration::from_secs(10),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
@@ -604,6 +605,8 @@ impl PageServerConf {
             auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
+            profiling: ProfilingConfig::Disabled,
+            default_tenant_conf: TenantConf::dummy_conf(),
         }
     }
 }
@@ -613,7 +616,7 @@ impl PageServerConf {
 fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
     let s = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
 }
 
@@ -622,26 +625,46 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
     // for our use, though.
     let i: i64 = item
         .as_integer()
-        .with_context(|| format!("configure option {} is not an integer", name))?;
+        .with_context(|| format!("configure option {name} is not an integer"))?;
     if i < 0 {
-        bail!("configure option {} cannot be negative", name);
+        bail!("configure option {name} cannot be negative");
     }
     Ok(i as u64)
+}
+
+fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
+where
+    I: TryFrom<i64, Error = E>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let toml_integer = match item.get(name) {
+        Some(item) => item
+            .as_integer()
+            .with_context(|| format!("configure option {name} is not an integer"))?,
+        None => return Ok(None),
+    };
+
+    I::try_from(toml_integer)
+        .map(Some)
+        .with_context(|| format!("configure option {name} is too large"))
 }
 
 fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
     let s = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {name} is not a string"))?;
 
     Ok(humantime::parse_duration(s)?)
 }
 
-fn parse_toml_auth_type(name: &str, item: &Item) -> Result<AuthType> {
+fn parse_toml_from_str<T>(name: &str, item: &Item) -> Result<T>
+where
+    T: FromStr<Err = anyhow::Error>,
+{
     let v = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
-    AuthType::from_str(v)
+        .with_context(|| format!("configure option {name} is not a string"))?;
+    T::from_str(v)
 }
 
 #[cfg(test)]
@@ -657,14 +680,6 @@ mod tests {
 
 listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
-
-checkpoint_distance = 111 # in bytes
-
-compaction_target_size = 111 # in bytes
-compaction_period = '111 s'
-
-gc_period = '222 s'
-gc_horizon = 222
 
 wait_lsn_timeout = '111 s'
 wal_redo_timeout = '111 s'
@@ -686,10 +701,8 @@ id = 10
         let config_string = format!("pg_distrib_dir='{}'\nid=10", pg_distrib_dir.display());
         let toml = config_string.parse()?;
 
-        let parsed_config =
-            PageServerConf::parse_and_validate(&toml, &workdir).unwrap_or_else(|e| {
-                panic!("Failed to parse config '{}', reason: {}", config_string, e)
-            });
+        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e}"));
 
         assert_eq!(
             parsed_config,
@@ -697,11 +710,6 @@ id = 10
                 id: ZNodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-                checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
-                compaction_target_size: defaults::DEFAULT_COMPACTION_TARGET_SIZE,
-                compaction_period: humantime::parse_duration(defaults::DEFAULT_COMPACTION_PERIOD)?,
-                gc_horizon: defaults::DEFAULT_GC_HORIZON,
-                gc_period: humantime::parse_duration(defaults::DEFAULT_GC_PERIOD)?,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -712,6 +720,8 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                profiling: ProfilingConfig::Disabled,
+                default_tenant_conf: TenantConf::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -725,16 +735,13 @@ id = 10
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
 
         let config_string = format!(
-            "{}pg_distrib_dir='{}'",
-            ALL_BASE_VALUES_TOML,
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'",
             pg_distrib_dir.display()
         );
         let toml = config_string.parse()?;
 
-        let parsed_config =
-            PageServerConf::parse_and_validate(&toml, &workdir).unwrap_or_else(|e| {
-                panic!("Failed to parse config '{}', reason: {}", config_string, e)
-            });
+        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e}"));
 
         assert_eq!(
             parsed_config,
@@ -742,11 +749,6 @@ id = 10
                 id: ZNodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
-                checkpoint_distance: 111,
-                compaction_target_size: 111,
-                compaction_period: Duration::from_secs(111),
-                gc_horizon: 222,
-                gc_period: Duration::from_secs(222),
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
@@ -757,6 +759,8 @@ id = 10
                 auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
+                profiling: ProfilingConfig::Disabled,
+                default_tenant_conf: TenantConf::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -785,37 +789,33 @@ local_path = '{}'"#,
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
-                r#"{}
+                r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
 
-{}"#,
-                ALL_BASE_VALUES_TOML,
+{remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
-                remote_storage_config_str,
             );
 
             let toml = config_string.parse()?;
 
             let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{}', reason: {}", config_string, e)
-                })
+                .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e}"))
                 .remote_storage_config
                 .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
-            parsed_remote_storage_config,
-            RemoteStorageConfig {
-                max_concurrent_sync: NonZeroUsize::new(
-                    defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC
-                )
-                .unwrap(),
-                max_sync_errors: NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
+                parsed_remote_storage_config,
+                RemoteStorageConfig {
+                    max_concurrent_timelines_sync: NonZeroUsize::new(
+                        defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC
+                    )
                     .unwrap(),
-                storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
-            },
-            "Remote storage config should correctly parse the local FS config and fill other storage defaults"
-        );
+                    max_sync_errors: NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
+                        .unwrap(),
+                    storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
+                },
+                "Remote storage config should correctly parse the local FS config and fill other storage defaults"
+            );
         }
         Ok(())
     }
@@ -831,52 +831,49 @@ pg_distrib_dir='{}'
         let access_key_id = "SOMEKEYAAAAASADSAH*#".to_string();
         let secret_access_key = "SOMEsEcReTsd292v".to_string();
         let endpoint = "http://localhost:5000".to_string();
-        let max_concurrent_sync = NonZeroUsize::new(111).unwrap();
+        let max_concurrent_timelines_sync = NonZeroUsize::new(111).unwrap();
         let max_sync_errors = NonZeroU32::new(222).unwrap();
+        let s3_concurrency_limit = NonZeroUsize::new(333).unwrap();
 
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-max_concurrent_sync = {}
-max_sync_errors = {}
-bucket_name = '{}'
-bucket_region = '{}'
-prefix_in_bucket = '{}'
-access_key_id = '{}'
-secret_access_key = '{}'
-endpoint = '{}'"#,
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
+max_concurrent_timelines_sync = {max_concurrent_timelines_sync}
+max_sync_errors = {max_sync_errors}
+bucket_name = '{bucket_name}'
+bucket_region = '{bucket_region}'
+prefix_in_bucket = '{prefix_in_bucket}'
+access_key_id = '{access_key_id}'
+secret_access_key = '{secret_access_key}'
+endpoint = '{endpoint}'
+concurrency_limit = {s3_concurrency_limit}"#
             ),
             format!(
-                "remote_storage={{max_concurrent_sync={}, max_sync_errors={}, bucket_name='{}', bucket_region='{}', prefix_in_bucket='{}', access_key_id='{}', secret_access_key='{}', endpoint='{}'}}",
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
+                "remote_storage={{max_concurrent_timelines_sync={max_concurrent_timelines_sync}, max_sync_errors={max_sync_errors}, bucket_name='{bucket_name}',\
+                bucket_region='{bucket_region}', prefix_in_bucket='{prefix_in_bucket}', access_key_id='{access_key_id}', secret_access_key='{secret_access_key}', endpoint='{endpoint}', concurrency_limit={s3_concurrency_limit}}}",
             ),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
-                r#"{}
+                r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
 
-{}"#,
-                ALL_BASE_VALUES_TOML,
+{remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
-                remote_storage_config_str,
             );
 
             let toml = config_string.parse()?;
 
             let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{}', reason: {}", config_string, e)
-                })
+                .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e}"))
                 .remote_storage_config
                 .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_sync,
+                    max_concurrent_timelines_sync,
                     max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
@@ -884,7 +881,8 @@ pg_distrib_dir='{}'
                         access_key_id: Some(access_key_id.clone()),
                         secret_access_key: Some(secret_access_key.clone()),
                         prefix_in_bucket: Some(prefix_in_bucket.clone()),
-                        endpoint: Some(endpoint.clone())
+                        endpoint: Some(endpoint.clone()),
+                        concurrency_limit: s3_concurrency_limit,
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"

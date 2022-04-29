@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -25,9 +25,7 @@ impl PartialOrd for DeltaFileName {
 
 impl Ord for DeltaFileName {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp;
-
-        cmp = self.key_range.start.cmp(&other.key_range.start);
+        let mut cmp = self.key_range.start.cmp(&other.key_range.start);
         if cmp != Ordering::Equal {
             return cmp;
         }
@@ -117,9 +115,7 @@ impl PartialOrd for ImageFileName {
 
 impl Ord for ImageFileName {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp;
-
-        cmp = self.key_range.start.cmp(&other.key_range.start);
+        let mut cmp = self.key_range.start.cmp(&other.key_range.start);
         if cmp != Ordering::Equal {
             return cmp;
         }

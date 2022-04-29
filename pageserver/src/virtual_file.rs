@@ -11,15 +11,15 @@
 //! src/backend/storage/file/fd.c
 //!
 use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
-use zenith_metrics::{register_histogram_vec, register_int_gauge_vec, HistogramVec, IntGaugeVec};
 
-use once_cell::sync::OnceCell;
+use metrics::{register_histogram_vec, register_int_gauge_vec, HistogramVec, IntGaugeVec};
 
 // Metrics collected on disk IO operations
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
@@ -65,6 +65,7 @@ lazy_static! {
 /// currently open, the 'handle' can still point to the slot where it was last kept. The
 /// 'tag' field is used to detect whether the handle still is valid or not.
 ///
+#[derive(Debug)]
 pub struct VirtualFile {
     /// Lazy handle to the global file descriptor cache. The slot that this points to
     /// might contain our File, or it may be empty, or it may contain a File that
@@ -88,7 +89,7 @@ pub struct VirtualFile {
     timelineid: String,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct SlotHandle {
     /// Index into OPEN_FILES.slots
     index: usize,

@@ -25,7 +25,7 @@ LOGGING = {
         "root": {
             "level": "INFO"
         },
-        "root.wal_acceptor_async": {
+        "root.safekeeper_async": {
             "level": "INFO"  # a lot of logs on DEBUG level
         }
     }

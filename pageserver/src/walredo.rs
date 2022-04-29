@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use log::*;
 use nix::poll::*;
 use serde::Serialize;
 use std::fs;
@@ -35,17 +34,15 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
-use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::nonblock::set_nonblock;
-use zenith_utils::zid::ZTenantId;
+use tracing::*;
+use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
 
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
+use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
@@ -703,7 +700,12 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
+            let n = loop {
+                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));

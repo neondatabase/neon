@@ -52,14 +52,14 @@ def test_pageserver_auth(zenith_env_builder: ZenithEnvBuilder):
         tenant_http_client.tenant_create()
 
 
-@pytest.mark.parametrize('with_wal_acceptors', [False, True])
-def test_compute_auth_to_pageserver(zenith_env_builder: ZenithEnvBuilder, with_wal_acceptors: bool):
+@pytest.mark.parametrize('with_safekeepers', [False, True])
+def test_compute_auth_to_pageserver(zenith_env_builder: ZenithEnvBuilder, with_safekeepers: bool):
     zenith_env_builder.pageserver_auth_enabled = True
-    if with_wal_acceptors:
+    if with_safekeepers:
         zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
-    branch = f'test_compute_auth_to_pageserver{with_wal_acceptors}'
+    branch = f'test_compute_auth_to_pageserver{with_safekeepers}'
     env.zenith_cli.create_branch(branch)
     pg = env.postgres.create_start(branch)
 
