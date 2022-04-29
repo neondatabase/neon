@@ -28,7 +28,7 @@ The pageserver has a few different duties:
 - Receive WAL from the WAL service and decode it.
 - Replay WAL that's applicable to the chunks that the Page Server maintains
 
-For more detailed info, see `/pageserver/README`
+For more detailed info, see [/pageserver/README](/pageserver/README.md)
 
 `/proxy`:
 
@@ -57,7 +57,7 @@ PostgreSQL extension that contains functions needed for testing and debugging.
 The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
-For more detailed info, see `/safekeeper/README`
+For more detailed info, see [/safekeeper/README](/safekeeper/README.md)
 
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.

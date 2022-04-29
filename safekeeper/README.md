@@ -7,6 +7,7 @@ replica. A replication slot is used in the primary to prevent the
 primary from discarding WAL that hasn't been streamed to the WAL
 service yet.
 
+```
 +--------------+              +------------------+
 |              |     WAL      |                  |
 | Compute node |  ----------> |   WAL Service    |
@@ -23,7 +24,7 @@ service yet.
                               | Pageservers  |
                               |              |
                               +--------------+
-
+```
 
 
 The WAL service consists of multiple WAL safekeepers that all store a
@@ -31,6 +32,7 @@ copy of the WAL. A WAL record is considered durable when the majority
 of safekeepers have received and stored the WAL to local disk. A
 consensus algorithm based on Paxos is used to manage the quorum.
 
+```
   +-------------------------------------------+
   | WAL Service                               |
   |                                           |
@@ -48,7 +50,7 @@ consensus algorithm based on Paxos is used to manage the quorum.
   |  +------------+                           |
   |                                           |
   +-------------------------------------------+
-
+```
 
 The primary connects to the WAL safekeepers, so it works in a "push"
 fashion.  That's different from how streaming replication usually
