@@ -75,6 +75,7 @@ pub mod defaults {
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
+#image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 # [remote_storage]

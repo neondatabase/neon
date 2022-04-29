@@ -387,6 +387,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
             Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
+    tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
         tenant_conf.pitr_interval =
@@ -434,6 +435,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
             Some(humantime::parse_duration(&gc_period).map_err(ApiError::from_err)?);
     }
     tenant_conf.gc_horizon = request_data.gc_horizon;
+    tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
 
     if let Some(pitr_interval) = request_data.pitr_interval {
         tenant_conf.pitr_interval =

@@ -528,6 +528,13 @@ impl LayeredRepository {
             .unwrap_or(self.conf.default_tenant_conf.gc_period)
     }
 
+    pub fn get_image_creation_threshold(&self) -> usize {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .image_creation_threshold
+            .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
     pub fn get_pitr_interval(&self) -> Duration {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1150,6 +1157,13 @@ impl LayeredTimeline {
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
+    }
+
+    fn get_image_creation_threshold(&self) -> usize {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .image_creation_threshold
+            .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     /// Open a Timeline handle.
@@ -1821,7 +1835,7 @@ impl LayeredTimeline {
             // 2. Create new image layers for partitions that have been modified
             // "enough".
             for part in partitioning.parts.iter() {
-                if self.time_for_new_image_layer(part, lsn, 3)? {
+                if self.time_for_new_image_layer(part, lsn)? {
                     self.create_image_layer(part, lsn)?;
                 }
             }
@@ -1839,12 +1853,7 @@ impl LayeredTimeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(
-        &self,
-        partition: &KeySpace,
-        lsn: Lsn,
-        threshold: usize,
-    ) -> Result<bool> {
+    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<bool> {
         let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
@@ -1862,7 +1871,7 @@ impl LayeredTimeline {
                     "range {}-{}, has {} deltas on this timeline",
                     img_range.start, img_range.end, num_deltas
                 );
-                if num_deltas >= threshold {
+                if num_deltas >= self.get_image_creation_threshold() {
                     return Ok(true);
                 }
             }

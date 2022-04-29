@@ -31,6 +31,7 @@ pub struct TenantCreateRequest {
     pub compaction_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
+    pub image_creation_threshold: Option<usize>,
     pub pitr_interval: Option<String>,
 }
 
@@ -65,6 +66,7 @@ pub struct TenantConfigRequest {
     pub compaction_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
+    pub image_creation_threshold: Option<usize>,
     pub pitr_interval: Option<String>,
 }
 
@@ -78,6 +80,7 @@ impl TenantConfigRequest {
             compaction_threshold: None,
             gc_horizon: None,
             gc_period: None,
+            image_creation_threshold: None,
             pitr_interval: None,
         }
     }

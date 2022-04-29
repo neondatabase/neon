@@ -694,6 +694,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"compaction_threshold"),
                 RowDescriptor::int8_col(b"gc_horizon"),
                 RowDescriptor::int8_col(b"gc_period"),
+                RowDescriptor::int8_col(b"image_creation_threshold"),
                 RowDescriptor::int8_col(b"pitr_interval"),
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
@@ -708,6 +709,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 Some(repo.get_compaction_threshold().to_string().as_bytes()),
                 Some(repo.get_gc_horizon().to_string().as_bytes()),
                 Some(repo.get_gc_period().as_secs().to_string().as_bytes()),
+                Some(repo.get_image_creation_threshold().to_string().as_bytes()),
                 Some(repo.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;

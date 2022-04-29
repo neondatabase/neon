@@ -369,6 +369,10 @@ impl PageServerNode {
                     .map(|x| x.parse::<u64>())
                     .transpose()?,
                 gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
             })
             .send()?
@@ -405,6 +409,9 @@ impl PageServerNode {
                     .get("gc_horizon")
                     .map(|x| x.parse::<u64>().unwrap()),
                 gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>().unwrap()),
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
             })
             .send()?

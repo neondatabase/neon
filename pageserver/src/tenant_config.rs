@@ -32,6 +32,7 @@ pub mod defaults {
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
+    pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
 }
 
@@ -59,6 +60,8 @@ pub struct TenantConf {
     // Interval at which garbage collection is triggered.
     #[serde(with = "humantime_serde")]
     pub gc_period: Duration,
+    // Delta layer churn threshold to create L1 image layers.
+    pub image_creation_threshold: usize,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is time.
@@ -79,6 +82,7 @@ pub struct TenantConfOpt {
     pub gc_horizon: Option<u64>,
     #[serde(with = "humantime_serde")]
     pub gc_period: Option<Duration>,
+    pub image_creation_threshold: Option<usize>,
     #[serde(with = "humantime_serde")]
     pub pitr_interval: Option<Duration>,
 }
@@ -100,6 +104,9 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.compaction_threshold),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
+            image_creation_threshold: self
+                .image_creation_threshold
+                .unwrap_or(global_conf.image_creation_threshold),
             pitr_interval: self.pitr_interval.unwrap_or(global_conf.pitr_interval),
         }
     }
@@ -123,6 +130,9 @@ impl TenantConfOpt {
         if let Some(gc_period) = other.gc_period {
             self.gc_period = Some(gc_period);
         }
+        if let Some(image_creation_threshold) = other.image_creation_threshold {
+            self.image_creation_threshold = Some(image_creation_threshold);
+        }
         if let Some(pitr_interval) = other.pitr_interval {
             self.pitr_interval = Some(pitr_interval);
         }
@@ -142,6 +152,7 @@ impl TenantConf {
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
+            image_creation_threshold: DEFAULT_IMAGE_CREATION_THRESHOLD,
             pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
                 .expect("cannot parse default PITR interval"),
         }
@@ -162,6 +173,7 @@ impl TenantConf {
             compaction_threshold: defaults::DEFAULT_COMPACTION_THRESHOLD,
             gc_horizon: defaults::DEFAULT_GC_HORIZON,
             gc_period: Duration::from_secs(10),
+            image_creation_threshold: defaults::DEFAULT_IMAGE_CREATION_THRESHOLD,
             pitr_interval: Duration::from_secs(60 * 60),
         }
     }

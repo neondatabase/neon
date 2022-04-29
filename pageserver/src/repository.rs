@@ -467,6 +467,7 @@ pub mod repo_harness {
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
+                image_creation_threshold: Some(tenant_conf.image_creation_threshold),
                 pitr_interval: Some(tenant_conf.pitr_interval),
             }
         }
