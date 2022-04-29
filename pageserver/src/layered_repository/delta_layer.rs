@@ -258,8 +258,18 @@ impl Layer for DeltaLayer {
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
             for (entry_lsn, pos) in offsets {
-                let buf = cursor.read_blob(pos)?;
-                let val = Value::des(&buf)?;
+                let buf = cursor.read_blob(pos).with_context(|| {
+                    format!(
+                        "Failed to read blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
+                let val = Value::des(&buf).with_context(|| {
+                    format!(
+                        "Failed to deserialize file blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
                 match val {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((entry_lsn, img));
