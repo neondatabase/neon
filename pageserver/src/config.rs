@@ -21,7 +21,8 @@ use crate::layered_repository::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 pub const ZSTD_MAX_SAMPLES: usize = 1024;
-pub const ZSTD_MAX_DICTIONARY_SIZE: usize = 64 * 1024;
+pub const ZSTD_MIN_SAMPLES: usize = 8; // magic requirement of zstd
+pub const ZSTD_MAX_DICTIONARY_SIZE: usize = 128 * 1024;
 pub const ZSTD_COMPRESSION_LEVEL: i32 = 0; // default compression level
 
 pub mod defaults {

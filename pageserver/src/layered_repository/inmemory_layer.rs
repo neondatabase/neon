@@ -338,8 +338,11 @@ impl InMemoryLayer {
                 }
             }
         }
-        let dictionary = zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?;
-
+        let dictionary = if samples.len() >= config::ZSTD_MIN_SAMPLES {
+            zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?
+        } else {
+            Vec::new()
+        };
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timelineid,
