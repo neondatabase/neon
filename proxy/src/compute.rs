@@ -1,5 +1,5 @@
+use crate::auth_backend::console::DatabaseInfo;
 use crate::cancellation::CancelClosure;
-use crate::cloud::api::DatabaseInfo;
 use crate::error::UserFacingError;
 use std::io;
 use std::net::SocketAddr;

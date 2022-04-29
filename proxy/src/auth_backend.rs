@@ -1,10 +1,9 @@
-mod local;
+pub mod console;
+pub mod legacy_console;
+pub mod link;
+pub mod postgres;
 
-mod legacy;
-pub use legacy::{AuthError, AuthErrorImpl, Legacy};
-
-pub mod api;
-pub use api::{Api, BoxedApi};
+pub use legacy_console::{AuthError, AuthErrorImpl};
 
 use crate::mgmt;
 use crate::waiters::{self, Waiter, Waiters};
@@ -29,18 +28,4 @@ where
 
 pub fn notify(psql_session_id: &str, msg: mgmt::ComputeReady) -> Result<(), waiters::NotifyError> {
     CPLANE_WAITERS.notify(psql_session_id, msg)
-}
-
-/// Construct a new opaque cloud API provider.
-pub fn new(url: reqwest::Url) -> anyhow::Result<BoxedApi> {
-    Ok(match url.scheme() {
-        "https" | "http" => {
-            todo!("build a real cloud wrapper")
-        }
-        "postgresql" | "postgres" | "pg" => {
-            // Just point to a local running postgres instance.
-            Box::new(local::Local { url })
-        }
-        other => anyhow::bail!("unsupported url scheme: {other}"),
-    })
 }

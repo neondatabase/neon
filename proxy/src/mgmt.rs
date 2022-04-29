@@ -1,4 +1,4 @@
-use crate::cloud;
+use crate::auth_backend;
 use anyhow::Context;
 use serde::Deserialize;
 use std::{
@@ -9,6 +9,8 @@ use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     pq_proto::{BeMessage, SINGLE_COL_ROWDESC},
 };
+
+/// TODO: move all of that to auth-backend/link.rs when we ditch legacy-console backend
 
 ///
 /// Main proxy listener loop.
@@ -75,12 +77,12 @@ struct PsqlSessionResponse {
 
 #[derive(Deserialize)]
 enum PsqlSessionResult {
-    Success(cloud::api::DatabaseInfo),
+    Success(auth_backend::console::DatabaseInfo),
     Failure(String),
 }
 
 /// A message received by `mgmt` when a compute node is ready.
-pub type ComputeReady = Result<cloud::api::DatabaseInfo, String>;
+pub type ComputeReady = Result<auth_backend::console::DatabaseInfo, String>;
 
 impl PsqlSessionResult {
     fn into_compute_ready(self) -> ComputeReady {
@@ -111,7 +113,7 @@ fn try_process_query(pgb: &mut PostgresBackend, query_string: &str) -> anyhow::R
 
     let resp: PsqlSessionResponse = serde_json::from_str(query_string)?;
 
-    match cloud::notify(&resp.session_id, resp.result.into_compute_ready()) {
+    match auth_backend::notify(&resp.session_id, resp.result.into_compute_ready()) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

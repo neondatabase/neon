@@ -23,6 +23,10 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
+
+    // New console API requires SNI info to determine cluster name.
+    // Other Auth backends don't need it.
+    pub sni_cluster: Option<String>,
 }
 
 impl ClientCredentials {
@@ -45,7 +49,11 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         let user = get_param("user")?;
         let db = get_param("database")?;
 
-        Ok(Self { user, dbname: db })
+        Ok(Self {
+            user,
+            dbname: db,
+            sni_cluster: None,
+        })
     }
 }
 
@@ -54,7 +62,7 @@ impl ClientCredentials {
     pub async fn authenticate(
         self,
         config: &ProxyConfig,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     ) -> Result<compute::NodeInfo, AuthError> {
         // This method is just a convenient facade for `handle_user`
         super::handle_user(config, client, self).await
