@@ -1,6 +1,7 @@
 from contextlib import closing
 
 import pytest
+import psycopg2.extras
 
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
@@ -30,19 +31,39 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}'''
     # check the configuration of the default tenant
     # it should match global configuration
     with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
+        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
+            log.info(f"show {env.initial_tenant.hex}")
             pscur.execute(f"show {env.initial_tenant.hex}")
             res = pscur.fetchone()
-            log.info(f"initial_tenant res: {res}")
-            assert res == (10000, 1048576, 1, 10, 67108864, 100, 2592000)
+            assert all(
+                i in res.items() for i in {
+                    "checkpoint_distance": 10000,
+                    "compaction_target_size": 1048576,
+                    "compaction_period": 1,
+                    "compaction_threshold": 10,
+                    "gc_horizon": 67108864,
+                    "gc_period": 100,
+                    "image_creation_threshold": 3,
+                    "pitr_interval": 2592000
+                }.items())
 
     # check the configuration of the new tenant
     with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
+        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant.hex}")
             res = pscur.fetchone()
             log.info(f"res: {res}")
-            assert res == (20000, 1048576, 1, 10, 67108864, 30, 2592000)
+            assert all(
+                i in res.items() for i in {
+                    "checkpoint_distance": 20000,
+                    "compaction_target_size": 1048576,
+                    "compaction_period": 1,
+                    "compaction_threshold": 10,
+                    "gc_horizon": 67108864,
+                    "gc_period": 30,
+                    "image_creation_threshold": 3,
+                    "pitr_interval": 2592000
+                }.items())
 
     # update the config and ensure that it has changed
     env.zenith_cli.config_tenant(tenant_id=tenant,
@@ -52,19 +73,39 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}'''
                                  })
 
     with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
+        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant.hex}")
             res = pscur.fetchone()
             log.info(f"after config res: {res}")
-            assert res == (15000, 1048576, 1, 10, 67108864, 80, 2592000)
+            assert all(
+                i in res.items() for i in {
+                    "checkpoint_distance": 15000,
+                    "compaction_target_size": 1048576,
+                    "compaction_period": 1,
+                    "compaction_threshold": 10,
+                    "gc_horizon": 67108864,
+                    "gc_period": 80,
+                    "image_creation_threshold": 3,
+                    "pitr_interval": 2592000
+                }.items())
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
     env.pageserver.start()
 
     with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
+        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant.hex}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
-            assert res == (15000, 1048576, 1, 10, 67108864, 80, 2592000)
+            assert all(
+                i in res.items() for i in {
+                    "checkpoint_distance": 15000,
+                    "compaction_target_size": 1048576,
+                    "compaction_period": 1,
+                    "compaction_threshold": 10,
+                    "gc_horizon": 67108864,
+                    "gc_period": 80,
+                    "image_creation_threshold": 3,
+                    "pitr_interval": 2592000
+                }.items())
