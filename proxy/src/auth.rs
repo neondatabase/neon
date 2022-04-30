@@ -174,7 +174,7 @@ fn parse_password(bytes: &[u8]) -> Option<&str> {
 fn hello_message(redirect_uri: &str, session_id: &str) -> String {
     format!(
         concat![
-            "☀️  Welcome to Zenith!\n",
+            "☀️  Welcome to Neon!\n",
             "To proceed with database creation, open the following link:\n\n",
             "    {redirect_uri}{session_id}\n\n",
             "It needs to be done once and we will send you '.pgpass' file,\n",
