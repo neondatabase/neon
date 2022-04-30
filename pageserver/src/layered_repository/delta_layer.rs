@@ -278,7 +278,8 @@ impl Layer for DeltaLayer {
                     let mut decompressed: Vec<u8> = Vec::new();
                     decoder.read_to_end(&mut decompressed)?;
                     Value::des(&decompressed)
-                }.with_context(|| {
+                }
+                .with_context(|| {
                     format!(
                         "Failed to deserialize file blob from virtual file {}",
                         file.file.path.display()
