@@ -1439,7 +1439,7 @@ impl LayeredTimeline {
                     continue;
                 }
             }
-            for frozen_layer in layers.frozen_layers.iter() {
+            for frozen_layer in layers.frozen_layers.iter().rev() {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
