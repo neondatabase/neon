@@ -12,15 +12,13 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::PageServerConf,
-    layered_repository::metadata::metadata_path,
-    storage_sync::{sync_queue, SyncTask},
+    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
 use utils::zid::ZTenantTimelineId;
 
 use super::{
     index::{IndexPart, RemoteTimeline},
-    SyncData, TimelineDownload,
+    LayersDownload, SyncData, SyncQueue,
 };
 
 pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
@@ -76,7 +74,7 @@ pub(super) enum DownloadedTimeline {
     FailedAndRescheduled,
     /// Remote timeline data is found, its latest checkpoint's metadata contents (disk_consistent_lsn) is known.
     /// Initial download successful.
-    Successful(SyncData<TimelineDownload>),
+    Successful(SyncData<LayersDownload>),
 }
 
 /// Attempts to download all given timeline's layers.
@@ -87,9 +85,10 @@ pub(super) enum DownloadedTimeline {
 pub(super) async fn download_timeline_layers<'a, P, S>(
     conf: &'static PageServerConf,
     storage: &'a S,
+    sync_queue: &'a SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
-    mut download_data: SyncData<TimelineDownload>,
+    mut download_data: SyncData<LayersDownload>,
 ) -> DownloadedTimeline
 where
     P: Debug + Send + Sync + 'static,
@@ -251,7 +250,7 @@ where
     if errors_happened {
         debug!("Reenqueuing failed download task for timeline {sync_id}");
         download_data.retries += 1;
-        sync_queue::push(sync_id, SyncTask::Download(download_data));
+        sync_queue.push(sync_id, SyncTask::Download(download_data));
         DownloadedTimeline::FailedAndRescheduled
     } else {
         info!("Successfully downloaded all layers");
@@ -265,7 +264,10 @@ async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet};
+    use std::{
+        collections::{BTreeSet, HashSet},
+        num::NonZeroUsize,
+    };
 
     use remote_storage::{LocalFs, RemoteStorage};
     use tempfile::tempdir;
@@ -284,6 +286,8 @@ mod tests {
     #[tokio::test]
     async fn download_timeline() -> anyhow::Result<()> {
         let harness = RepoHarness::create("download_timeline")?;
+        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
         let storage = LocalFs::new(
@@ -324,11 +328,12 @@ mod tests {
         let download_data = match download_timeline_layers(
             harness.conf,
             &storage,
+            &sync_queue,
             Some(&remote_timeline),
             sync_id,
             SyncData::new(
                 current_retries,
-                TimelineDownload {
+                LayersDownload {
                     layers_to_skip: HashSet::from([local_timeline_path.join("layer_to_skip")]),
                 },
             ),
@@ -380,17 +385,19 @@ mod tests {
     #[tokio::test]
     async fn download_timeline_negatives() -> anyhow::Result<()> {
         let harness = RepoHarness::create("download_timeline_negatives")?;
+        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), harness.conf.workdir.clone())?;
 
         let empty_remote_timeline_download = download_timeline_layers(
             harness.conf,
             &storage,
+            &sync_queue,
             None,
             sync_id,
             SyncData::new(
                 0,
-                TimelineDownload {
+                LayersDownload {
                     layers_to_skip: HashSet::new(),
                 },
             ),
@@ -409,11 +416,12 @@ mod tests {
         let already_downloading_remote_timeline_download = download_timeline_layers(
             harness.conf,
             &storage,
+            &sync_queue,
             Some(&not_expecting_download_remote_timeline),
             sync_id,
             SyncData::new(
                 0,
-                TimelineDownload {
+                LayersDownload {
                     layers_to_skip: HashSet::new(),
                 },
             ),

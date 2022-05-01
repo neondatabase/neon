@@ -8,16 +8,14 @@ use remote_storage::RemoteStorage;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    config::PageServerConf,
-    layered_repository::metadata::metadata_path,
-    storage_sync::{sync_queue, SyncTask},
-};
 use utils::zid::ZTenantTimelineId;
 
 use super::{
     index::{IndexPart, RemoteTimeline},
-    SyncData, TimelineUpload,
+    LayersUpload, SyncData, SyncQueue,
+};
+use crate::{
+    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
 
 /// Serializes and uploads the given index part data to the remote storage.
@@ -68,11 +66,7 @@ pub(super) enum UploadedTimeline {
     /// Upload failed due to some error, the upload task is rescheduled for another retry.
     FailedAndRescheduled,
     /// No issues happened during the upload, all task files were put into the remote storage.
-    Successful(SyncData<TimelineUpload>),
-    /// No failures happened during the upload, but some files were removed locally before the upload task completed
-    /// (could happen due to retries, for instance, if GC happens in the interim).
-    /// Such files are considered "not needed" and ignored, but the task's metadata should be discarded and the new one loaded from the local file.
-    SuccessfulAfterLocalFsUpdate(SyncData<TimelineUpload>),
+    Successful(SyncData<LayersUpload>),
 }
 
 /// Attempts to upload given layer files.
@@ -81,9 +75,10 @@ pub(super) enum UploadedTimeline {
 /// On an error, bumps the retries count and reschedules the entire task.
 pub(super) async fn upload_timeline_layers<'a, P, S>(
     storage: &'a S,
+    sync_queue: &SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
-    mut upload_data: SyncData<TimelineUpload>,
+    mut upload_data: SyncData<LayersUpload>,
 ) -> UploadedTimeline
 where
     P: Debug + Send + Sync + 'static,
@@ -168,7 +163,6 @@ where
         .collect::<FuturesUnordered<_>>();
 
     let mut errors_happened = false;
-    let mut local_fs_updated = false;
     while let Some(upload_result) = upload_tasks.next().await {
         match upload_result {
             Ok(uploaded_path) => {
@@ -185,7 +179,16 @@ where
                         errors_happened = true;
                         error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
                     } else {
-                        local_fs_updated = true;
+                        // We have run the upload sync task, but the file we wanted to upload is gone.
+                        // This is "fine" due the asynchronous nature of the sync loop: it only reacts to events and might need to
+                        // retry the upload tasks, if S3 or network is down: but during this time, pageserver might still operate and
+                        // run compaction/gc threads, removing redundant files from disk.
+                        // It's not good to pause GC/compaction because of those and we would rather skip such uploads.
+                        //
+                        // Yet absence of such files might also mean that the timeline metadata file was updated (GC moves the Lsn forward, for instance).
+                        // We don't try to read a more recent version, since it could contain `disk_consistent_lsn` that does not have its upload finished yet.
+                        // This will create "missing" layers and make data inconsistent.
+                        // Instead, we only update the metadata when it was submitted in an upload task as a checkpoint result.
                         upload.layers_to_upload.remove(&source_path);
                         warn!(
                             "Missing locally a layer file {} scheduled for upload, skipping",
@@ -200,11 +203,8 @@ where
     if errors_happened {
         debug!("Reenqueuing failed upload task for timeline {sync_id}");
         upload_data.retries += 1;
-        sync_queue::push(sync_id, SyncTask::Upload(upload_data));
+        sync_queue.push(sync_id, SyncTask::Upload(upload_data));
         UploadedTimeline::FailedAndRescheduled
-    } else if local_fs_updated {
-        info!("Successfully uploaded all layers, some local layers were removed during the upload");
-        UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data)
     } else {
         info!("Successfully uploaded all layers");
         UploadedTimeline::Successful(upload_data)
@@ -218,7 +218,10 @@ enum UploadError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet};
+    use std::{
+        collections::{BTreeSet, HashSet},
+        num::NonZeroUsize,
+    };
 
     use remote_storage::LocalFs;
     use tempfile::tempdir;
@@ -237,6 +240,7 @@ mod tests {
     #[tokio::test]
     async fn regular_layer_upload() -> anyhow::Result<()> {
         let harness = RepoHarness::create("regular_layer_upload")?;
+        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
@@ -258,6 +262,7 @@ mod tests {
 
         let upload_result = upload_timeline_layers(
             &storage,
+            &sync_queue,
             None,
             sync_id,
             SyncData::new(current_retries, timeline_upload.clone()),
@@ -322,6 +327,7 @@ mod tests {
     #[tokio::test]
     async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
         let harness = RepoHarness::create("layer_upload_after_local_fs_update")?;
+        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
@@ -347,6 +353,7 @@ mod tests {
 
         let upload_result = upload_timeline_layers(
             &storage,
+            &sync_queue,
             None,
             sync_id,
             SyncData::new(current_retries, timeline_upload.clone()),
@@ -354,7 +361,7 @@ mod tests {
         .await;
 
         let upload_data = match upload_result {
-            UploadedTimeline::SuccessfulAfterLocalFsUpdate(upload_data) => upload_data,
+            UploadedTimeline::Successful(upload_data) => upload_data,
             wrong_result => panic!(
                 "Expected a successful after local fs upload for timeline, but got: {wrong_result:?}"
             ),
