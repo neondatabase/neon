@@ -103,6 +103,43 @@ pub struct SafeKeeperStateV3 {
     pub wal_start_lsn: Lsn,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafeKeeperStateV4 {
+    #[serde(with = "hex")]
+    pub tenant_id: ZTenantId,
+    /// Zenith timelineid
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
+    /// persistent acceptor state
+    pub acceptor_state: AcceptorState,
+    /// information about server
+    pub server: ServerInfo,
+    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
+    pub proposer_uuid: PgUuid,
+    /// Part of WAL acknowledged by quorum and available locally. Always points
+    /// to record boundary.
+    pub commit_lsn: Lsn,
+    /// First LSN not yet offloaded to s3. Useful to persist to avoid finding
+    /// out offloading progress on boot.
+    pub s3_wal_lsn: Lsn,
+    /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
+    /// of last record streamed to everyone). Persisting it helps skipping
+    /// recovery in walproposer, generally we compute it from peers. In
+    /// walproposer proto called 'truncate_lsn'.
+    pub peer_horizon_lsn: Lsn,
+    /// LSN of the oldest known checkpoint made by pageserver and successfully
+    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
+    /// informational purposes, we receive it from pageserver (or broker).
+    pub remote_consistent_lsn: Lsn,
+    // Peers and their state as we remember it. Knowing peers themselves is
+    // fundamental; but state is saved here only for informational purposes and
+    // obviously can be stale. (Currently not saved at all, but let's provision
+    // place to have less file version upgrades).
+    pub peers: Peers,
+}
+
 pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState> {
     // migrate to storing full term history
     if version == 1 {
@@ -125,6 +162,8 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
                 wal_seg_size: oldstate.server.wal_seg_size,
             },
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
             s3_wal_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
@@ -146,6 +185,8 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             acceptor_state: oldstate.acceptor_state,
             server,
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
             s3_wal_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
@@ -167,6 +208,8 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             acceptor_state: oldstate.acceptor_state,
             server,
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
             s3_wal_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,

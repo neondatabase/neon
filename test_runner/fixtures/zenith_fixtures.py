@@ -1762,6 +1762,7 @@ class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
     remote_consistent_lsn: str
+    timeline_start_lsn: str
 
 
 @dataclass
@@ -1786,7 +1787,8 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'],
-                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'],
+                                        timeline_start_lsn=resj['timeline_start_lsn'])
 
     def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
         res = self.post(

@@ -573,7 +573,9 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
 
     # fetch something sensible from status
-    epoch = wa_http_cli.timeline_status(tenant_id, timeline_id).acceptor_epoch
+    tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
+    epoch = tli_status.acceptor_epoch
+    timeline_start_lsn = tli_status.timeline_start_lsn
 
     pg.safe_psql("create table t(i int)")
 
@@ -581,8 +583,12 @@ def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
     pg.stop().start()
     pg.safe_psql("insert into t values(10)")
 
-    epoch_after_reboot = wa_http_cli.timeline_status(tenant_id, timeline_id).acceptor_epoch
+    tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
+    epoch_after_reboot = tli_status.acceptor_epoch
     assert epoch_after_reboot > epoch
+
+    # and timeline_start_lsn stays the same
+    assert tli_status.timeline_start_lsn == timeline_start_lsn
 
 
 class SafekeeperEnv:
