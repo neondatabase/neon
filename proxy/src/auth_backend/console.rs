@@ -22,9 +22,11 @@ pub enum ConsoleAuthError {
     #[error("Bad client credentials: {0:?}")]
     BadCredentials(crate::auth::ClientCredentials),
 
-    /// For passwords that couldn't be processed by [`parse_password`].
-    #[error("Absend SNI information")]
+    #[error("SNI info is missing, please upgrade the postgres client library")]
     SniMissing,
+
+    #[error("Unexpected SNI content")]
+    SniWrong,
 
     #[error(transparent)]
     BadUrl(#[from] url::ParseError),
@@ -166,10 +168,15 @@ pub async fn handle_user(
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     creds: &ClientCredentials,
 ) -> Result<compute::NodeInfo, crate::auth::AuthError> {
+    // Determine cluster name from SNI.
     let cluster = creds
-        .sni_cluster
+        .sni_data
         .as_ref()
-        .ok_or(ConsoleAuthError::SniMissing)?;
+        .ok_or(ConsoleAuthError::SniMissing)?
+        .split_once('.')
+        .ok_or(ConsoleAuthError::SniWrong)?
+        .0;
+
     let user = creds.user.as_str();
 
     // Step 1: get the auth secret

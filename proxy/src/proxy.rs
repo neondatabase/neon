@@ -144,11 +144,14 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
 
                 // Here and forth: `or_else` demands that we use a future here
-                let creds = async { params.try_into() }
+                let mut creds: auth::ClientCredentials = async { params.try_into() }
                     .or_else(|e| stream.throw_error(e))
                     .await?;
 
-                // TODO: set creds.cluster here when SNI info is available
+                // Set SNI info when available
+                if let Stream::Tls { tls } = stream.get_ref() {
+                    creds.sni_data = tls.get_ref().1.sni_hostname().map(|s| s.to_owned());
+                }
 
                 break Ok(Some((stream, creds)));
             }

@@ -24,9 +24,9 @@ pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
 
-    // New console API requires SNI info to determine cluster name.
+    // New console API requires SNI info to determine the cluster name.
     // Other Auth backends don't need it.
-    pub sni_cluster: Option<String>,
+    pub sni_data: Option<String>,
 }
 
 impl ClientCredentials {
@@ -52,7 +52,7 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         Ok(Self {
             user,
             dbname: db,
-            sni_cluster: None,
+            sni_data: None,
         })
     }
 }
