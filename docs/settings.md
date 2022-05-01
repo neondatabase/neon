@@ -74,6 +74,10 @@ Every `compaction_period` seconds, the page server checks if
 maintenance operations, like compaction, are needed on the layer
 files.  Default is 1 s, which should be fine.
 
+#### compaction_target_size
+
+File sizes for L0 delta and L1 image layers. Default is 128MB.
+
 #### gc_horizon
 
 `gz_horizon` determines how much history is retained, to allow
@@ -84,6 +88,14 @@ away.
 #### gc_period
 
 Interval at which garbage collection is triggered. Default is 100 s.
+
+#### image_creation_threshold
+
+L0 delta layer threshold for L1 iamge layer creation. Default is 3.
+
+#### pitr_interval
+
+WAL retention duration for PITR branching. Default is 30 days.
 
 #### initial_superuser_name
 
