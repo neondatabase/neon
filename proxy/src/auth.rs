@@ -6,6 +6,7 @@ use crate::config::{AuthBackendType, ProxyConfig};
 use crate::error::UserFacingError;
 use crate::stream::PqStream;
 use crate::{auth_backend, compute, waiters};
+use console::ConsoleAuthError::SniMissing;
 use std::io;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -72,6 +73,7 @@ impl UserFacingError for AuthError {
         match self.0.as_ref() {
             Console(e) => e.to_string_client(),
             MalformedPassword => self.to_string(),
+            GetAuthInfo(e) if matches!(e, SniMissing) => e.to_string(),
             _ => "Internal error".to_string(),
         }
     }
