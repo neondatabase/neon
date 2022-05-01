@@ -43,10 +43,13 @@ pub struct LayerMap {
     pub next_open_layer_at: Option<Lsn>,
 
     ///
-    /// The frozen layer, if any, contains WAL older than the current 'open_layer'
-    /// or 'next_open_layer_at', but newer than any historic layer. The frozen
-    /// layer is during checkpointing, when an InMemoryLayer is being written out
-    /// to disk.
+    /// Frozen layers, if any. Frozen layers are in-memory layers that
+    /// are no longer added to, but haven't been written out to disk
+    /// yet. They contain WAL older than the current 'open_layer' or
+    /// 'next_open_layer_at', but newer than any historic layer.
+    /// The frozen layers are in order from oldest to newest, so that
+    /// the newest one is in the 'back' of the VecDeque, and the oldest
+    /// in the 'front'.
     ///
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 

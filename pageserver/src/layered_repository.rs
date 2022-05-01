@@ -1421,7 +1421,8 @@ impl LayeredTimeline {
 
             let layers = timeline.layers.read().unwrap();
 
-            // Check the open and frozen in-memory layers first
+            // Check the open and frozen in-memory layers first, in order from newest
+            // to oldest.
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
@@ -1684,7 +1685,7 @@ impl LayeredTimeline {
             self.conf.timeline_path(&self.timelineid, &self.tenantid),
         ])?;
 
-        // Finally, replace the frozen in-memory layer with the new on-disk layers
+        // Finally, replace the frozen in-memory layer with the new on-disk layer
         {
             let mut layers = self.layers.write().unwrap();
             let l = layers.frozen_layers.pop_front();
