@@ -102,7 +102,7 @@ impl SharedState {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store)?;
+        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -125,7 +125,7 @@ impl SharedState {
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store)?,
+            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
