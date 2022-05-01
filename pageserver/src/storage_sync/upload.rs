@@ -106,6 +106,11 @@ where
         .cloned()
         .collect::<Vec<_>>();
 
+    if layers_to_upload.is_empty() {
+        info!("No layers to upload after filtering, aborting");
+        return UploadedTimeline::Successful(upload_data);
+    }
+
     debug!("Layers to upload: {layers_to_upload:?}");
     info!(
         "Uploading {} timeline layers, new lsn: {new_upload_lsn:?}",

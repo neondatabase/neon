@@ -120,6 +120,11 @@ where
     debug!("Layers to download: {layers_to_download:?}");
     info!("Downloading {} timeline layers", layers_to_download.len());
 
+    if layers_to_download.is_empty() {
+        info!("No layers to download after filtering, skipping");
+        return DownloadedTimeline::Successful(download_data);
+    }
+
     let mut download_tasks = layers_to_download
         .into_iter()
         .map(|layer_desination_path| async move {

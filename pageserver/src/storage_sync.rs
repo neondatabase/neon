@@ -141,6 +141,7 @@
 //!
 //! When pageserver signals shutdown, current sync task gets finished and the loop exists.
 
+mod delete;
 mod download;
 pub mod index;
 mod upload;
@@ -168,6 +169,7 @@ use tokio::{
 use tracing::*;
 
 use self::{
+    delete::delete_timeline_layers,
     download::{download_timeline_layers, DownloadedTimeline},
     index::{IndexPart, RemoteTimeline, RemoteTimelineIndex},
     upload::{upload_index_part, upload_timeline_layers, UploadedTimeline},
@@ -579,7 +581,7 @@ pub enum SyncTask {
     /// A certain amount of image files to download.
     Upload(SyncData<TimelineUpload>),
     /// Delete remote files.
-    Delete(SyncData<HashSet<PathBuf>>),
+    Delete(SyncData<TimelineDelete>),
 }
 
 /// Stores the data to synd and its retries, to evict the tasks failing to frequently.
@@ -604,8 +606,8 @@ impl SyncTask {
         Self::Upload(SyncData::new(0, upload_task))
     }
 
-    fn delete(layers_to_delete: HashSet<PathBuf>) -> Self {
-        Self::Delete(SyncData::new(0, layers_to_delete))
+    fn delete(delete_task: TimelineDelete) -> Self {
+        Self::Delete(SyncData::new(0, delete_task))
     }
 }
 
@@ -613,7 +615,7 @@ impl SyncTask {
 struct SyncTaskBatch {
     upload: Option<SyncData<TimelineUpload>>,
     download: Option<SyncData<TimelineDownload>>,
-    delete: Option<SyncData<HashSet<PathBuf>>>,
+    delete: Option<SyncData<TimelineDelete>>,
 }
 
 impl SyncTaskBatch {
@@ -664,7 +666,15 @@ impl SyncTaskBatch {
             SyncTask::Delete(new_delete) => match &mut self.delete {
                 Some(batch_delete) => {
                     batch_delete.retries = batch_delete.retries.min(new_delete.retries);
-                    batch_delete.data.extend(new_delete.data.into_iter());
+
+                    batch_delete
+                        .data
+                        .layers_to_delete
+                        .extend(new_delete.data.layers_to_delete.into_iter());
+                    batch_delete
+                        .data
+                        .deleted_layers
+                        .extend(new_delete.data.deleted_layers.into_iter());
                 }
                 None => self.delete = Some(new_delete),
             },
@@ -692,6 +702,13 @@ pub struct TimelineUpload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineDownload {
     layers_to_skip: HashSet<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineDelete {
+    layers_to_delete: HashSet<PathBuf>,
+    deleted_layers: HashSet<PathBuf>,
+    deletion_registered: bool,
 }
 
 /// Adds the new checkpoint files as an upload sync task to the queue.
@@ -733,7 +750,11 @@ pub fn schedule_layer_delete(
             tenant_id,
             timeline_id,
         },
-        SyncTask::delete(layers_to_delete),
+        SyncTask::delete(TimelineDelete {
+            layers_to_delete,
+            deleted_layers: HashSet::new(),
+            deletion_registered: false,
+        }),
     ) {
         warn!("Could not send deletion task for tenant {tenant_id}, timeline {timeline_id}")
     } else {
@@ -951,7 +972,7 @@ where
 
     let upload_data = batch.upload.clone();
     let download_data = batch.download.clone();
-    let ((), status_update) = tokio::join!(
+    let (upload_result, status_update) = tokio::join!(
         async {
             if let Some(upload_data) = upload_data {
                 match validate_task_retries(upload_data, max_sync_errors)
@@ -969,6 +990,7 @@ where
                             "upload",
                         )
                         .await;
+                        return Some(());
                     }
                     ControlFlow::Break(failed_upload_data) => {
                         if let Err(e) = update_remote_data(
@@ -976,8 +998,10 @@ where
                             storage.as_ref(),
                             &index,
                             sync_id,
-                            &failed_upload_data.data,
-                            true,
+                            RemoteDataUpdate::Upload {
+                                uploaded_data: failed_upload_data.data,
+                                upload_failed: true,
+                            },
                         )
                         .await
                         {
@@ -986,6 +1010,7 @@ where
                     }
                 }
             }
+            None
         }
         .instrument(info_span!("upload_timeline_data")),
         async {
@@ -1029,7 +1054,6 @@ where
                 delete_timeline_data(
                     conf,
                     (storage.as_ref(), &index),
-                    current_remote_timeline.as_ref(),
                     sync_id,
                     new_delete_data,
                     sync_start,
@@ -1038,7 +1062,19 @@ where
                 .instrument(info_span!("delete_timeline_data"))
                 .await;
             }
-            ControlFlow::Break(_) => {}
+            ControlFlow::Break(failed_delete_data) => {
+                if let Err(e) = update_remote_data(
+                    conf,
+                    storage.as_ref(),
+                    &index,
+                    sync_id,
+                    RemoteDataUpdate::Delete(&failed_delete_data.data.deleted_layers),
+                )
+                .await
+                {
+                    error!("Failed to update remote timeline {sync_id}: {e:?}");
+                }
+            }
         }
     }
 
@@ -1072,22 +1108,19 @@ where
             if let Err(e) = index.write().await.set_awaits_download(&sync_id, false) {
                 error!("Timeline {sync_id} was expected to be in the remote index after a download attempt, but it's absent: {e:?}");
             }
-            None
         }
         DownloadedTimeline::FailedAndRescheduled => {
             register_sync_status(sync_start, task_name, Some(false));
-            None
         }
         DownloadedTimeline::Successful(mut download_data) => {
             match update_local_metadata(conf, sync_id, current_remote_timeline).await {
                 Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
                     Ok(()) => {
                         register_sync_status(sync_start, task_name, Some(true));
-                        Some(TimelineSyncStatusUpdate::Downloaded)
+                        return Some(TimelineSyncStatusUpdate::Downloaded);
                     }
                     Err(e) => {
                         error!("Timeline {sync_id} was expected to be in the remote index after a sucessful download, but it's absent: {e:?}");
-                        None
                     }
                 },
                 Err(e) => {
@@ -1095,11 +1128,12 @@ where
                     download_data.retries += 1;
                     sync_queue::push(sync_id, SyncTask::Download(download_data));
                     register_sync_status(sync_start, task_name, Some(false));
-                    None
                 }
             }
         }
     }
+
+    None
 }
 
 async fn update_local_metadata(
@@ -1164,28 +1198,39 @@ async fn update_local_metadata(
 }
 
 async fn delete_timeline_data<P, S>(
-    conf: &PageServerConf,
-    index: (&S, &RemoteIndex),
-    as_ref: Option<&RemoteTimeline>,
+    conf: &'static PageServerConf,
+    (storage, index): (&S, &RemoteIndex),
     sync_id: ZTenantTimelineId,
-    new_delete_data: SyncData<HashSet<PathBuf>>,
+    mut new_delete_data: SyncData<TimelineDelete>,
     sync_start: Instant,
     task_name: &str,
-) -> Option<()>
-where
+) where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 {
-    // match update_remote_data(conf, storage, index, sync_id, &uploaded_data.data, false).await {
-    //     Ok(()) => register_sync_status(sync_start, task_name, Some(true)),
-    //     Err(e) => {
-    //         error!("Failed to update remote timeline {sync_id}: {e:?}");
-    //         uploaded_data.retries += 1;
-    //         sync_queue::push(sync_id, SyncTask::Upload(uploaded_data));
-    //         register_sync_status(sync_start, task_name, Some(false));
-    //     }
-    // }
-    todo!("TODO kb")
+    let timeline_delete = &mut new_delete_data.data;
+
+    if !timeline_delete.deletion_registered {
+        if let Err(e) = update_remote_data(
+            conf,
+            storage,
+            index,
+            sync_id,
+            RemoteDataUpdate::Delete(&timeline_delete.layers_to_delete),
+        )
+        .await
+        {
+            error!("Failed to update remote timeline {sync_id}: {e:?}");
+            new_delete_data.retries += 1;
+            sync_queue::push(sync_id, SyncTask::Delete(new_delete_data));
+            register_sync_status(sync_start, task_name, Some(false));
+            return;
+        }
+    }
+    timeline_delete.deletion_registered = true;
+
+    let sync_status = delete_timeline_layers(storage, sync_id, new_delete_data).await;
+    register_sync_status(sync_start, task_name, Some(sync_status));
 }
 
 async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMetadata> {
@@ -1205,8 +1250,7 @@ async fn upload_timeline_data<P, S>(
     new_upload_data: SyncData<TimelineUpload>,
     sync_start: Instant,
     task_name: &str,
-) -> Option<()>
-where
+) where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
@@ -1216,7 +1260,7 @@ where
         {
             UploadedTimeline::FailedAndRescheduled => {
                 register_sync_status(sync_start, task_name, Some(false));
-                return None;
+                return;
             }
             UploadedTimeline::Successful(upload_data) => upload_data,
             UploadedTimeline::SuccessfulAfterLocalFsUpdate(mut outdated_upload_data) => {
@@ -1233,28 +1277,46 @@ where
                             outdated_upload_data.retries += 1;
                             sync_queue::push(sync_id, SyncTask::Upload(outdated_upload_data));
                             register_sync_status(sync_start, task_name, Some(false));
-                            return None;
+                            return;
                         }
                     };
+
                     outdated_upload_data.data.metadata = Some(local_metadata);
                 }
                 outdated_upload_data
             }
         };
 
-    match update_remote_data(conf, storage, index, sync_id, &uploaded_data.data, false).await {
+    match update_remote_data(
+        conf,
+        storage,
+        index,
+        sync_id,
+        RemoteDataUpdate::Upload {
+            uploaded_data: uploaded_data.data.clone(),
+            upload_failed: false,
+        },
+    )
+    .await
+    {
         Ok(()) => {
             register_sync_status(sync_start, task_name, Some(true));
-            Some(())
         }
         Err(e) => {
             error!("Failed to update remote timeline {sync_id}: {e:?}");
             uploaded_data.retries += 1;
             sync_queue::push(sync_id, SyncTask::Upload(uploaded_data));
             register_sync_status(sync_start, task_name, Some(false));
-            None
         }
     }
+}
+
+enum RemoteDataUpdate<'a> {
+    Upload {
+        uploaded_data: TimelineUpload,
+        upload_failed: bool,
+    },
+    Delete(&'a HashSet<PathBuf>),
 }
 
 async fn update_remote_data<P, S>(
@@ -1262,8 +1324,7 @@ async fn update_remote_data<P, S>(
     storage: &S,
     index: &RemoteIndex,
     sync_id: ZTenantTimelineId,
-    uploaded_data: &TimelineUpload,
-    upload_failed: bool,
+    update: RemoteDataUpdate<'_>,
 ) -> anyhow::Result<()>
 where
     P: Debug + Send + Sync + 'static,
@@ -1275,40 +1336,59 @@ where
 
         match index_accessor.timeline_entry_mut(&sync_id) {
             Some(existing_entry) => {
-                if let Some(new_metadata) = uploaded_data.metadata.as_ref() {
-                    if existing_entry.metadata.disk_consistent_lsn()
-                        < new_metadata.disk_consistent_lsn()
-                    {
-                        existing_entry.metadata = new_metadata.clone();
+                match update {
+                    RemoteDataUpdate::Upload {
+                        uploaded_data,
+                        upload_failed,
+                    } => {
+                        if let Some(new_metadata) = uploaded_data.metadata.as_ref() {
+                            if existing_entry.metadata.disk_consistent_lsn()
+                                < new_metadata.disk_consistent_lsn()
+                            {
+                                existing_entry.metadata = new_metadata.clone();
+                            }
+                        }
+                        if upload_failed {
+                            existing_entry.add_upload_failures(
+                                uploaded_data.layers_to_upload.iter().cloned(),
+                            );
+                        } else {
+                            existing_entry
+                                .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                        }
                     }
-                }
-
-                if upload_failed {
-                    existing_entry
-                        .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
-                } else {
-                    existing_entry
-                        .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                    RemoteDataUpdate::Delete(layers_to_remove) => {
+                        existing_entry.remove_layers(layers_to_remove)
+                    }
                 }
                 existing_entry.clone()
             }
-            None => {
-                let new_metadata = match uploaded_data.metadata.as_ref() {
-                    Some(new_metadata) => new_metadata,
-                    None => bail!("For timeline {sync_id} upload, there's no upload metadata and no remote index entry, cannot create a new one"),
-                };
-                let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
-                if upload_failed {
-                    new_remote_timeline
-                        .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
-                } else {
-                    new_remote_timeline
-                        .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
-                }
+            None => match update {
+                RemoteDataUpdate::Upload {
+                    uploaded_data,
+                    upload_failed,
+                } => {
+                    let new_metadata = match uploaded_data.metadata.as_ref() {
+                        Some(new_metadata) => new_metadata,
+                        None => bail!("For timeline {sync_id} upload, there's no upload metadata and no remote index entry, cannot create a new one"),
+                    };
+                    let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
+                    if upload_failed {
+                        new_remote_timeline
+                            .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
+                    } else {
+                        new_remote_timeline
+                            .add_timeline_layers(uploaded_data.uploaded_layers.iter().cloned());
+                    }
 
-                index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
-                new_remote_timeline
-            }
+                    index_accessor.add_timeline_entry(sync_id, new_remote_timeline.clone());
+                    new_remote_timeline
+                }
+                RemoteDataUpdate::Delete(_) => {
+                    warn!("No remote index entry for timeline {sync_id}, skipping deletion");
+                    return Ok(());
+                }
+            },
         }
     };
 
@@ -1539,5 +1619,15 @@ mod test_utils {
 
     pub fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
         TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0), Lsn(0), Lsn(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batching_tests() {
+        todo!("TODO kb")
     }
 }
