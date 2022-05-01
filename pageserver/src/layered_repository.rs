@@ -1881,7 +1881,7 @@ impl LayeredTimeline {
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
-                let img_lsn = if let Some(ref last_img) = last_img {
+                let img_lsn = if let Some(last_img) = last_img {
                     last_img.get_lsn_range().end
                 } else {
                     Lsn(0)

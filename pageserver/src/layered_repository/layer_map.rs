@@ -132,17 +132,15 @@ impl LayerMap {
                 // this layer contains the requested point in the key/lsn space.
                 // No need to search any further
                 trace!(
-                    "found layer {} for request on {} at {}",
+                    "found layer {} for request on {key} at {end_lsn}",
                     l.filename().display(),
-                    key,
-                    end_lsn
                 );
                 latest_delta.replace(Arc::clone(l));
                 break;
             }
             // this layer's end LSN is smaller than the requested point. If there's
             // nothing newer, this is what we need to return. Remember this.
-            if let Some(ref old_candidate) = latest_delta {
+            if let Some(old_candidate) = &latest_delta {
                 if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
                     latest_delta.replace(Arc::clone(l));
                 }
@@ -152,10 +150,8 @@ impl LayerMap {
         }
         if let Some(l) = latest_delta {
             trace!(
-                "found (old) layer {} for request on {} at {}",
+                "found (old) layer {} for request on {key} at {end_lsn}",
                 l.filename().display(),
-                key,
-                end_lsn
             );
             let lsn_floor = std::cmp::max(
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
@@ -166,17 +162,13 @@ impl LayerMap {
                 layer: l,
             }))
         } else if let Some(l) = latest_img {
-            trace!(
-                "found img layer and no deltas for request on {} at {}",
-                key,
-                end_lsn
-            );
+            trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Ok(Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
             }))
         } else {
-            trace!("no layer found for request on {} at {}", key, end_lsn);
+            trace!("no layer found for request on {key} at {end_lsn}");
             Ok(None)
         }
     }
@@ -194,7 +186,6 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    #[allow(dead_code)]
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         let len_before = self.historic_layers.len();
 

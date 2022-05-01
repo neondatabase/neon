@@ -147,6 +147,13 @@ impl RemoteTimeline {
         self.missing_layers.extend(upload_failures.into_iter());
     }
 
+    pub fn remove_layers(&mut self, layers_to_remove: &HashSet<PathBuf>) {
+        self.timeline_layers
+            .retain(|layer| !layers_to_remove.contains(layer));
+        self.missing_layers
+            .retain(|layer| !layers_to_remove.contains(layer));
+    }
+
     /// Lists all layer files in the given remote timeline. Omits the metadata file.
     pub fn stored_files(&self) -> &HashSet<PathBuf> {
         &self.timeline_layers
