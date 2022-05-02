@@ -579,14 +579,13 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://neondatabase.github.io/helm-charts
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
             DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-            helm upgrade zenith-proxy-scram zenithdb/zenith-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
-
+            helm upgrade zenith-proxy     neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
 
   deploy-release:
     docker:
