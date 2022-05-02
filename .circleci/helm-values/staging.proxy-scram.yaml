@@ -20,7 +20,7 @@ exposedService:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    external-dns.alpha.kubernetes.io/hostname: *.cloud.stage.neon.tech
+    external-dns.alpha.kubernetes.io/hostname: cloud.stage.neon.tech
 
 metrics:
   enabled: true
