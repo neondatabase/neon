@@ -1,4 +1,3 @@
-use etcd_broker::SkTimelineInfo;
 use hyper::{Body, Request, Response, StatusCode};
 
 use serde::Serialize;
@@ -11,6 +10,7 @@ use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
 use crate::SafeKeeperConf;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
     http::{
         endpoint,

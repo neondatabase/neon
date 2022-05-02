@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use etcd_broker::subscription_key::{
+    NodeKind, OperationKind, SkOperationKind, SubscriptionKey, SubscriptionKind,
+};
 use tokio::task::JoinHandle;
 
 use std::cmp::min;
@@ -25,8 +28,6 @@ use crate::timeline::{GlobalTimelines, Timeline};
 use crate::{broker, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
-
-const BACKUP_ELECTION_NAME: &str = "WAL_BACKUP";
 
 const BROKER_CONNECTION_RETRY_DELAY_MS: u64 = 1000;
 
@@ -98,11 +99,15 @@ async fn wal_backup_launcher_main_loop(
                 info!("starting WAL backup task for {}", zttid);
 
                 // TODO: decide who should offload in launcher itself by simply checking current state
-                let election_name = broker::get_campaign_name(
-                    BACKUP_ELECTION_NAME,
-                    &conf.broker_etcd_prefix,
-                    zttid,
-                );
+                let election_name = SubscriptionKey {
+                    cluster_prefix: conf.broker_etcd_prefix.clone(),
+                    kind: SubscriptionKind::Operation(
+                        zttid,
+                        NodeKind::Safekeeper,
+                        OperationKind::Safekeeper(SkOperationKind::WalBackup),
+                    ),
+                }
+                .watch_key();
                 let my_candidate_name = broker::get_candiate_name(conf.my_id);
                 let election = broker::Election::new(
                     election_name,
