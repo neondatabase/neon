@@ -616,7 +616,7 @@ pub struct DeltaLayerWriter {
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
     blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
-    dictionary: Vec<u8>,
+    compressor: Option<zstd::bulk::Compressor<'static>>,
 }
 
 impl DeltaLayerWriter {
@@ -651,6 +651,11 @@ impl DeltaLayerWriter {
 
         let off = blob_writer.write_blob(&dictionary)?;
         assert!(off == DICTIONARY_OFFSET);
+        let compressor = if dictionary.is_empty() {
+            None
+        } else {
+            Some(zstd::bulk::Compressor::with_dictionary(config::ZSTD_COMPRESSION_LEVEL, &dictionary)?)
+        };
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -664,7 +669,7 @@ impl DeltaLayerWriter {
             lsn_range,
             tree: tree_builder,
             blob_writer,
-            dictionary,
+            compressor,
         })
     }
 
@@ -677,19 +682,12 @@ impl DeltaLayerWriter {
         assert!(self.lsn_range.start <= lsn);
 
         let body = &Value::ser(&val)?;
-        let off = if self.dictionary.is_empty() {
-            self.blob_writer.write_blob(body)
+        let off = if let Some(ref mut compressor) = self.compressor {
+            let compressed = compressor.compress(body)?;
+            self.blob_writer.write_blob(&compressed)?
         } else {
-            let mut compressed: Vec<u8> = Vec::new();
-            let mut encoder = zstd::Encoder::with_dictionary(
-                &mut compressed,
-                config::ZSTD_COMPRESSION_LEVEL,
-                &self.dictionary,
-            )?;
-            encoder.write_all(body)?;
-            encoder.finish()?;
-            self.blob_writer.write_blob(&compressed)
-        }?;
+            self.blob_writer.write_blob(body)?
+        };
 
         let blob_ref = BlobRef::new(off, val.will_init());
 
