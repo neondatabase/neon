@@ -231,7 +231,7 @@ fn thread_wrapper<F>(
                     "Shutting down: thread '{}' exited with error: {:?}",
                     thread_name, err
                 );
-                shutdown_pageserver();
+                shutdown_pageserver(1);
             } else {
                 error!("Thread '{}' exited with error: {:?}", thread_name, err);
             }
@@ -241,7 +241,7 @@ fn thread_wrapper<F>(
                 "Shutting down: thread '{}' panicked: {:?}",
                 thread_name, err
             );
-            shutdown_pageserver();
+            shutdown_pageserver(1);
         }
     }
 }
