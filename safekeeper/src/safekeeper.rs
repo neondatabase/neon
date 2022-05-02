@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use etcd_broker::SkTimelineInfo;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use postgres_ffi::xlog_utils::TimeLineID;
 
 use postgres_ffi::xlog_utils::XLogSegNo;

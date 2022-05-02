@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use etcd_broker::SkTimelineInfo;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 

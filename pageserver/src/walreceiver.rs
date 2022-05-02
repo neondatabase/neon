@@ -50,7 +50,10 @@ use crate::thread_mgr::ThreadKind;
 use crate::{thread_mgr, DatadirTimelineImpl};
 use anyhow::{ensure, Context};
 use chrono::{NaiveDateTime, Utc};
-use etcd_broker::{Client, SkTimelineInfo, SkTimelineSubscription, SkTimelineSubscriptionKind};
+use etcd_broker::{
+    subscription_key::SubscriptionKey, subscription_value::SkTimelineInfo, BrokerSubscription,
+    Client,
+};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use std::cell::Cell;
@@ -403,7 +406,7 @@ async fn timeline_wal_broker_loop_step(
     // Endlessly try to subscribe for broker updates for a given timeline.
     // If there are no safekeepers to maintain the lease, the timeline subscription will be inavailable in the broker and the operation will fail constantly.
     // This is ok, pageservers should anyway try subscribing (with some backoff) since it's the only way they can get the timeline WAL anyway.
-    let mut broker_subscription: SkTimelineSubscription;
+    let mut broker_subscription: BrokerSubscription<SkTimelineInfo>;
     let mut attempt = 0;
     loop {
         select! {
@@ -420,9 +423,9 @@ async fn timeline_wal_broker_loop_step(
                 info!("Broker subscription loop cancelled, shutting down");
                 return Ok(ControlFlow::Break(()));
             },
-            new_subscription = etcd_broker::subscribe_to_safekeeper_timeline_updates(
+            new_subscription = etcd_broker::subscribe_for_json_values(
                 etcd_client,
-                SkTimelineSubscriptionKind::timeline(broker_prefix.to_owned(), id),
+                SubscriptionKey::sk_timeline_info(broker_prefix.to_owned(), id),
             )
             .instrument(info_span!("etcd_subscription")) => match new_subscription {
                 Ok(new_subscription) => {
