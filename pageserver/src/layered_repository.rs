@@ -1685,6 +1685,8 @@ impl LayeredTimeline {
             self.conf.timeline_path(&self.timelineid, &self.tenantid),
         ])?;
 
+        fail_point!("flush-frozen");
+
         // Finally, replace the frozen in-memory layer with the new on-disk layer
         {
             let mut layers = self.layers.write().unwrap();
