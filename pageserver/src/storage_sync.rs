@@ -92,12 +92,12 @@
 //! A queue is implemented in the [`sync_queue`] module as a pair of sender and receiver channels, to block on zero tasks instead of checking the queue.
 //! The pair's shared buffer of a fixed size serves as an implicit queue, holding [`SyncTask`] for local files upload/download operations.
 //!
-//! The queue gets emptied by a single thread with the loop, that polls the tasks in batches of deduplicated tasks (size configurable).
-//! A task from the batch corresponds to a single timeline, with its files to sync merged together.
-//! Every batch task and layer file in the task is processed concurrently, which is possible due to incremental nature of the timelines:
-//! it's not asserted, but assumed that timeline's checkpoints only add the files locally, not removing or amending the existing ones.
-//! Only GC removes local timeline files, the GC support is not added to sync currently,
-//! yet downloading extra files is not critically bad at this stage, GC can remove those again.
+//! The queue gets emptied by a single thread with the loop, that polls the tasks in batches of deduplicated tasks.
+//! A task from the batch corresponds to a single timeline, with its files to sync merged together: given that only one task sync loop step is active at a time,
+//! timeline uploads and downloads can happen concurrently, in no particular order due to incremental nature of the timeline layers.
+//! Deletion happens only after a successful upload only, otherwise the compation output might make the timeline inconsistent until both tasks are fully processed without errors.
+//! Upload and download update the remote data (inmemory index and S3 json index part file) only after every layer is successfully synchronized, while the deletion task
+//! does otherwise: it requires to have the remote data updated first succesfully: blob files will be invisible to pageserver this way.
 //!
 //! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via downloading and merging the index data for all timelines,
 //! present locally.
@@ -119,7 +119,7 @@
 //! Among other tasks, the index is used to prevent invalid uploads and non-existing downloads on demand, refer to [`index`] for more details.
 //!
 //! Index construction is currently the only place where the storage sync can return an [`Err`] to the user.
-//! New sync tasks are accepted via [`schedule_timeline_checkpoint_upload`] and [`schedule_timeline_download`] functions,
+//! New sync tasks are accepted via [`schedule_layer_upload`], [`schedule_layer_download`] and [`schedule_layer_delete`] functions,
 //! disregarding of the corresponding loop startup.
 //! It's up to the caller to avoid synchronizations if the loop is disabled: otherwise, the sync tasks will be ignored.
 //! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
@@ -449,7 +449,7 @@ fn collect_timeline_files(
 /// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
 mod sync_queue {
     use std::{
-        collections::{hash_map, HashMap, HashSet},
+        collections::{HashMap, HashSet},
         num::NonZeroUsize,
         ops::ControlFlow,
         sync::atomic::{AtomicUsize, Ordering},
@@ -460,7 +460,7 @@ mod sync_queue {
     use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender};
     use tracing::{debug, warn};
 
-    use super::SyncTask;
+    use super::{SyncTask, SyncTaskBatch};
     use utils::zid::ZTenantTimelineId;
 
     static SENDER: OnceCell<UnboundedSender<(ZTenantTimelineId, SyncTask)>> = OnceCell::new();
@@ -512,10 +512,10 @@ mod sync_queue {
     /// Not blocking, can return fewer tasks if the queue does not contain enough.
     /// Batch tasks are split by timelines, with all related tasks merged into one (download/upload)
     /// or two (download and upload, if both were found in the queue during batch construction).
-    pub async fn next_task_batch(
+    pub(super) async fn next_task_batch(
         receiver: &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
         max_timelines_to_sync: NonZeroUsize,
-    ) -> ControlFlow<(), HashMap<ZTenantTimelineId, SyncTask>> {
+    ) -> ControlFlow<(), HashMap<ZTenantTimelineId, SyncTaskBatch>> {
         // request the first task in blocking fashion to do less meaningless work
         let (first_sync_id, first_task) = if let Some(first_task) = next_task(receiver).await {
             first_task
@@ -529,26 +529,21 @@ mod sync_queue {
         batched_timelines.insert(first_sync_id.timeline_id);
 
         let mut tasks = HashMap::new();
-        tasks.insert(first_sync_id, first_task);
+        tasks.insert(first_sync_id, SyncTaskBatch::new(first_task));
 
         loop {
             if batched_timelines.len() >= max_timelines_to_sync {
-                debug!("Filled a full task batch with {max_timelines_to_sync} timeline sync operations");
+                debug!(
+                    "Filled a full task batch with {} timeline sync operations",
+                    batched_timelines.len()
+                );
                 break;
             }
 
             match receiver.try_recv() {
                 Ok((sync_id, new_task)) => {
                     LENGTH.fetch_sub(1, Ordering::Relaxed);
-                    match tasks.entry(sync_id) {
-                        hash_map::Entry::Occupied(o) => {
-                            let current = o.remove();
-                            tasks.insert(sync_id, current.merge(new_task));
-                        }
-                        hash_map::Entry::Vacant(v) => {
-                            v.insert(new_task);
-                        }
-                    }
+                    tasks.entry(sync_id).or_default().add(new_task);
                     batched_timelines.insert(sync_id.timeline_id);
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -583,8 +578,8 @@ pub enum SyncTask {
     Download(SyncData<TimelineDownload>),
     /// A certain amount of image files to download.
     Upload(SyncData<TimelineUpload>),
-    /// Both upload and download layers need to be synced.
-    DownloadAndUpload(SyncData<TimelineDownload>, SyncData<TimelineUpload>),
+    /// Delete remote files.
+    Delete(SyncData<HashSet<PathBuf>>),
 }
 
 /// Stores the data to synd and its retries, to evict the tasks failing to frequently.
@@ -609,121 +604,70 @@ impl SyncTask {
         Self::Upload(SyncData::new(0, upload_task))
     }
 
-    /// Merges two tasks into one with the following rules:
-    ///
-    /// * Download + Download = Download with the retry counter reset and the layers to skip combined
-    /// * DownloadAndUpload + Download = DownloadAndUpload with Upload unchanged and the Download counterparts united by the same rules
-    /// * Upload + Upload = Upload with the retry counter reset and the layers to upload and the uploaded layers combined
-    /// * DownloadAndUpload + Upload = DownloadAndUpload with Download unchanged and the Upload counterparts united by the same rules
-    /// * Upload + Download = DownloadAndUpload with both tasks unchanged
-    /// * DownloadAndUpload + DownloadAndUpload = DownloadAndUpload with both parts united by the same rules
-    fn merge(mut self, other: Self) -> Self {
-        match (&mut self, other) {
-            (
-                SyncTask::DownloadAndUpload(download_data, _) | SyncTask::Download(download_data),
-                SyncTask::Download(new_download_data),
-            )
-            | (
-                SyncTask::Download(download_data),
-                SyncTask::DownloadAndUpload(new_download_data, _),
-            ) => {
-                download_data
-                    .data
-                    .layers_to_skip
-                    .extend(new_download_data.data.layers_to_skip.into_iter());
-                download_data.retries = 0;
-            }
-            (SyncTask::Upload(upload), SyncTask::Download(new_download_data)) => {
-                self = SyncTask::DownloadAndUpload(new_download_data, upload.clone());
-            }
+    fn delete(layers_to_delete: HashSet<PathBuf>) -> Self {
+        Self::Delete(SyncData::new(0, layers_to_delete))
+    }
+}
 
-            (
-                SyncTask::DownloadAndUpload(_, upload_data) | SyncTask::Upload(upload_data),
-                SyncTask::Upload(new_upload_data),
-            )
-            | (SyncTask::Upload(upload_data), SyncTask::DownloadAndUpload(_, new_upload_data)) => {
-                upload_data
-                    .data
-                    .layers_to_upload
-                    .extend(new_upload_data.data.layers_to_upload.into_iter());
-                upload_data
-                    .data
-                    .uploaded_layers
-                    .extend(new_upload_data.data.uploaded_layers.into_iter());
-                upload_data.retries = 0;
+#[derive(Debug, Default)]
+struct SyncTaskBatch {
+    upload: Option<SyncData<TimelineUpload>>,
+    download: Option<SyncData<TimelineDownload>>,
+    delete: Option<SyncData<HashSet<PathBuf>>>,
+}
 
-                if new_upload_data
-                    .data
-                    .metadata
-                    .as_ref()
-                    .map(|meta| meta.disk_consistent_lsn())
-                    > upload_data
+impl SyncTaskBatch {
+    fn new(task: SyncTask) -> Self {
+        let mut new_self = Self::default();
+        new_self.add(task);
+        new_self
+    }
+
+    fn add(&mut self, task: SyncTask) {
+        match task {
+            SyncTask::Download(new_download) => match &mut self.download {
+                Some(batch_download) => {
+                    batch_download.retries = batch_download.retries.min(new_download.retries);
+                    batch_download
                         .data
+                        .layers_to_skip
+                        .extend(new_download.data.layers_to_skip.into_iter());
+                }
+                None => self.download = Some(new_download),
+            },
+            SyncTask::Upload(new_upload) => match &mut self.upload {
+                Some(batch_upload) => {
+                    batch_upload.retries = batch_upload.retries.min(new_upload.retries);
+
+                    let batch_data = &mut batch_upload.data;
+                    let new_data = new_upload.data;
+                    batch_data
+                        .layers_to_upload
+                        .extend(new_data.layers_to_upload.into_iter());
+                    batch_data
+                        .uploaded_layers
+                        .extend(new_data.uploaded_layers.into_iter());
+                    if batch_data
                         .metadata
                         .as_ref()
                         .map(|meta| meta.disk_consistent_lsn())
-                {
-                    upload_data.data.metadata = new_upload_data.data.metadata;
+                        <= new_data
+                            .metadata
+                            .as_ref()
+                            .map(|meta| meta.disk_consistent_lsn())
+                    {
+                        batch_data.metadata = new_data.metadata;
+                    }
                 }
-            }
-            (SyncTask::Download(download), SyncTask::Upload(new_upload_data)) => {
-                self = SyncTask::DownloadAndUpload(download.clone(), new_upload_data)
-            }
-
-            (
-                SyncTask::DownloadAndUpload(download_data, upload_data),
-                SyncTask::DownloadAndUpload(new_download_data, new_upload_data),
-            ) => {
-                download_data
-                    .data
-                    .layers_to_skip
-                    .extend(new_download_data.data.layers_to_skip.into_iter());
-                download_data.retries = 0;
-
-                upload_data
-                    .data
-                    .layers_to_upload
-                    .extend(new_upload_data.data.layers_to_upload.into_iter());
-                upload_data
-                    .data
-                    .uploaded_layers
-                    .extend(new_upload_data.data.uploaded_layers.into_iter());
-                upload_data.retries = 0;
-
-                if new_upload_data
-                    .data
-                    .metadata
-                    .as_ref()
-                    .map(|meta| meta.disk_consistent_lsn())
-                    > upload_data
-                        .data
-                        .metadata
-                        .as_ref()
-                        .map(|meta| meta.disk_consistent_lsn())
-                {
-                    upload_data.data.metadata = new_upload_data.data.metadata;
+                None => self.upload = Some(new_upload),
+            },
+            SyncTask::Delete(new_delete) => match &mut self.delete {
+                Some(batch_delete) => {
+                    batch_delete.retries = batch_delete.retries.min(new_delete.retries);
+                    batch_delete.data.extend(new_delete.data.into_iter());
                 }
-            }
-        }
-
-        self
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            SyncTask::Download(_) => "download",
-            SyncTask::Upload(_) => "upload",
-            SyncTask::DownloadAndUpload(_, _) => "download and upload",
-        }
-    }
-
-    fn retries(&self) -> u32 {
-        match self {
-            SyncTask::Download(data) => data.retries,
-            SyncTask::Upload(data) => data.retries,
-            SyncTask::DownloadAndUpload(download_data, upload_data) => {
-                download_data.retries.max(upload_data.retries)
-            }
+                None => self.delete = Some(new_delete),
+            },
         }
     }
 }
@@ -760,6 +704,7 @@ pub fn schedule_layer_upload(
     layers_to_upload: HashSet<PathBuf>,
     metadata: Option<TimelineMetadata>,
 ) {
+    debug!("Scheduling layer upload for tenant {tenant_id}, timeline {timeline_id}, to upload: {layers_to_upload:?}");
     if !sync_queue::push(
         ZTenantTimelineId {
             tenant_id,
@@ -771,18 +716,29 @@ pub fn schedule_layer_upload(
             metadata,
         }),
     ) {
-        warn!("Could not send an upload task for tenant {tenant_id}, timeline {timeline_id}",)
+        warn!("Could not send an upload task for tenant {tenant_id}, timeline {timeline_id}")
     } else {
         debug!("Upload task for tenant {tenant_id}, timeline {timeline_id} sent")
     }
 }
 
 pub fn schedule_layer_delete(
-    _tenant_id: ZTenantId,
-    _timeline_id: ZTimelineId,
-    _layers_to_delete: HashSet<PathBuf>,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+    layers_to_delete: HashSet<PathBuf>,
 ) {
-    // TODO kb implement later
+    debug!("Scheduling layer deletion for tenant {tenant_id}, timeline {timeline_id}, to delete: {layers_to_delete:?}");
+    if !sync_queue::push(
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        },
+        SyncTask::delete(layers_to_delete),
+    ) {
+        warn!("Could not send deletion task for tenant {tenant_id}, timeline {timeline_id}")
+    } else {
+        debug!("Deletion task for tenant {tenant_id}, timeline {timeline_id} sent")
+    }
 }
 
 /// Requests the download of the entire timeline for a given tenant.
@@ -948,13 +904,13 @@ where
 
     let mut sync_results = batched_tasks
         .into_iter()
-        .map(|(sync_id, task)| {
+        .map(|(sync_id, batch)| {
             let storage = Arc::clone(&storage);
             let index = index.clone();
             async move {
                 let state_update =
-                    process_sync_task(conf, storage, index, max_sync_errors, sync_id, task)
-                        .instrument(info_span!("process_sync_tasks", sync_id = %sync_id))
+                    process_sync_task_batch(conf, storage, index, max_sync_errors, sync_id, batch)
+                        .instrument(info_span!("process_sync_task_batch", sync_id = %sync_id))
                         .await;
                 (sync_id, state_update)
             }
@@ -978,13 +934,13 @@ where
     ControlFlow::Continue(new_timeline_states)
 }
 
-async fn process_sync_task<P, S>(
+async fn process_sync_task_batch<P, S>(
     conf: &'static PageServerConf,
     storage: Arc<S>,
     index: RemoteIndex,
     max_sync_errors: NonZeroU32,
     sync_id: ZTenantTimelineId,
-    task: SyncTask,
+    batch: SyncTaskBatch,
 ) -> Option<TimelineSyncStatusUpdate>
 where
     P: Debug + Send + Sync + 'static,
@@ -993,124 +949,103 @@ where
     let sync_start = Instant::now();
     let current_remote_timeline = { index.read().await.timeline_entry(&sync_id).cloned() };
 
-    let task = match validate_task_retries(sync_id, task, max_sync_errors) {
-        ControlFlow::Continue(task) => task,
-        ControlFlow::Break(aborted_task) => {
-            match aborted_task {
-                SyncTask::Download(_) => {
-                    index
-                        .write()
-                        .await
-                        .set_awaits_download(&sync_id, false)
-                        .ok();
-                }
-                SyncTask::Upload(failed_upload_data) => {
-                    if let Err(e) = update_remote_data(
-                        conf,
-                        storage.as_ref(),
-                        &index,
-                        sync_id,
-                        &failed_upload_data.data,
-                        true,
-                    )
+    let upload_data = batch.upload.clone();
+    let download_data = batch.download.clone();
+    let ((), status_update) = tokio::join!(
+        async {
+            if let Some(upload_data) = upload_data {
+                match validate_task_retries(upload_data, max_sync_errors)
+                    .instrument(info_span!("retries_validation"))
                     .await
-                    {
-                        error!("Failed to update remote timeline {sync_id}: {e:?}");
+                {
+                    ControlFlow::Continue(new_upload_data) => {
+                        upload_timeline_data(
+                            conf,
+                            (storage.as_ref(), &index),
+                            current_remote_timeline.as_ref(),
+                            sync_id,
+                            new_upload_data,
+                            sync_start,
+                            "upload",
+                        )
+                        .await;
                     }
-                }
-                SyncTask::DownloadAndUpload(_, failed_upload_data) => {
-                    index
-                        .write()
+                    ControlFlow::Break(failed_upload_data) => {
+                        if let Err(e) = update_remote_data(
+                            conf,
+                            storage.as_ref(),
+                            &index,
+                            sync_id,
+                            &failed_upload_data.data,
+                            true,
+                        )
                         .await
-                        .set_awaits_download(&sync_id, false)
-                        .ok();
-                    if let Err(e) = update_remote_data(
-                        conf,
-                        storage.as_ref(),
-                        &index,
-                        sync_id,
-                        &failed_upload_data.data,
-                        true,
-                    )
-                    .await
-                    {
-                        error!("Failed to update remote timeline {sync_id}: {e:?}");
+                        {
+                            error!("Failed to update remote timeline {sync_id}: {e:?}");
+                        }
                     }
                 }
             }
-            return None;
         }
-    };
-
-    let task_name = task.name();
-    let current_task_attempt = task.retries();
-    info!("Sync task '{task_name}' processing started, attempt #{current_task_attempt}");
-
-    if current_task_attempt > 0 {
-        let seconds_to_wait = 2.0_f64.powf(current_task_attempt as f64 - 1.0).min(30.0);
-        info!("Waiting {seconds_to_wait} seconds before starting the '{task_name}' task");
-        tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
-    }
-
-    let status_update = match task {
-        SyncTask::Download(new_download_data) => {
-            download_timeline(
-                conf,
-                (storage.as_ref(), &index),
-                current_remote_timeline.as_ref(),
-                sync_id,
-                new_download_data,
-                sync_start,
-                task_name,
-            )
-            .await
-        }
-        SyncTask::Upload(new_upload_data) => {
-            upload_timeline(
-                conf,
-                (storage.as_ref(), &index),
-                current_remote_timeline.as_ref(),
-                sync_id,
-                new_upload_data,
-                sync_start,
-                task_name,
-            )
-            .await;
+        .instrument(info_span!("upload_timeline_data")),
+        async {
+            if let Some(download_data) = download_data {
+                match validate_task_retries(download_data, max_sync_errors)
+                    .instrument(info_span!("retries_validation"))
+                    .await
+                {
+                    ControlFlow::Continue(new_download_data) => {
+                        return download_timeline_data(
+                            conf,
+                            (storage.as_ref(), &index),
+                            current_remote_timeline.as_ref(),
+                            sync_id,
+                            new_download_data,
+                            sync_start,
+                            "download",
+                        )
+                        .await
+                    }
+                    ControlFlow::Break(_) => {
+                        index
+                            .write()
+                            .await
+                            .set_awaits_download(&sync_id, false)
+                            .ok();
+                    }
+                }
+            }
             None
         }
-        SyncTask::DownloadAndUpload(new_download_data, new_upload_data) => {
-            let status_update = download_timeline(
-                conf,
-                (storage.as_ref(), &index),
-                current_remote_timeline.as_ref(),
-                sync_id,
-                new_download_data,
-                sync_start,
-                task_name,
-            )
-            .await;
+        .instrument(info_span!("download_timeline_data")),
+    );
 
-            upload_timeline(
-                conf,
-                (storage.as_ref(), &index),
-                current_remote_timeline.as_ref(),
-                sync_id,
-                new_upload_data,
-                sync_start,
-                task_name,
-            )
-            .await;
-
-            status_update
+    if let Some(delete_data) = batch.delete {
+        match validate_task_retries(delete_data, max_sync_errors)
+            .instrument(info_span!("retries_validation"))
+            .await
+        {
+            ControlFlow::Continue(new_delete_data) => {
+                delete_timeline_data(
+                    conf,
+                    (storage.as_ref(), &index),
+                    current_remote_timeline.as_ref(),
+                    sync_id,
+                    new_delete_data,
+                    sync_start,
+                    "delete",
+                )
+                .instrument(info_span!("delete_timeline_data"))
+                .await;
+            }
+            ControlFlow::Break(_) => {}
         }
-    };
-
-    info!("Finished processing the task");
+    }
 
     status_update
 }
 
-async fn download_timeline<P, S>(
+async fn download_timeline_data<P, S>(
     conf: &'static PageServerConf,
     (storage, index): (&S, &RemoteIndex),
     current_remote_timeline: Option<&RemoteTimeline>,
@@ -1228,6 +1163,31 @@ async fn update_local_metadata(
     Ok(())
 }
 
+async fn delete_timeline_data<P, S>(
+    conf: &PageServerConf,
+    index: (&S, &RemoteIndex),
+    as_ref: Option<&RemoteTimeline>,
+    sync_id: ZTenantTimelineId,
+    new_delete_data: SyncData<HashSet<PathBuf>>,
+    sync_start: Instant,
+    task_name: &str,
+) -> Option<()>
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
+{
+    // match update_remote_data(conf, storage, index, sync_id, &uploaded_data.data, false).await {
+    //     Ok(()) => register_sync_status(sync_start, task_name, Some(true)),
+    //     Err(e) => {
+    //         error!("Failed to update remote timeline {sync_id}: {e:?}");
+    //         uploaded_data.retries += 1;
+    //         sync_queue::push(sync_id, SyncTask::Upload(uploaded_data));
+    //         register_sync_status(sync_start, task_name, Some(false));
+    //     }
+    // }
+    todo!("TODO kb")
+}
+
 async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMetadata> {
     TimelineMetadata::from_bytes(
         &fs::read(metadata_path)
@@ -1237,7 +1197,7 @@ async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMeta
     .context("Failed to parse metadata bytes")
 }
 
-async fn upload_timeline<P, S>(
+async fn upload_timeline_data<P, S>(
     conf: &'static PageServerConf,
     (storage, index): (&S, &RemoteIndex),
     current_remote_timeline: Option<&RemoteTimeline>,
@@ -1245,7 +1205,8 @@ async fn upload_timeline<P, S>(
     new_upload_data: SyncData<TimelineUpload>,
     sync_start: Instant,
     task_name: &str,
-) where
+) -> Option<()>
+where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
@@ -1255,7 +1216,7 @@ async fn upload_timeline<P, S>(
         {
             UploadedTimeline::FailedAndRescheduled => {
                 register_sync_status(sync_start, task_name, Some(false));
-                return;
+                return None;
             }
             UploadedTimeline::Successful(upload_data) => upload_data,
             UploadedTimeline::SuccessfulAfterLocalFsUpdate(mut outdated_upload_data) => {
@@ -1272,7 +1233,7 @@ async fn upload_timeline<P, S>(
                             outdated_upload_data.retries += 1;
                             sync_queue::push(sync_id, SyncTask::Upload(outdated_upload_data));
                             register_sync_status(sync_start, task_name, Some(false));
-                            return;
+                            return None;
                         }
                     };
                     outdated_upload_data.data.metadata = Some(local_metadata);
@@ -1282,12 +1243,16 @@ async fn upload_timeline<P, S>(
         };
 
     match update_remote_data(conf, storage, index, sync_id, &uploaded_data.data, false).await {
-        Ok(()) => register_sync_status(sync_start, task_name, Some(true)),
+        Ok(()) => {
+            register_sync_status(sync_start, task_name, Some(true));
+            Some(())
+        }
         Err(e) => {
             error!("Failed to update remote timeline {sync_id}: {e:?}");
             uploaded_data.retries += 1;
             sync_queue::push(sync_id, SyncTask::Upload(uploaded_data));
             register_sync_status(sync_start, task_name, Some(false));
+            None
         }
     }
 }
@@ -1358,51 +1323,25 @@ where
         .context("Failed to upload new index part")
 }
 
-fn validate_task_retries(
-    sync_id: ZTenantTimelineId,
-    task: SyncTask,
+async fn validate_task_retries<T>(
+    sync_data: SyncData<T>,
     max_sync_errors: NonZeroU32,
-) -> ControlFlow<SyncTask, SyncTask> {
+) -> ControlFlow<SyncData<T>, SyncData<T>> {
+    let current_attempt = sync_data.retries;
     let max_sync_errors = max_sync_errors.get();
-    let mut skip_upload = false;
-    let mut skip_download = false;
-
-    match &task {
-        SyncTask::Download(download_data) | SyncTask::DownloadAndUpload(download_data, _)
-            if download_data.retries > max_sync_errors =>
-        {
-            error!(
-                    "Evicting download task for timeline {sync_id} that failed {} times, exceeding the error threshold {max_sync_errors}",
-                    download_data.retries
-                );
-            skip_download = true;
-        }
-        SyncTask::Upload(upload_data) | SyncTask::DownloadAndUpload(_, upload_data)
-            if upload_data.retries > max_sync_errors =>
-        {
-            error!(
-                "Evicting upload task for timeline {sync_id} that failed {} times, exceeding the error threshold {max_sync_errors}",
-                upload_data.retries,
-            );
-            skip_upload = true;
-        }
-        _ => {}
+    if current_attempt >= max_sync_errors {
+        error!(
+            "Aborting task that failed {current_attempt} times, exceeding retries threshold of {max_sync_errors}",
+        );
+        return ControlFlow::Break(sync_data);
     }
 
-    match task {
-        aborted_task @ SyncTask::Download(_) if skip_download => ControlFlow::Break(aborted_task),
-        aborted_task @ SyncTask::Upload(_) if skip_upload => ControlFlow::Break(aborted_task),
-        aborted_task @ SyncTask::DownloadAndUpload(_, _) if skip_upload && skip_download => {
-            ControlFlow::Break(aborted_task)
-        }
-        SyncTask::DownloadAndUpload(download_task, _) if skip_upload => {
-            ControlFlow::Continue(SyncTask::Download(download_task))
-        }
-        SyncTask::DownloadAndUpload(_, upload_task) if skip_download => {
-            ControlFlow::Continue(SyncTask::Upload(upload_task))
-        }
-        not_skipped => ControlFlow::Continue(not_skipped),
+    if current_attempt > 0 {
+        let seconds_to_wait = 2.0_f64.powf(current_attempt as f64 - 1.0).min(30.0);
+        info!("Waiting {seconds_to_wait} seconds before starting the task");
+        tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
     }
+    ControlFlow::Continue(sync_data)
 }
 
 async fn try_fetch_index_parts<P, S>(
@@ -1600,372 +1539,5 @@ mod test_utils {
 
     pub fn dummy_metadata(disk_consistent_lsn: Lsn) -> TimelineMetadata {
         TimelineMetadata::new(disk_consistent_lsn, None, None, Lsn(0), Lsn(0), Lsn(0))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::{test_utils::dummy_metadata, *};
-    use utils::lsn::Lsn;
-
-    #[test]
-    fn download_sync_tasks_merge() {
-        let download_1 = SyncTask::Download(SyncData::new(
-            2,
-            TimelineDownload {
-                layers_to_skip: HashSet::from([PathBuf::from("one")]),
-            },
-        ));
-        let download_2 = SyncTask::Download(SyncData::new(
-            6,
-            TimelineDownload {
-                layers_to_skip: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-            },
-        ));
-
-        let merged_download = match download_1.merge(download_2) {
-            SyncTask::Download(merged_download) => merged_download,
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_download.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-
-        assert_eq!(
-            merged_download
-                .data
-                .layers_to_skip
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged download tasks should a combined set of layers to skip"
-        );
-    }
-
-    #[test]
-    fn upload_sync_tasks_merge() {
-        let metadata_1 = dummy_metadata(Lsn(1));
-        let metadata_2 = dummy_metadata(Lsn(2));
-        assert!(metadata_2.disk_consistent_lsn() > metadata_1.disk_consistent_lsn());
-
-        let upload_1 = SyncTask::Upload(SyncData::new(
-            2,
-            TimelineUpload {
-                layers_to_upload: HashSet::from([PathBuf::from("one")]),
-                uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                metadata: Some(metadata_1),
-            },
-        ));
-        let upload_2 = SyncTask::Upload(SyncData::new(
-            6,
-            TimelineUpload {
-                layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-                uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                metadata: Some(metadata_2.clone()),
-            },
-        ));
-
-        let merged_upload = match upload_1.merge(upload_2) {
-            SyncTask::Upload(merged_upload) => merged_upload,
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_upload.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-
-        let upload = merged_upload.data;
-        assert_eq!(
-            upload.layers_to_upload.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged upload tasks should a combined set of layers to upload"
-        );
-
-        assert_eq!(
-            upload.uploaded_layers.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([PathBuf::from("u_one"), PathBuf::from("u_two"),]),
-            "Merged upload tasks should a combined set of uploaded layers"
-        );
-
-        assert_eq!(
-            upload.metadata,
-            Some(metadata_2),
-            "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
-        );
-    }
-
-    #[test]
-    fn upload_and_download_sync_tasks_merge() {
-        let download_data = SyncData::new(
-            3,
-            TimelineDownload {
-                layers_to_skip: HashSet::from([PathBuf::from("d_one")]),
-            },
-        );
-
-        let upload_data = SyncData::new(
-            2,
-            TimelineUpload {
-                layers_to_upload: HashSet::from([PathBuf::from("u_one")]),
-                uploaded_layers: HashSet::from([PathBuf::from("u_one_2")]),
-                metadata: Some(dummy_metadata(Lsn(1))),
-            },
-        );
-
-        let (merged_download, merged_upload) = match SyncTask::Download(download_data.clone())
-            .merge(SyncTask::Upload(upload_data.clone()))
-        {
-            SyncTask::DownloadAndUpload(merged_download, merged_upload) => {
-                (merged_download, merged_upload)
-            }
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_download, download_data,
-            "When upload and dowload are merged, both should be unchanged"
-        );
-        assert_eq!(
-            merged_upload, upload_data,
-            "When upload and dowload are merged, both should be unchanged"
-        );
-    }
-
-    #[test]
-    fn uploaddownload_and_upload_sync_tasks_merge() {
-        let download_data = SyncData::new(
-            3,
-            TimelineDownload {
-                layers_to_skip: HashSet::from([PathBuf::from("d_one")]),
-            },
-        );
-
-        let metadata_1 = dummy_metadata(Lsn(5));
-        let metadata_2 = dummy_metadata(Lsn(2));
-        assert!(metadata_1.disk_consistent_lsn() > metadata_2.disk_consistent_lsn());
-
-        let upload_download = SyncTask::DownloadAndUpload(
-            download_data.clone(),
-            SyncData::new(
-                2,
-                TimelineUpload {
-                    layers_to_upload: HashSet::from([PathBuf::from("one")]),
-                    uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                    metadata: Some(metadata_1.clone()),
-                },
-            ),
-        );
-
-        let new_upload = SyncTask::Upload(SyncData::new(
-            6,
-            TimelineUpload {
-                layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-                uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                metadata: Some(metadata_2),
-            },
-        ));
-
-        let (merged_download, merged_upload) = match upload_download.merge(new_upload) {
-            SyncTask::DownloadAndUpload(merged_download, merged_upload) => {
-                (merged_download, merged_upload)
-            }
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_download, download_data,
-            "When uploaddowload and upload tasks are merged, download should be unchanged"
-        );
-
-        assert_eq!(
-            merged_upload.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-        let upload = merged_upload.data;
-        assert_eq!(
-            upload.layers_to_upload.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged upload tasks should a combined set of layers to upload"
-        );
-
-        assert_eq!(
-            upload.uploaded_layers.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([PathBuf::from("u_one"), PathBuf::from("u_two"),]),
-            "Merged upload tasks should a combined set of uploaded layers"
-        );
-
-        assert_eq!(
-            upload.metadata,
-            Some(metadata_1),
-            "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
-        );
-    }
-
-    #[test]
-    fn uploaddownload_and_download_sync_tasks_merge() {
-        let upload_data = SyncData::new(
-            22,
-            TimelineUpload {
-                layers_to_upload: HashSet::from([PathBuf::from("one")]),
-                uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                metadata: Some(dummy_metadata(Lsn(22))),
-            },
-        );
-
-        let upload_download = SyncTask::DownloadAndUpload(
-            SyncData::new(
-                2,
-                TimelineDownload {
-                    layers_to_skip: HashSet::from([PathBuf::from("one")]),
-                },
-            ),
-            upload_data.clone(),
-        );
-
-        let new_download = SyncTask::Download(SyncData::new(
-            6,
-            TimelineDownload {
-                layers_to_skip: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-            },
-        ));
-
-        let (merged_download, merged_upload) = match upload_download.merge(new_download) {
-            SyncTask::DownloadAndUpload(merged_download, merged_upload) => {
-                (merged_download, merged_upload)
-            }
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_upload, upload_data,
-            "When uploaddowload and download tasks are merged, upload should be unchanged"
-        );
-
-        assert_eq!(
-            merged_download.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-        assert_eq!(
-            merged_download
-                .data
-                .layers_to_skip
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged download tasks should a combined set of layers to skip"
-        );
-    }
-
-    #[test]
-    fn uploaddownload_sync_tasks_merge() {
-        let metadata_1 = dummy_metadata(Lsn(1));
-        let metadata_2 = dummy_metadata(Lsn(2));
-        assert!(metadata_2.disk_consistent_lsn() > metadata_1.disk_consistent_lsn());
-
-        let upload_download = SyncTask::DownloadAndUpload(
-            SyncData::new(
-                2,
-                TimelineDownload {
-                    layers_to_skip: HashSet::from([PathBuf::from("one")]),
-                },
-            ),
-            SyncData::new(
-                2,
-                TimelineUpload {
-                    layers_to_upload: HashSet::from([PathBuf::from("one")]),
-                    uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                    metadata: Some(metadata_1),
-                },
-            ),
-        );
-        let new_upload_download = SyncTask::DownloadAndUpload(
-            SyncData::new(
-                6,
-                TimelineDownload {
-                    layers_to_skip: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-                },
-            ),
-            SyncData::new(
-                6,
-                TimelineUpload {
-                    layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
-                    uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                    metadata: Some(metadata_2.clone()),
-                },
-            ),
-        );
-
-        let (merged_download, merged_upload) = match upload_download.merge(new_upload_download) {
-            SyncTask::DownloadAndUpload(merged_download, merged_upload) => {
-                (merged_download, merged_upload)
-            }
-            wrong_merge_result => panic!("Unexpected merge result: {wrong_merge_result:?}"),
-        };
-
-        assert_eq!(
-            merged_download.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-        assert_eq!(
-            merged_download
-                .data
-                .layers_to_skip
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged download tasks should a combined set of layers to skip"
-        );
-
-        assert_eq!(
-            merged_upload.retries, 0,
-            "Merged task should have its retries counter reset"
-        );
-        let upload = merged_upload.data;
-        assert_eq!(
-            upload.layers_to_upload.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                PathBuf::from("one"),
-                PathBuf::from("two"),
-                PathBuf::from("three")
-            ]),
-            "Merged upload tasks should a combined set of layers to upload"
-        );
-
-        assert_eq!(
-            upload.uploaded_layers.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([PathBuf::from("u_one"), PathBuf::from("u_two"),]),
-            "Merged upload tasks should a combined set of uploaded layers"
-        );
-
-        assert_eq!(
-            upload.metadata,
-            Some(metadata_2),
-            "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
-        );
     }
 }

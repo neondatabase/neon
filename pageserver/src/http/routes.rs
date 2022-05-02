@@ -267,7 +267,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
         drop(index_accessor);
     }
 
-    let new_timeline = match try_download_shard_data(state, sync_id).await {
+    let new_timeline = match try_download_index_part_data(state, sync_id).await {
         Ok(Some(mut new_timeline)) => {
             tokio::fs::create_dir_all(state.conf.timeline_path(&timeline_id, &tenant_id))
                 .await
@@ -300,11 +300,11 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn try_download_shard_data(
+async fn try_download_index_part_data(
     state: &State,
     sync_id: ZTenantTimelineId,
 ) -> anyhow::Result<Option<RemoteTimeline>> {
-    let shard = match state.remote_storage.as_ref() {
+    let index_part = match state.remote_storage.as_ref() {
         Some(GenericRemoteStorage::Local(local_storage)) => {
             storage_sync::download_index_part(state.conf, local_storage, sync_id).await
         }
@@ -313,18 +313,15 @@ async fn try_download_shard_data(
         }
         None => return Ok(None),
     }
-    .with_context(|| format!("Failed to download index shard for timeline {}", sync_id))?;
+    .with_context(|| format!("Failed to download index part for timeline {sync_id}"))?;
 
     let timeline_path = state
         .conf
         .timeline_path(&sync_id.timeline_id, &sync_id.tenant_id);
-    RemoteTimeline::from_index_part(&timeline_path, shard)
+    RemoteTimeline::from_index_part(&timeline_path, index_part)
         .map(Some)
         .with_context(|| {
-            format!(
-                "Failed to convert index shard into remote timeline for timeline {}",
-                sync_id
-            )
+            format!("Failed to convert index part into remote timeline for timeline {sync_id}")
         })
 }
 
