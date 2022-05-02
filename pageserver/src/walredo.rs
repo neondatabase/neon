@@ -163,6 +163,23 @@ pub enum WalRedoError {
     InvalidRecord,
 }
 
+pub fn linked_redo(
+    // key: Key,
+    // lsn: Lsn,
+    // base_img: Option<Bytes>,
+    // records: Vec<(Lsn, ZenithWalRecord)>,
+) -> Result<Bytes, WalRedoError> {
+    unsafe {
+        let pg_path = "/home/bojan/src/neondatabase/neon/tmp_install/bin/postgres";
+        let pg_lib = libloading::Library::new(pg_path).expect("failed loading pg");
+        // TODO add stringinfo arg
+        let apply_record_fn: libloading::Symbol<unsafe extern fn()> =
+            pg_lib.get(b"ApplyRecord").expect("failed loading ApplyRecord fn");
+    }
+    // TODO actually return something
+    Ok(Bytes::new())
+}
+
 ///
 /// Public interface of WAL redo manager
 ///
@@ -184,6 +201,8 @@ impl WalRedoManager for PostgresRedoManager {
             error!("invalid WAL redo request with no records");
             return Err(WalRedoError::InvalidRequest);
         }
+
+        // return linked_redo(key, lsn, base_img, records);
 
         let mut img: Option<Bytes> = base_img;
         let mut batch_zenith = can_apply_in_zenith(&records[0].1);

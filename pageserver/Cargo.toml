@@ -62,6 +62,7 @@ postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
+libloading = "0.7.0"
 
 [dev-dependencies]
 hex-literal = "0.3"

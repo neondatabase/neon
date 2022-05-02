@@ -1640,6 +1640,7 @@ dependencies = [
  "hyper",
  "itertools",
  "lazy_static",
+ "libloading",
  "metrics",
  "nix",
  "once_cell",
