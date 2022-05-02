@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Ok};
+use anyhow::{anyhow, Context, Ok};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
@@ -113,7 +113,7 @@ impl RemoteTimelineIndex {
         awaits_download: bool,
     ) -> anyhow::Result<()> {
         self.timeline_entry_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown timeline sync {}", id))?
+            .ok_or_else(|| anyhow!("unknown timeline sync {id}"))?
             .awaits_download = awaits_download;
         Ok(())
     }
