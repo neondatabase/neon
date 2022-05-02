@@ -221,15 +221,12 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     .await
     .context("failed to subscribe for safekeeper info")?;
     loop {
-        match subscription.fetch_data().await {
+        match subscription.value_updates.recv().await {
             Some(new_info) => {
-                for (zttid, sk_info) in new_info {
-                    // note: there are blocking operations below, but it's considered fine for now
-                    if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                        for (safekeeper_id, info) in sk_info {
-                            tli.record_safekeeper_info(&info, safekeeper_id).await?
-                        }
-                    }
+                // note: there are blocking operations below, but it's considered fine for now
+                if let Ok(tli) = GlobalTimelines::get(&conf, new_info.key.id, false) {
+                    tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
+                        .await?
                 }
             }
             None => {
