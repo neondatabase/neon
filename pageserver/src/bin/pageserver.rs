@@ -295,7 +295,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 signal.name()
             );
             profiling::exit_profiler(conf, &profiler_guard);
-            pageserver::shutdown_pageserver();
+            pageserver::shutdown_pageserver(0);
             unreachable!()
         }
     })
