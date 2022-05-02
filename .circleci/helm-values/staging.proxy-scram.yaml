@@ -6,7 +6,7 @@ image:
 
 settings:
   authBackend: "console"
-  authEndpoint: "https://console.stage.neon.tech:9095/management/api/v2"
+  authEndpoint: "http://console-staging.local/management/api/v2/healthz"
 
 # -- Additional labels for zenith-proxy pods
 podLabels:
