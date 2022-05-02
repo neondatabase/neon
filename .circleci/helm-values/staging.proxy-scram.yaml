@@ -6,7 +6,7 @@ image:
 
 settings:
   authBackend: "console"
-  authEndpoint: "http://console-staging.local/management/api/v2/healthz"
+  authEndpoint: "http://console-staging.local/management/api/v2"
 
 # -- Additional labels for zenith-proxy pods
 podLabels:
