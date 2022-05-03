@@ -358,12 +358,12 @@ pub fn main() {
 impl XLogRecord {
     pub fn from_slice(buf: &[u8]) -> Result<XLogRecord, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(XLogRecord::des(buf)?)
+        XLogRecord::des(buf)
     }
 
     pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogRecord, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(XLogRecord::des_from(&mut buf.reader())?)
+        XLogRecord::des_from(&mut buf.reader())
     }
 
     pub fn encode(&self) -> Result<Bytes, SerializeError> {
@@ -380,19 +380,19 @@ impl XLogRecord {
 impl XLogPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogPageHeaderData, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(XLogPageHeaderData::des_from(&mut buf.reader())?)
+        XLogPageHeaderData::des_from(&mut buf.reader())
     }
 }
 
 impl XLogLongPageHeaderData {
     pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogLongPageHeaderData, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(XLogLongPageHeaderData::des_from(&mut buf.reader())?)
+        XLogLongPageHeaderData::des_from(&mut buf.reader())
     }
 
     pub fn encode(&self) -> Result<Bytes, SerializeError> {
         use utils::bin_ser::LeSer;
-        Ok(self.ser()?.into())
+        self.ser().map(|b| b.into())
     }
 }
 
@@ -404,9 +404,9 @@ impl CheckPoint {
         Ok(self.ser()?.into())
     }
 
-    pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
+    pub fn decode(buf: &[u8]) -> Result<CheckPoint, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(CheckPoint::des(buf)?)
+        CheckPoint::des(buf)
     }
 
     /// Update next XID based on provided new_xid and stored epoch.

@@ -91,7 +91,7 @@ impl WalStreamDecoder {
 
                 let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
                     WalDecodeError {
-                        msg: format!("long header deserialization failed {}", e).to_string(),
+                        msg: format!("long header deserialization failed {}", e),
                         lsn: self.lsn,
                     }
                 })?;
@@ -113,7 +113,7 @@ impl WalStreamDecoder {
 
                 let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
                     WalDecodeError {
-                        msg: format!("header deserialization failed {}", e).to_string(),
+                        msg: format!("header deserialization failed {}", e),
                         lsn: self.lsn,
                     }
                 })?;
@@ -201,7 +201,7 @@ impl WalStreamDecoder {
         let xlogrec =
             XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
                 WalDecodeError {
-                    msg: format!("xlog record deserialization failed {}", e).to_string(),
+                    msg: format!("xlog record deserialization failed {}", e),
                     lsn: self.lsn,
                 }
             })?;
