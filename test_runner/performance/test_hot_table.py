@@ -3,12 +3,14 @@ from contextlib import closing
 from fixtures.compare_fixtures import PgCompare
 
 
-@pytest.mark.slow
-def test_hot_table(zenith_with_baseline: PgCompare):
+# HACK: I wanna see this run in CI, if successful I'll clean it up
+# @pytest.mark.slow
+@pytest.mark.remote_cluster
+def test_hot_table(remote_compare: PgCompare):
     # Update a small table many times, then measure read performance
-    env = zenith_with_baseline
+    env = remote_compare
 
-    num_rows = 100000  # Slightly larger than shared buffers size
+    num_rows = 100000  # Slightly larger than shared buffers size  TODO validate
     num_writes = 1000000
     num_reads = 10
 
