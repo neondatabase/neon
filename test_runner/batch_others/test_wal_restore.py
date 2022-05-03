@@ -15,7 +15,6 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
                      pg_bin: PgBin,
                      test_output_dir,
                      port_distributor: PortDistributor):
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
     env.zenith_cli.create_branch("test_wal_restore")
     pg = env.postgres.create_start('test_wal_restore')

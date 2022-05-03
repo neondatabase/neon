@@ -121,6 +121,16 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let broker_endpoints_param = format!(
+            "broker_endpoints=[{}]",
+            self.env
+                .pageserver
+                .broker_endpoints
+                .iter()
+                .map(|url| format!("'{url}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let mut args = Vec::with_capacity(20);
 
         args.push("--init");
@@ -129,6 +139,7 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &broker_endpoints_param]);
         args.extend(["-c", &id]);
 
         for config_override in config_overrides {

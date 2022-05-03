@@ -94,7 +94,6 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
 
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/1587")
 def test_backpressure_received_lsn_lag(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
     # Create a branch for us
     env.zenith_cli.create_branch('test_backpressure')

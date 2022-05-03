@@ -412,11 +412,10 @@ class ZenithEnvBuilder:
                  port_distributor: PortDistributor,
                  pageserver_remote_storage: Optional[RemoteStorage] = None,
                  pageserver_config_override: Optional[str] = None,
-                 num_safekeepers: int = 0,
+                 num_safekeepers: int = 1,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None,
-                 default_branch_name=DEFAULT_BRANCH_NAME,
-                 broker: bool = False):
+                 default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -425,7 +424,10 @@ class ZenithEnvBuilder:
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
-        self.broker = broker
+        # keep etcd datadir inside 'repo'
+        self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
+                           port=self.port_distributor.get_port(),
+                           peer_port=self.port_distributor.get_port())
         self.env: Optional[ZenithEnv] = None
 
         self.s3_mock_server: Optional[MockS3Server] = None
@@ -551,14 +553,9 @@ class ZenithEnv:
             default_tenant_id = '{self.initial_tenant.hex}'
         """)
 
-        self.broker = None
-        if config.broker:
-            # keep etcd datadir inside 'repo'
-            self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
-                               port=self.port_distributor.get_port(),
-                               peer_port=self.port_distributor.get_port())
-            toml += textwrap.dedent(f"""
-            broker_endpoints = ['http://127.0.0.1:{self.broker.port}']
+        self.broker = config.broker
+        toml += textwrap.dedent(f"""
+            broker_endpoints = ['{self.broker.client_url()}']
         """)
 
         # Create config for pageserver
@@ -1842,24 +1839,29 @@ class Etcd:
     peer_port: int
     handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
 
+    def client_url(self):
+        return f'http://127.0.0.1:{self.port}'
+
     def check_status(self):
         s = requests.Session()
         s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
-        s.get(f"http://localhost:{self.port}/health").raise_for_status()
+        s.get(f"{self.client_url()}/health").raise_for_status()
 
     def start(self):
         pathlib.Path(self.datadir).mkdir(exist_ok=True)
         etcd_full_path = etcd_path()
         if etcd_full_path is None:
-            raise Exception('etcd not found')
+            raise Exception('etcd binary not found locally')
 
+        client_url = self.client_url()
+        log.info(f'Starting etcd to listen incoming connections at "{client_url}"')
         with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
             args = [
                 etcd_full_path,
                 f"--data-dir={self.datadir}",
-                f"--listen-client-urls=http://localhost:{self.port}",
-                f"--advertise-client-urls=http://localhost:{self.port}",
-                f"--listen-peer-urls=http://localhost:{self.peer_port}"
+                f"--listen-client-urls={client_url}",
+                f"--advertise-client-urls={client_url}",
+                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}"
             ]
             self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
 
@@ -1911,7 +1913,13 @@ def test_output_dir(request: Any) -> str:
     return test_dir
 
 
-SKIP_DIRS = frozenset(('pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical'))
+SKIP_DIRS = frozenset(('pg_wal',
+                       'pg_stat',
+                       'pg_stat_tmp',
+                       'pg_subtrans',
+                       'pg_logical',
+                       'pg_replslot/wal_proposer_slot',
+                       'pg_xact'))
 
 SKIP_FILES = frozenset(('pg_internal.init',
                         'pg.log',

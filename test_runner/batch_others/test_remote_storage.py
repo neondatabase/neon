@@ -32,7 +32,6 @@ import pytest
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
 def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
     # zenith_env_builder.rust_log_override = 'debug'
-    zenith_env_builder.num_safekeepers = 1
     if storage_type == 'local_fs':
         zenith_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':

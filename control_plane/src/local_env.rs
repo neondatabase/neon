@@ -97,6 +97,7 @@ pub struct PageServerConf {
 
     // jwt auth token used for communication with pageserver
     pub auth_token: String,
+    pub broker_endpoints: Vec<String>,
 }
 
 impl Default for PageServerConf {
@@ -107,6 +108,7 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
             auth_token: String::new(),
+            broker_endpoints: Vec::new(),
         }
     }
 }
@@ -401,6 +403,7 @@ impl LocalEnv {
 
         self.pageserver.auth_token =
             self.generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
+        self.pageserver.broker_endpoints = self.broker_endpoints.clone();
 
         fs::create_dir_all(self.pg_data_dirs_path())?;
 

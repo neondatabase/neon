@@ -94,8 +94,6 @@ def test_cli_tenant_create(zenith_simple_env: ZenithEnv):
 
 
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
-    # Start with single sk
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     # Connect to sk port on v4 loopback
@@ -111,8 +109,6 @@ def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
 
 
 def test_cli_start_stop(zenith_env_builder: ZenithEnvBuilder):
-    # Start with single sk
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     # Stop default ps/sk

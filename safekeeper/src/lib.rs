@@ -51,7 +51,7 @@ pub struct SafeKeeperConf {
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
     pub my_id: ZNodeId,
-    pub broker_endpoints: Option<Vec<Url>>,
+    pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
     pub s3_offload_enabled: bool,
 }
@@ -81,7 +81,7 @@ impl Default for SafeKeeperConf {
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: ZNodeId(0),
-            broker_endpoints: None,
+            broker_endpoints: Vec::new(),
             broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
             s3_offload_enabled: true,
         }
