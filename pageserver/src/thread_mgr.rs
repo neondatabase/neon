@@ -130,12 +130,14 @@ struct PageServerThread {
 }
 
 /// Launch a new thread
+/// Note: if shutdown_process_on_error is set to true failure
+///   of the thread will lead to shutdown of entire process
 pub fn spawn<F>(
     kind: ThreadKind,
     tenant_id: Option<ZTenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
-    fail_on_error: bool,
+    shutdown_process_on_error: bool,
     f: F,
 ) -> std::io::Result<()>
 where
@@ -175,7 +177,7 @@ where
                 thread_id,
                 thread_rc2,
                 shutdown_rx,
-                fail_on_error,
+                shutdown_process_on_error,
                 f,
             )
         }) {
@@ -201,7 +203,7 @@ fn thread_wrapper<F>(
     thread_id: u64,
     thread: Arc<PageServerThread>,
     shutdown_rx: watch::Receiver<()>,
-    fail_on_error: bool,
+    shutdown_process_on_error: bool,
     f: F,
 ) where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
@@ -221,27 +223,41 @@ fn thread_wrapper<F>(
     let result = panic::catch_unwind(AssertUnwindSafe(f));
 
     // Remove our entry from the global hashmap.
-    THREADS.lock().unwrap().remove(&thread_id);
+    let thread = THREADS
+        .lock()
+        .unwrap()
+        .remove(&thread_id)
+        .expect("no thread in registry");
 
     match result {
         Ok(Ok(())) => debug!("Thread '{}' exited normally", thread_name),
         Ok(Err(err)) => {
-            if fail_on_error {
+            if shutdown_process_on_error {
                 error!(
-                    "Shutting down: thread '{}' exited with error: {:?}",
-                    thread_name, err
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
                 );
                 shutdown_pageserver(1);
             } else {
-                error!("Thread '{}' exited with error: {:?}", thread_name, err);
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
             }
         }
         Err(err) => {
-            error!(
-                "Shutting down: thread '{}' panicked: {:?}",
-                thread_name, err
-            );
-            shutdown_pageserver(1);
+            if shutdown_process_on_error {
+                error!(
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+                shutdown_pageserver(1);
+            } else {
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+            }
         }
     }
 }
