@@ -635,7 +635,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                     segno,
                     rpageno,
                     if is_commit {
-                        ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+                        ZenithWalRecord::ClogSetCommitted {
+                            xids: page_xids,
+                            timestamp: parsed.xact_time,
+                        }
                     } else {
                         ZenithWalRecord::ClogSetAborted { xids: page_xids }
                     },
@@ -652,7 +655,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             segno,
             rpageno,
             if is_commit {
-                ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+                ZenithWalRecord::ClogSetCommitted {
+                    xids: page_xids,
+                    timestamp: parsed.xact_time,
+                }
             } else {
                 ZenithWalRecord::ClogSetAborted { xids: page_xids }
             },

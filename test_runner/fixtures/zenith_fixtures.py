@@ -1572,6 +1572,7 @@ class Postgres(PgProtocol):
         assert self.node_name is not None
         self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
+        self.running = False
 
         return self
 

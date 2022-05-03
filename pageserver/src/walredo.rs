@@ -283,6 +283,11 @@ impl PostgresRedoManager {
         // If something went wrong, don't try to reuse the process. Kill it, and
         // next request will launch a new one.
         if result.is_err() {
+            error!(
+                "error applying {} WAL records to reconstruct page image at LSN {}",
+                records.len(),
+                lsn
+            );
             let process = process_guard.take().unwrap();
             process.kill();
         }
@@ -387,7 +392,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids } => {
+            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -419,6 +424,21 @@ impl PostgresRedoManager {
                         xid,
                         pg_constants::TRANSACTION_STATUS_COMMITTED,
                         page,
+                    );
+                }
+
+                // Append the timestamp
+                if page.len() == pg_constants::BLCKSZ as usize + 8 {
+                    page.truncate(pg_constants::BLCKSZ as usize);
+                }
+                if page.len() == pg_constants::BLCKSZ as usize {
+                    page.extend_from_slice(&timestamp.to_be_bytes());
+                } else {
+                    warn!(
+                        "CLOG blk {} in seg {} has invalid size {}",
+                        blknum,
+                        segno,
+                        page.len()
                     );
                 }
             }

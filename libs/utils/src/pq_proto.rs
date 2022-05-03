@@ -503,6 +503,18 @@ impl RowDescriptor<'_> {
             formatcode: 0,
         }
     }
+
+    pub const fn text_col(name: &[u8]) -> RowDescriptor {
+        RowDescriptor {
+            name,
+            tableoid: 0,
+            attnum: 0,
+            typoid: TEXT_OID,
+            typlen: -1,
+            typmod: 0,
+            formatcode: 0,
+        }
+    }
 }
 
 #[derive(Debug)]

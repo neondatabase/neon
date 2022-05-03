@@ -31,7 +31,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::repository::Repository;
@@ -42,6 +42,7 @@ use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
+use postgres_ffi::xlog_utils::to_pg_timestamp;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -805,6 +806,33 @@ impl postgres_backend::Handler for PageServerHandler {
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("get_lsn_by_timestamp ") {
+            // Locate LSN of last transaction with timestamp less or equal than sppecified
+            // TODO lazy static
+            let re = Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) '(.*)'$")
+                .unwrap();
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
+            let timestamp_pg = to_pg_timestamp(timestamp);
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+                b"lsn",
+            )]))?;
+            let result = match timeline.find_lsn_for_timestamp(timestamp_pg)? {
+                LsnForTimestamp::Present(lsn) => format!("{}", lsn),
+                LsnForTimestamp::Future(_lsn) => "future".into(),
+                LsnForTimestamp::Past(_lsn) => "past".into(),
+            };
+            pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

@@ -154,9 +154,17 @@ impl<'a> Basebackup<'a> {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-            ensure!(img.len() == pg_constants::BLCKSZ as usize);
 
-            slru_buf.extend_from_slice(&img);
+            if slru == SlruKind::Clog {
+                ensure!(
+                    img.len() == pg_constants::BLCKSZ as usize
+                        || img.len() == pg_constants::BLCKSZ as usize + 8
+                );
+            } else {
+                ensure!(img.len() == pg_constants::BLCKSZ as usize);
+            }
+
+            slru_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);
