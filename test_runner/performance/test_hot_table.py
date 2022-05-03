@@ -1,15 +1,19 @@
 import pytest
 from contextlib import closing
 from fixtures.compare_fixtures import PgCompare
+from pytest_lazyfixture import lazy_fixture  # type: ignore
 
 
-# HACK: I wanna see this run in CI, if successful I'll clean it up
-# @pytest.mark.slow
-@pytest.mark.remote_cluster
-def test_hot_table(remote_compare: PgCompare):
+@pytest.mark.parametrize(
+    "env",
+    [
+        # The test is too slow to run in CI, but fast enough to run with remote tests
+        pytest.param(lazy_fixture("zenith_compare"), id="zenith", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
+    ])
+def test_hot_table(env: PgCompare):
     # Update a small table many times, then measure read performance
-    env = remote_compare
-
     num_rows = 100000  # Slightly larger than shared buffers size  TODO validate
     num_writes = 1000000
     num_reads = 10

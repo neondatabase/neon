@@ -1,13 +1,19 @@
 import pytest
 from contextlib import closing
 from fixtures.compare_fixtures import PgCompare
+from pytest_lazyfixture import lazy_fixture  # type: ignore
 
 
-@pytest.mark.slow
-def test_hot_page(zenith_with_baseline: PgCompare):
+@pytest.mark.parametrize(
+    "env",
+    [
+        # The test is too slow to run in CI, but fast enough to run with remote tests
+        pytest.param(lazy_fixture("zenith_compare"), id="zenith", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
+    ])
+def test_hot_page(env: PgCompare):
     # Update the same page many times, then measure read performance
-    env = zenith_with_baseline
-
     num_writes = 1000000
 
     with closing(env.pg.connect()) as conn:
