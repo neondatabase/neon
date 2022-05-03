@@ -1504,12 +1504,20 @@ impl LayeredTimeline {
         let ancestor = self
             .ancestor_timeline
             .as_ref()
-            .expect("there should be an ancestor")
+            .with_context(|| {
+                format!(
+                    "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
+                    self.timelineid,
+                    self.get_ancestor_timeline_id(),
+                )
+            })?
             .ensure_loaded()
             .with_context(|| {
                 format!(
-                "Cannot get the whole layer for read locked: timeline {} is not present locally",
-                self.get_ancestor_timeline_id().unwrap())
+                    "Ancestor timeline is not is not loaded. Timeline id: {} Ancestor id {:?}",
+                    self.timelineid,
+                    self.get_ancestor_timeline_id(),
+                )
             })?;
         Ok(Arc::clone(ancestor))
     }
