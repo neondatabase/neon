@@ -244,7 +244,7 @@ fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     header.xl_crc = crc;
 
     let mut wal: Vec<u8> = Vec::new();
-    wal.extend_from_slice(&header_bytes);
+    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
     wal.extend_from_slice(&data);
 
     // WAL start position must be aligned at 8 bytes,
