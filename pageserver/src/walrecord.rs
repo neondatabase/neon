@@ -1,7 +1,6 @@
 //!
 //! Functions for parsing WAL records.
 //!
-use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
@@ -10,6 +9,7 @@ use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use tracing::*;
+use utils::bin_ser::DeserializeError;
 
 /// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
 /// around a PostgreSQL WAL record, or a custom zenith-specific "record".
@@ -504,7 +504,7 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord> {
+pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeError> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -757,7 +757,7 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord> {
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String> {
+pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String, DeserializeError> {
     match rec {
         ZenithWalRecord::Postgres { will_init, rec } => Ok(format!(
             "will_init: {}, {}",
@@ -768,7 +768,7 @@ pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String> {
     }
 }
 
-fn describe_postgres_wal_record(record: &Bytes) -> Result<String> {
+fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeError> {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,
