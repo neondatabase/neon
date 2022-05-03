@@ -7,9 +7,11 @@ pub mod layered_repository;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
+pub mod profiling;
 pub mod reltag;
 pub mod remote_storage;
 pub mod repository;
+pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_threads;
 pub mod thread_mgr;
@@ -22,13 +24,10 @@ pub mod walredo;
 
 use lazy_static::lazy_static;
 use tracing::info;
-use zenith_metrics::{register_int_gauge_vec, IntGaugeVec};
-use zenith_utils::{
-    postgres_backend,
-    zid::{ZTenantId, ZTimelineId},
-};
+use utils::postgres_backend;
 
 use crate::thread_mgr::ThreadKind;
+use metrics::{register_int_gauge_vec, IntGaugeVec};
 
 use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;
@@ -68,7 +67,7 @@ pub type RepositoryImpl = LayeredRepository;
 
 pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;
 
-pub fn shutdown_pageserver() {
+pub fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint thread. This prevents new connections from
     // being accepted.
     thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
@@ -95,5 +94,5 @@ pub fn shutdown_pageserver() {
     thread_mgr::shutdown_threads(None, None, None);
 
     info!("Shut down successfully completed");
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }

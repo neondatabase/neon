@@ -5,7 +5,7 @@ use crate::stream::PqStream;
 use crate::{sasl, scram};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 
 /// Every authentication selector is supposed to implement this trait.
 pub trait AuthMethod {
@@ -24,19 +24,6 @@ impl AuthMethod for Scram<'_> {
     #[inline(always)]
     fn first_message(&self) -> BeMessage<'_> {
         Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
-    }
-}
-
-/// Use password-based auth in [`AuthFlow`].
-pub struct Md5(
-    /// Salt for client.
-    pub [u8; 4],
-);
-
-impl AuthMethod for Md5 {
-    #[inline(always)]
-    fn first_message(&self) -> BeMessage<'_> {
-        Be::AuthenticationMD5Password(self.0)
     }
 }
 
@@ -70,19 +57,10 @@ impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     }
 }
 
-/// Stream wrapper for handling simple MD5 password auth.
-impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Md5> {
-    /// Perform user authentication. Raise an error in case authentication failed.
-    #[allow(unused)]
-    pub async fn authenticate(self) -> Result<(), AuthError> {
-        unimplemented!("MD5 auth flow is yet to be implemented");
-    }
-}
-
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn authenticate(self) -> Result<(), AuthError> {
+    pub async fn authenticate(self) -> Result<scram::ScramKey, AuthError> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
@@ -93,10 +71,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
 
         let secret = self.state.0;
-        sasl::SaslStream::new(self.stream, sasl.message)
+        let key = sasl::SaslStream::new(self.stream, sasl.message)
             .authenticate(scram::Exchange::new(secret, rand::random, None))
             .await?;
 
-        Ok(())
+        Ok(key)
     }
 }

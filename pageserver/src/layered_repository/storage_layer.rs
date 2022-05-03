@@ -4,13 +4,15 @@
 
 use crate::repository::{Key, Value};
 use crate::walrecord::ZenithWalRecord;
-use crate::{ZTenantId, ZTimelineId};
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use zenith_utils::lsn::Lsn;
+use utils::{
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where

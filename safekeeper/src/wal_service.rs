@@ -12,7 +12,7 @@ use crate::callmemaybe::CallmeEvent;
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
 use tokio::sync::mpsc::UnboundedSender;
-use zenith_utils::postgres_backend::{AuthType, PostgresBackend};
+use utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(

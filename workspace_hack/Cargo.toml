@@ -24,8 +24,8 @@ indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std", "use_std"] }
-num-integer = { version = "0.1", default-features = false, features = ["std"] }
-num-traits = { version = "0.2", features = ["std"] }
+num-integer = { version = "0.1", default-features = false, features = ["i128"] }
+num-traits = { version = "0.2", features = ["i128", "std"] }
 prost = { version = "0.9", features = ["prost-derive", "std"] }
 rand = { version = "0.8", features = ["alloc", "getrandom", "libc", "rand_chacha", "rand_hc", "small_rng", "std", "std_rng"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
@@ -39,7 +39,6 @@ tracing-core = { version = "0.1", features = ["lazy_static", "std"] }
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace", "std"] }
 bytes = { version = "1", features = ["serde", "std"] }
-cc = { version = "1", default-features = false, features = ["jobserver", "parallel"] }
 clap = { version = "2", features = ["ansi_term", "atty", "color", "strsim", "suggestions", "vec_map"] }
 either = { version = "1", features = ["use_std"] }
 hashbrown = { version = "0.11", features = ["ahash", "inline-more", "raw"] }

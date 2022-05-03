@@ -8,7 +8,6 @@ use super::signature::SignatureBuilder;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
-#[derive(Debug)]
 struct TlsServerEndPoint;
 
 impl std::fmt::Display for TlsServerEndPoint {
@@ -28,7 +27,6 @@ impl std::str::FromStr for TlsServerEndPoint {
     }
 }
 
-#[derive(Debug)]
 enum ExchangeState {
     /// Waiting for [`ClientFirstMessage`].
     Initial,
@@ -41,7 +39,6 @@ enum ExchangeState {
 }
 
 /// Server's side of SCRAM auth algorithm.
-#[derive(Debug)]
 pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
@@ -65,8 +62,10 @@ impl<'a> Exchange<'a> {
 }
 
 impl sasl::Mechanism for Exchange<'_> {
-    fn exchange(mut self, input: &str) -> sasl::Result<(Option<Self>, String)> {
-        use ExchangeState::*;
+    type Output = super::ScramKey;
+
+    fn exchange(mut self, input: &str) -> sasl::Result<(sasl::Step<Self, Self::Output>, String)> {
+        use {sasl::Step::*, ExchangeState::*};
         match &self.state {
             Initial => {
                 let client_first_message =
@@ -85,7 +84,7 @@ impl sasl::Mechanism for Exchange<'_> {
                     server_first_message,
                 };
 
-                Ok((Some(self), msg))
+                Ok((Continue(self), msg))
             }
             SaltSent {
                 cbind_flag,
@@ -127,7 +126,7 @@ impl sasl::Mechanism for Exchange<'_> {
                 let msg = client_final_message
                     .build_server_final_message(signature_builder, &self.secret.server_key);
 
-                Ok((None, msg))
+                Ok((Authenticated(client_key), msg))
             }
         }
     }

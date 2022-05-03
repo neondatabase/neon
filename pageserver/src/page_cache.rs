@@ -47,7 +47,7 @@ use std::{
 
 use once_cell::sync::OnceCell;
 use tracing::error;
-use zenith_utils::{
+use utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };

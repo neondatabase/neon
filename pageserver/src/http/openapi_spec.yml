@@ -328,11 +328,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                new_tenant_id:
-                  type: string
-                  format: hex
+              $ref: "#/components/schemas/TenantCreateInfo"
       responses:
         "201":
           description: New tenant created successfully
@@ -371,7 +367,48 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
+  /v1/tenant/config:
+    put:
+      description: |
+        Update tenant's config.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantConfigInfo"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TenantInfo"
+        "400":
+          description: Malformed tenant config request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     JWT:
@@ -388,6 +425,45 @@ components:
         id:
           type: string
         state:
+          type: string
+    TenantCreateInfo:
+      type: object
+      properties:
+        new_tenant_id:
+          type: string
+          format: hex
+        tenant_id:
+          type: string
+          format: hex
+        gc_period:
+          type: string
+        gc_horizon:
+          type: integer
+        pitr_interval:
+          type: string
+        checkpoint_distance:
+          type: integer
+        compaction_period:
+          type: string
+        compaction_threshold:
+          type: string
+    TenantConfigInfo:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: hex
+        gc_period:
+          type: string
+        gc_horizon:
+          type: integer
+        pitr_interval:
+          type: string
+        checkpoint_distance:
+          type: integer
+        compaction_period:
+          type: string
+        compaction_threshold:
           type: string
     TimelineInfo:
       type: object
@@ -409,6 +485,7 @@ components:
       type: object
       required:
         - awaits_download
+        - remote_consistent_lsn
       properties:
         awaits_download:
           type: boolean

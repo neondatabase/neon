@@ -1,65 +1,47 @@
-use anyhow::{bail, ensure, Context};
-use std::net::SocketAddr;
-use std::str::FromStr;
-use std::sync::Arc;
-
-pub type TlsConfig = Arc<rustls::ServerConfig>;
+use anyhow::{ensure, Context};
+use std::{str::FromStr, sync::Arc};
 
 #[non_exhaustive]
-pub enum ClientAuthMethod {
-    Password,
+pub enum AuthBackendType {
+    LegacyConsole,
+    Console,
+    Postgres,
     Link,
-
-    /// Use password auth only if username ends with "@zenith"
-    Mixed,
 }
 
-pub enum RouterConfig {
-    Static { host: String, port: u16 },
-    Dynamic(ClientAuthMethod),
-}
-
-impl FromStr for ClientAuthMethod {
+impl FromStr for AuthBackendType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        use ClientAuthMethod::*;
+        println!("ClientAuthMethod::from_str: '{}'", s);
+        use AuthBackendType::*;
         match s {
-            "password" => Ok(Password),
+            "legacy" => Ok(LegacyConsole),
+            "console" => Ok(Console),
+            "postgres" => Ok(Postgres),
             "link" => Ok(Link),
-            "mixed" => Ok(Mixed),
-            _ => bail!("Invalid option for router: `{}`", s),
+            _ => Err(anyhow::anyhow!("Invlid option for auth method")),
         }
     }
 }
 
 pub struct ProxyConfig {
-    /// main entrypoint for users to connect to
-    pub proxy_address: SocketAddr,
+    /// TLS configuration for the proxy.
+    pub tls_config: Option<TlsConfig>,
 
-    /// method of assigning compute nodes
-    pub router_config: RouterConfig,
+    pub auth_backend: AuthBackendType,
 
-    /// internally used for status and prometheus metrics
-    pub http_address: SocketAddr,
-
-    /// management endpoint. Upon user account creation control plane
-    /// will notify us here, so that we can 'unfreeze' user session.
-    /// TODO It uses postgres protocol over TCP but should be migrated to http.
-    pub mgmt_address: SocketAddr,
-
-    /// send unauthenticated users to this URI
-    pub redirect_uri: String,
-
-    /// control plane address where we would check auth.
     pub auth_endpoint: reqwest::Url,
 
-    pub tls_config: Option<TlsConfig>,
+    pub auth_link_uri: reqwest::Url,
 }
 
-pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
+pub type TlsConfig = Arc<rustls::ServerConfig>;
+
+/// Configure TLS for the main endpoint.
+pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
     let key = {
-        let key_bytes = std::fs::read(key_path).context("SSL key file")?;
+        let key_bytes = std::fs::read(key_path).context("TLS key file")?;
         let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
             .context("couldn't read TLS keys")?;
 
@@ -68,7 +50,7 @@ pub fn configure_ssl(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     };
 
     let cert_chain = {
-        let cert_chain_bytes = std::fs::read(cert_path).context("SSL cert file")?;
+        let cert_chain_bytes = std::fs::read(cert_path).context("TLS cert file")?;
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
             .context("couldn't read TLS certificate chain")?
             .into_iter()

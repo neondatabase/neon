@@ -217,6 +217,13 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         tenant_pg.start()
 
+        timeline_to_detach_local_path = env.repo_dir / 'tenants' / tenant.hex / 'timelines' / timeline.hex
+        files_before_detach = os.listdir(timeline_to_detach_local_path)
+        assert 'metadata' in files_before_detach, f'Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
+             but got: {files_before_detach}'
+        assert len(files_before_detach) > 2, f'Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
+             but got {files_before_detach}'
+
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
         # is no longer involved, and if it is, we will see the errors
@@ -237,6 +244,8 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             load_stop_event.set()
             load_thread.join(timeout=10)
             log.info('load thread stopped')
+
+        assert not os.path.exists(timeline_to_detach_local_path), f'After detach, local timeline dir {timeline_to_detach_local_path} should be removed'
 
         # bring old pageserver back for clean shutdown via zenith cli
         # new pageserver will be shut down by the context manager

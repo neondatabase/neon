@@ -15,8 +15,8 @@ tracing = "0.1.27"
 clap = "3.0"
 daemonize = "0.4.1"
 tokio = { version = "1.17", features = ["macros", "fs"] }
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 anyhow = "1.0"
 crc32c = "0.6.0"
 humantime = "2.1.0"
@@ -27,15 +27,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_with = {version = "1.12.0"}
 hex = "0.4.3"
 const_format = "0.2.21"
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 etcd-client = "0.8.3"
 tokio-util = { version = "0.7", features = ["io"] }
 rusoto_core = "0.47"
 rusoto_s3 = "0.47"
 
-postgres_ffi = { path = "../postgres_ffi" }
-zenith_metrics = { path = "../zenith_metrics" }
-zenith_utils = { path = "../zenith_utils" }
+postgres_ffi = { path = "../libs/postgres_ffi" }
+metrics = { path = "../libs/metrics" }
+utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]

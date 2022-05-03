@@ -1,18 +1,18 @@
 version: 2.1
 
 executors:
-  zenith-xlarge-executor:
+  neon-xlarge-executor:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
       - image: zimg/rust:1.58
-  zenith-executor:
+  neon-executor:
     docker:
       - image: zimg/rust:1.58
 
 jobs:
   check-codestyle-rust:
-    executor: zenith-xlarge-executor
+    executor: neon-xlarge-executor
     steps:
       - checkout
       - run:
@@ -22,7 +22,7 @@ jobs:
 
   # A job to build postgres
   build-postgres:
-    executor: zenith-xlarge-executor
+    executor: neon-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -67,9 +67,9 @@ jobs:
           paths:
             - tmp_install
 
-  # A job to build zenith rust code
-  build-zenith:
-    executor: zenith-xlarge-executor
+  # A job to build Neon rust code
+  build-neon:
+    executor: neon-xlarge-executor
     parameters:
       build_type:
         type: enum
@@ -113,7 +113,7 @@ jobs:
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
               cov_prefix=()
-              CARGO_FLAGS=--release
+              CARGO_FLAGS="--release --features profiling"
             fi
 
             export CARGO_INCREMENTAL=0
@@ -121,7 +121,7 @@ jobs:
             export RUSTC_WRAPPER=cachepot
             export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
-            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --bins --tests
+            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
             cachepot -s
 
       - save_cache:
@@ -131,20 +131,6 @@ jobs:
             - ~/.cargo/registry
             - ~/.cargo/git
             - target
-
-        # Run style checks
-        # has to run separately from cargo fmt section
-        # since needs to run with dependencies
-      - run:
-          name: cargo clippy
-          command: |
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
-            "${cov_prefix[@]}" ./run_clippy.sh
 
         # Run rust unit tests
       - run:
@@ -223,7 +209,7 @@ jobs:
             - "*"
 
   check-codestyle-python:
-    executor: zenith-executor
+    executor: neon-executor
     steps:
       - checkout
       - restore_cache:
@@ -246,7 +232,7 @@ jobs:
           command: poetry run mypy .
 
   run-pytest:
-    executor: zenith-executor
+    executor: neon-executor
     parameters:
       # pytest args to specify the tests to run.
       #
@@ -369,7 +355,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" -delete
+            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
@@ -390,7 +376,7 @@ jobs:
             - "*"
 
   coverage-report:
-    executor: zenith-xlarge-executor
+    executor: neon-xlarge-executor
     steps:
       - attach_workspace:
           at: /tmp/zenith
@@ -420,7 +406,7 @@ jobs:
             COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
 
             scripts/git-upload \
-              --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/zenithdb/zenith-coverage-data.git \
+              --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/neondatabase/zenith-coverage-data.git \
               --message="Add code coverage for $COMMIT_URL" \
               copy /tmp/zenith/coverage/report $CIRCLE_SHA1 # COPY FROM TO_RELATIVE
 
@@ -437,7 +423,7 @@ jobs:
                 \"target_url\": \"$REPORT_URL\"
               }"
 
-  # Build zenithdb/zenith:latest image and push it to Docker hub
+  # Build neondatabase/neon:latest image and push it to Docker hub
   docker-image:
     docker:
       - image: cimg/base:2021.04
@@ -451,18 +437,18 @@ jobs:
       - run:
           name: Build and push Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
             docker build \
               --pull \
               --build-arg GIT_VERSION=${CIRCLE_SHA1} \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:latest .
-            docker push zenithdb/zenith:${DOCKER_TAG}
-            docker push zenithdb/zenith:latest
+              --tag neondatabase/neon:${DOCKER_TAG} --tag neondatabase/neon:latest .
+            docker push neondatabase/neon:${DOCKER_TAG}
+            docker push neondatabase/neon:latest
 
-  # Build zenithdb/compute-node:latest image and push it to Docker hub
+  # Build neondatabase/compute-node:latest image and push it to Docker hub
   docker-image-compute:
     docker:
       - image: cimg/base:2021.04
@@ -470,31 +456,31 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
-      # Build zenithdb/compute-tools:latest image and push it to Docker hub
+      # Build neondatabase/compute-tools:latest image and push it to Docker hub
       # TODO: this should probably also use versioned tag, not just :latest.
       # XXX: but should it? We build and use it only locally now.
       - run:
           name: Build and push compute-tools Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             docker build \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag zenithdb/compute-tools:latest -f Dockerfile.compute-tools .
-            docker push zenithdb/compute-tools:latest
+              --tag neondatabase/compute-tools:latest -f Dockerfile.compute-tools .
+            docker push neondatabase/compute-tools:latest
       - run:
           name: Init postgres submodule
           command: git submodule update --init --depth 1
       - run:
           name: Build and push compute-node Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:latest vendor/postgres
-            docker push zenithdb/compute-node:${DOCKER_TAG}
-            docker push zenithdb/compute-node:latest
+            docker build --tag neondatabase/compute-node:${DOCKER_TAG} --tag neondatabase/compute-node:latest vendor/postgres
+            docker push neondatabase/compute-node:${DOCKER_TAG}
+            docker push neondatabase/compute-node:latest
 
-  # Build production zenithdb/zenith:release image and push it to Docker hub
+  # Build production neondatabase/neon:release image and push it to Docker hub
   docker-image-release:
     docker:
       - image: cimg/base:2021.04
@@ -508,18 +494,18 @@ jobs:
       - run:
           name: Build and push Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
             docker build \
               --pull \
               --build-arg GIT_VERSION=${CIRCLE_SHA1} \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag zenithdb/zenith:${DOCKER_TAG} --tag zenithdb/zenith:release .
-            docker push zenithdb/zenith:${DOCKER_TAG}
-            docker push zenithdb/zenith:release
+              --tag neondatabase/neon:${DOCKER_TAG} --tag neondatabase/neon:release .
+            docker push neondatabase/neon:${DOCKER_TAG}
+            docker push neondatabase/neon:release
 
-  # Build production zenithdb/compute-node:release image and push it to Docker hub
+  # Build production neondatabase/compute-node:release image and push it to Docker hub
   docker-image-compute-release:
     docker:
       - image: cimg/base:2021.04
@@ -527,29 +513,29 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
-      # Build zenithdb/compute-tools:release image and push it to Docker hub
+      # Build neondatabase/compute-tools:release image and push it to Docker hub
       # TODO: this should probably also use versioned tag, not just :latest.
       # XXX: but should it? We build and use it only locally now.
       - run:
           name: Build and push compute-tools Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             docker build \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag zenithdb/compute-tools:release -f Dockerfile.compute-tools .
-            docker push zenithdb/compute-tools:release
+              --tag neondatabase/compute-tools:release -f Dockerfile.compute-tools .
+            docker push neondatabase/compute-tools:release
       - run:
           name: Init postgres submodule
           command: git submodule update --init --depth 1
       - run:
           name: Build and push compute-node Docker image
           command: |
-            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build --tag zenithdb/compute-node:${DOCKER_TAG} --tag zenithdb/compute-node:release vendor/postgres
-            docker push zenithdb/compute-node:${DOCKER_TAG}
-            docker push zenithdb/compute-node:release
+            docker build --tag neondatabase/compute-node:${DOCKER_TAG} --tag neondatabase/compute-node:release vendor/postgres
+            docker push neondatabase/compute-node:${DOCKER_TAG}
+            docker push neondatabase/compute-node:release
 
   deploy-staging:
     docker:
@@ -575,7 +561,7 @@ jobs:
             rm -f ssh-key ssh-key-cert.pub
 
             ansible-playbook deploy.yaml -i staging.hosts
-            rm -f zenith_install.tar.gz .zenith_current_version
+            rm -f neon_install.tar.gz .neon_current_version
 
   deploy-staging-proxy:
     docker:
@@ -593,13 +579,13 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://neondatabase.github.io/helm-charts
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
             DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-
+            helm upgrade zenith-proxy     neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
 
   deploy-release:
     docker:
@@ -625,7 +611,7 @@ jobs:
             rm -f ssh-key ssh-key-cert.pub
 
             ansible-playbook deploy.yaml -i production.hosts
-            rm -f zenith_install.tar.gz .zenith_current_version
+            rm -f neon_install.tar.gz .neon_current_version
 
   deploy-release-proxy:
     docker:
@@ -704,8 +690,8 @@ workflows:
           matrix:
             parameters:
               build_type: ["debug", "release"]
-      - build-zenith:
-          name: build-zenith-<< matrix.build_type >>
+      - build-neon:
+          name: build-neon-<< matrix.build_type >>
           matrix:
             parameters:
               build_type: ["debug", "release"]
@@ -720,7 +706,7 @@ workflows:
           test_selection: batch_pg_regress
           needs_postgres_source: true
           requires:
-            - build-zenith-<< matrix.build_type >>
+            - build-neon-<< matrix.build_type >>
       - run-pytest:
           name: other-tests-<< matrix.build_type >>
           matrix:
@@ -728,7 +714,7 @@ workflows:
               build_type: ["debug", "release"]
           test_selection: batch_others
           requires:
-            - build-zenith-<< matrix.build_type >>
+            - build-neon-<< matrix.build_type >>
       - run-pytest:
           name: benchmarks
           context: PERF_TEST_RESULT_CONNSTR
@@ -737,7 +723,7 @@ workflows:
           run_in_parallel: false
           save_perf_report: true
           requires:
-            - build-zenith-release
+            - build-neon-release
       - coverage-report:
           # Context passes credentials for gh api
           context: CI_ACCESS_TOKEN
@@ -833,6 +819,6 @@ workflows:
             # XXX: Successful build doesn't mean everything is OK, but
             # the job to be triggered takes so much time to complete (~22 min)
             # that it's better not to wait for the commented-out steps
-            - build-zenith-release
+            - build-neon-release
             # - pg_regress-tests-release
             # - other-tests-release

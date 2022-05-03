@@ -82,3 +82,14 @@ def print_gc_result(row):
 # path to etcd binary or None if not present.
 def etcd_path():
     return shutil.which("etcd")
+
+
+# Traverse directory to get total size.
+def get_dir_size(path: str) -> int:
+    """Return size in bytes."""
+    totalbytes = 0
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            totalbytes += os.path.getsize(os.path.join(root, name))
+
+    return totalbytes
