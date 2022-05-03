@@ -1108,7 +1108,7 @@ class ZenithCli:
 
         assert type(arguments) == list
 
-        bin_zenith = os.path.join(str(zenith_binpath), 'zenith')
+        bin_zenith = os.path.join(str(zenith_binpath), 'neon_local')
 
         args = [bin_zenith] + arguments
         log.info('Running command "{}"'.format(' '.join(args)))

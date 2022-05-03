@@ -1451,6 +1451,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "neon_local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 3.0.14",
+ "control_plane",
+ "pageserver",
+ "postgres",
+ "postgres_ffi",
+ "safekeeper",
+ "serde_json",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "nix"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3634,22 +3650,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e262a29d0e61ccf2b6190d7050d4b237535fc76ce4c1210d9caa316f71dffa75"
 dependencies = [
  "chrono",
-]
-
-[[package]]
-name = "zenith"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap 3.0.14",
- "control_plane",
- "pageserver",
- "postgres",
- "postgres_ffi",
- "safekeeper",
- "serde_json",
- "utils",
- "workspace_hack",
 ]
 
 [[package]]
