@@ -277,8 +277,8 @@ impl Layer for DeltaLayer {
                     )
                 })?;
                 let val = if let Some(decompressor) = &mut decompressor {
-                    let mut decompressed: Vec<u8> = Vec::new();
-                    decompressor.decompress_to_buffer(&buf, &mut decompressed)?;
+                    let decompressed =
+                        decompressor.decompress(&buf, config::ZSTD_DECOMPRESS_BUFFER_LIMIT)?;
                     Value::des(&decompressed)
                 } else {
                     Value::des(&buf)
@@ -395,9 +395,8 @@ impl Layer for DeltaLayer {
                 match cursor.read_blob(blob_ref.pos()) {
                     Ok(buf) => {
                         let val = if let Some(decompressor) = &mut decompressor {
-                            let mut decompressed: Vec<u8> = Vec::new();
-                            decompressor
-                                .decompress_to_buffer(&buf, &mut decompressed)
+                            let decompressed = decompressor
+                                .decompress(&buf, config::ZSTD_DECOMPRESS_BUFFER_LIMIT)
                                 .unwrap();
                             Value::des(&decompressed)
                         } else {
@@ -858,8 +857,8 @@ impl<'a> DeltaValueIter<'a> {
 
             let buf = self.reader.read_blob(blob_ref.pos())?;
             let val = if let Some(decompressor) = &mut self.decompressor {
-                let mut decompressed: Vec<u8> = Vec::new();
-                decompressor.decompress_to_buffer(&buf, &mut decompressed)?;
+                let decompressed =
+                    decompressor.decompress(&buf, config::ZSTD_DECOMPRESS_BUFFER_LIMIT)?;
                 Value::des(&decompressed)
             } else {
                 Value::des(&buf)
