@@ -244,7 +244,7 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
                 Some(tenant_id),
                 None,
                 "Compactor thread",
-                true,
+                false,
                 move || crate::tenant_threads::compact_loop(tenant_id),
             )?;
 
@@ -253,7 +253,7 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
                 Some(tenant_id),
                 None,
                 "GC thread",
-                true,
+                false,
                 move || crate::tenant_threads::gc_loop(tenant_id),
             )
             .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
