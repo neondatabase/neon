@@ -8,7 +8,7 @@ from fixtures.log_helper import log
 import signal
 import pytest
 
-from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
+from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, Etcd, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
 from fixtures.utils import lsn_from_hex
 
 
@@ -21,7 +21,8 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
                           pageserver_bin: pathlib.Path,
                           remote_storage_mock_path: pathlib.Path,
                           pg_port: int,
-                          http_port: int):
+                          http_port: int,
+                          broker: Etcd):
     """
     cannot use ZenithPageserver yet because it depends on zenith cli
     which currently lacks support for multiple pageservers
@@ -36,6 +37,7 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c pg_distrib_dir='{pg_distrib_dir}'",
         f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
+        f"-c broker_endpoints=['{broker.client_url()}']",
     ]
 
     subprocess.check_output(cmd, text=True)
@@ -103,7 +105,6 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                            port_distributor: PortDistributor,
                            with_load: str):
-    zenith_env_builder.num_safekeepers = 1
     zenith_env_builder.enable_local_fs_remote_storage()
 
     env = zenith_env_builder.init_start()
@@ -180,7 +181,8 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                                pageserver_bin,
                                remote_storage_mock_path,
                                new_pageserver_pg_port,
-                               new_pageserver_http_port):
+                               new_pageserver_http_port,
+                               zenith_env_builder.broker):
 
         # call to attach timeline to new pageserver
         new_pageserver_http.timeline_attach(tenant, timeline)

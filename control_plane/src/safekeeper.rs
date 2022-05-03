@@ -137,6 +137,7 @@ impl SafekeeperNode {
                 .args(&["--listen-pg", &listen_pg])
                 .args(&["--listen-http", &listen_http])
                 .args(&["--recall", "1 second"])
+                .args(&["--broker-endpoints", &self.broker_endpoints.join(",")])
                 .arg("--daemonize"),
         );
         if !self.conf.sync {

@@ -1,7 +1,7 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
@@ -31,7 +31,7 @@ const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     metrics::set_common_metrics_prefix("safekeeper");
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
@@ -177,8 +177,12 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("broker-endpoints") {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
-        conf.broker_endpoints = Some(collected_ep?);
+        conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
     }
+    ensure!(
+        !conf.broker_endpoints.is_empty(),
+        "No broker endpoints provided"
+    );
     if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
         conf.broker_etcd_prefix = prefix.to_string();
     }
@@ -309,16 +313,14 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         .unwrap();
     threads.push(callmemaybe_thread);
 
-    if conf.broker_endpoints.is_some() {
-        let conf_ = conf.clone();
-        threads.push(
-            thread::Builder::new()
-                .name("broker thread".into())
-                .spawn(|| {
-                    broker::thread_main(conf_);
-                })?,
-        );
-    }
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("broker thread".into())
+            .spawn(|| {
+                broker::thread_main(conf_);
+            })?,
+    );
 
     let conf_ = conf.clone();
     threads.push(

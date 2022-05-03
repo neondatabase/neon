@@ -46,7 +46,7 @@ fn timeline_safekeeper_path(
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
-    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
     // Get and maintain lease to automatically delete obsolete data
     let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
@@ -91,7 +91,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
-    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
     let mut subscription = etcd_broker::subscribe_to_safekeeper_timeline_updates(
         &mut client,
@@ -99,7 +99,6 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     )
     .await
     .context("failed to subscribe for safekeeper info")?;
-
     loop {
         match subscription.fetch_data().await {
             Some(new_info) => {

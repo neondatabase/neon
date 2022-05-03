@@ -12,7 +12,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
-from fixtures.zenith_fixtures import PgBin, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
+from fixtures.zenith_fixtures import PgBin, Etcd, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
 from fixtures.utils import etcd_path, get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
@@ -22,7 +22,6 @@ from typing import List, Optional, Any
 # succeed and data is written
 def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    zenith_env_builder.broker = True
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_safekeepers_normal_work')
@@ -331,7 +330,6 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 @pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
 def test_broker(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
-    zenith_env_builder.broker = True
     zenith_env_builder.enable_local_fs_remote_storage()
     env = zenith_env_builder.init_start()
 
@@ -374,7 +372,6 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
 @pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
 def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
-    zenith_env_builder.broker = True
     # to advance remote_consistent_llsn
     zenith_env_builder.enable_local_fs_remote_storage()
     env = zenith_env_builder.init_start()
@@ -557,8 +554,6 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
 
 
 def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
-
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_timeline_status')
@@ -599,6 +594,9 @@ class SafekeeperEnv:
                  num_safekeepers: int = 1):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
+        self.broker = Etcd(datadir=os.path.join(self.repo_dir, "etcd"),
+                           port=self.port_distributor.get_port(),
+                           peer_port=self.port_distributor.get_port())
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = os.path.join(str(zenith_binpath), 'safekeeper')
@@ -645,6 +643,8 @@ class SafekeeperEnv:
             safekeeper_dir,
             "--id",
             str(i),
+            "--broker-endpoints",
+            self.broker.client_url(),
             "--daemonize"
         ]
 
@@ -698,7 +698,6 @@ def test_safekeeper_without_pageserver(test_output_dir: str,
         repo_dir,
         port_distributor,
         pg_bin,
-        num_safekeepers=1,
     )
 
     with env:
