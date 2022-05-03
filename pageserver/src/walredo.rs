@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use log::*;
 use nix::poll::*;
 use serde::Serialize;
 use std::fs;
@@ -35,17 +34,15 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
-use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::nonblock::set_nonblock;
-use zenith_utils::zid::ZTenantId;
+use tracing::*;
+use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
 
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
+use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
@@ -286,6 +283,11 @@ impl PostgresRedoManager {
         // If something went wrong, don't try to reuse the process. Kill it, and
         // next request will launch a new one.
         if result.is_err() {
+            error!(
+                "error applying {} WAL records to reconstruct page image at LSN {}",
+                records.len(),
+                lsn
+            );
             let process = process_guard.take().unwrap();
             process.kill();
         }
@@ -390,7 +392,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids } => {
+            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -422,6 +424,21 @@ impl PostgresRedoManager {
                         xid,
                         pg_constants::TRANSACTION_STATUS_COMMITTED,
                         page,
+                    );
+                }
+
+                // Append the timestamp
+                if page.len() == pg_constants::BLCKSZ as usize + 8 {
+                    page.truncate(pg_constants::BLCKSZ as usize);
+                }
+                if page.len() == pg_constants::BLCKSZ as usize {
+                    page.extend_from_slice(&timestamp.to_be_bytes());
+                } else {
+                    warn!(
+                        "CLOG blk {} in seg {} has invalid size {}",
+                        blknum,
+                        segno,
+                        page.len()
                     );
                 }
             }
@@ -703,7 +720,12 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
+            let n = loop {
+                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));

@@ -12,20 +12,20 @@
 //!
 use anyhow::{ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
-use log::*;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
+use tracing::*;
 
 use crate::reltag::SlruKind;
 use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
@@ -154,9 +154,17 @@ impl<'a> Basebackup<'a> {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-            ensure!(img.len() == pg_constants::BLCKSZ as usize);
 
-            slru_buf.extend_from_slice(&img);
+            if slru == SlruKind::Clog {
+                ensure!(
+                    img.len() == pg_constants::BLCKSZ as usize
+                        || img.len() == pg_constants::BLCKSZ as usize + 8
+                );
+            } else {
+                ensure!(img.len() == pg_constants::BLCKSZ as usize);
+            }
+
+            slru_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);

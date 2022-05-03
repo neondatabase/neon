@@ -11,9 +11,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use zenith_utils::auth::{encode_from_key_file, Claims, Scope};
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::{
+    auth::{encode_from_key_file, Claims, Scope},
+    postgres_backend::AuthType,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 use crate::safekeeper::SafekeeperNode;
 

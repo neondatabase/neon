@@ -13,15 +13,17 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
+use safekeeper::http::models::TimelineCreateRequest;
 use thiserror::Error;
-use walkeeper::http::models::TimelineCreateRequest;
-use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
+use utils::{
+    connstring::connection_address,
+    http::error::HttpErrorBody,
+    zid::{ZNodeId, ZTenantId, ZTimelineId},
+};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
 use crate::{fill_rust_env_vars, read_pidfile};
-use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {

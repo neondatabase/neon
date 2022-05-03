@@ -5,10 +5,10 @@ use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use lazy_static::lazy_static;
+use metrics::{new_common_metric_name, register_int_counter, IntCounter};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use zenith_metrics::{new_common_metric_name, register_int_counter, IntCounter};
-use zenith_utils::pq_proto::{BeMessage as Be, *};
+use utils::pq_proto::{BeMessage as Be, *};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -73,7 +73,7 @@ pub async fn thread_main(
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -144,9 +144,14 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
 
                 // Here and forth: `or_else` demands that we use a future here
-                let creds = async { params.try_into() }
+                let mut creds: auth::ClientCredentials = async { params.try_into() }
                     .or_else(|e| stream.throw_error(e))
                     .await?;
+
+                // Set SNI info when available
+                if let Stream::Tls { tls } = stream.get_ref() {
+                    creds.sni_data = tls.get_ref().1.sni_hostname().map(|s| s.to_owned());
+                }
 
                 break Ok(Some((stream, creds)));
             }
@@ -174,7 +179,7 @@ impl<S> Client<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(
         self,
@@ -185,10 +190,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 
         // Authenticate and connect to a compute node.
         let auth = creds.authenticate(config, &mut stream).await;
-        let db_info = async { auth }.or_else(|e| stream.throw_error(e)).await?;
+        let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
         let (db, version, cancel_closure) =
-            db_info.connect().or_else(|e| stream.throw_error(e)).await?;
+            node.connect().or_else(|e| stream.throw_error(e)).await?;
         let cancel_key_data = session.enable_cancellation(cancel_closure);
 
         stream
@@ -265,14 +270,24 @@ mod tests {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let server_config = {
-            let mut config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-            config.set_single_cert(vec![cert], key)?;
+            let config = rustls::ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)?;
+
             config.into()
         };
 
         let client_config = {
-            let mut config = rustls::ClientConfig::new();
-            config.root_store.add(&ca)?;
+            let config = rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates({
+                    let mut store = rustls::RootCertStore::empty();
+                    store.add(&ca)?;
+                    store
+                })
+                .with_no_client_auth();
+
             ClientConfig { config, hostname }
         };
 

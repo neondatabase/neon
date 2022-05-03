@@ -51,18 +51,23 @@ impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
-    pub async fn authenticate(mut self, mut mechanism: impl Mechanism) -> super::Result<()> {
+    pub async fn authenticate<M: Mechanism>(
+        mut self,
+        mut mechanism: M,
+    ) -> super::Result<M::Output> {
         loop {
             let input = self.recv().await?;
             let (moved, reply) = mechanism.exchange(input)?;
+
+            use super::Step::*;
             match moved {
-                Some(moved) => {
+                Continue(moved) => {
                     self.send(&ServerMessage::Continue(&reply)).await?;
                     mechanism = moved;
                 }
-                None => {
+                Authenticated(result) => {
                     self.send(&ServerMessage::Final(&reply)).await?;
-                    return Ok(());
+                    return Ok(result);
                 }
             }
         }

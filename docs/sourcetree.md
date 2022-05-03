@@ -28,12 +28,7 @@ The pageserver has a few different duties:
 - Receive WAL from the WAL service and decode it.
 - Replay WAL that's applicable to the chunks that the Page Server maintains
 
-For more detailed info, see `/pageserver/README`
-
-`/postgres_ffi`:
-
-Utility functions for interacting with PostgreSQL file formats.
-Misc constants, copied from PostgreSQL headers.
+For more detailed info, see [/pageserver/README](/pageserver/README.md)
 
 `/proxy`:
 
@@ -57,12 +52,12 @@ PostgreSQL extension that implements storage manager API and network communicati
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
-`/walkeeper`:
+`/safekeeper`:
 
 The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
-For more detailed info, see `/walkeeper/README`
+For more detailed info, see [/safekeeper/README](/safekeeper/README.md)
 
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.
@@ -74,13 +69,20 @@ We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
 Main entry point for the 'zenith' CLI utility.
 TODO: Doesn't it belong to control_plane?
 
-`/zenith_metrics`:
+`/libs`:
+Unites granular neon helper crates under the hood.
 
+`/libs/postgres_ffi`:
+
+Utility functions for interacting with PostgreSQL file formats.
+Misc constants, copied from PostgreSQL headers.
+
+`/libs/utils`:
+Generic helpers that are shared between other crates in this repository.
+A subject for future modularization.
+
+`/libs/metrics`:
 Helpers for exposing Prometheus metrics from the server.
-
-`/zenith_utils`:
-
-Helpers that are shared between other crates in this repository.
 
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,
