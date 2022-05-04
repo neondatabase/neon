@@ -1315,7 +1315,7 @@ class VanillaPostgres(PgProtocol):
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
-            conf_file.writelines(options)
+            conf_file.write("\n".join(options))
 
     def start(self, log_path: Optional[str] = None):
         assert not self.running
