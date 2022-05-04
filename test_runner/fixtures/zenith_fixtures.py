@@ -1303,6 +1303,22 @@ def pg_bin(test_output_dir: str) -> PgBin:
     return PgBin(test_output_dir)
 
 
+@dataclass
+class ReplayBin:
+    """A helper class for running the pageserver benchmarker tool."""
+    def run(self, tenant, timeline):
+        replay_binpath = os.path.join(str(zenith_binpath), 'replay')
+        args = [replay_binpath,
+                "--tenant", tenant.hex,
+                "--timeline", timeline.hex]
+        return subprocess.run(args)
+
+
+@pytest.fixture(scope='function')
+def replay_bin(test_output_dir):
+    return ReplayBin()
+
+
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
         super().__init__(host='localhost', port=port, dbname='postgres')
