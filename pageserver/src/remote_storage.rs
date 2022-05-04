@@ -14,7 +14,7 @@
 //!
 //! * public API via to interact with the external world:
 //!     * [`start_local_timeline_sync`] to launch a background async loop to handle the synchronization
-//!     * [`schedule_timeline_checkpoint_upload`] and [`schedule_timeline_download`] to enqueue a new upload and download tasks,
+//!     * [`schedule_layer_upload`], [`schedule_layer_download`] and [`schedule_layer_delete`] to enqueue a new upload and download tasks,
 //!       to be processed by the async loop
 //!
 //! Here's a schematic overview of all interactions backup and the rest of the pageserver perform:
@@ -71,10 +71,10 @@
 //! when the newer image is downloaded
 //!
 //! Pageserver maintains similar to the local file structure remotely: all layer files are uploaded with the same names under the same directory structure.
-//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexShard`], containing the list of remote files.
+//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexPart`], containing the list of remote files.
 //! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
 //! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`ZTenantId`] and [`ZTimelineId`],
-//! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrive its shard contents, if needed, same as any layer files.
+//! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrive its part contents, if needed, same as any layer files.
 //!
 //! By default, pageserver reads the remote storage index data only for timelines located locally, to synchronize those, if needed.
 //! Bulk index data download happens only initially, on pageserer startup. The rest of the remote storage stays unknown to pageserver and loaded on demand only,
@@ -108,7 +108,7 @@ pub use self::{
     storage_sync::{
         download_index_part,
         index::{IndexPart, RemoteIndex, RemoteTimeline},
-        schedule_timeline_checkpoint_upload, schedule_timeline_download,
+        schedule_layer_delete, schedule_layer_download, schedule_layer_upload,
     },
 };
 use crate::{

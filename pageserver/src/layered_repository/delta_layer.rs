@@ -218,6 +218,10 @@ impl Layer for DeltaLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
+    }
+
     fn get_value_reconstruct_data(
         &self,
         key: Key,
