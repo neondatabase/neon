@@ -86,7 +86,10 @@ where
     S: RemoteStorage<StoragePath = P> + Send + Sync + 'static,
 {
     let upload = &mut upload_data.data;
-    let new_upload_lsn = upload.metadata.disk_consistent_lsn();
+    let new_upload_lsn = upload
+        .metadata
+        .as_ref()
+        .map(|meta| meta.disk_consistent_lsn());
 
     let already_uploaded_layers = remote_timeline
         .map(|timeline| timeline.stored_files())
@@ -101,7 +104,7 @@ where
 
     debug!("Layers to upload: {layers_to_upload:?}");
     info!(
-        "Uploading {} timeline layers, new lsn: {new_upload_lsn}",
+        "Uploading {} timeline layers, new lsn: {new_upload_lsn:?}",
         layers_to_upload.len(),
     );
 
@@ -234,8 +237,10 @@ mod tests {
         let current_retries = 3;
         let metadata = dummy_metadata(Lsn(0x30));
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
-        let timeline_upload =
+        let mut timeline_upload =
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
+        timeline_upload.metadata = None;
+
         assert!(
             storage.list().await?.is_empty(),
             "Storage should be empty before any uploads are made"
@@ -278,8 +283,8 @@ mod tests {
             "Successful upload should have all layers uploaded"
         );
         assert_eq!(
-            upload.metadata, metadata,
-            "Successful upload should not chage its metadata"
+            upload.metadata, None,
+            "Successful upload without metadata should not have it returned either"
         );
 
         let storage_files = storage.list().await?;
@@ -367,7 +372,8 @@ mod tests {
             "Successful upload should have all layers uploaded"
         );
         assert_eq!(
-            upload.metadata, metadata,
+            upload.metadata,
+            Some(metadata),
             "Successful upload should not chage its metadata"
         );
 

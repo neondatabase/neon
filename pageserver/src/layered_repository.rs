@@ -1789,7 +1789,7 @@ impl LayeredTimeline {
                     self.tenantid,
                     self.timelineid,
                     HashSet::from([new_delta_path]),
-                    metadata,
+                    Some(metadata),
                 );
             }
 
@@ -1857,13 +1857,11 @@ impl LayeredTimeline {
                 }
             }
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                let metadata = load_metadata(self.conf, self.timelineid, self.tenantid)
-                    .context("failed to load local metadata")?;
                 remote_storage::schedule_layer_upload(
                     self.tenantid,
                     self.timelineid,
                     layer_paths_to_upload,
-                    metadata,
+                    None,
                 );
             }
             timer.stop_and_record();
@@ -2045,17 +2043,6 @@ impl LayeredTimeline {
             layers.insert_historic(Arc::new(l));
         }
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
-            let metadata = load_metadata(self.conf, self.timelineid, self.tenantid)
-                .context("failed to load local metadata")?;
-            remote_storage::schedule_layer_upload(
-                self.tenantid,
-                self.timelineid,
-                new_layer_paths,
-                metadata,
-            );
-        }
-
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_paths_do_delete = HashSet::with_capacity(level0_deltas.len());
@@ -2069,6 +2056,12 @@ impl LayeredTimeline {
         drop(layers);
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            remote_storage::schedule_layer_upload(
+                self.tenantid,
+                self.timelineid,
+                new_layer_paths,
+                None,
+            );
             remote_storage::schedule_layer_delete(
                 self.tenantid,
                 self.timelineid,

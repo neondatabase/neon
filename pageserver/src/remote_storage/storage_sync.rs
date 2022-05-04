@@ -72,7 +72,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use tokio::{
@@ -341,8 +341,16 @@ impl SyncTask {
                     .extend(new_upload_data.data.uploaded_layers.into_iter());
                 upload_data.retries = 0;
 
-                if new_upload_data.data.metadata.disk_consistent_lsn()
-                    > upload_data.data.metadata.disk_consistent_lsn()
+                if new_upload_data
+                    .data
+                    .metadata
+                    .as_ref()
+                    .map(|meta| meta.disk_consistent_lsn())
+                    > upload_data
+                        .data
+                        .metadata
+                        .as_ref()
+                        .map(|meta| meta.disk_consistent_lsn())
                 {
                     upload_data.data.metadata = new_upload_data.data.metadata;
                 }
@@ -371,8 +379,16 @@ impl SyncTask {
                     .extend(new_upload_data.data.uploaded_layers.into_iter());
                 upload_data.retries = 0;
 
-                if new_upload_data.data.metadata.disk_consistent_lsn()
-                    > upload_data.data.metadata.disk_consistent_lsn()
+                if new_upload_data
+                    .data
+                    .metadata
+                    .as_ref()
+                    .map(|meta| meta.disk_consistent_lsn())
+                    > upload_data
+                        .data
+                        .metadata
+                        .as_ref()
+                        .map(|meta| meta.disk_consistent_lsn())
                 {
                     upload_data.data.metadata = new_upload_data.data.metadata;
                 }
@@ -410,7 +426,7 @@ pub struct TimelineUpload {
     /// Already uploaded layers. Used to store the data about the uploads between task retries
     /// and to record the data into the remote index after the task got completed or evicted.
     uploaded_layers: HashSet<PathBuf>,
-    metadata: TimelineMetadata,
+    metadata: Option<TimelineMetadata>,
 }
 
 /// A timeline download task.
@@ -431,7 +447,7 @@ pub fn schedule_layer_upload(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
     layers_to_upload: HashSet<PathBuf>,
-    metadata: TimelineMetadata,
+    metadata: Option<TimelineMetadata>,
 ) {
     if !sync_queue::push(
         ZTenantTimelineId {
@@ -932,23 +948,24 @@ async fn upload_timeline<P, S>(
             }
             UploadedTimeline::Successful(upload_data) => upload_data,
             UploadedTimeline::SuccessfulAfterLocalFsUpdate(mut outdated_upload_data) => {
-                let local_metadata_path =
-                    metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id);
-                let local_metadata = match read_metadata_file(&local_metadata_path).await {
-                    Ok(metadata) => metadata,
-                    Err(e) => {
-                        error!(
-                            "Failed to load local metadata from path '{}': {e:?}",
-                            local_metadata_path.display()
-                        );
-                        outdated_upload_data.retries += 1;
-                        sync_queue::push(sync_id, SyncTask::Upload(outdated_upload_data));
-                        register_sync_status(sync_start, task_name, Some(false));
-                        return;
-                    }
-                };
-
-                outdated_upload_data.data.metadata = local_metadata;
+                if outdated_upload_data.data.metadata.is_some() {
+                    let local_metadata_path =
+                        metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id);
+                    let local_metadata = match read_metadata_file(&local_metadata_path).await {
+                        Ok(metadata) => metadata,
+                        Err(e) => {
+                            error!(
+                                "Failed to load local metadata from path '{}': {e:?}",
+                                local_metadata_path.display()
+                            );
+                            outdated_upload_data.retries += 1;
+                            sync_queue::push(sync_id, SyncTask::Upload(outdated_upload_data));
+                            register_sync_status(sync_start, task_name, Some(false));
+                            return;
+                        }
+                    };
+                    outdated_upload_data.data.metadata = Some(local_metadata);
+                }
                 outdated_upload_data
             }
         };
@@ -982,11 +999,14 @@ where
 
         match index_accessor.timeline_entry_mut(&sync_id) {
             Some(existing_entry) => {
-                if existing_entry.metadata.disk_consistent_lsn()
-                    < uploaded_data.metadata.disk_consistent_lsn()
-                {
-                    existing_entry.metadata = uploaded_data.metadata.clone();
+                if let Some(new_metadata) = uploaded_data.metadata.as_ref() {
+                    if existing_entry.metadata.disk_consistent_lsn()
+                        < new_metadata.disk_consistent_lsn()
+                    {
+                        existing_entry.metadata = new_metadata.clone();
+                    }
                 }
+
                 if upload_failed {
                     existing_entry
                         .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
@@ -997,7 +1017,11 @@ where
                 existing_entry.clone()
             }
             None => {
-                let mut new_remote_timeline = RemoteTimeline::new(uploaded_data.metadata.clone());
+                let new_metadata = match uploaded_data.metadata.as_ref() {
+                    Some(new_metadata) => new_metadata,
+                    None => bail!("For timeline {sync_id} upload, there's no upload metadata and no remote index entry, cannot create a new one"),
+                };
+                let mut new_remote_timeline = RemoteTimeline::new(new_metadata.clone());
                 if upload_failed {
                     new_remote_timeline
                         .add_upload_failures(uploaded_data.layers_to_upload.iter().cloned());
@@ -1140,7 +1164,7 @@ fn schedule_first_sync_tasks(
                     SyncTask::upload(TimelineUpload {
                         layers_to_upload: local_files,
                         uploaded_layers: HashSet::new(),
-                        metadata: local_metadata,
+                        metadata: Some(local_metadata),
                     }),
                 ));
                 local_timeline_init_statuses
@@ -1202,7 +1226,7 @@ fn compare_local_and_remote_timeline(
             SyncTask::upload(TimelineUpload {
                 layers_to_upload,
                 uploaded_layers: HashSet::new(),
-                metadata: local_metadata,
+                metadata: Some(local_metadata),
             }),
         ));
         // Note that status here doesn't change.
@@ -1269,7 +1293,7 @@ mod test_utils {
         Ok(TimelineUpload {
             layers_to_upload,
             uploaded_layers: HashSet::new(),
-            metadata,
+            metadata: Some(metadata),
         })
     }
 
@@ -1340,7 +1364,7 @@ mod tests {
             TimelineUpload {
                 layers_to_upload: HashSet::from([PathBuf::from("one")]),
                 uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                metadata: metadata_1,
+                metadata: Some(metadata_1),
             },
         ));
         let upload_2 = SyncTask::Upload(SyncData::new(
@@ -1348,7 +1372,7 @@ mod tests {
             TimelineUpload {
                 layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
                 uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                metadata: metadata_2.clone(),
+                metadata: Some(metadata_2.clone()),
             },
         ));
 
@@ -1380,7 +1404,8 @@ mod tests {
         );
 
         assert_eq!(
-            upload.metadata, metadata_2,
+            upload.metadata,
+            Some(metadata_2),
             "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
         );
     }
@@ -1399,7 +1424,7 @@ mod tests {
             TimelineUpload {
                 layers_to_upload: HashSet::from([PathBuf::from("u_one")]),
                 uploaded_layers: HashSet::from([PathBuf::from("u_one_2")]),
-                metadata: dummy_metadata(Lsn(1)),
+                metadata: Some(dummy_metadata(Lsn(1))),
             },
         );
 
@@ -1442,7 +1467,7 @@ mod tests {
                 TimelineUpload {
                     layers_to_upload: HashSet::from([PathBuf::from("one")]),
                     uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                    metadata: metadata_1.clone(),
+                    metadata: Some(metadata_1.clone()),
                 },
             ),
         );
@@ -1452,7 +1477,7 @@ mod tests {
             TimelineUpload {
                 layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
                 uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                metadata: metadata_2,
+                metadata: Some(metadata_2),
             },
         ));
 
@@ -1490,7 +1515,8 @@ mod tests {
         );
 
         assert_eq!(
-            upload.metadata, metadata_1,
+            upload.metadata,
+            Some(metadata_1),
             "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
         );
     }
@@ -1502,7 +1528,7 @@ mod tests {
             TimelineUpload {
                 layers_to_upload: HashSet::from([PathBuf::from("one")]),
                 uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                metadata: dummy_metadata(Lsn(22)),
+                metadata: Some(dummy_metadata(Lsn(22))),
             },
         );
 
@@ -1572,7 +1598,7 @@ mod tests {
                 TimelineUpload {
                     layers_to_upload: HashSet::from([PathBuf::from("one")]),
                     uploaded_layers: HashSet::from([PathBuf::from("u_one")]),
-                    metadata: metadata_1,
+                    metadata: Some(metadata_1),
                 },
             ),
         );
@@ -1588,7 +1614,7 @@ mod tests {
                 TimelineUpload {
                     layers_to_upload: HashSet::from([PathBuf::from("two"), PathBuf::from("three")]),
                     uploaded_layers: HashSet::from([PathBuf::from("u_two")]),
-                    metadata: metadata_2.clone(),
+                    metadata: Some(metadata_2.clone()),
                 },
             ),
         );
@@ -1640,7 +1666,8 @@ mod tests {
         );
 
         assert_eq!(
-            upload.metadata, metadata_2,
+            upload.metadata,
+            Some(metadata_2),
             "Merged upload tasks should have a metadata with biggest disk_consistent_lsn"
         );
     }
