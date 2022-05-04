@@ -15,7 +15,7 @@ use crate::XLogPageHeaderData;
 use crate::XLogRecord;
 use crate::XLOG_PAGE_MAGIC;
 
-use anyhow::{bail, Result};
+use anyhow::bail;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -28,6 +28,8 @@ use std::io::prelude::*;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use utils::bin_ser::DeserializeError;
+use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
@@ -144,7 +146,7 @@ fn find_end_of_wal_segment(
     tli: TimeLineID,
     wal_seg_size: usize,
     start_offset: usize, // start reading at this point
-) -> Result<u32> {
+) -> anyhow::Result<u32> {
     // step back to the beginning of the page to read it in...
     let mut offs: usize = start_offset - start_offset % XLOG_BLCKSZ;
     let mut contlen: usize = 0;
@@ -272,7 +274,7 @@ pub fn find_end_of_wal(
     wal_seg_size: usize,
     precise: bool,
     start_lsn: Lsn, // start reading WAL at this point or later
-) -> Result<(XLogRecPtr, TimeLineID)> {
+) -> anyhow::Result<(XLogRecPtr, TimeLineID)> {
     let mut high_segno: XLogSegNo = 0;
     let mut high_tli: TimeLineID = 0;
     let mut high_ispartial = false;
@@ -354,19 +356,19 @@ pub fn main() {
 }
 
 impl XLogRecord {
-    pub fn from_slice(buf: &[u8]) -> XLogRecord {
+    pub fn from_slice(buf: &[u8]) -> Result<XLogRecord, DeserializeError> {
         use utils::bin_ser::LeSer;
-        XLogRecord::des(buf).unwrap()
+        XLogRecord::des(buf)
     }
 
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogRecord {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogRecord, DeserializeError> {
         use utils::bin_ser::LeSer;
-        XLogRecord::des_from(&mut buf.reader()).unwrap()
+        XLogRecord::des_from(&mut buf.reader())
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes, SerializeError> {
         use utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        Ok(self.ser()?.into())
     }
 
     // Is this record an XLOG_SWITCH record? They need some special processing,
@@ -376,35 +378,35 @@ impl XLogRecord {
 }
 
 impl XLogPageHeaderData {
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogPageHeaderData, DeserializeError> {
         use utils::bin_ser::LeSer;
-        XLogPageHeaderData::des_from(&mut buf.reader()).unwrap()
+        XLogPageHeaderData::des_from(&mut buf.reader())
     }
 }
 
 impl XLogLongPageHeaderData {
-    pub fn from_bytes<B: Buf>(buf: &mut B) -> XLogLongPageHeaderData {
+    pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogLongPageHeaderData, DeserializeError> {
         use utils::bin_ser::LeSer;
-        XLogLongPageHeaderData::des_from(&mut buf.reader()).unwrap()
+        XLogLongPageHeaderData::des_from(&mut buf.reader())
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes, SerializeError> {
         use utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        self.ser().map(|b| b.into())
     }
 }
 
 pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
 
 impl CheckPoint {
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes, SerializeError> {
         use utils::bin_ser::LeSer;
-        self.ser().unwrap().into()
+        Ok(self.ser()?.into())
     }
 
-    pub fn decode(buf: &[u8]) -> Result<CheckPoint, anyhow::Error> {
+    pub fn decode(buf: &[u8]) -> Result<CheckPoint, DeserializeError> {
         use utils::bin_ser::LeSer;
-        Ok(CheckPoint::des(buf)?)
+        CheckPoint::des(buf)
     }
 
     /// Update next XID based on provided new_xid and stored epoch.
@@ -442,7 +444,7 @@ impl CheckPoint {
 // Generate new, empty WAL segment.
 // We need this segment to start compute node.
 //
-pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
+pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, SerializeError> {
     let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
 
     let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
@@ -462,12 +464,12 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Bytes {
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
-    let hdr_bytes = hdr.encode();
+    let hdr_bytes = hdr.encode()?;
     seg_buf.extend_from_slice(&hdr_bytes);
 
     //zero out the rest of the file
     seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
-    seg_buf.freeze()
+    Ok(seg_buf.freeze())
 }
 
 #[cfg(test)]
