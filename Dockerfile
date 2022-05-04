@@ -26,7 +26,9 @@ COPY . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, loosing the compilation stats.
-RUN mold -run cargo build --release && cachepot -s
+RUN set -e \
+    && sudo -E "PATH=$PATH" mold -run cargo build --release \
+    && cachepot -s
 
 # Build final image
 #

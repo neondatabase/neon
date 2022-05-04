@@ -11,17 +11,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::io::{Read, Seek, SeekFrom};
 
 use lazy_static::lazy_static;
-use postgres_ffi::xlog_utils::{find_end_of_wal, XLogSegNo, PG_TLI};
+use postgres_ffi::xlog_utils::{
+    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName, XLogSegNo, PG_TLI,
+};
 use std::cmp::min;
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tracing::*;
 
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::ZTenantTimelineId;
+use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::safekeeper::SafeKeeperState;
 
@@ -30,7 +31,7 @@ use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 use postgres_ffi::waldecoder::WalStreamDecoder;
 
-use zenith_metrics::{
+use metrics::{
     register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
     DISK_WRITE_SECONDS_BUCKETS,
 };
@@ -102,6 +103,10 @@ pub trait Storage {
 
     /// Durably store WAL on disk, up to the last written WAL record.
     fn flush_wal(&mut self) -> Result<()>;
+
+    /// Remove all segments <= given segno. Returns closure as we want to do
+    /// that without timeline lock.
+    fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>>;
 }
 
 /// PhysicalStorage is a storage that stores WAL on disk. Writes are separated from flushes
@@ -467,6 +472,44 @@ impl Storage for PhysicalStorage {
         self.update_flush_lsn();
         Ok(())
     }
+
+    fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
+        let timeline_dir = self.timeline_dir.clone();
+        let wal_seg_size = self.wal_seg_size.unwrap();
+        Box::new(move |segno_up_to: XLogSegNo| {
+            remove_up_to(&timeline_dir, wal_seg_size, segno_up_to)
+        })
+    }
+}
+
+/// Remove all WAL segments in timeline_dir <= given segno.
+fn remove_up_to(timeline_dir: &Path, wal_seg_size: usize, segno_up_to: XLogSegNo) -> Result<()> {
+    let mut n_removed = 0;
+    for entry in fs::read_dir(&timeline_dir)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let fname = entry_path.file_name().unwrap();
+
+        if let Some(fname_str) = fname.to_str() {
+            /* Ignore files that are not XLOG segments */
+            if !IsXLogFileName(fname_str) && !IsPartialXLogFileName(fname_str) {
+                continue;
+            }
+            let (segno, _) = XLogFromFileName(fname_str, wal_seg_size);
+            if segno <= segno_up_to {
+                remove_file(entry_path)?;
+                n_removed += 1;
+            }
+        }
+    }
+    let segno_from = segno_up_to - n_removed + 1;
+    info!(
+        "removed {} WAL segments [{}; {}]",
+        n_removed,
+        XLogFileName(PG_TLI, segno_from, wal_seg_size),
+        XLogFileName(PG_TLI, segno_up_to, wal_seg_size)
+    );
+    Ok(())
 }
 
 pub struct WalReader {

@@ -35,7 +35,6 @@ use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
 use crate::walrecord;
-use crate::{ZTenantId, ZTimelineId};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,8 +50,11 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -222,6 +224,7 @@ impl Layer for DeltaLayer {
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ensure!(lsn_range.start >= self.lsn_range.start);
         let mut need_image = true;
 
         ensure!(self.key_range.contains(&key));
@@ -255,8 +258,18 @@ impl Layer for DeltaLayer {
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
             for (entry_lsn, pos) in offsets {
-                let buf = cursor.read_blob(pos)?;
-                let val = Value::des(&buf)?;
+                let buf = cursor.read_blob(pos).with_context(|| {
+                    format!(
+                        "Failed to read blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
+                let val = Value::des(&buf).with_context(|| {
+                    format!(
+                        "Failed to deserialize file blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
                 match val {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((entry_lsn, img));
@@ -287,7 +300,10 @@ impl Layer for DeltaLayer {
     }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
-        let inner = self.load().unwrap();
+        let inner = match self.load() {
+            Ok(inner) => inner,
+            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
+        };
 
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
@@ -419,7 +435,9 @@ impl DeltaLayer {
             drop(inner);
             let inner = self.inner.write().unwrap();
             if !inner.loaded {
-                self.load_inner(inner)?;
+                self.load_inner(inner).with_context(|| {
+                    format!("Failed to load delta layer {}", self.path().display())
+                })?;
             } else {
                 // Another thread loaded it while we were not holding the lock.
             }

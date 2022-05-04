@@ -19,20 +19,20 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
+use std::time::Duration;
 use tracing::*;
-use zenith_metrics::{register_histogram_vec, HistogramVec};
-use zenith_utils::auth::{self, JwtAuth};
-use zenith_utils::auth::{Claims, Scope};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::is_socket_read_timed_out;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::postgres_backend::{self, AuthType};
-use zenith_utils::pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC};
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    auth::{self, Claims, JwtAuth, Scope},
+    lsn::Lsn,
+    postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
+    pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::basebackup;
-use crate::config::PageServerConf;
-use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::config::{PageServerConf, ProfilingConfig};
+use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
+use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::repository::Repository;
 use crate::repository::Timeline;
@@ -41,6 +41,8 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
+use metrics::{register_histogram_vec, HistogramVec};
+use postgres_ffi::xlog_utils::to_pg_timestamp;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -325,14 +327,17 @@ impl PageServerHandler {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
             .context("Cannot load local timeline")?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
 
         while !thread_mgr::is_shutdown_requested() {
-            match pgb.read_message() {
+            let msg = pgb.read_message();
+
+            let profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+            match msg {
                 Ok(message) => {
                     if let Some(message) = message {
                         trace!("query: {:?}", message);
@@ -384,6 +389,7 @@ impl PageServerHandler {
                     }
                 }
             }
+            drop(profiling_guard);
         }
         Ok(())
     }
@@ -517,7 +523,7 @@ impl PageServerHandler {
         info!("starting");
 
         // check that the timeline exists
-        let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
             .context("Cannot load local timeline")?;
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -651,7 +657,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
 
             // Check that the timeline exists
-            tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;
 
             walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
@@ -662,7 +668,10 @@ impl postgres_backend::Handler for PageServerHandler {
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("failpoints ") {
+            ensure!(fail::has_failpoints(), "Cannot manage failpoints because pageserver was compiled without failpoints support");
+
             let (_, failpoints) = query_string.split_at("failpoints ".len());
+
             for failpoint in failpoints.split(';') {
                 if let Some((name, actions)) = failpoint.split_once('=') {
                     info!("cfg failpoint: {} {}", name, actions);
@@ -672,6 +681,39 @@ impl postgres_backend::Handler for PageServerHandler {
                 }
             }
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("show ") {
+            // show <tenant_id>
+            let (_, params_raw) = query_string.split_at("show ".len());
+            let params = params_raw.split(' ').collect::<Vec<_>>();
+            ensure!(params.len() == 1, "invalid param number for config command");
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"compaction_target_size"),
+                RowDescriptor::int8_col(b"compaction_period"),
+                RowDescriptor::int8_col(b"compaction_threshold"),
+                RowDescriptor::int8_col(b"gc_horizon"),
+                RowDescriptor::int8_col(b"gc_period"),
+                RowDescriptor::int8_col(b"image_creation_threshold"),
+                RowDescriptor::int8_col(b"pitr_interval"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+                Some(repo.get_compaction_target_size().to_string().as_bytes()),
+                Some(
+                    repo.get_compaction_period()
+                        .as_secs()
+                        .to_string()
+                        .as_bytes(),
+                ),
+                Some(repo.get_compaction_threshold().to_string().as_bytes()),
+                Some(repo.get_gc_horizon().to_string().as_bytes()),
+                Some(repo.get_gc_period().as_secs().to_string().as_bytes()),
+                Some(repo.get_image_creation_threshold().to_string().as_bytes()),
+                Some(repo.get_pitr_interval().as_secs().to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
             // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
@@ -689,16 +731,20 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+
+            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+
             let gc_horizon: u64 = caps
                 .get(4)
                 .map(|h| h.as_str().parse())
-                .unwrap_or(Ok(self.conf.gc_horizon))?;
+                .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, true)?;
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
+                RowDescriptor::int8_col(b"layers_needed_by_pitr"),
                 RowDescriptor::int8_col(b"layers_needed_by_branches"),
                 RowDescriptor::int8_col(b"layers_not_updated"),
                 RowDescriptor::int8_col(b"layers_removed"),
@@ -707,6 +753,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(result.layers_total.to_string().as_bytes()),
                 Some(result.layers_needed_by_cutoff.to_string().as_bytes()),
+                Some(result.layers_needed_by_pitr.to_string().as_bytes()),
                 Some(result.layers_needed_by_branches.to_string().as_bytes()),
                 Some(result.layers_not_updated.to_string().as_bytes()),
                 Some(result.layers_removed.to_string().as_bytes()),
@@ -727,7 +774,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Couldn't load timeline")?;
             timeline.tline.compact()?;
 
@@ -746,7 +793,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
-            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;
 
             timeline.tline.checkpoint(CheckpointConfig::Forced)?;
@@ -759,6 +806,33 @@ impl postgres_backend::Handler for PageServerHandler {
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("get_lsn_by_timestamp ") {
+            // Locate LSN of last transaction with timestamp less or equal than sppecified
+            // TODO lazy static
+            let re = Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) '(.*)'$")
+                .unwrap();
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
+            let timestamp_pg = to_pg_timestamp(timestamp);
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+                b"lsn",
+            )]))?;
+            let result = match timeline.find_lsn_for_timestamp(timestamp_pg)? {
+                LsnForTimestamp::Present(lsn) => format!("{}", lsn),
+                LsnForTimestamp::Future(_lsn) => "future".into(),
+                LsnForTimestamp::Past(_lsn) => "past".into(),
+            };
+            pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

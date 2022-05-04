@@ -10,28 +10,26 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
+use tokio::sync::mpsc;
 use tracing::*;
 use url::{ParseError, Url};
-use zenith_utils::http::endpoint;
-use zenith_utils::zid::ZNodeId;
-use zenith_utils::{logging, tcp_listener, GIT_VERSION};
 
 use safekeeper::control_file::{self};
 use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
-use safekeeper::http;
-use safekeeper::s3_offload;
+use safekeeper::remove_wal;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
-use tokio::sync::mpsc;
-use zenith_utils::shutdown::exit_now;
-use zenith_utils::signals;
+use safekeeper::{http, s3_offload};
+use utils::{
+    http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
+};
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
 
 fn main() -> Result<()> {
-    zenith_metrics::set_common_metrics_prefix("safekeeper");
+    metrics::set_common_metrics_prefix("safekeeper");
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
@@ -293,6 +291,15 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
                 })?,
         );
     }
+
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("WAL removal thread".into())
+            .spawn(|| {
+                remove_wal::thread_main(conf_);
+            })?,
+    );
 
     // TODO: put more thoughts into handling of failed threads
     // We probably should restart them.

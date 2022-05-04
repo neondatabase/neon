@@ -129,6 +129,7 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 
     handle_roles(&read_state.spec, &mut client)?;
     handle_databases(&read_state.spec, &mut client)?;
+    handle_grants(&read_state.spec, &mut client)?;
     create_writablity_check_data(&mut client)?;
 
     // 'Close' connection
@@ -157,7 +158,7 @@ fn run_compute(state: &Arc<RwLock<ComputeState>>) -> Result<ExitStatus> {
 }
 
 fn main() -> Result<()> {
-    // TODO: re-use `zenith_utils::logging` later
+    // TODO: re-use `utils::logging` later
     init_logger(DEFAULT_LOG_LEVEL)?;
 
     // Env variable is set by `cargo`

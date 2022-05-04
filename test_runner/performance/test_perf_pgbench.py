@@ -1,5 +1,5 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import PgBin, VanillaPostgres, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, VanillaPostgres, ZenithEnv, profiling_supported
 from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 
 from fixtures.benchmark_fixture import PgBenchRunResult, MetricReport, ZenithBenchmarker
@@ -104,6 +104,28 @@ def get_scales_matrix():
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(zenith_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(zenith_with_baseline, scale, duration)
+
+
+# Run the pgbench tests, and generate a flamegraph from it
+# This requires that the pageserver was built with the 'profiling' feature.
+#
+# TODO: If the profiling is cheap enough, there's no need to run the same test
+# twice, with and without profiling. But for now, run it separately, so that we
+# can see how much overhead the profiling adds.
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("duration", get_durations_matrix())
+def test_pgbench_flamegraph(zenbenchmark, pg_bin, zenith_env_builder, scale: int, duration: int):
+    zenith_env_builder.num_safekeepers = 1
+    zenith_env_builder.pageserver_config_override = '''
+profiling="page_requests"
+'''
+    if not profiling_supported():
+        pytest.skip("pageserver was built without 'profiling' feature")
+
+    env = zenith_env_builder.init_start()
+    env.zenith_cli.create_branch("empty", "main")
+
+    run_test_pgbench(ZenithCompare(zenbenchmark, env, pg_bin, "pgbench"), scale, duration)
 
 
 # Run the pgbench tests against an existing Postgres cluster

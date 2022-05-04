@@ -19,13 +19,14 @@ use std::time::Duration;
 use std::{str, thread};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback};
-use zenith_utils::sock_split::ReadStream;
-
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    bin_ser::BeSer,
+    lsn::Lsn,
+    postgres_backend::PostgresBackend,
+    pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback},
+    sock_split::ReadStream,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';

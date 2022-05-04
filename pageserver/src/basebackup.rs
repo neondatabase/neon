@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use std::fmt::Write as FmtWrite;
 use std::io;
@@ -25,7 +25,7 @@ use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
@@ -154,9 +154,17 @@ impl<'a> Basebackup<'a> {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
-            ensure!(img.len() == pg_constants::BLCKSZ as usize);
 
-            slru_buf.extend_from_slice(&img);
+            if slru == SlruKind::Clog {
+                ensure!(
+                    img.len() == pg_constants::BLCKSZ as usize
+                        || img.len() == pg_constants::BLCKSZ as usize + 8
+                );
+            } else {
+                ensure!(img.len() == pg_constants::BLCKSZ as usize);
+            }
+
+            slru_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);
@@ -315,7 +323,8 @@ impl<'a> Basebackup<'a> {
         let wal_file_name = XLogFileName(PG_TLI, segno, pg_constants::WAL_SEGMENT_SIZE);
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, pg_constants::WAL_SEGMENT_SIZE as u64)?;
-        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier)?;
+        let wal_seg = generate_wal_segment(segno, pg_control.system_identifier)
+            .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
         ensure!(wal_seg.len() == pg_constants::WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..])?;
         Ok(())

@@ -1,9 +1,12 @@
 # Helm chart values for zenith-proxy.
 # This is a YAML-formatted file.
 
+image:
+  repository: neondatabase/neon
+
 settings:
-  authEndpoint: "https://console.zenith.tech/authenticate_proxy_request/"
-  uri: "https://console.zenith.tech/psql_session/"
+  authEndpoint: "https://console.neon.tech/authenticate_proxy_request/"
+  uri: "https://console.neon.tech/psql_session/"
 
 # -- Additional labels for zenith-proxy pods
 podLabels:
@@ -25,7 +28,7 @@ exposedService:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    external-dns.alpha.kubernetes.io/hostname: start.zenith.tech
+    external-dns.alpha.kubernetes.io/hostname: start.zenith.tech,connect.neon.tech,pg.neon.tech
 
 metrics:
   enabled: true

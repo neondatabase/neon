@@ -5,7 +5,6 @@ use super::key::ScramKey;
 
 /// Server secret is produced from [password](super::password::SaltedPassword)
 /// and is used throughout the authentication process.
-#[derive(Debug)]
 pub struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
     pub iterations: u32,
@@ -39,6 +38,7 @@ impl ServerSecret {
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
+    #[allow(dead_code)]
     pub fn mock(user: &str, nonce: &[u8; 32]) -> Self {
         // Refer to `auth-scram.c : scram_mock_salt`.
         let mocked_salt = super::sha256([user.as_bytes(), nonce]);

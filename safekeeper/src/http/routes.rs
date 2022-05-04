@@ -4,21 +4,23 @@ use serde::Serialize;
 use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
-use zenith_utils::http::json::json_request;
-use zenith_utils::http::{RequestExt, RouterBuilder};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::ZNodeId;
-use zenith_utils::zid::ZTenantTimelineId;
 
+use crate::broker::SafekeeperInfo;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::GlobalTimelines;
 use crate::SafeKeeperConf;
-use zenith_utils::http::endpoint;
-use zenith_utils::http::error::ApiError;
-use zenith_utils::http::json::json_response;
-use zenith_utils::http::request::parse_request_param;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    http::{
+        endpoint,
+        error::ApiError,
+        json::{json_request, json_response},
+        request::parse_request_param,
+        RequestExt, RouterBuilder,
+    },
+    lsn::Lsn,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 use super::models::TimelineCreateRequest;
 
@@ -122,6 +124,20 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::CREATED, ())
 }
 
+/// Used only in tests to hand craft required data.
+async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let zttid = ZTenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    let safekeeper_info: SafekeeperInfo = json_request(&mut request).await?;
+
+    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    tli.record_safekeeper_info(&safekeeper_info, ZNodeId(1))?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let router = endpoint::make_router();
@@ -133,4 +149,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             timeline_status_handler,
         )
         .post("/v1/timeline", timeline_create_handler)
+        // for tests
+        .post(
+            "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
+            record_safekeeper_info,
+        )
 }

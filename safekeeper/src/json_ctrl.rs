@@ -22,9 +22,11 @@ use crate::timeline::TimelineTools;
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils;
 use postgres_ffi::{uint32, uint64, Oid, XLogRecord};
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
+use utils::{
+    lsn::Lsn,
+    postgres_backend::PostgresBackend,
+    pq_proto::{BeMessage, RowDescriptor, TEXT_OID},
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
@@ -191,7 +193,7 @@ struct XlLogicalMessage {
 
 impl XlLogicalMessage {
     pub fn encode(&self) -> Bytes {
-        use zenith_utils::bin_ser::LeSer;
+        use utils::bin_ser::LeSer;
         self.ser().unwrap().into()
     }
 }
@@ -236,13 +238,13 @@ fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
         xl_crc: 0, // crc will be calculated later
     };
 
-    let header_bytes = header.encode().unwrap();
+    let header_bytes = header.encode().expect("failed to encode header");
     let crc = crc32c_append(0, &data);
     let crc = crc32c_append(crc, &header_bytes[0..xlog_utils::XLOG_RECORD_CRC_OFFS]);
     header.xl_crc = crc;
 
     let mut wal: Vec<u8> = Vec::new();
-    wal.extend_from_slice(&header.encode().unwrap());
+    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
     wal.extend_from_slice(&data);
 
     // WAL start position must be aligned at 8 bytes,

@@ -14,3 +14,4 @@ safekeepers
 console_mgmt_base_url = http://console-release.local
 bucket_name           = zenith-storage-oregon
 bucket_region         = us-west-2
+etcd_endpoints        = etcd-release.local:2379

@@ -7,7 +7,6 @@ use anyhow::{anyhow, bail, Result};
 use bytes::BytesMut;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
-use zenith_utils::sock_split::ReadStream;
 
 use crate::timeline::Timeline;
 
@@ -23,8 +22,11 @@ use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::TimelineTools;
-use zenith_utils::postgres_backend::PostgresBackend;
-use zenith_utils::pq_proto::{BeMessage, FeMessage};
+use utils::{
+    postgres_backend::PostgresBackend,
+    pq_proto::{BeMessage, FeMessage},
+    sock_split::ReadStream,
+};
 
 use crate::callmemaybe::CallmeEvent;
 

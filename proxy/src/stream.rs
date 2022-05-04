@@ -9,7 +9,7 @@ use std::{io, task};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::server::TlsStream;
-use zenith_utils::pq_proto::{BeMessage, FeMessage, FeStartupPacket};
+use utils::pq_proto::{BeMessage, FeMessage, FeStartupPacket};
 
 pin_project! {
     /// Stream wrapper which implements libpq's protocol.

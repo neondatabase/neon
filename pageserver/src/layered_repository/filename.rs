@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use zenith_utils::lsn::Lsn;
+use utils::lsn::Lsn;
 
 // Note: LayeredTimeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, Clone)]

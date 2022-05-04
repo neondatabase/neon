@@ -10,13 +10,11 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use tracing::*;
-use zenith_metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
-use zenith_utils::bin_ser::LeSer;
-
-use zenith_utils::zid::ZTenantTimelineId;
 
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
+use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
+use utils::{bin_ser::LeSer, zid::ZTenantTimelineId};
 
 use crate::SafeKeeperConf;
 
@@ -251,10 +249,10 @@ impl Storage for FileStorage {
 mod test {
     use super::FileStorage;
     use super::*;
-    use crate::{safekeeper::SafeKeeperState, SafeKeeperConf, ZTenantTimelineId};
+    use crate::{safekeeper::SafeKeeperState, SafeKeeperConf};
     use anyhow::Result;
     use std::fs;
-    use zenith_utils::lsn::Lsn;
+    use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
     fn stub_conf() -> SafeKeeperConf {
         let workdir = tempfile::tempdir().unwrap().into_path();

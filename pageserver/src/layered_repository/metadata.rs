@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
-use zenith_utils::{
+use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
