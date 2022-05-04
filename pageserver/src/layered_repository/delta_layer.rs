@@ -199,8 +199,9 @@ pub struct DeltaLayerInner {
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
 
-    /// Compression dictionary. (None if not loaded yet)
-    dictionary: Option<Vec<u8>>,
+    /// Compression dictionary.
+    dictionary: Vec<u8>, // empty if not loaded
+    prepared_dictionary: Option<zstd::dict::DecoderDictionary<'static>>, // None if not loaded
 }
 
 impl Layer for DeltaLayer {
@@ -238,11 +239,11 @@ impl Layer for DeltaLayer {
         {
             // Open the file and lock the metadata in memory
             let inner = self.load()?;
-            let dictionary = inner.dictionary.as_ref().unwrap();
-            let mut decompressor = if !dictionary.is_empty() {
-                Some(zstd::bulk::Decompressor::with_dictionary(dictionary)?)
-            } else {
-                None
+            let mut decompressor = match &inner.prepared_dictionary {
+                Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
+                    dictionary,
+                )?),
+                None => None,
             };
 
             // Scan the page versions backwards, starting from `lsn`.
@@ -376,11 +377,11 @@ impl Layer for DeltaLayer {
         tree_reader.dump()?;
 
         let mut cursor = file.block_cursor();
-        let dictionary = inner.dictionary.as_ref().unwrap();
-        let mut decompressor = if !dictionary.is_empty() {
-            Some(zstd::bulk::Decompressor::with_dictionary(dictionary)?)
-        } else {
-            None
+        let mut decompressor = match &inner.prepared_dictionary {
+            Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
+                dictionary,
+            )?),
+            None => None,
         };
 
         tree_reader.visit(
@@ -520,9 +521,12 @@ impl DeltaLayer {
         }
 
         let mut cursor = file.block_cursor();
-        let dictionary = cursor.read_blob(DICTIONARY_OFFSET)?;
-        inner.dictionary = Some(dictionary);
-
+        inner.dictionary = cursor.read_blob(DICTIONARY_OFFSET)?;
+        inner.prepared_dictionary = if inner.dictionary.is_empty() {
+            None
+        } else {
+            Some(zstd::dict::DecoderDictionary::copy(&inner.dictionary))
+        };
         inner.index_start_blk = actual_summary.index_start_blk;
         inner.index_root_blk = actual_summary.index_root_blk;
 
@@ -548,7 +552,8 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: None,
+                dictionary: Vec::new(),
+                prepared_dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -576,7 +581,8 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: None,
+                dictionary: Vec::new(),
+                prepared_dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -755,7 +761,8 @@ impl DeltaLayerWriter {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: None,
+                dictionary: Vec::new(),
+                prepared_dictionary: None,
                 index_start_blk,
                 index_root_blk,
             }),
@@ -793,7 +800,7 @@ struct DeltaValueIter<'a> {
     all_offsets: Vec<(DeltaKey, BlobRef)>,
     next_idx: usize,
     reader: BlockCursor<Adapter<'a>>,
-    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressor: Option<zstd::bulk::Decompressor<'a>>,
 }
 
 struct Adapter<'a>(RwLockReadGuard<'a, DeltaLayerInner>);
@@ -832,9 +839,18 @@ impl<'a> DeltaValueIter<'a> {
                 true
             },
         )?;
-        let dictionary = inner.dictionary.as_ref().unwrap();
-        let decompressor = if !dictionary.is_empty() {
-            Some(zstd::bulk::Decompressor::with_dictionary(dictionary)?)
+        /*
+            let mut decompressor = match &inner.prepared_dictionary {
+                Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
+                    dictionary,
+                )?),
+                None => None,
+            };
+        */
+        let decompressor = if !inner.dictionary.is_empty() {
+            Some(zstd::bulk::Decompressor::with_dictionary(
+                &inner.dictionary,
+            )?)
         } else {
             None
         };
