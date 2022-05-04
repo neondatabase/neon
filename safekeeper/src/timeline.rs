@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
+use etcd_broker::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
@@ -21,7 +22,6 @@ use utils::{
     zid::{ZNodeId, ZTenantTimelineId},
 };
 
-use crate::broker::SafekeeperInfo;
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
 
 use crate::control_file;
@@ -89,6 +89,7 @@ struct SharedState {
     active: bool,
     num_computes: u32,
     pageserver_connstr: Option<String>,
+    listen_pg_addr: String,
     last_removed_segno: XLogSegNo,
 }
 
@@ -111,6 +112,7 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
+            listen_pg_addr: conf.listen_pg_addr.clone(),
             last_removed_segno: 0,
         })
     }
@@ -130,6 +132,7 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
+            listen_pg_addr: conf.listen_pg_addr.clone(),
             last_removed_segno: 0,
         })
     }
@@ -418,9 +421,9 @@ impl Timeline {
     }
 
     /// Prepare public safekeeper info for reporting.
-    pub fn get_public_info(&self) -> SafekeeperInfo {
+    pub fn get_public_info(&self) -> anyhow::Result<SkTimelineInfo> {
         let shared_state = self.mutex.lock().unwrap();
-        SafekeeperInfo {
+        Ok(SkTimelineInfo {
             last_log_term: Some(shared_state.sk.get_epoch()),
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
@@ -432,11 +435,23 @@ impl Timeline {
                 shared_state.sk.inmem.remote_consistent_lsn,
             )),
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
-        }
+            wal_stream_connection_string: shared_state
+                .pageserver_connstr
+                .as_deref()
+                .map(|pageserver_connstr| {
+                    wal_stream_connection_string(
+                        self.zttid,
+                        &shared_state.listen_pg_addr,
+                        pageserver_connstr,
+                    )
+                })
+                .transpose()
+                .context("Failed to get the pageserver callmemaybe connstr")?,
+        })
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&self, sk_info: &SafekeeperInfo, _sk_id: ZNodeId) -> Result<()> {
+    pub fn record_safekeeper_info(&self, sk_info: &SkTimelineInfo, _sk_id: ZNodeId) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.sk.record_safekeeper_info(sk_info)?;
         self.notify_wal_senders(&mut shared_state);
@@ -487,6 +502,29 @@ impl Timeline {
         self.mutex.lock().unwrap().last_removed_segno = horizon_segno;
         Ok(())
     }
+}
+
+// pageserver connstr is needed to be able to distinguish between different pageservers
+// it is required to correctly manage callmemaybe subscriptions when more than one pageserver is involved
+// TODO it is better to use some sort of a unique id instead of connection string, see https://github.com/zenithdb/zenith/issues/1105
+fn wal_stream_connection_string(
+    ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    }: ZTenantTimelineId,
+    listen_pg_addr_str: &str,
+    pageserver_connstr: &str,
+) -> anyhow::Result<String> {
+    let me_connstr = format!("postgresql://no_user@{}/no_db", listen_pg_addr_str);
+    let me_conf = me_connstr
+        .parse::<postgres::config::Config>()
+        .with_context(|| {
+            format!("Failed to parse pageserver connection string '{me_connstr}' as a postgres one")
+        })?;
+    let (host, port) = utils::connstring::connection_host_port(&me_conf);
+    Ok(format!(
+        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id} pageserver_connstr={pageserver_connstr}'",
+    ))
 }
 
 // Utilities needed by various Connection-like objects

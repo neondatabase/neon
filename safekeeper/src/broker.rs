@@ -1,61 +1,22 @@
 //! Communication with etcd, providing safekeeper peers and pageserver coordination.
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
-use etcd_client::Client;
-use etcd_client::EventType;
-use etcd_client::PutOptions;
-use etcd_client::WatchOptions;
-use lazy_static::lazy_static;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-use std::str::FromStr;
+use etcd_broker::Client;
+use etcd_broker::PutOptions;
+use etcd_broker::SkTimelineSubscriptionKind;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
 
-use crate::{safekeeper::Term, timeline::GlobalTimelines, SafeKeeperConf};
-use utils::{
-    lsn::Lsn,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
-};
+use crate::{timeline::GlobalTimelines, SafeKeeperConf};
+use utils::zid::{ZNodeId, ZTenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
 const LEASE_TTL_SEC: i64 = 5;
-// TODO: add global zenith installation ID.
-const ZENITH_PREFIX: &str = "zenith";
-
-/// Published data about safekeeper. Fields made optional for easy migrations.
-#[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SafekeeperInfo {
-    /// Term of the last entry.
-    pub last_log_term: Option<Term>,
-    /// LSN of the last record.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub flush_lsn: Option<Lsn>,
-    /// Up to which LSN safekeeper regards its WAL as committed.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub commit_lsn: Option<Lsn>,
-    /// LSN up to which safekeeper offloaded WAL to s3.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub s3_wal_lsn: Option<Lsn>,
-    /// LSN of last checkpoint uploaded by pageserver.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub remote_consistent_lsn: Option<Lsn>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub peer_horizon_lsn: Option<Lsn>,
-}
 
 pub fn thread_main(conf: SafeKeeperConf) {
     let runtime = runtime::Builder::new_current_thread()
@@ -71,22 +32,21 @@ pub fn thread_main(conf: SafeKeeperConf) {
     });
 }
 
-/// Prefix to timeline related data.
-fn timeline_path(zttid: &ZTenantTimelineId) -> String {
+/// Key to per timeline per safekeeper data.
+fn timeline_safekeeper_path(
+    broker_prefix: String,
+    zttid: ZTenantTimelineId,
+    sk_id: ZNodeId,
+) -> String {
     format!(
-        "{}/{}/{}",
-        ZENITH_PREFIX, zttid.tenant_id, zttid.timeline_id
+        "{}/{sk_id}",
+        SkTimelineSubscriptionKind::timeline(broker_prefix, zttid).watch_key()
     )
 }
 
-/// Key to per timeline per safekeeper data.
-fn timeline_safekeeper_path(zttid: &ZTenantTimelineId, sk_id: ZNodeId) -> String {
-    format!("{}/safekeeper/{}", timeline_path(zttid), sk_id)
-}
-
 /// Push once in a while data about all active timelines to the broker.
-async fn push_loop(conf: SafeKeeperConf) -> Result<()> {
-    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None).await?;
+async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
+    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
 
     // Get and maintain lease to automatically delete obsolete data
     let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
@@ -98,14 +58,17 @@ async fn push_loop(conf: SafeKeeperConf) -> Result<()> {
         // is under plain mutex. That's ok, all this code is not performance
         // sensitive and there is no risk of deadlock as we don't await while
         // lock is held.
-        let active_tlis = GlobalTimelines::get_active_timelines();
-        for zttid in &active_tlis {
-            if let Ok(tli) = GlobalTimelines::get(&conf, *zttid, false) {
-                let sk_info = tli.get_public_info();
+        for zttid in GlobalTimelines::get_active_timelines() {
+            if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
+                let sk_info = tli.get_public_info()?;
                 let put_opts = PutOptions::new().with_lease(lease.id());
                 client
                     .put(
-                        timeline_safekeeper_path(zttid, conf.my_id),
+                        timeline_safekeeper_path(
+                            conf.broker_etcd_prefix.clone(),
+                            zttid,
+                            conf.my_id,
+                        ),
                         serde_json::to_string(&sk_info)?,
                         Some(put_opts),
                     )
@@ -128,44 +91,30 @@ async fn push_loop(conf: SafeKeeperConf) -> Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
-    lazy_static! {
-        static ref TIMELINE_SAFEKEEPER_RE: Regex =
-            Regex::new(r"^zenith/([[:xdigit:]]+)/([[:xdigit:]]+)/safekeeper/([[:digit:]])$")
-                .unwrap();
-    }
-    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None).await?;
-    loop {
-        let wo = WatchOptions::new().with_prefix();
-        // TODO: subscribe only to my timelines
-        let (_, mut stream) = client.watch(ZENITH_PREFIX, Some(wo)).await?;
-        while let Some(resp) = stream.message().await? {
-            if resp.canceled() {
-                bail!("watch canceled");
-            }
+    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
 
-            for event in resp.events() {
-                if EventType::Put == event.event_type() {
-                    if let Some(kv) = event.kv() {
-                        if let Some(caps) = TIMELINE_SAFEKEEPER_RE.captures(kv.key_str()?) {
-                            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-                            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-                            let zttid = ZTenantTimelineId::new(tenant_id, timeline_id);
-                            let safekeeper_id = ZNodeId(caps.get(3).unwrap().as_str().parse()?);
-                            let value_str = kv.value_str()?;
-                            match serde_json::from_str::<SafekeeperInfo>(value_str) {
-                                Ok(safekeeper_info) => {
-                                    if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                                        tli.record_safekeeper_info(&safekeeper_info, safekeeper_id)?
-                                    }
-                                }
-                                Err(err) => warn!(
-                                    "failed to deserialize safekeeper info {}: {}",
-                                    value_str, err
-                                ),
-                            }
+    let mut subscription = etcd_broker::subscribe_to_safekeeper_timeline_updates(
+        &mut client,
+        SkTimelineSubscriptionKind::all(conf.broker_etcd_prefix.clone()),
+    )
+    .await
+    .context("failed to subscribe for safekeeper info")?;
+
+    loop {
+        match subscription.fetch_data().await {
+            Some(new_info) => {
+                for (zttid, sk_info) in new_info {
+                    // note: there are blocking operations below, but it's considered fine for now
+                    if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
+                        for (safekeeper_id, info) in sk_info {
+                            tli.record_safekeeper_info(&info, safekeeper_id)?
                         }
                     }
                 }
+            }
+            None => {
+                debug!("timeline updates sender closed, aborting the pull loop");
+                return Ok(());
             }
         }
     }

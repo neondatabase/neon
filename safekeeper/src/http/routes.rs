@@ -1,3 +1,4 @@
+use etcd_broker::SkTimelineInfo;
 use hyper::{Body, Request, Response, StatusCode};
 
 use serde::Serialize;
@@ -5,7 +6,6 @@ use serde::Serializer;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use crate::broker::SafekeeperInfo;
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::GlobalTimelines;
@@ -136,7 +136,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
-    let safekeeper_info: SafekeeperInfo = json_request(&mut request).await?;
+    let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
     tli.record_safekeeper_info(&safekeeper_info, ZNodeId(1))?;
