@@ -68,7 +68,7 @@ struct TimelineTreeEl {
     pub children: BTreeSet<ZTimelineId>,
 }
 
-// Main entry point for the 'neon_local' CLI utility
+// Main entry point for the 'neon_ctl' CLI utility
 //
 // This utility helps to manage neon installation. That includes following:
 //   * Management of local postgres installations running on top of the

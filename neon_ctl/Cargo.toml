@@ -1,5 +1,5 @@
 [package]
-name = "neon_local"
+name = "neon_ctl"
 version = "0.1.0"
 edition = "2021"
 
