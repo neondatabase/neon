@@ -21,6 +21,7 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use anyhow::Context;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
 
@@ -82,7 +83,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ) -> Result<()> {
         let mut modification = timeline.begin_modification(lsn);
 
-        let mut decoded = decode_wal_record(recdata)?;
+        let mut decoded = decode_wal_record(recdata).context("failed decoding wal record")?;
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
 

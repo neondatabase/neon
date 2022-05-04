@@ -1,7 +1,7 @@
 //!
 //! Functions for parsing WAL records.
 //!
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
@@ -516,7 +516,7 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf).context("failed to parse XLogRecord")?;
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
