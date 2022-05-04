@@ -20,8 +20,8 @@ use tracing::*;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -37,7 +37,7 @@ use crate::keyspace::KeySpace;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 use crate::page_cache;
-use crate::remote_storage::{schedule_timeline_checkpoint_upload, RemoteIndex};
+use crate::remote_storage::{self, RemoteIndex};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
 };
@@ -415,7 +415,7 @@ impl Repository for LayeredRepository {
                     Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
                     Entry::Vacant(entry) => {
                         // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                        let metadata = Self::load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
+                        let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
                         // finally we make newly downloaded timeline visible to repository
                         entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
                     },
@@ -605,7 +605,7 @@ impl LayeredRepository {
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
     ) -> anyhow::Result<Arc<LayeredTimeline>> {
-        let metadata = Self::load_metadata(self.conf, timelineid, self.tenant_id)
+        let metadata = load_metadata(self.conf, timelineid, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
@@ -761,17 +761,6 @@ impl LayeredRepository {
         }
 
         Ok(())
-    }
-
-    fn load_metadata(
-        conf: &'static PageServerConf,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
-    ) -> Result<TimelineMetadata> {
-        let path = metadata_path(conf, timelineid, tenantid);
-        info!("loading metadata from {}", path.display());
-        let metadata_bytes = std::fs::read(&path)?;
-        TimelineMetadata::from_bytes(&metadata_bytes)
     }
 
     //
@@ -1783,10 +1772,10 @@ impl LayeredTimeline {
             PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
 
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                schedule_timeline_checkpoint_upload(
+                remote_storage::schedule_layer_upload(
                     self.tenantid,
                     self.timelineid,
-                    new_delta_path,
+                    HashSet::from([new_delta_path]),
                     metadata,
                 );
             }
@@ -1847,10 +1836,22 @@ impl LayeredTimeline {
             let timer = self.create_images_time_histo.start_timer();
             // 2. Create new image layers for partitions that have been modified
             // "enough".
+            let mut layer_paths_to_upload = HashSet::with_capacity(partitioning.parts.len());
             for part in partitioning.parts.iter() {
                 if self.time_for_new_image_layer(part, lsn)? {
-                    self.create_image_layer(part, lsn)?;
+                    let new_path = self.create_image_layer(part, lsn)?;
+                    layer_paths_to_upload.insert(new_path);
                 }
+            }
+            if self.upload_layers.load(atomic::Ordering::Relaxed) {
+                let metadata = load_metadata(self.conf, self.timelineid, self.tenantid)
+                    .context("failed to load local metadata")?;
+                remote_storage::schedule_layer_upload(
+                    self.tenantid,
+                    self.timelineid,
+                    layer_paths_to_upload,
+                    metadata,
+                );
             }
             timer.stop_and_record();
 
@@ -1893,7 +1894,7 @@ impl LayeredTimeline {
         Ok(false)
     }
 
-    fn create_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> Result<()> {
+    fn create_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<PathBuf> {
         let img_range =
             partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
         let mut image_layer_writer =
@@ -1926,10 +1927,11 @@ impl LayeredTimeline {
         // FIXME: Do we need to do something to upload it to remote storage here?
 
         let mut layers = self.layers.write().unwrap();
+        let new_path = image_layer.path();
         layers.insert_historic(Arc::new(image_layer));
         drop(layers);
 
-        Ok(())
+        Ok(new_path)
     }
 
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
@@ -2024,17 +2026,42 @@ impl LayeredTimeline {
         }
 
         let mut layers = self.layers.write().unwrap();
+        let mut new_layer_paths = HashSet::with_capacity(new_layers.len());
         for l in new_layers {
+            new_layer_paths.insert(l.path());
             layers.insert_historic(Arc::new(l));
+        }
+
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            let metadata = load_metadata(self.conf, self.timelineid, self.tenantid)
+                .context("failed to load local metadata")?;
+            remote_storage::schedule_layer_upload(
+                self.tenantid,
+                self.timelineid,
+                new_layer_paths,
+                metadata,
+            );
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
+        let mut layer_paths_do_delete = HashSet::with_capacity(level0_deltas.len());
         for l in level0_deltas {
             l.delete()?;
-            layers.remove_historic(l.clone());
+            if let Some(path) = l.local_path() {
+                layer_paths_do_delete.insert(path);
+            }
+            layers.remove_historic(l);
         }
         drop(layers);
+
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            remote_storage::schedule_layer_delete(
+                self.tenantid,
+                self.timelineid,
+                layer_paths_do_delete,
+            );
+        }
 
         Ok(())
     }
@@ -2098,7 +2125,7 @@ impl LayeredTimeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        let mut layers_to_remove: Vec<Arc<dyn Layer>> = Vec::new();
+        let mut layers_to_remove = Vec::new();
 
         // Scan all on-disk layers in the timeline.
         //
@@ -2209,11 +2236,22 @@ impl LayeredTimeline {
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
+        let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer.clone());
-
+            if let Some(path) = doomed_layer.local_path() {
+                layer_paths_to_delete.insert(path);
+            }
+            layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
+        }
+
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            remote_storage::schedule_layer_delete(
+                self.tenantid,
+                self.timelineid,
+                layer_paths_to_delete,
+            );
         }
 
         result.elapsed = now.elapsed()?;
@@ -2362,6 +2400,26 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     bail!("couldn't find an unused backup number for {:?}", path)
 }
 
+fn load_metadata(
+    conf: &'static PageServerConf,
+    timeline_id: ZTimelineId,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<TimelineMetadata> {
+    let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+        format!(
+            "Failed to read metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })?;
+    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+        format!(
+            "Failed to parse metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })
+}
+
 ///
 /// Tests that are specific to the layered storage format.
 ///
@@ -2396,9 +2454,19 @@ pub mod tests {
 
         let err = harness.try_load().err().expect("should fail");
         assert_eq!(err.to_string(), "failed to load local metadata");
-        assert_eq!(
-            err.source().unwrap().to_string(),
-            "metadata checksum mismatch"
+
+        let mut found_error_message = false;
+        let mut err_source = err.source();
+        while let Some(source) = err_source {
+            if source.to_string() == "metadata checksum mismatch" {
+                found_error_message = true;
+                break;
+            }
+            err_source = source.source();
+        }
+        assert!(
+            found_error_message,
+            "didn't find the corrupted metadata error"
         );
 
         Ok(())

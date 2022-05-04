@@ -11,7 +11,7 @@ use super::models::{
 };
 use crate::config::RemoteStorageKind;
 use crate::remote_storage::{
-    download_index_part, schedule_timeline_download, LocalFs, RemoteIndex, RemoteTimeline, S3Bucket,
+    download_index_part, schedule_layer_download, LocalFs, RemoteIndex, RemoteTimeline, S3Bucket,
 };
 use crate::repository::Repository;
 use crate::tenant_config::TenantConfOpt;
@@ -273,7 +273,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
         }
 
         remote_timeline.awaits_download = true;
-        schedule_timeline_download(tenant_id, timeline_id);
+        schedule_layer_download(tenant_id, timeline_id);
         return json_response(StatusCode::ACCEPTED, ());
     } else {
         // no timeline in the index, release the lock to make the potentially lengthy download opetation
@@ -309,7 +309,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
         }
         None => index_accessor.add_timeline_entry(sync_id, new_timeline),
     }
-    schedule_timeline_download(tenant_id, timeline_id);
+    schedule_layer_download(tenant_id, timeline_id);
     json_response(StatusCode::ACCEPTED, ())
 }
 

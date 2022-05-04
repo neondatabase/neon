@@ -85,6 +85,10 @@ impl Layer for InMemoryLayer {
         ))
     }
 
+    fn local_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
     }

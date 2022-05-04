@@ -427,10 +427,10 @@ pub struct TimelineDownload {
 /// On task failure, it gets retried again from the start a number of times.
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_timeline_checkpoint_upload(
+pub fn schedule_layer_upload(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-    new_layer: PathBuf,
+    layers_to_upload: HashSet<PathBuf>,
     metadata: TimelineMetadata,
 ) {
     if !sync_queue::push(
@@ -439,7 +439,7 @@ pub fn schedule_timeline_checkpoint_upload(
             timeline_id,
         },
         SyncTask::upload(TimelineUpload {
-            layers_to_upload: HashSet::from([new_layer]),
+            layers_to_upload,
             uploaded_layers: HashSet::new(),
             metadata,
         }),
@@ -450,6 +450,14 @@ pub fn schedule_timeline_checkpoint_upload(
     }
 }
 
+pub fn schedule_layer_delete(
+    _tenant_id: ZTenantId,
+    _timeline_id: ZTimelineId,
+    _layers_to_delete: HashSet<PathBuf>,
+) {
+    // TODO kb implement later
+}
+
 /// Requests the download of the entire timeline for a given tenant.
 /// No existing local files are currently overwritten, except the metadata file (if its disk_consistent_lsn is less than the downloaded one).
 /// The metadata file is always updated last, to avoid inconsistencies.
@@ -457,8 +465,8 @@ pub fn schedule_timeline_checkpoint_upload(
 /// On any failure, the task gets retried, omitting already downloaded layers.
 ///
 /// Ensure that the loop is started otherwise the task is never processed.
-pub fn schedule_timeline_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
-    debug!("Scheduling timeline download for tenant {tenant_id}, timeline {timeline_id}");
+pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
+    debug!("Scheduling layer download for tenant {tenant_id}, timeline {timeline_id}");
     sync_queue::push(
         ZTenantTimelineId {
             tenant_id,
