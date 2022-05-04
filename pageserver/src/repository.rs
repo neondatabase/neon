@@ -1,5 +1,5 @@
 use crate::layered_repository::metadata::TimelineMetadata;
-use crate::remote_storage::RemoteIndex;
+use crate::storage_sync::index::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};

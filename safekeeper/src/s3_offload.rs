@@ -1,20 +1,23 @@
 //
 // Offload old WAL segments to S3 and remove them locally
+// Needs `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables to be set
+// if no IAM bucket access is used.
 //
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use postgres_ffi::xlog_utils::*;
-use rusoto_core::credential::StaticProvider;
-use rusoto_core::{HttpClient, Region};
-use rusoto_s3::{ListObjectsV2Request, PutObjectRequest, S3Client, StreamingBody, S3};
+use remote_storage::{
+    GenericRemoteStorage, RemoteStorage, RemoteStorageConfig, S3Bucket, S3Config, S3ObjectKey,
+};
 use std::collections::HashSet;
 use std::env;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::time::SystemTime;
 use tokio::fs::{self, File};
+use tokio::io::BufReader;
 use tokio::runtime;
 use tokio::time::sleep;
-use tokio_util::io::ReaderStream;
 use tracing::*;
 use walkdir::WalkDir;
 
@@ -39,9 +42,8 @@ pub fn thread_main(conf: SafeKeeperConf) {
 }
 
 async fn offload_files(
-    client: &S3Client,
-    bucket_name: &str,
-    listing: &HashSet<String>,
+    remote_storage: &S3Bucket,
+    listing: &HashSet<S3ObjectKey>,
     dir_path: &Path,
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<u64> {
@@ -55,17 +57,12 @@ async fn offload_files(
             && IsXLogFileName(entry.file_name().to_str().unwrap())
             && entry.metadata().unwrap().created().unwrap() <= horizon
         {
-            let relpath = path.strip_prefix(&conf.workdir).unwrap();
-            let s3path = String::from("walarchive/") + relpath.to_str().unwrap();
-            if !listing.contains(&s3path) {
+            let remote_path = remote_storage.remote_object_id(path)?;
+            if !listing.contains(&remote_path) {
                 let file = File::open(&path).await?;
-                client
-                    .put_object(PutObjectRequest {
-                        body: Some(StreamingBody::new(ReaderStream::new(file))),
-                        bucket: bucket_name.to_string(),
-                        key: s3path,
-                        ..PutObjectRequest::default()
-                    })
+                let file_length = file.metadata().await?.len() as usize;
+                remote_storage
+                    .upload(BufReader::new(file), file_length, &remote_path, None)
                     .await?;
 
                 fs::remove_file(&path).await?;
@@ -77,58 +74,34 @@ async fn offload_files(
 }
 
 async fn main_loop(conf: &SafeKeeperConf) -> anyhow::Result<()> {
-    let region = Region::Custom {
-        name: env::var("S3_REGION").context("S3_REGION env var is not set")?,
-        endpoint: env::var("S3_ENDPOINT").context("S3_ENDPOINT env var is not set")?,
+    let remote_storage = match GenericRemoteStorage::new(
+        conf.workdir.clone(),
+        &RemoteStorageConfig {
+            max_concurrent_syncs: NonZeroUsize::new(10).unwrap(),
+            max_sync_errors: NonZeroU32::new(1).unwrap(),
+            storage: remote_storage::RemoteStorageKind::AwsS3(S3Config {
+                bucket_name: "zenith-testbucket".to_string(),
+                bucket_region: env::var("S3_REGION").context("S3_REGION env var is not set")?,
+                prefix_in_bucket: Some("walarchive/".to_string()),
+                endpoint: Some(env::var("S3_ENDPOINT").context("S3_ENDPOINT env var is not set")?),
+                concurrency_limit: NonZeroUsize::new(20).unwrap(),
+            }),
+        },
+    )? {
+        GenericRemoteStorage::Local(_) => {
+            bail!("Unexpected: got local storage for the remote config")
+        }
+        GenericRemoteStorage::S3(remote_storage) => remote_storage,
     };
 
-    let client = S3Client::new_with(
-        HttpClient::new().context("Failed to create S3 http client")?,
-        StaticProvider::new_minimal(
-            env::var("S3_ACCESSKEY").context("S3_ACCESSKEY env var is not set")?,
-            env::var("S3_SECRET").context("S3_SECRET env var is not set")?,
-        ),
-        region,
-    );
-
-    let bucket_name = "zenith-testbucket";
-
     loop {
-        let listing = gather_wal_entries(&client, bucket_name).await?;
-        let n = offload_files(&client, bucket_name, &listing, &conf.workdir, conf).await?;
-        info!("Offload {} files to S3", n);
+        let listing = remote_storage
+            .list()
+            .await?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let n = offload_files(&remote_storage, &listing, &conf.workdir, conf).await?;
+        info!("Offload {n} files to S3");
         sleep(conf.ttl.unwrap()).await;
     }
-}
-
-async fn gather_wal_entries(
-    client: &S3Client,
-    bucket_name: &str,
-) -> anyhow::Result<HashSet<String>> {
-    let mut document_keys = HashSet::new();
-
-    let mut continuation_token = None::<String>;
-    loop {
-        let response = client
-            .list_objects_v2(ListObjectsV2Request {
-                bucket: bucket_name.to_string(),
-                prefix: Some("walarchive/".to_string()),
-                continuation_token,
-                ..ListObjectsV2Request::default()
-            })
-            .await?;
-        document_keys.extend(
-            response
-                .contents
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|o| o.key),
-        );
-
-        continuation_token = response.continuation_token;
-        if continuation_token.is_none() {
-            break;
-        }
-    }
-    Ok(document_keys)
 }

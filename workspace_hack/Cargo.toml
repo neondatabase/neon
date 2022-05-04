@@ -21,7 +21,13 @@ chrono = { version = "0.4", features = ["clock", "libc", "oldtime", "serde", "st
 clap = { version = "2", features = ["ansi_term", "atty", "color", "strsim", "suggestions", "vec_map"] }
 either = { version = "1", features = ["use_std"] }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
+futures-channel = { version = "0.3", features = ["alloc", "futures-sink", "sink", "std"] }
+futures-task = { version = "0.3", default-features = false, features = ["alloc", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await", "async-await-macro", "channel", "futures-channel", "futures-io", "futures-macro", "futures-sink", "io", "memchr", "sink", "slab", "std"] }
+generic-array = { version = "0.14", default-features = false, features = ["more_lengths"] }
 hashbrown = { version = "0.11", features = ["ahash", "inline-more", "raw"] }
+hex = { version = "0.4", features = ["alloc", "serde", "std"] }
+hyper = { version = "0.14", features = ["client", "full", "h2", "http1", "http2", "runtime", "server", "socket2", "stream", "tcp"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 itoa = { version = "0.4", features = ["i128", "std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }

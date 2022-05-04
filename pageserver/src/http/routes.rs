@@ -3,17 +3,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse,
     TimelineCreateRequest,
 };
-use crate::config::RemoteStorageKind;
-use crate::remote_storage::{
-    download_index_part, schedule_layer_download, LocalFs, RemoteIndex, RemoteTimeline, S3Bucket,
-};
 use crate::repository::Repository;
+use crate::storage_sync;
+use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines};
@@ -37,11 +36,6 @@ struct State {
     remote_storage: Option<GenericRemoteStorage>,
 }
 
-enum GenericRemoteStorage {
-    Local(LocalFs),
-    S3(S3Bucket),
-}
-
 impl State {
     fn new(
         conf: &'static PageServerConf,
@@ -57,14 +51,7 @@ impl State {
         let remote_storage = conf
             .remote_storage_config
             .as_ref()
-            .map(|storage_config| match &storage_config.storage {
-                RemoteStorageKind::LocalFs(root) => {
-                    LocalFs::new(root.clone(), &conf.workdir).map(GenericRemoteStorage::Local)
-                }
-                RemoteStorageKind::AwsS3(s3_config) => {
-                    S3Bucket::new(s3_config, &conf.workdir).map(GenericRemoteStorage::S3)
-                }
-            })
+            .map(|storage_config| GenericRemoteStorage::new(conf.workdir.clone(), storage_config))
             .transpose()
             .context("Failed to init generic remote storage")?;
 
@@ -273,7 +260,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
         }
 
         remote_timeline.awaits_download = true;
-        schedule_layer_download(tenant_id, timeline_id);
+        storage_sync::schedule_layer_download(tenant_id, timeline_id);
         return json_response(StatusCode::ACCEPTED, ());
     } else {
         // no timeline in the index, release the lock to make the potentially lengthy download opetation
@@ -309,7 +296,7 @@ async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body
         }
         None => index_accessor.add_timeline_entry(sync_id, new_timeline),
     }
-    schedule_layer_download(tenant_id, timeline_id);
+    storage_sync::schedule_layer_download(tenant_id, timeline_id);
     json_response(StatusCode::ACCEPTED, ())
 }
 
@@ -319,10 +306,10 @@ async fn try_download_shard_data(
 ) -> anyhow::Result<Option<RemoteTimeline>> {
     let shard = match state.remote_storage.as_ref() {
         Some(GenericRemoteStorage::Local(local_storage)) => {
-            download_index_part(state.conf, local_storage, sync_id).await
+            storage_sync::download_index_part(state.conf, local_storage, sync_id).await
         }
         Some(GenericRemoteStorage::S3(s3_storage)) => {
-            download_index_part(state.conf, s3_storage, sync_id).await
+            storage_sync::download_index_part(state.conf, s3_storage, sync_id).await
         }
         None => return Ok(None),
     }
