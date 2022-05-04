@@ -34,10 +34,9 @@ use std::time::{Duration, Instant, SystemTime};
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
 use crate::keyspace::KeySpace;
+use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::page_cache;
-use crate::remote_storage::{self, RemoteIndex};
 use crate::repository::{
     GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
 };
@@ -48,6 +47,7 @@ use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
+use crate::{page_cache, storage_sync};
 
 use metrics::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
@@ -1785,7 +1785,7 @@ impl LayeredTimeline {
             PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
 
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                remote_storage::schedule_layer_upload(
+                storage_sync::schedule_layer_upload(
                     self.tenantid,
                     self.timelineid,
                     HashSet::from([new_delta_path]),
@@ -1857,7 +1857,7 @@ impl LayeredTimeline {
                 }
             }
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                remote_storage::schedule_layer_upload(
+                storage_sync::schedule_layer_upload(
                     self.tenantid,
                     self.timelineid,
                     layer_paths_to_upload,
@@ -2056,13 +2056,13 @@ impl LayeredTimeline {
         drop(layers);
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
-            remote_storage::schedule_layer_upload(
+            storage_sync::schedule_layer_upload(
                 self.tenantid,
                 self.timelineid,
                 new_layer_paths,
                 None,
             );
-            remote_storage::schedule_layer_delete(
+            storage_sync::schedule_layer_delete(
                 self.tenantid,
                 self.timelineid,
                 layer_paths_do_delete,
@@ -2253,7 +2253,7 @@ impl LayeredTimeline {
         }
 
         if self.upload_layers.load(atomic::Ordering::Relaxed) {
-            remote_storage::schedule_layer_delete(
+            storage_sync::schedule_layer_delete(
                 self.tenantid,
                 self.timelineid,
                 layer_paths_to_delete,

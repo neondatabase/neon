@@ -29,13 +29,12 @@ hex = "0.4.3"
 const_format = "0.2.21"
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 tokio-util = { version = "0.7", features = ["io"] }
-rusoto_core = "0.47"
-rusoto_s3 = "0.47"
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
 etcd_broker = { path = "../libs/etcd_broker" }
+remote_storage = { path = "../libs/remote_storage" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 [dev-dependencies]

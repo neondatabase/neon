@@ -135,7 +135,7 @@ The backup service is disabled by default and can be enabled to interact with a 
 
 CLI examples:
 * Local FS: `${PAGESERVER_BIN} -c "remote_storage={local_path='/some/local/path/'}"`
-* AWS S3  : `${PAGESERVER_BIN} -c "remote_storage={bucket_name='some-sample-bucket',bucket_region='eu-north-1', prefix_in_bucket='/test_prefix/',access_key_id='SOMEKEYAAAAASADSAH*#',secret_access_key='SOMEsEcReTsd292v'}"`
+* AWS S3  : `env AWS_ACCESS_KEY_ID='SOMEKEYAAAAASADSAH*#' AWS_SECRET_ACCESS_KEY='SOMEsEcReTsd292v' ${PAGESERVER_BIN} -c "remote_storage={bucket_name='some-sample-bucket',bucket_region='eu-north-1', prefix_in_bucket='/test_prefix/'}"`
 
 For Amazon AWS S3, a key id and secret access key could be located in `~/.aws/credentials` if awscli was ever configured to work with the desired bucket, on the AWS Settings page for a certain user. Also note, that the bucket names does not contain any protocols when used on AWS.
 For local S3 installations, refer to the their documentation for name format and credentials.
@@ -155,11 +155,9 @@ or
 bucket_name = 'some-sample-bucket'
 bucket_region = 'eu-north-1'
 prefix_in_bucket = '/test_prefix/'
-access_key_id = 'SOMEKEYAAAAASADSAH*#'
-secret_access_key = 'SOMEsEcReTsd292v'
 ```
 
-Also, `AWS_SECRET_ACCESS_KEY` and `AWS_ACCESS_KEY_ID` variables can be used to specify the credentials instead of any of the ways above.
+`AWS_SECRET_ACCESS_KEY` and `AWS_ACCESS_KEY_ID` env variables can be used to specify the S3 credentials if needed.
 
 TODO: Sharding
 --------------------

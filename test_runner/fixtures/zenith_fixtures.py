@@ -472,20 +472,16 @@ class ZenithEnvBuilder:
 
         mock_endpoint = self.s3_mock_server.endpoint()
         mock_region = self.s3_mock_server.region()
-        mock_access_key = self.s3_mock_server.access_key()
-        mock_secret_key = self.s3_mock_server.secret_key()
         boto3.client(
             's3',
             endpoint_url=mock_endpoint,
             region_name=mock_region,
-            aws_access_key_id=mock_access_key,
-            aws_secret_access_key=mock_secret_key,
+            aws_access_key_id=self.s3_mock_server.access_key(),
+            aws_secret_access_key=self.s3_mock_server.secret_key(),
         ).create_bucket(Bucket=bucket_name)
         self.pageserver_remote_storage = S3Storage(bucket=bucket_name,
                                                    endpoint=mock_endpoint,
-                                                   region=mock_region,
-                                                   access_key=mock_access_key,
-                                                   secret_key=mock_secret_key)
+                                                   region=mock_region)
 
     def __enter__(self):
         return self
@@ -811,8 +807,6 @@ class LocalFsStorage:
 class S3Storage:
     bucket: str
     region: str
-    access_key: Optional[str]
-    secret_key: Optional[str]
     endpoint: Optional[str]
 
 
@@ -998,7 +992,14 @@ class ZenithCli:
         append_pageserver_param_overrides(start_args,
                                           self.env.pageserver.remote_storage,
                                           self.env.pageserver.config_override)
-        return self.raw_cli(start_args)
+
+        s3_env_vars = None
+        if self.env.s3_mock_server:
+            s3_env_vars = {
+                'AWS_ACCESS_KEY_ID': self.env.s3_mock_server.access_key(),
+                'AWS_SECRET_ACCESS_KEY': self.env.s3_mock_server.secret_key(),
+            }
+        return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
         cmd = ['pageserver', 'stop']
@@ -1093,6 +1094,7 @@ class ZenithCli:
 
     def raw_cli(self,
                 arguments: List[str],
+                extra_env_vars: Optional[Dict[str, str]] = None,
                 check_return_code=True) -> 'subprocess.CompletedProcess[str]':
         """
         Run "zenith" with the specified arguments.
@@ -1117,9 +1119,10 @@ class ZenithCli:
         env_vars = os.environ.copy()
         env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override
+        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+            env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
         var = 'LLVM_PROFILE_FILE'
@@ -1217,10 +1220,6 @@ def append_pageserver_param_overrides(
             pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
                 bucket_region='{pageserver_remote_storage.region}'"
 
-            if pageserver_remote_storage.access_key is not None:
-                pageserver_storage_override += f",access_key_id='{pageserver_remote_storage.access_key}'"
-            if pageserver_remote_storage.secret_key is not None:
-                pageserver_storage_override += f",secret_access_key='{pageserver_remote_storage.secret_key}'"
             if pageserver_remote_storage.endpoint is not None:
                 pageserver_storage_override += f",endpoint='{pageserver_remote_storage.endpoint}'"
 

@@ -5,6 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use remote_storage::{RemoteStorageConfig, RemoteStorageKind, S3Config};
 use std::env;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -33,18 +34,6 @@ pub mod defaults {
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
-    /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
-    /// during start (where local and remote timelines are compared and initial sync tasks are scheduled) and timeline attach.
-    /// Both cases may trigger timeline download, that might download a lot of layers. This concurrency is limited by the clients internally, if needed.
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC: usize = 50;
-    pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
-    /// Currently, sync happens with AWS S3, that has two limits on requests per second:
-    /// ~200 RPS for IAM services
-    /// https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html
-    /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
-    /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
-    pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -315,67 +304,6 @@ impl PageServerConfigBuilder {
     }
 }
 
-/// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteStorageConfig {
-    /// Max allowed number of concurrent sync operations between pageserver and the remote storage.
-    pub max_concurrent_timelines_sync: NonZeroUsize,
-    /// Max allowed errors before the sync task is considered failed and evicted.
-    pub max_sync_errors: NonZeroU32,
-    /// The storage connection configuration.
-    pub storage: RemoteStorageKind,
-}
-
-/// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteStorageKind {
-    /// Storage based on local file system.
-    /// Specify a root folder to place all stored files into.
-    LocalFs(PathBuf),
-    /// AWS S3 based storage, storing all files in the S3 bucket
-    /// specified by the config
-    AwsS3(S3Config),
-}
-
-/// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct S3Config {
-    /// Name of the bucket to connect to.
-    pub bucket_name: String,
-    /// The region where the bucket is located at.
-    pub bucket_region: String,
-    /// A "subfolder" in the bucket, to use the same bucket separately by multiple pageservers at once.
-    pub prefix_in_bucket: Option<String>,
-    /// "Login" to use when connecting to bucket.
-    /// Can be empty for cases like AWS k8s IAM
-    /// where we can allow certain pods to connect
-    /// to the bucket directly without any credentials.
-    pub access_key_id: Option<String>,
-    /// "Password" to use when connecting to bucket.
-    pub secret_access_key: Option<String>,
-    /// A base URL to send S3 requests to.
-    /// By default, the endpoint is derived from a region name, assuming it's
-    /// an AWS S3 region name, erroring on wrong region name.
-    /// Endpoint provides a way to support other S3 flavors and their regions.
-    ///
-    /// Example: `http://127.0.0.1:5000`
-    pub endpoint: Option<String>,
-    /// AWS S3 has various limits on its API calls, we need not to exceed those.
-    /// See [`defaults::DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
-    pub concurrency_limit: NonZeroUsize,
-}
-
-impl std::fmt::Debug for S3Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3Config")
-            .field("bucket_name", &self.bucket_name)
-            .field("bucket_region", &self.bucket_region)
-            .field("prefix_in_bucket", &self.prefix_in_bucket)
-            .field("concurrency_limit", &self.concurrency_limit)
-            .finish()
-    }
-}
-
 impl PageServerConf {
     //
     // Repository paths, relative to workdir.
@@ -523,21 +451,21 @@ impl PageServerConf {
         let bucket_name = toml.get("bucket_name");
         let bucket_region = toml.get("bucket_region");
 
-        let max_concurrent_timelines_sync = NonZeroUsize::new(
-            parse_optional_integer("max_concurrent_timelines_sync", toml)?
-                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC),
+        let max_concurrent_syncs = NonZeroUsize::new(
+            parse_optional_integer("max_concurrent_syncs", toml)?
+                .unwrap_or(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
         )
-        .context("Failed to parse 'max_concurrent_timelines_sync' as a positive integer")?;
+        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
 
         let max_sync_errors = NonZeroU32::new(
             parse_optional_integer("max_sync_errors", toml)?
-                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
+                .unwrap_or(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
         )
         .context("Failed to parse 'max_sync_errors' as a positive integer")?;
 
         let concurrency_limit = NonZeroUsize::new(
             parse_optional_integer("concurrency_limit", toml)?
-                .unwrap_or(defaults::DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+                .unwrap_or(remote_storage::DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
         )
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
@@ -552,16 +480,6 @@ impl PageServerConf {
             (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
                 bucket_name: parse_toml_string("bucket_name", bucket_name)?,
                 bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                access_key_id: toml
-                    .get("access_key_id")
-                    .map(|access_key_id| parse_toml_string("access_key_id", access_key_id))
-                    .transpose()?,
-                secret_access_key: toml
-                    .get("secret_access_key")
-                    .map(|secret_access_key| {
-                        parse_toml_string("secret_access_key", secret_access_key)
-                    })
-                    .transpose()?,
                 prefix_in_bucket: toml
                     .get("prefix_in_bucket")
                     .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
@@ -579,7 +497,7 @@ impl PageServerConf {
         };
 
         Ok(RemoteStorageConfig {
-            max_concurrent_timelines_sync,
+            max_concurrent_syncs,
             max_sync_errors,
             storage,
         })
@@ -807,11 +725,11 @@ pg_distrib_dir='{}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_timelines_sync: NonZeroUsize::new(
-                        defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_TIMELINES_SYNC
+                    max_concurrent_syncs: NonZeroUsize::new(
+                        remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
                     )
                     .unwrap(),
-                    max_sync_errors: NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
+                    max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
                         .unwrap(),
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
                 },
@@ -829,29 +747,25 @@ pg_distrib_dir='{}'
         let bucket_name = "some-sample-bucket".to_string();
         let bucket_region = "eu-north-1".to_string();
         let prefix_in_bucket = "test_prefix".to_string();
-        let access_key_id = "SOMEKEYAAAAASADSAH*#".to_string();
-        let secret_access_key = "SOMEsEcReTsd292v".to_string();
         let endpoint = "http://localhost:5000".to_string();
-        let max_concurrent_timelines_sync = NonZeroUsize::new(111).unwrap();
+        let max_concurrent_syncs = NonZeroUsize::new(111).unwrap();
         let max_sync_errors = NonZeroU32::new(222).unwrap();
         let s3_concurrency_limit = NonZeroUsize::new(333).unwrap();
 
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-max_concurrent_timelines_sync = {max_concurrent_timelines_sync}
+max_concurrent_syncs = {max_concurrent_syncs}
 max_sync_errors = {max_sync_errors}
 bucket_name = '{bucket_name}'
 bucket_region = '{bucket_region}'
 prefix_in_bucket = '{prefix_in_bucket}'
-access_key_id = '{access_key_id}'
-secret_access_key = '{secret_access_key}'
 endpoint = '{endpoint}'
 concurrency_limit = {s3_concurrency_limit}"#
             ),
             format!(
-                "remote_storage={{max_concurrent_timelines_sync={max_concurrent_timelines_sync}, max_sync_errors={max_sync_errors}, bucket_name='{bucket_name}',\
-                bucket_region='{bucket_region}', prefix_in_bucket='{prefix_in_bucket}', access_key_id='{access_key_id}', secret_access_key='{secret_access_key}', endpoint='{endpoint}', concurrency_limit={s3_concurrency_limit}}}",
+                "remote_storage={{max_concurrent_syncs={max_concurrent_syncs}, max_sync_errors={max_sync_errors}, bucket_name='{bucket_name}',\
+                bucket_region='{bucket_region}', prefix_in_bucket='{prefix_in_bucket}', endpoint='{endpoint}', concurrency_limit={s3_concurrency_limit}}}",
             ),
         ];
 
@@ -874,13 +788,11 @@ pg_distrib_dir='{}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_timelines_sync,
+                    max_concurrent_syncs,
                     max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
                         bucket_region: bucket_region.clone(),
-                        access_key_id: Some(access_key_id.clone()),
-                        secret_access_key: Some(secret_access_key.clone()),
                         prefix_in_bucket: Some(prefix_in_bucket.clone()),
                         endpoint: Some(endpoint.clone()),
                         concurrency_limit: s3_concurrency_limit,
