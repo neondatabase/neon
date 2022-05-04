@@ -664,7 +664,19 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
-            println!("NODE\tADDRESS\tTIMELINE\tBRANCH NAME\tLSN\t\tSTATUS");
+            let mut table = comfy_table::Table::new();
+
+            table.load_preset(comfy_table::presets::NOTHING);
+
+            table.set_header(&[
+                "NODE",
+                "ADDRESS",
+                "TIMELINE",
+                "BRANCH NAME",
+                "LSN",
+                "STATUS",
+            ]);
+
             for ((_, node_name), node) in cplane
                 .nodes
                 .iter()
@@ -683,16 +695,17 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .map(|name| name.as_str())
                     .unwrap_or("?");
 
-                println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
-                    node_name,
-                    node.address,
-                    node.timeline_id,
+                table.add_row(&[
+                    node_name.as_str(),
+                    &node.address.to_string(),
+                    &node.timeline_id.to_string(),
                     branch_name,
-                    lsn_str,
+                    lsn_str.as_str(),
                     node.status(),
-                );
+                ]);
             }
+
+            println!("{table}");
         }
         "create" => {
             let branch_name = sub_args
