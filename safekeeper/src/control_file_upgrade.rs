@@ -216,6 +216,29 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
+    // migrate to having timeline_start_lsn
+    } else if version == 4 {
+        info!("reading safekeeper control file version {}", version);
+        let oldstate = SafeKeeperStateV4::des(&buf[..buf.len()])?;
+        let server = ServerInfo {
+            pg_version: oldstate.server.pg_version,
+            system_id: oldstate.server.system_id,
+            wal_seg_size: oldstate.server.wal_seg_size,
+        };
+        return Ok(SafeKeeperState {
+            tenant_id: oldstate.tenant_id,
+            timeline_id: oldstate.timeline_id,
+            acceptor_state: oldstate.acceptor_state,
+            server,
+            proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
+            commit_lsn: oldstate.commit_lsn,
+            s3_wal_lsn: Lsn(0),
+            peer_horizon_lsn: oldstate.peer_horizon_lsn,
+            remote_consistent_lsn: Lsn(0),
+            peers: Peers(vec![]),
+        });
     }
     bail!("unsupported safekeeper control file version {}", version)
 }
