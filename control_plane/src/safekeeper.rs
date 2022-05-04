@@ -77,6 +77,7 @@ pub struct SafekeeperNode {
     pub pageserver: Arc<PageServerNode>,
 
     broker_endpoints: Option<String>,
+    broker_etcd_prefix: Option<String>,
 }
 
 impl SafekeeperNode {
@@ -94,6 +95,7 @@ impl SafekeeperNode {
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
             broker_endpoints: env.broker_endpoints.clone(),
+            broker_etcd_prefix: env.broker_etcd_prefix.clone(),
         }
     }
 
@@ -142,6 +144,9 @@ impl SafekeeperNode {
         }
         if let Some(ref ep) = self.broker_endpoints {
             cmd.args(&["--broker-endpoints", ep]);
+        }
+        if let Some(prefix) = self.broker_etcd_prefix.as_deref() {
+            cmd.args(&["--broker-etcd-prefix", prefix]);
         }
 
         if !cmd.status()?.success() {

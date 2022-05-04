@@ -517,7 +517,7 @@ fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
         .collect()
 }
 
-fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
+fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> anyhow::Result<()> {
     let pageserver = PageServerNode::from_env(env);
     match tenant_match.subcommand() {
         Some(("list", _)) => {
@@ -550,17 +550,8 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Re
 
             pageserver
                 .tenant_config(tenant_id, tenant_conf)
-                .unwrap_or_else(|e| {
-                    anyhow!(
-                        "Tenant config failed for tenant with id {} : {}",
-                        tenant_id,
-                        e
-                    );
-                });
-            println!(
-                "tenant {} successfully configured on the pageserver",
-                tenant_id
-            );
+                .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
+            println!("tenant {tenant_id} successfully configured on the pageserver");
         }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),

@@ -109,6 +109,12 @@ fn main() -> Result<()> {
             .takes_value(true)
             .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
         )
+        .arg(
+            Arg::new("broker-etcd-prefix")
+            .long("broker-etcd-prefix")
+            .takes_value(true)
+            .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
+        )
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
@@ -118,7 +124,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut conf: SafeKeeperConf = Default::default();
+    let mut conf = SafeKeeperConf::default();
 
     if let Some(dir) = arg_matches.value_of("datadir") {
         // change into the data directory.
@@ -161,6 +167,9 @@ fn main() -> Result<()> {
     if let Some(addr) = arg_matches.value_of("broker-endpoints") {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
         conf.broker_endpoints = Some(collected_ep?);
+    }
+    if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
+        conf.broker_etcd_prefix = prefix.to_string();
     }
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))

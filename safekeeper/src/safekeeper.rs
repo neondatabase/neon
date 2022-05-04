@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use etcd_broker::SkTimelineInfo;
 use postgres_ffi::xlog_utils::TimeLineID;
 
 use postgres_ffi::xlog_utils::XLogSegNo;
@@ -16,7 +17,6 @@ use tracing::*;
 
 use lazy_static::lazy_static;
 
-use crate::broker::SafekeeperInfo;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
@@ -886,7 +886,7 @@ where
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&mut self, sk_info: &SafekeeperInfo) -> Result<()> {
+    pub fn record_safekeeper_info(&mut self, sk_info: &SkTimelineInfo) -> Result<()> {
         let mut sync_control_file = false;
         if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
         {
