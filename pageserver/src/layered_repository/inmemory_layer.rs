@@ -85,6 +85,10 @@ impl Layer for InMemoryLayer {
         ))
     }
 
+    fn local_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
     }
@@ -207,7 +211,7 @@ impl Layer for InMemoryLayer {
                         write!(&mut desc, " img {} bytes", img.len())?;
                     }
                     Ok(Value::WalRecord(rec)) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec);
+                        let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
                         write!(
                             &mut desc,
                             " rec {} bytes will_init: {} {}",

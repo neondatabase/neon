@@ -89,7 +89,12 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf);
+                let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
+                    WalDecodeError {
+                        msg: format!("long header deserialization failed {}", e),
+                        lsn: self.lsn,
+                    }
+                })?;
 
                 if hdr.std.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
@@ -106,7 +111,12 @@ impl WalStreamDecoder {
                     return Ok(None);
                 }
 
-                let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf);
+                let hdr = XLogPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
+                    WalDecodeError {
+                        msg: format!("header deserialization failed {}", e),
+                        lsn: self.lsn,
+                    }
+                })?;
 
                 if hdr.xlp_pageaddr != self.lsn.0 {
                     return Err(WalDecodeError {
@@ -188,7 +198,13 @@ impl WalStreamDecoder {
         }
 
         // We now have a record in the 'recordbuf' local variable.
-        let xlogrec = XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]);
+        let xlogrec =
+            XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
+                WalDecodeError {
+                    msg: format!("xlog record deserialization failed {}", e),
+                    lsn: self.lsn,
+                }
+            })?;
 
         let mut crc = 0;
         crc = crc32c_append(crc, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);

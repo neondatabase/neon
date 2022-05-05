@@ -1,11 +1,9 @@
-import subprocess
-import asyncio
 from contextlib import closing
 
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverApiException
 
 
 #
@@ -120,3 +118,17 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
 
     branch2_cur.execute('SELECT count(*) FROM foo')
     assert branch2_cur.fetchone() == (300000, )
+
+
+def test_ancestor_branch_detach(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+
+    parent_timeline_id = env.zenith_cli.create_branch("test_ancestor_branch_detach_parent", "empty")
+
+    env.zenith_cli.create_branch("test_ancestor_branch_detach_branch1",
+                                 "test_ancestor_branch_detach_parent")
+
+    ps_http = env.pageserver.http_client()
+    with pytest.raises(ZenithPageserverApiException,
+                       match="Failed to detach inmem tenant timeline"):
+        ps_http.timeline_detach(env.initial_tenant, parent_timeline_id)

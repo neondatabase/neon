@@ -253,7 +253,7 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> std::slice::Iter<Arc<dyn Layer>> {
+    pub fn iter_historic_layers(&self) -> impl Iterator<Item = &Arc<dyn Layer>> {
         self.historic_layers.iter()
     }
 

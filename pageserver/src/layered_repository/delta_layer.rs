@@ -218,6 +218,10 @@ impl Layer for DeltaLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
+    }
+
     fn get_value_reconstruct_data(
         &self,
         key: Key,
@@ -375,7 +379,7 @@ impl Layer for DeltaLayer {
                                 write!(&mut desc, " img {} bytes", img.len()).unwrap();
                             }
                             Ok(Value::WalRecord(rec)) => {
-                                let wal_desc = walrecord::describe_wal_record(&rec);
+                                let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
                                 write!(
                                     &mut desc,
                                     " rec {} bytes will_init: {} {}",

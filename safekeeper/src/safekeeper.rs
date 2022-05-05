@@ -938,9 +938,7 @@ where
             ),
             self.state.s3_wal_lsn,
         );
-        let res = horizon_lsn.segment_number(self.state.server.wal_seg_size as usize);
-        info!("horizon is {}, res {}", horizon_lsn, res);
-        res
+        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }
 }
 

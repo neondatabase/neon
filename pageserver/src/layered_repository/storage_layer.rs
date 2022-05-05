@@ -105,6 +105,9 @@ pub trait Layer: Send + Sync {
     /// log messages, even though they're never not on disk.)
     fn filename(&self) -> PathBuf;
 
+    /// If a layer has a corresponding file on a local filesystem, return its absolute path.
+    fn local_path(&self) -> Option<PathBuf>;
+
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
