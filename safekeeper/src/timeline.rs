@@ -469,6 +469,10 @@ impl Timeline {
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
             let shared_state = self.mutex.lock().unwrap();
+            // WAL seg size not initialized yet, no WAL exists.
+            if shared_state.sk.state.server.wal_seg_size == 0 {
+                return Ok(());
+            }
             horizon_segno = shared_state.sk.get_horizon_segno();
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
