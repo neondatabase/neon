@@ -1,20 +1,20 @@
 # What performance tests do we have and how we run them
 
-Performanse tests are build using infrastructure of our usual python integration tests.
+Performance tests are built using infrastructure of our usual python integration tests.
 
 ## Tests that are run against local installation
 
-Most off the performance tests run against local installation. This causes some problems because safekeeper(s) and a pageserver share resources of one single host and one underlyinng disk.
+Most of the performance tests run against a local installation. This causes some problems because safekeeper(s) and the pageserver share resources of one single host and one underlying disk.
 
 These tests are run in CI in the same environment as the usual integration tests. So environment may not yield comarable results because this is the machine that CI provider gives us.
 
 ## Remote tests
 
-There are a few tests that marked with `pytest.mark.remote_cluster`. These tests do not use local installation and onnly need a connection string to run. So they can be used for every postgresql comatible database. Currenntly these tests are run against our staging daily. Staging is not an isolated environment, so it adds to possible noise due to activity of other clusters.
+There are a few tests that marked with `pytest.mark.remote_cluster`. These tests do not use local installation and only need a connection string to run. So they can be used for every postgresql compatible database. Currently these tests are run against our staging daily. Staging is not an isolated environment, so it adds to possible noise due to activity of other clusters.
 
 ## Noise
 
-All tests run only once. Usually to obtain more consistent performance numbers test is performed multiple times and then some statistics is applied to results, like min/max/avg/median etc.
+All tests run only once. Usually to obtain more consistent performance numbers test is performed multiple times and then some statistics is applied to the results, like min/max/avg/median etc.
 
 ## Results collection
 
