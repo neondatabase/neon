@@ -34,11 +34,14 @@ use crate::layered_repository::storage_layer::{
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
-use crate::walrecord;
+use crate::{lineage, walrecord};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+// avoid binding to Write (conflicts with std::io::Write)
+// while being able to use std::fmt::Write's methods
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
@@ -46,8 +49,9 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tracing::*;
+use tracing::{debug, trace};
 
+use crate::lineage::LineageWriteHandler;
 use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
@@ -227,7 +231,8 @@ impl Layer for DeltaLayer {
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.lsn_range.start);
-        let mut need_image = true;
+        let mut need_image = reconstruct_state.img.is_none();
+        let max_lsn = Lsn(lsn_range.end.0 - 1);
 
         ensure!(self.key_range.contains(&key));
 
@@ -242,7 +247,7 @@ impl Layer for DeltaLayer {
                 inner.index_root_blk,
                 file,
             );
-            let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
+            let search_key = DeltaKey::from_key_lsn(&key, max_lsn);
 
             let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
@@ -252,10 +257,16 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                if entry_lsn < lsn_range.start {
+
+                offsets.push((entry_lsn, blob_ref.pos()));
+
+                // Note: Lineages contain a range of LSNs, starting from their registered LSN upwards.
+                // This means we need to include _at least_ one record before the start of the lsn_range.
+                // The handlers of the specific record types also need to ensure that they correctly
+                // handle the information.
+                if !need_image && entry_lsn < lsn_range.start {
                     return false;
                 }
-                offsets.push((entry_lsn, blob_ref.pos()));
 
                 !blob_ref.will_init()
             })?;
@@ -282,6 +293,10 @@ impl Layer for DeltaLayer {
                         break;
                     }
                     Value::WalRecord(rec) => {
+                        if !need_image && entry_lsn < lsn_range.start {
+                            break;
+                        }
+
                         let will_init = rec.will_init();
                         reconstruct_state.records.push((entry_lsn, rec));
                         if will_init {
@@ -290,6 +305,49 @@ impl Layer for DeltaLayer {
                             break;
                         }
                     }
+                    Value::NonInitiatingLineage(lin) => {
+                        let vec = lin.recs_up_to(max_lsn);
+
+                        for (lsn, rec) in vec.into_iter().rev() {
+                            if !need_image && lsn < lsn_range.start {
+                                break;
+                            }
+                            match rec {
+                                Value::WalRecord(walrec) => {
+                                    reconstruct_state.records.push((lsn, walrec))
+                                }
+                                _ => bail!("Unexpected data in non-initiating lineage: {:?}", rec),
+                            }
+                        }
+                    }
+                    Value::InitiatingLineage(lin) => {
+                        let vec = lin.recs_up_to(max_lsn);
+
+                        let last_index = vec.len() - 1;
+
+                        for (index, (lsn, rec)) in vec.into_iter().rev().enumerate() {
+                            if !need_image && lsn < lsn_range.start {
+                                break;
+                            }
+
+                            match rec {
+                                Value::Image(bytes) => {
+                                    debug_assert_eq!(index, last_index);
+                                    reconstruct_state.img = Some((lsn, bytes));
+                                }
+                                Value::WalRecord(walrec) => {
+                                    reconstruct_state.records.push((lsn, walrec))
+                                }
+                                _ => bail!("Unexpected data in initiating lineage: {:?}", rec),
+                            }
+                        }
+                        need_image = false;
+                        break;
+                    }
+                }
+
+                if !need_image && entry_lsn < lsn_range.start {
+                    break;
                 }
             }
             // release metadata lock and close the file
@@ -380,6 +438,24 @@ impl Layer for DeltaLayer {
                         rec.will_init(),
                         wal_desc
                     )
+                },
+                Value::NonInitiatingLineage(lin) => {
+                    let lin_desc = lineage::describe_lineage(&lin);
+                    format!(
+                        &mut desc,
+                        " lin {} bytes non-init {}",
+                        buf.len(),
+                        lin_desc,
+                    );
+                },
+                Value::InitiatingLineage(lin) => {
+                    let lin_desc = lineage::describe_lineage(&lin);
+                    format!(
+                        &mut desc,
+                        " lin {} bytes init {}",
+                        buf.len(),
+                        lin_desc
+                    );
                 }
             };
             Ok(desc)
@@ -608,6 +684,8 @@ pub struct DeltaLayerWriter {
     key_start: Key,
     lsn_range: Range<Lsn>,
 
+    lineage_handler: Option<(Key, LineageWriteHandler)>,
+
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
     blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
@@ -649,6 +727,7 @@ impl DeltaLayerWriter {
             tenantid,
             key_start,
             lsn_range,
+            lineage_handler: None,
             tree: tree_builder,
             blob_writer,
         })
@@ -659,27 +738,88 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    pub fn put_value(&mut self, key: Key, lsn: Lsn, insert_value: Value) -> Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
-        let off = self.blob_writer.write_blob(&Value::ser(&val)?)?;
+        // Unwrap any lineages into seperate records.
+        // This is not amazing, but prevents us from needing to do recursive parsing
+        // whilst reading the records from disk for replay.
+        let actual_insert_records = match insert_value {
+            Value::Image(_) | Value::WalRecord(_) => vec![(lsn, insert_value)],
+            Value::NonInitiatingLineage(lin) | Value::InitiatingLineage(lin) => {
+                lin.recs_up_to(Lsn::MAX)
+            }
+        };
 
-        let blob_ref = BlobRef::new(off, val.will_init());
+        for (lsn, insert_value) in actual_insert_records.into_iter() {
+            if let Some((lin_key, lin_handler)) = &mut self.lineage_handler {
+                let write_key = *lin_key;
 
-        let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
+                let res = if write_key == key {
+                    lin_handler.append_record(lsn, insert_value)?
+                } else {
+                    let res = lin_handler.finish()?;
+                    let mut new_write_handler = LineageWriteHandler::new();
+
+                    new_write_handler.append_record(lsn, insert_value)?;
+
+                    self.lineage_handler = Some((key, new_write_handler));
+
+                    res
+                };
+
+                if let Some((res_lsn, return_value)) = res {
+                    let will_init = return_value.will_init();
+
+                    let off = self.blob_writer.write_blob(&Value::ser(&return_value)?)?;
+
+                    let blob_ref = BlobRef::new(off, will_init);
+
+                    let delta_key = DeltaKey::from_key_lsn(&write_key, res_lsn);
+
+                    self.tree.append(&delta_key.0, blob_ref.0)?;
+                }
+            } else {
+                let mut new_write_handler = LineageWriteHandler::new();
+                new_write_handler.append_record(lsn, insert_value)?;
+                self.lineage_handler = Some((key, new_write_handler))
+            }
+        }
 
         Ok(())
     }
 
     pub fn size(&self) -> u64 {
-        self.blob_writer.size() + self.tree.borrow_writer().size()
+        return self.blob_writer.size()
+            + self.tree.borrow_writer().size()
+            + self
+                .lineage_handler
+                .as_ref()
+                .map_or(0, |pair| pair.1.guesstimate_size());
     }
 
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+        // First, finish the lineage handler.
+        // This potentially has some records cached that must still be flushed,
+        // so let's do that first.
+        if let Some((key, handler)) = &mut self.lineage_handler {
+            let res = handler.finish()?;
+
+            if let Some((insert_lsn, insert_value)) = res {
+                let off = self.blob_writer.write_blob(&Value::ser(&insert_value)?)?;
+
+                let blob_ref = BlobRef::new(off, insert_value.will_init());
+
+                let delta_key = DeltaKey::from_key_lsn(key, insert_lsn);
+                self.tree.append(&delta_key.0, blob_ref.0)?;
+            }
+
+            self.lineage_handler = None;
+        }
+
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 

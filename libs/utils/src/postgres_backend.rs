@@ -426,7 +426,7 @@ impl PostgresBackend {
                 // remove null terminator
                 let query_string = cstr_to_str(&m.body)?;
 
-                trace!("got query {:?}", query_string);
+                info!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
                 if let Err(e) = handler.process_query(self, query_string) {
                     // ":?" uses the alternate formatting style, which makes anyhow display the

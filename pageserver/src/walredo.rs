@@ -41,7 +41,10 @@ use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::{
+    ClearVisibilityMapFlags, ClogSetAborted, ClogSetCommitted, MultixactMembersCreate,
+    MultixactOffsetCreate, Postgres, ZenithWalRecord,
+};
 use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
@@ -141,10 +144,10 @@ fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
     // Postgres WAL records. But everything else is handled in zenith.
     #[allow(clippy::match_like_matches_macro)]
     match rec {
-        ZenithWalRecord::Postgres {
+        ZenithWalRecord::Postgres(Postgres {
             will_init: _,
             rec: _,
-        } => false,
+        }) => false,
         _ => true,
     }
 }
@@ -343,18 +346,18 @@ impl PostgresRedoManager {
         record: &ZenithWalRecord,
     ) -> Result<(), WalRedoError> {
         match record {
-            ZenithWalRecord::Postgres {
+            ZenithWalRecord::Postgres(Postgres {
                 will_init: _,
                 rec: _,
-            } => {
+            }) => {
                 error!("tried to pass postgres wal record to zenith WAL redo");
                 return Err(WalRedoError::InvalidRequest);
             }
-            ZenithWalRecord::ClearVisibilityMapFlags {
+            ZenithWalRecord::ClearVisibilityMapFlags(ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,
                 flags,
-            } => {
+            }) => {
                 // sanity check that this is modifying the correct relation
                 let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
@@ -392,7 +395,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
+            ZenithWalRecord::ClogSetCommitted(ClogSetCommitted { xids, timestamp }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -442,7 +445,7 @@ impl PostgresRedoManager {
                     );
                 }
             }
-            ZenithWalRecord::ClogSetAborted { xids } => {
+            ZenithWalRecord::ClogSetAborted(ClogSetAborted { xids }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -473,7 +476,7 @@ impl PostgresRedoManager {
                     transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
                 }
             }
-            ZenithWalRecord::MultixactOffsetCreate { mid, moff } => {
+            ZenithWalRecord::MultixactOffsetCreate(MultixactOffsetCreate { mid, moff }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -506,7 +509,7 @@ impl PostgresRedoManager {
 
                 LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
             }
-            ZenithWalRecord::MultixactMembersCreate { moff, members } => {
+            ZenithWalRecord::MultixactMembersCreate(MultixactMembersCreate { moff, members }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -679,10 +682,10 @@ impl PostgresRedoProcess {
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
-            if let ZenithWalRecord::Postgres {
+            if let ZenithWalRecord::Postgres(Postgres {
                 will_init: _,
                 rec: postgres_rec,
-            } = rec
+            }) = rec
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {

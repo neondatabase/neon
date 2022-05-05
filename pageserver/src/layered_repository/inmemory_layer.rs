@@ -12,6 +12,7 @@ use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::lineage;
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
@@ -128,7 +129,7 @@ impl Layer for InMemoryLayer {
 
         // Scan the page versions backwards, starting from `lsn`.
         if let Some(vec_map) = inner.index.get(&key) {
-            let slice = vec_map.slice_range(lsn_range);
+            let slice = vec_map.slice_range(lsn_range.clone());
             for (entry_lsn, pos) in slice.iter().rev() {
                 let buf = reader.read_blob(*pos)?;
                 let value = Value::des(&buf)?;
@@ -145,6 +146,40 @@ impl Layer for InMemoryLayer {
                             need_image = false;
                             break;
                         }
+                    }
+                    Value::NonInitiatingLineage(lin) => {
+                        let recs = lin.recs_up_to(Lsn(lsn_range.end.0 - 1));
+                        // reverse the iterator, because we must add records in
+                        // descending order of LSN.
+                        for (lsn, rec) in recs.into_iter().rev() {
+                            match rec {
+                                Value::WalRecord(rec) => reconstruct_state.records.push((lsn, rec)),
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "Unexpected result from non-initiating lineage"
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    Value::InitiatingLineage(lin) => {
+                        let recs = lin.recs_up_to(Lsn(lsn_range.end.0 - 1));
+                        // reverse the iterator, because we must add records in
+                        // descending order of LSN.
+                        for (lsn, rec) in recs.into_iter().rev() {
+                            match rec {
+                                Value::Image(bytes) => {
+                                    reconstruct_state.img = Some((lsn, bytes));
+                                }
+                                Value::WalRecord(rec) => reconstruct_state.records.push((lsn, rec)),
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "Unexpected result from non-initiating lineage"
+                                    ))
+                                }
+                            }
+                        }
+                        break;
                     }
                 }
             }
@@ -219,6 +254,19 @@ impl Layer for InMemoryLayer {
                             rec.will_init(),
                             wal_desc
                         )?;
+                    }
+                    Ok(Value::InitiatingLineage(lin)) => {
+                        let lin_desc = lineage::describe_lineage(&lin);
+                        write!(
+                            &mut desc,
+                            " lin {} bytes initiating: {}",
+                            buf.len(),
+                            lin_desc
+                        )?;
+                    }
+                    Ok(Value::NonInitiatingLineage(lin)) => {
+                        let lin_desc = lineage::describe_lineage(&lin);
+                        write!(&mut desc, " lin {} bytes non-init: {}", buf.len(), lin_desc)?;
                     }
                     Err(err) => {
                         write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;

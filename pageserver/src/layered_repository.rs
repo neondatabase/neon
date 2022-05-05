@@ -1075,6 +1075,12 @@ impl Timeline for LayeredTimeline {
 
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
 
+        let mut high_lsn = lsn;
+        for (low_lsn, _) in reconstruct_state.records.iter() {
+            assert!(*low_lsn <= high_lsn);
+            high_lsn = *low_lsn;
+        }
+
         self.reconstruct_time_histo
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
@@ -1577,7 +1583,7 @@ impl LayeredTimeline {
     }
 
     fn finish_write(&self, new_lsn: Lsn) {
-        assert!(new_lsn.is_aligned());
+        debug_assert!(new_lsn.is_aligned());
 
         self.last_record_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
@@ -2352,7 +2358,35 @@ impl LayeredTimeline {
         mut data: ValueReconstructState,
     ) -> Result<Bytes> {
         // Perform WAL redo if needed
+
+        // Sort records by lsn in increasing order.
         data.records.reverse();
+
+        if cfg!(debug_assertions) {
+            if let Some((rec_lsn, _)) = data.records.first() {
+                if let Some((img_lsn, _)) = &data.img {
+                    debug_assert!(*img_lsn <= *rec_lsn);
+                }
+            }
+
+            let is_sorted = data
+                .records
+                .iter()
+                .fold((Lsn(0), true), |(commu_lsn, sum), (rec_lsn, _)| {
+                    (
+                        *rec_lsn,
+                        sum && (commu_lsn < *rec_lsn
+                            || (commu_lsn == Lsn(0) && *rec_lsn == Lsn(0))),
+                    )
+                })
+                .1;
+
+            debug_assert!(
+                is_sorted,
+                "LSNs are not sorted: {:?}",
+                data.records.iter().map(|d| d.0).collect::<Vec<Lsn>>()
+            );
+        }
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {

@@ -316,10 +316,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
-            let rec = ZenithWalRecord::Postgres {
+            let rec = ZenithWalRecord::Postgres(Postgres {
                 will_init: blk.will_init || blk.apply_image,
                 rec: decoded.record.clone(),
-            };
+            });
             self.put_rel_wal_record(modification, rel, blk.blkno, rec)?;
         }
         Ok(())
@@ -429,11 +429,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                         modification,
                         vm_rel,
                         new_vm_blk.unwrap(),
-                        ZenithWalRecord::ClearVisibilityMapFlags {
+                        ZenithWalRecord::ClearVisibilityMapFlags(ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
                             flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                        },
+                        }),
                     )?;
                 } else {
                     // Clear VM bits for one heap page, or for two pages that reside on
@@ -443,11 +443,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                             modification,
                             vm_rel,
                             new_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            ZenithWalRecord::ClearVisibilityMapFlags(ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                            },
+                            }),
                         )?;
                     }
                     if let Some(old_vm_blk) = old_vm_blk {
@@ -455,11 +455,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                             modification,
                             vm_rel,
                             old_vm_blk,
-                            ZenithWalRecord::ClearVisibilityMapFlags {
+                            ZenithWalRecord::ClearVisibilityMapFlags(ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
                                 flags: pg_constants::VISIBILITYMAP_VALID_BITS,
-                            },
+                            }),
                         )?;
                     }
                 }
@@ -643,12 +643,12 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                     segno,
                     rpageno,
                     if is_commit {
-                        ZenithWalRecord::ClogSetCommitted {
+                        ZenithWalRecord::ClogSetCommitted(ClogSetCommitted {
                             xids: page_xids,
                             timestamp: parsed.xact_time,
-                        }
+                        })
                     } else {
-                        ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                        ZenithWalRecord::ClogSetAborted(ClogSetAborted { xids: page_xids })
                     },
                 )?;
                 page_xids = Vec::new();
@@ -663,12 +663,12 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             segno,
             rpageno,
             if is_commit {
-                ZenithWalRecord::ClogSetCommitted {
+                ZenithWalRecord::ClogSetCommitted(ClogSetCommitted {
                     xids: page_xids,
                     timestamp: parsed.xact_time,
-                }
+                })
             } else {
-                ZenithWalRecord::ClogSetAborted { xids: page_xids }
+                ZenithWalRecord::ClogSetAborted(ClogSetAborted { xids: page_xids })
             },
         )?;
 
@@ -761,10 +761,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             SlruKind::MultiXactOffsets,
             segno,
             rpageno,
-            ZenithWalRecord::MultixactOffsetCreate {
+            ZenithWalRecord::MultixactOffsetCreate(MultixactOffsetCreate {
                 mid: xlrec.mid,
                 moff: xlrec.moff,
-            },
+            }),
         )?;
 
         // Create WAL records for the update of each affected multixact-members page
@@ -795,10 +795,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 SlruKind::MultiXactMembers,
                 pageno / pg_constants::SLRU_PAGES_PER_SEGMENT,
                 pageno % pg_constants::SLRU_PAGES_PER_SEGMENT,
-                ZenithWalRecord::MultixactMembersCreate {
+                ZenithWalRecord::MultixactMembersCreate(MultixactMembersCreate {
                     moff: offset,
                     members: this_page_members,
-                },
+                }),
             )?;
 
             // Note: The multixact members can wrap around, even within one WAL record.

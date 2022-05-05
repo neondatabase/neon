@@ -1,7 +1,8 @@
 //!
 //! Functions for parsing WAL records.
 //!
-use anyhow::Result;
+use crate::repository::Value;
+use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
@@ -9,7 +10,77 @@ use postgres_ffi::XLogRecord;
 use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
-use tracing::*;
+use std::mem::size_of;
+use tracing::trace;
+
+macro_rules! impl_value_casts {
+    ($name:ident) => {
+        impl From<$name> for Value {
+            fn from(other: $name) -> Value {
+                Value::WalRecord(ZenithWalRecord::$name(other))
+            }
+        }
+
+        impl TryFrom<Value> for $name {
+            type Error = Error;
+
+            fn try_from(value: Value) -> Result<Self, Self::Error> {
+                match value {
+                    Value::WalRecord(ZenithWalRecord::$name(it)) => Ok(it),
+                    _ => Err(anyhow!("Incorrect cast")),
+                }
+            }
+        }
+    };
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct Postgres {
+    pub will_init: bool,
+    pub rec: Bytes,
+}
+
+impl_value_casts!(Postgres);
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct ClearVisibilityMapFlags {
+    pub new_heap_blkno: Option<u32>,
+    pub old_heap_blkno: Option<u32>,
+    pub flags: u8,
+}
+
+impl_value_casts!(ClearVisibilityMapFlags);
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct ClogSetCommitted {
+    pub xids: Vec<TransactionId>,
+    pub timestamp: TimestampTz,
+}
+
+impl_value_casts!(ClogSetCommitted);
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct ClogSetAborted {
+    pub xids: Vec<TransactionId>,
+}
+
+impl_value_casts!(ClogSetAborted);
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct MultixactOffsetCreate {
+    pub mid: MultiXactId,
+    pub moff: MultiXactOffset,
+}
+
+impl_value_casts!(MultixactOffsetCreate);
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+pub struct MultixactMembersCreate {
+    pub moff: MultiXactOffset,
+    pub members: Vec<MultiXactMember>,
+}
+
+impl_value_casts!(MultixactMembersCreate);
 use utils::bin_ser::DeserializeError;
 
 /// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
@@ -17,31 +88,18 @@ use utils::bin_ser::DeserializeError;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ZenithWalRecord {
     /// Native PostgreSQL WAL record
-    Postgres { will_init: bool, rec: Bytes },
+    Postgres(Postgres),
 
     /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
-    ClearVisibilityMapFlags {
-        new_heap_blkno: Option<u32>,
-        old_heap_blkno: Option<u32>,
-        flags: u8,
-    },
+    ClearVisibilityMapFlags(ClearVisibilityMapFlags),
     /// Mark transaction IDs as committed on a CLOG page
-    ClogSetCommitted {
-        xids: Vec<TransactionId>,
-        timestamp: TimestampTz,
-    },
+    ClogSetCommitted(ClogSetCommitted),
     /// Mark transaction IDs as aborted on a CLOG page
-    ClogSetAborted { xids: Vec<TransactionId> },
+    ClogSetAborted(ClogSetAborted),
     /// Extend multixact offsets SLRU
-    MultixactOffsetCreate {
-        mid: MultiXactId,
-        moff: MultiXactOffset,
-    },
+    MultixactOffsetCreate(MultixactOffsetCreate),
     /// Extend multixact members SLRU.
-    MultixactMembersCreate {
-        moff: MultiXactOffset,
-        members: Vec<MultiXactMember>,
-    },
+    MultixactMembersCreate(MultixactMembersCreate),
 }
 
 impl ZenithWalRecord {
@@ -49,11 +107,31 @@ impl ZenithWalRecord {
     /// it need to be applied over the previous image of the page?
     pub fn will_init(&self) -> bool {
         match self {
-            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+            ZenithWalRecord::Postgres(Postgres { will_init, rec: _ }) => *will_init,
 
             // None of the special zenith record types currently initialize the page
             _ => false,
         }
+    }
+
+    pub fn guestimate_size(&self) -> usize {
+        size_of::<u64>()
+            + match self {
+                ZenithWalRecord::Postgres(it) => it.rec.len() + size_of::<u64>() + 1,
+                ZenithWalRecord::ClearVisibilityMapFlags(_) => size_of::<ClearVisibilityMapFlags>(),
+                ZenithWalRecord::ClogSetCommitted(recs) => {
+                    recs.xids.len() * size_of::<TransactionId>() + size_of::<u64>()
+                }
+                ZenithWalRecord::ClogSetAborted(recs) => {
+                    recs.xids.len() * size_of::<TransactionId>() + size_of::<u64>()
+                }
+                ZenithWalRecord::MultixactOffsetCreate(_) => size_of::<MultixactOffsetCreate>(),
+                ZenithWalRecord::MultixactMembersCreate(mems) => {
+                    mems.members.len() * size_of::<MultiXactMember>()
+                        + size_of::<u64>()
+                        + size_of::<MultiXactOffset>()
+                }
+            }
     }
 }
 
@@ -449,7 +527,7 @@ impl XlMultiXactCreate {
         let mid = buf.get_u32_le();
         let moff = buf.get_u32_le();
         let nmembers = buf.get_u32_le();
-        let mut members = Vec::new();
+        let mut members = Vec::with_capacity(nmembers as usize);
         for _ in 0..nmembers {
             members.push(MultiXactMember::decode(buf));
         }
@@ -760,7 +838,7 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
 /// For debugging purposes
 pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String, DeserializeError> {
     match rec {
-        ZenithWalRecord::Postgres { will_init, rec } => Ok(format!(
+        ZenithWalRecord::Postgres(Postgres { will_init, rec }) => Ok(format!(
             "will_init: {}, {}",
             will_init,
             describe_postgres_wal_record(rec)?
