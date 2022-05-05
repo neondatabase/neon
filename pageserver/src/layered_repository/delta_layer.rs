@@ -839,14 +839,13 @@ impl<'a> DeltaValueIter<'a> {
                 true
             },
         )?;
+        let decompressor = match &inner.prepared_dictionary {
+            Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
+                dictionary,
+            )?),
+            None => None,
+        };
         /*
-            let mut decompressor = match &inner.prepared_dictionary {
-                Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
-                    dictionary,
-                )?),
-                None => None,
-            };
-        */
         let decompressor = if !inner.dictionary.is_empty() {
             Some(zstd::bulk::Decompressor::with_dictionary(
                 &inner.dictionary,
@@ -854,6 +853,7 @@ impl<'a> DeltaValueIter<'a> {
         } else {
             None
         };
+        */
         let iter = DeltaValueIter {
             all_offsets,
             next_idx: 0,
