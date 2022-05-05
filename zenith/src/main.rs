@@ -694,7 +694,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     }
                     Some(lsn) => {
                         // -> read-only node
-                        // Use the node's lsn.
+                        // Use the node's LSN.
                         lsn.to_string()
                     }
                 };
