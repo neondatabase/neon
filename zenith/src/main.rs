@@ -683,13 +683,21 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .iter()
                 .filter(|((node_tenant_id, _), _)| node_tenant_id == &tenant_id)
             {
-                // FIXME: This shows the LSN at the end of the timeline. It's not the
-                // right thing to do for read-only nodes that might be anchored at an
-                // older point in time, or following but lagging behind the primary.
-                let lsn_str = timeline_infos
-                    .get(&node.timeline_id)
-                    .and_then(|bi| bi.local.as_ref().map(|l| l.last_record_lsn.to_string()))
-                    .unwrap_or_else(|| "?".to_string());
+                let lsn_str = match node.lsn {
+                    None => {
+                        // -> primary node
+                        // Use the LSN at the end of the timeline.
+                        timeline_infos
+                            .get(&node.timeline_id)
+                            .and_then(|bi| bi.local.as_ref().map(|l| l.last_record_lsn.to_string()))
+                            .unwrap_or_else(|| "?".to_string())
+                    }
+                    Some(lsn) => {
+                        // -> read-only node
+                        // Use the node's LSN.
+                        lsn.to_string()
+                    }
+                };
 
                 let branch_name = timeline_name_mappings
                     .get(&ZTenantTimelineId::new(tenant_id, node.timeline_id))
