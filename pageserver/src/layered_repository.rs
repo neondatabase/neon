@@ -393,9 +393,22 @@ impl Repository for LayeredRepository {
 
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
         let mut timelines = self.timelines.lock().unwrap();
+        // check no child timelines, because detach will remove files, which will brake child branches
+        // FIXME this can still be violated because we do not guarantee
+        //   that all ancestors are downloaded/attached to the same pageserver
+        let num_children = timelines
+            .iter()
+            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
+            .count();
+
+        ensure!(
+            num_children == 0,
+            "Cannot detach timeline which has child timelines"
+        );
+
         ensure!(
             timelines.remove(&timeline_id).is_some(),
-            "cannot detach timeline {timeline_id} that is not available locally"
+            "Cannot detach timeline {timeline_id} that is not available locally"
         );
         Ok(())
     }

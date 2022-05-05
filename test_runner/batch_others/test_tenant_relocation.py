@@ -109,10 +109,11 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
     tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
-    env.zenith_cli.create_root_branch('main', tenant_id=tenant)
-    env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
-    tenant_pg = env.postgres.create_start(branch_name='main',
+    # attach does not download ancestor branches (should it?), just use root branch for now
+    env.zenith_cli.create_root_branch('test_tenant_relocation', tenant_id=tenant)
+
+    tenant_pg = env.postgres.create_start(branch_name='test_tenant_relocation',
                                           node_name='test_tenant_relocation',
                                           tenant_id=tenant)
 
