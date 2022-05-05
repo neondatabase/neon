@@ -7,7 +7,7 @@ RELEASE=${RELEASE:-false}
 # look at docker hub for latest tag for neon docker image
 if [ "${RELEASE}" = "true" ]; then
     echo "search latest relase tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | tail -1)
+    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
     if [ -z "${VERSION}" ]; then
         echo "no any docker tags found, exiting..."
         exit 1
@@ -16,7 +16,7 @@ if [ "${RELEASE}" = "true" ]; then
     fi
 else
     echo "search latest dev tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -v release | tail -1)
+    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -E '^[0-9]+$' | sort -n | tail -1)
     if [ -z "${VERSION}" ]; then
         echo "no any docker tags found, exiting..."
         exit 1
