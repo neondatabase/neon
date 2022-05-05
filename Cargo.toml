@@ -6,7 +6,7 @@ members = [
     "proxy",
     "safekeeper",
     "workspace_hack",
-    "neon_ctl",
+    "neon_local",
     "libs/*",
 ]
 

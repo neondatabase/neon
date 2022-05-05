@@ -1488,7 +1488,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "neon_ctl"
+name = "neon_local"
 version = "0.1.0"
 dependencies = [
  "anyhow",
