@@ -49,14 +49,14 @@ make -j5
 ```sh
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
-> ./target/debug/zenith init
+> ./target/debug/neon_local init
 initializing tenantid c03ba6b7ad4c5e9cf556f059ade44229
 created initial timeline 5b014a9e41b4b63ce1a1febc04503636 timeline.lsn 0/169C3C8
 created main branch
 pageserver init succeeded
 
 # start pageserver and safekeeper
-> ./target/debug/zenith start
+> ./target/debug/neon_local start
 Starting pageserver at 'localhost:64000' in '.zenith'
 Pageserver started
 initializing for single for 7676
@@ -64,7 +64,7 @@ Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/single'
 Safekeeper started
 
 # start postgres compute node
-> ./target/debug/zenith pg start main
+> ./target/debug/neon_local pg start main
 Starting new postgres main on timeline 5b014a9e41b4b63ce1a1febc04503636 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/c03ba6b7ad4c5e9cf556f059ade44229/main port=55432
 Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
@@ -72,7 +72,7 @@ waiting for server to start.... done
 server started
 
 # check list of running postgres instances
-> ./target/debug/zenith pg list
+> ./target/debug/neon_local pg list
 NODE	ADDRESS	TIMELINES	BRANCH NAME	LSN		STATUS
 main	127.0.0.1:55432	5b014a9e41b4b63ce1a1febc04503636	main	0/1609610	running
 ```
@@ -94,16 +94,16 @@ postgres=# select * from t;
 5. And create branches and run postgres on them:
 ```sh
 # create branch named migration_check
-> ./target/debug/zenith timeline branch --branch-name migration_check
+> ./target/debug/neon_local timeline branch --branch-name migration_check
 Created timeline '0e9331cad6efbafe6a88dd73ae21a5c9' at Lsn 0/16F5830 for tenant: c03ba6b7ad4c5e9cf556f059ade44229. Ancestor timeline: 'main'
 
 # check branches tree
-> ./target/debug/zenith timeline list
+> ./target/debug/neon_local timeline list
  main [5b014a9e41b4b63ce1a1febc04503636]
  ┗━ @0/1609610: migration_check [0e9331cad6efbafe6a88dd73ae21a5c9]
 
 # start postgres on that branch
-> ./target/debug/zenith pg start migration_check
+> ./target/debug/neon_local pg start migration_check
 Starting postgres node at 'host=127.0.0.1 port=55433 user=stas'
 waiting for server to start.... done
 
@@ -123,7 +123,7 @@ INSERT 0 1
 6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
    you have just started. You can stop them all with one command:
 ```sh
-> ./target/debug/zenith stop
+> ./target/debug/neon_local stop
 ```
 
 ## Running tests
