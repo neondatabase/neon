@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::error::ApiError;
-use hyper::{Body, Request};
+use hyper::{body::HttpBody, Body, Request};
 use routerify::ext::RequestExt;
 
 pub fn get_request_param<'a>(
@@ -29,5 +29,12 @@ pub fn parse_request_param<T: FromStr>(
             "failed to parse {}",
             param_name
         ))),
+    }
+}
+
+pub async fn ensure_no_body(request: &mut Request<Body>) -> Result<(), ApiError> {
+    match request.body_mut().data().await {
+        Some(_) => Err(ApiError::BadRequest("Unexpected request body".into())),
+        None => Ok(()),
     }
 }
