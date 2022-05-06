@@ -38,7 +38,7 @@ jobs:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
       - name: Fix permissions
-        run: sudo chmod -R a+rwx /__w/
+        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
 
       - name: Checkout
         uses: actions/checkout@v3
