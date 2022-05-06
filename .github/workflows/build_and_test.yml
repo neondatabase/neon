@@ -154,7 +154,34 @@ jobs:
           
           "${cov_prefix[@]}" cargo test $CARGO_FLAGS
 
-      #Install rust binaries
-      #Install postgres binaries
-      #Merge coverage data
-      #persist_to_workspace
+      # TODO:
+      # Install rust binaries
+      # Install postgres binaries
+      # Merge coverage data
+      # persist_to_workspace
+
+  check-codestyle-python:
+    runs-on: [ self-hosted, Linux ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        # TODO preinstall poetry in runner image
+        run: pip install poetry && ./scripts/pysync
+
+      - name: Run yapf to ensure code format
+        run: poetry run yapf --recursive --diff .
+
+      - name: Run mypy to check types
+        run: poetry run mypy .
