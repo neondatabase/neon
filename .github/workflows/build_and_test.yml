@@ -1,3 +1,4 @@
+name: build_and_test
 on: [push]
 jobs:
   check-codestyle-rust:
@@ -45,7 +46,17 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      # TODO: Add caching
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v3
+        with:
+          path: tmp_install/
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
-        run: make postgres -j$(nproc)
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: COPT='-Werror' mold -run make postgres -j$(nproc)
