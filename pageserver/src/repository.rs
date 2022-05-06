@@ -620,7 +620,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(hex!("110000222233333333444444445500000001"));
+        static ref TEST_KEY: Key = Key::from_slice(hex!(&"110000222233333333444444445500000001"));
     }
 
     #[test]
