@@ -388,8 +388,8 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl Iterator<Item = &Arc<dyn Layer>> {
-        self.historic_layers.iter().map(|e| e.layer.clone())
+    pub fn iter_historic_layers(&self) -> Box<dyn Iterator<Item = Arc<dyn Layer>> + '_> {
+        Box::new(self.historic_layers.iter().map(|e| e.layer.clone()))
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
