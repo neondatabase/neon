@@ -1,0 +1,23 @@
+on: [push]
+
+jobs:
+  build_and_test:
+    runs-on: [self-hosted, Linux]
+    container:
+      image: zimg/rust:1.58
+
+    steps:
+      - name: Fix permissions
+        run: sudo chmod -R a+rwx /__w/
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Install rust toolchain 1.58
+        run: rustup default 1.58
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
