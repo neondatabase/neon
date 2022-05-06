@@ -37,7 +37,7 @@ impl Key {
     /// As far as Zenith is not supporting tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
+        assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
         (((self.field1 & 0xf) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
@@ -620,7 +620,7 @@ mod tests {
     use lazy_static::lazy_static;
 
     lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(&hex!("110000222233333333444444445500000001"));
+        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
     }
 
     #[test]
@@ -663,9 +663,9 @@ mod tests {
         use std::str::from_utf8;
 
         #[allow(non_snake_case)]
-        let TEST_KEY_A: Key = Key::from_hex("110000222233333333444444445500000001").unwrap();
+        let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
         #[allow(non_snake_case)]
-        let TEST_KEY_B: Key = Key::from_hex("110000222233333333444444445500000002").unwrap();
+        let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
         writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
