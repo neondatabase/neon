@@ -1,10 +1,12 @@
 on: [push]
-
 jobs:
-  build_and_test:
+  check-codestyle-rust:
     runs-on: [self-hosted, Linux]
+    strategy:
+      matrix:
+        rust_toolchain: [ 1.58 ]
     container:
-      image: zimg/rust:1.58
+      image: zimg/rust:${{ matrix.rust_toolchain }}
 
     steps:
       - name: Fix permissions
@@ -14,10 +16,36 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 2
+          fetch-depth: 1
 
-      - name: Install rust toolchain 1.58
-        run: rustup default 1.58
+      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
+        run: rustup default ${{ matrix.rust_toolchain }}
 
       - name: rustfmt
         run: cargo fmt --all -- --check
+
+  build-postgres:
+    runs-on: [ self-hosted, Linux ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+
+    container:
+      image: zimg/rust:${{ matrix.rust_toolchain }}
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
+    steps:
+      - name: Fix permissions
+        run: sudo chmod -R a+rwx /__w/
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      # TODO: Add caching
+
+      - name: Build postgres
+        run: make postgres -j$(nproc)
