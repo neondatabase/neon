@@ -28,8 +28,8 @@ def test_branching(zenith_env_builder: ZenithEnvBuilder, pg_bin):
     pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -S -M prepared'.split() + [connstr])
 
     for i in range(branches):
-        env.zenith_cli.create_branch('b{}'.format(i+1), 'b{}'.format(i))
-        pg = env.postgres.create_start('b{}'.format(i+1))
+        env.zenith_cli.create_branch('b{}'.format(i + 1), 'b{}'.format(i))
+        pg = env.postgres.create_start('b{}'.format(i + 1))
         connstr = pg.connstr()
         pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -N -M prepared'.split() + [connstr])
         pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -S -M prepared'.split() + [connstr])
