@@ -183,5 +183,6 @@ jobs:
       - name: Run yapf to ensure code format
         run: poetry run yapf --recursive --diff .
 
-      - name: Run mypy to check types
-        run: poetry run mypy .
+      # TOOD: Need to upgrade python to 3.9 in runner image
+      #- name: Run mypy to check types
+      #  run: poetry run mypy .
