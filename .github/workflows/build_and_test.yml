@@ -10,12 +10,12 @@ jobs:
     strategy:
       matrix:
         rust_toolchain: [ 1.58 ]
-    container:
-      image: zimg/rust:${{ matrix.rust_toolchain }}
+#    container:
+#      image: zimg/rust:${{ matrix.rust_toolchain }}
 
     steps:
-      - name: Fix permissions
-        run: sudo chmod -R a+rwx /__w/
+#      - name: Fix permissions
+#        run: sudo chmod -R a+rwx /__w/
 
       - name: Checkout
         uses: actions/checkout@v3
@@ -36,13 +36,13 @@ jobs:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
 
-    container:
-      image: zimg/rust:${{ matrix.rust_toolchain }}
+#    container:
+#      image: zimg/rust:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
-      - name: Fix permissions
-        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
+#      - name: Fix permissions
+#        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
 
       - name: Checkout
         uses: actions/checkout@v3
@@ -85,14 +85,14 @@ jobs:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
 
-    container:
-      image: zimg/rust:${{ matrix.rust_toolchain }}
+#    container:
+#      image: zimg/rust:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
 
     steps:
-      - name: Fix permissions
-        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
+#      - name: Fix permissions
+#        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
 
       - name: Checkout
         uses: actions/checkout@v3
