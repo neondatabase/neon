@@ -1772,6 +1772,7 @@ dependencies = [
  "crc32c",
  "crossbeam-utils",
  "daemonize",
+ "etcd_broker",
  "fail",
  "futures",
  "git-version",

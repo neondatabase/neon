@@ -1,8 +1,9 @@
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
-from typing import Any, List
+from typing import Any, List, Optional
 from fixtures.log_helper import log
 
 
@@ -80,9 +81,12 @@ def print_gc_result(row):
         .format_map(row))
 
 
-# path to etcd binary or None if not present.
-def etcd_path():
-    return shutil.which("etcd")
+def etcd_path() -> Path:
+    path_output = shutil.which("etcd")
+    if path_output is None:
+        raise RuntimeError('etcd not found in PATH')
+    else:
+        return Path(path_output)
 
 
 # Traverse directory to get total size.

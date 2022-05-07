@@ -124,7 +124,7 @@ impl PageServerNode {
         let broker_endpoints_param = format!(
             "broker_endpoints=[{}]",
             self.env
-                .pageserver
+                .etcd_broker
                 .broker_endpoints
                 .iter()
                 .map(|url| format!("'{url}'"))
@@ -141,6 +141,16 @@ impl PageServerNode {
         args.extend(["-c", &listen_pg_addr_param]);
         args.extend(["-c", &broker_endpoints_param]);
         args.extend(["-c", &id]);
+
+        let broker_etcd_prefix_param = self
+            .env
+            .etcd_broker
+            .broker_etcd_prefix
+            .as_ref()
+            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
+            args.extend(["-c", broker_etcd_prefix_param]);
+        }
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);

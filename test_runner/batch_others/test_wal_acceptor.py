@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.zenith_fixtures import PgBin, Etcd, Postgres, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
-from fixtures.utils import etcd_path, get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
+from fixtures.utils import get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 
@@ -327,7 +327,6 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
 
 # Test that safekeepers push their info to the broker and learn peer status from it
-@pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
 def test_broker(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 3
     zenith_env_builder.enable_local_fs_remote_storage()
@@ -369,7 +368,6 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
-@pytest.mark.skipif(etcd_path() is None, reason="requires etcd which is not present in PATH")
 def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
     zenith_env_builder.num_safekeepers = 2
     # to advance remote_consistent_llsn

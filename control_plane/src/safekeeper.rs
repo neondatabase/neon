@@ -12,7 +12,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::{IntoUrl, Method, Url};
+use reqwest::{IntoUrl, Method};
 use safekeeper::http::models::TimelineCreateRequest;
 use thiserror::Error;
 use utils::{
@@ -75,9 +75,6 @@ pub struct SafekeeperNode {
     pub http_base_url: String,
 
     pub pageserver: Arc<PageServerNode>,
-
-    broker_endpoints: Vec<Url>,
-    broker_etcd_prefix: Option<String>,
 }
 
 impl SafekeeperNode {
@@ -94,8 +91,6 @@ impl SafekeeperNode {
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
-            broker_endpoints: env.broker_endpoints.clone(),
-            broker_etcd_prefix: env.broker_etcd_prefix.clone(),
         }
     }
 
@@ -137,29 +132,21 @@ impl SafekeeperNode {
                 .args(&["--listen-pg", &listen_pg])
                 .args(&["--listen-http", &listen_http])
                 .args(&["--recall", "1 second"])
-                .args(&["--broker-endpoints", &self.broker_endpoints.join(",")])
+                .args(&[
+                    "--broker-endpoints",
+                    &self.env.etcd_broker.comma_separated_endpoints(),
+                ])
                 .arg("--daemonize"),
         );
         if !self.conf.sync {
             cmd.arg("--no-sync");
         }
 
-        if !self.broker_endpoints.is_empty() {
-            cmd.args(&[
-                "--broker-endpoints",
-                &self.broker_endpoints.iter().map(Url::as_str).fold(
-                    String::new(),
-                    |mut comma_separated_urls, url| {
-                        if !comma_separated_urls.is_empty() {
-                            comma_separated_urls.push(',');
-                        }
-                        comma_separated_urls.push_str(url);
-                        comma_separated_urls
-                    },
-                ),
-            ]);
+        let comma_separated_endpoints = self.env.etcd_broker.comma_separated_endpoints();
+        if !comma_separated_endpoints.is_empty() {
+            cmd.args(&["--broker-endpoints", &comma_separated_endpoints]);
         }
-        if let Some(prefix) = self.broker_etcd_prefix.as_deref() {
+        if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
             cmd.args(&["--broker-etcd-prefix", prefix]);
         }
 
