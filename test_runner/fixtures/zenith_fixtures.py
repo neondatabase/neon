@@ -555,7 +555,9 @@ class ZenithEnv:
 
         self.broker = config.broker
         toml += textwrap.dedent(f"""
+            [etcd_broker]
             broker_endpoints = ['{self.broker.client_url()}']
+            etcd_binary_path = '{self.broker.binary_path}'
         """)
 
         # Create config for pageserver
@@ -1837,6 +1839,7 @@ class Etcd:
     datadir: str
     port: int
     peer_port: int
+    binary_path: Path = etcd_path()
     handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
 
     def client_url(self):
@@ -1849,15 +1852,15 @@ class Etcd:
 
     def start(self):
         pathlib.Path(self.datadir).mkdir(exist_ok=True)
-        etcd_full_path = etcd_path()
-        if etcd_full_path is None:
-            raise Exception('etcd binary not found locally')
+
+        if not self.binary_path.is_file():
+            raise RuntimeError(f"etcd broker binary '{self.binary_path}' is not a file")
 
         client_url = self.client_url()
         log.info(f'Starting etcd to listen incoming connections at "{client_url}"')
         with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
             args = [
-                etcd_full_path,
+                self.binary_path,
                 f"--data-dir={self.datadir}",
                 f"--listen-client-urls={client_url}",
                 f"--advertise-client-urls={client_url}",
@@ -1918,8 +1921,7 @@ SKIP_DIRS = frozenset(('pg_wal',
                        'pg_stat_tmp',
                        'pg_subtrans',
                        'pg_logical',
-                       'pg_replslot/wal_proposer_slot',
-                       'pg_xact'))
+                       'pg_replslot/wal_proposer_slot'))
 
 SKIP_FILES = frozenset(('pg_internal.init',
                         'pg.log',

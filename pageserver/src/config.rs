@@ -113,6 +113,10 @@ pub struct PageServerConf {
     pub profiling: ProfilingConfig,
     pub default_tenant_conf: TenantConf,
 
+    /// A prefix to add in etcd brokers before every key.
+    /// Can be used for isolating different pageserver groups withing the same etcd cluster.
+    pub broker_etcd_prefix: String,
+
     /// Etcd broker endpoints to connect to.
     pub broker_endpoints: Vec<Url>,
 }
@@ -179,6 +183,7 @@ struct PageServerConfigBuilder {
     id: BuilderValue<ZNodeId>,
 
     profiling: BuilderValue<ProfilingConfig>,
+    broker_etcd_prefix: BuilderValue<String>,
     broker_endpoints: BuilderValue<Vec<Url>>,
 }
 
@@ -205,7 +210,8 @@ impl Default for PageServerConfigBuilder {
             remote_storage_config: Set(None),
             id: NotSet,
             profiling: Set(ProfilingConfig::Disabled),
-            broker_endpoints: NotSet,
+            broker_etcd_prefix: Set(etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string()),
+            broker_endpoints: Set(Vec::new()),
         }
     }
 }
@@ -266,6 +272,10 @@ impl PageServerConfigBuilder {
         self.broker_endpoints = BuilderValue::Set(broker_endpoints)
     }
 
+    pub fn broker_etcd_prefix(&mut self, broker_etcd_prefix: String) {
+        self.broker_etcd_prefix = BuilderValue::Set(broker_etcd_prefix)
+    }
+
     pub fn id(&mut self, node_id: ZNodeId) {
         self.id = BuilderValue::Set(node_id)
     }
@@ -278,10 +288,6 @@ impl PageServerConfigBuilder {
         let broker_endpoints = self
             .broker_endpoints
             .ok_or(anyhow!("No broker endpoints provided"))?;
-        ensure!(
-            !broker_endpoints.is_empty(),
-            "Empty broker endpoints collection provided"
-        );
 
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -319,6 +325,9 @@ impl PageServerConfigBuilder {
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
             broker_endpoints,
+            broker_etcd_prefix: self
+                .broker_etcd_prefix
+                .ok_or(anyhow!("missing broker_etcd_prefix"))?,
         })
     }
 }
@@ -392,6 +401,7 @@ impl PageServerConf {
                 }
                 "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
+                "broker_etcd_prefix" => builder.broker_etcd_prefix(parse_toml_string(key, item)?),
                 "broker_endpoints" => builder.broker_endpoints(
                     parse_toml_array(key, item)?
                         .into_iter()
@@ -556,6 +566,7 @@ impl PageServerConf {
             profiling: ProfilingConfig::Disabled,
             default_tenant_conf: TenantConf::dummy_conf(),
             broker_endpoints: Vec::new(),
+            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
         }
     }
 }
@@ -700,6 +711,7 @@ id = 10
                 broker_endpoints: vec![broker_endpoint
                     .parse()
                     .expect("Failed to parse a valid broker endpoint URL")],
+                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -743,6 +755,7 @@ id = 10
                 broker_endpoints: vec![broker_endpoint
                     .parse()
                     .expect("Failed to parse a valid broker endpoint URL")],
+                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -795,7 +808,7 @@ broker_endpoints = ['{broker_endpoint}']
                     max_concurrent_syncs: NonZeroUsize::new(
                         remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
                     )
-                    .unwrap(),
+                        .unwrap(),
                     max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
                         .unwrap(),
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),

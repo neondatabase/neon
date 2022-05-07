@@ -25,10 +25,14 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zenith_admin'
 
+broker_etcd_prefix = 'neon'
+broker_endpoints = ['some://etcd']
+
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings.
+The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user, 
+see the corresponding section below.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
 
@@ -45,6 +49,17 @@ All values can be passed as an argument to the pageserver binary, using the `-c`
 Example: `${PAGESERVER_BIN} -c "checkpoint_period = '100 s'" -c "remote_storage={local_path='/some/local/path/'}"`
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
+
+#### broker_endpoints
+
+A list of endpoints (etcd currently) to connect and pull the information from.
+Mandatory, does not have a default, since requires etcd to be started as a separate process,
+and its connection url should be specified separately. 
+
+#### broker_etcd_prefix
+
+A prefix to add for every etcd key used, to separate one group of related instances from another, in the same cluster.
+Default is `neon`.
 
 #### checkpoint_distance
 

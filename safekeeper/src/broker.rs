@@ -34,13 +34,13 @@ pub fn thread_main(conf: SafeKeeperConf) {
 
 /// Key to per timeline per safekeeper data.
 fn timeline_safekeeper_path(
-    broker_prefix: String,
+    broker_etcd_prefix: String,
     zttid: ZTenantTimelineId,
     sk_id: ZNodeId,
 ) -> String {
     format!(
         "{}/{sk_id}",
-        SkTimelineSubscriptionKind::timeline(broker_prefix, zttid).watch_key()
+        SkTimelineSubscriptionKind::timeline(broker_etcd_prefix, zttid).watch_key()
     )
 }
 

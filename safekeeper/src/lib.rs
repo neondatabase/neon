@@ -27,7 +27,6 @@ pub mod defaults {
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-    pub const DEFAULT_NEON_BROKER_PREFIX: &str = "neon";
 
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
@@ -82,7 +81,7 @@ impl Default for SafeKeeperConf {
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: ZNodeId(0),
             broker_endpoints: Vec::new(),
-            broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
+            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             s3_offload_enabled: true,
         }
     }

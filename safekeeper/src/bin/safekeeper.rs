@@ -1,7 +1,7 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
@@ -179,10 +179,6 @@ fn main() -> anyhow::Result<()> {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
         conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
     }
-    ensure!(
-        !conf.broker_endpoints.is_empty(),
-        "No broker endpoints provided"
-    );
     if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
         conf.broker_etcd_prefix = prefix.to_string();
     }
@@ -313,14 +309,18 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         .unwrap();
     threads.push(callmemaybe_thread);
 
-    let conf_ = conf.clone();
-    threads.push(
-        thread::Builder::new()
-            .name("broker thread".into())
-            .spawn(|| {
-                broker::thread_main(conf_);
-            })?,
-    );
+    if !conf.broker_endpoints.is_empty() {
+        let conf_ = conf.clone();
+        threads.push(
+            thread::Builder::new()
+                .name("broker thread".into())
+                .spawn(|| {
+                    broker::thread_main(conf_);
+                })?,
+        );
+    } else {
+        warn!("No broker endpoints providing, starting without node sync")
+    }
 
     let conf_ = conf.clone();
     threads.push(
