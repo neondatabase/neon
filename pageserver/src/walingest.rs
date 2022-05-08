@@ -304,8 +304,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
-            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
-            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            if image[10] != 0 || image[11] != 0 {
+                // !PageIsNew
+                image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
+                image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            }
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
