@@ -24,6 +24,7 @@
 use anyhow::Context;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::{page_is_new, page_set_lsn};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
@@ -304,10 +305,8 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
-            if image[10] != 0 || image[11] != 0 {
-                // !PageIsNew
-                image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
-                image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            if !page_is_new(&image) {
+                page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
