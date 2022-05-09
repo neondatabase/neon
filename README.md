@@ -12,12 +12,10 @@ A Neon installation consists of compute nodes and Neon storage engine.
 Compute nodes are stateless PostgreSQL nodes, backed by Neon storage engine.
 
 Neon storage engine consists of two major components:
-
 - Pageserver. Scalable storage backend for compute nodes.
 - WAL service. The service that receives WAL from compute node and ensures that it is stored durably.
 
 Pageserver consists of:
-
 - Repository - Neon storage implementation.
 - WAL receiver - service that receives WAL from WAL service and stores it in the repository.
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
@@ -28,7 +26,6 @@ Pageserver consists of:
 1. Install build dependencies and other useful packages
 
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
-
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev
@@ -42,7 +39,6 @@ To run the integration tests or Python scripts (not required to use the code), i
 Python (3.7 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
 
 2. Build neon and patched postgres
-
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
@@ -50,7 +46,6 @@ make -j5
 ```
 
 3. Start pageserver and postgres on top of it (should be called from repo root):
-
 ```sh
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
@@ -81,7 +76,6 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=po
 ```
 
 4. Now it is possible to connect to postgres and run some queries:
-
 ```text
 > psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
@@ -96,7 +90,6 @@ postgres=# select * from t;
 ```
 
 5. And create branches and run postgres on them:
-
 ```sh
 # create branch named migration_check
 > ./target/debug/neon_local timeline branch --branch-name migration_check
@@ -142,7 +135,6 @@ postgres=# select * from t;
 
 6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
    you have just started. You can stop them all with one command:
-
 ```sh
 > ./target/debug/neon_local stop
 ```
@@ -166,7 +158,7 @@ To view your `rustdoc` documentation in a browser, try running `cargo doc --no-d
 ### Postgres-specific terms
 
 Due to Neon's very close relation with PostgreSQL internals, there are numerous specific terms used.
-Same applies to certain spelling: i.e. we use MB to denote 1024 \* 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
+Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
 
 To get more familiar with this aspect, refer to:
 
