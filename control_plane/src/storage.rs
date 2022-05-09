@@ -167,6 +167,9 @@ impl PageServerNode {
             );
         }
 
+        // echo the captured output of the init command
+        println!("{}", String::from_utf8_lossy(&init_output.stdout));
+
         Ok(initial_timeline_id)
     }
 

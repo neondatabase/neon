@@ -50,31 +50,29 @@ make -j5
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
-initializing tenantid c03ba6b7ad4c5e9cf556f059ade44229
-created initial timeline 5b014a9e41b4b63ce1a1febc04503636 timeline.lsn 0/169C3C8
-created main branch
+initializing tenantid 9ef87a5bf0d92544f6fafeeb3239695c
+created initial timeline de200bd42b49cc1814412c7e592dd6e9 timeline.lsn 0/16B5A50
+initial timeline de200bd42b49cc1814412c7e592dd6e9 created
 pageserver init succeeded
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting pageserver at 'localhost:64000' in '.zenith'
+Starting pageserver at '127.0.0.1:64000' in '.zenith'
 Pageserver started
-initializing for single for 7676
-Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/single'
+initializing for sk 1 for 7676
+Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/sk1'
 Safekeeper started
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main
-Starting new postgres main on timeline 5b014a9e41b4b63ce1a1febc04503636 ...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/c03ba6b7ad4c5e9cf556f059ade44229/main port=55432
+Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
+Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
 Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
-waiting for server to start.... done
-server started
 
 # check list of running postgres instances
 > ./target/debug/neon_local pg list
-NODE	ADDRESS	TIMELINES	BRANCH NAME	LSN		STATUS
-main	127.0.0.1:55432	5b014a9e41b4b63ce1a1febc04503636	main	0/1609610	running
+ NODE  ADDRESS          TIMELINE                          BRANCH NAME  LSN        STATUS
+ main  127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main         0/16B5BA8  running
 ```
 
 4. Now it is possible to connect to postgres and run some queries:
@@ -95,17 +93,24 @@ postgres=# select * from t;
 ```sh
 # create branch named migration_check
 > ./target/debug/neon_local timeline branch --branch-name migration_check
-Created timeline '0e9331cad6efbafe6a88dd73ae21a5c9' at Lsn 0/16F5830 for tenant: c03ba6b7ad4c5e9cf556f059ade44229. Ancestor timeline: 'main'
+Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant: 9ef87a5bf0d92544f6fafeeb3239695c. Ancestor timeline: 'main'
 
 # check branches tree
 > ./target/debug/neon_local timeline list
- main [5b014a9e41b4b63ce1a1febc04503636]
- ┗━ @0/1609610: migration_check [0e9331cad6efbafe6a88dd73ae21a5c9]
+(L) main [de200bd42b49cc1814412c7e592dd6e9]
+(L) ┗━ @0/16F9A00: migration_check [b3b863fa45fa9e57e615f9f2d944e601]
 
 # start postgres on that branch
-> ./target/debug/neon_local pg start migration_check
-Starting postgres node at 'host=127.0.0.1 port=55433 user=stas'
-waiting for server to start.... done
+> ./target/debug/neon_local pg start migration_check --branch-name migration_check
+Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
+Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
+Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=postgres'
+
+# check the new list of running postgres instances
+> ./target/debug/neon_local pg list
+ NODE             ADDRESS          TIMELINE                          BRANCH NAME      LSN        STATUS
+ main             127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main             0/16F9A38  running
+ migration_check  127.0.0.1:55433  b3b863fa45fa9e57e615f9f2d944e601  migration_check  0/16F9A70  running
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
@@ -118,6 +123,14 @@ postgres=# select * from t;
 
 postgres=# insert into t values(2,2);
 INSERT 0 1
+
+# check that the new change doesn't affect the 'main' postgres
+> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+postgres=# select * from t;
+ key | value
+-----+-------
+   1 | 1
+(1 row)
 ```
 
 6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
