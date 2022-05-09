@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::{thread, time};
 
 use anyhow::Result;
@@ -6,16 +6,16 @@ use chrono::{DateTime, Utc};
 use log::{debug, info};
 use postgres::{Client, NoTls};
 
-use crate::zenith::ComputeState;
+use crate::compute::ComputeNode;
 
 const MONITOR_CHECK_INTERVAL: u64 = 500; // milliseconds
 
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
 // XXX: the only expected panic is at `RwLock` unwrap().
-fn watch_compute_activity(state: &Arc<RwLock<ComputeState>>) {
+fn watch_compute_activity(compute: &Arc<ComputeNode>) {
     // Suppose that `connstr` doesn't change
-    let connstr = state.read().unwrap().connstr.clone();
+    let connstr = compute.connstr.clone();
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = Client::connect(&connstr, NoTls);
     let timeout = time::Duration::from_millis(MONITOR_CHECK_INTERVAL);
@@ -46,7 +46,7 @@ fn watch_compute_activity(state: &Arc<RwLock<ComputeState>>) {
                             AND usename != 'zenith_admin';", // XXX: find a better way to filter other monitors?
                         &[],
                     );
-                let mut last_active = state.read().unwrap().last_active;
+                let mut last_active = compute.state.read().unwrap().last_active;
 
                 if let Ok(backs) = backends {
                     let mut idle_backs: Vec<DateTime<Utc>> = vec![];
@@ -83,14 +83,14 @@ fn watch_compute_activity(state: &Arc<RwLock<ComputeState>>) {
                 }
 
                 // Update the last activity in the shared state if we got a more recent one.
-                let mut state = state.write().unwrap();
+                let mut state = compute.state.write().unwrap();
                 if last_active > state.last_active {
                     state.last_active = last_active;
                     debug!("set the last compute activity time to: {}", last_active);
                 }
             }
             Err(e) => {
-                info!("cannot connect to postgres: {}, retrying", e);
+                debug!("cannot connect to postgres: {}, retrying", e);
 
                 // Establish a new connection and try again.
                 client = Client::connect(&connstr, NoTls);
@@ -100,7 +100,7 @@ fn watch_compute_activity(state: &Arc<RwLock<ComputeState>>) {
 }
 
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<RwLock<ComputeState>>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_monitor(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
 
     Ok(thread::Builder::new()
