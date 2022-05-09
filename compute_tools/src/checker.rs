@@ -1,11 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use log::error;
 use postgres::Client;
 use tokio_postgres::NoTls;
 
-use crate::zenith::ComputeState;
+use crate::compute::ComputeNode;
 
 pub fn create_writablity_check_data(client: &mut Client) -> Result<()> {
     let query = "
@@ -23,9 +23,9 @@ pub fn create_writablity_check_data(client: &mut Client) -> Result<()> {
     Ok(())
 }
 
-pub async fn check_writability(state: &Arc<RwLock<ComputeState>>) -> Result<()> {
-    let connstr = state.read().unwrap().connstr.clone();
-    let (client, connection) = tokio_postgres::connect(&connstr, NoTls).await?;
+pub async fn check_writability(compute: &Arc<ComputeNode>) -> Result<()> {
+    let connstr = &compute.connstr;
+    let (client, connection) = tokio_postgres::connect(connstr, NoTls).await?;
     if client.is_closed() {
         return Err(anyhow!("connection to postgres closed"));
     }

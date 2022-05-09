@@ -4,12 +4,12 @@ mod pg_helpers_tests {
     use std::fs::File;
 
     use compute_tools::pg_helpers::*;
-    use compute_tools::zenith::ClusterSpec;
+    use compute_tools::spec::ComputeSpec;
 
     #[test]
     fn params_serialize() {
         let file = File::open("tests/cluster_spec.json").unwrap();
-        let spec: ClusterSpec = serde_json::from_reader(file).unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
 
         assert_eq!(
             spec.cluster.databases.first().unwrap().to_pg_options(),
@@ -24,7 +24,7 @@ mod pg_helpers_tests {
     #[test]
     fn settings_serialize() {
         let file = File::open("tests/cluster_spec.json").unwrap();
-        let spec: ClusterSpec = serde_json::from_reader(file).unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
 
         assert_eq!(
             spec.cluster.settings.as_pg_settings(),
