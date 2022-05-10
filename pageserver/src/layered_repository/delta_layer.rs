@@ -392,7 +392,7 @@ impl Layer for DeltaLayer {
 
         // A subroutine to dump a single blob
         let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(pos).with_context(|| {
+            let buf = cursor.read_blob(blob_ref.pos()).with_context(|| {
                 format!(
                     "Failed to read blob from virtual file {}",
                     file.file.path.display()
@@ -422,7 +422,7 @@ impl Layer for DeltaLayer {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec);
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
