@@ -91,18 +91,18 @@ so manual installation of dependencies is not recommended.
 A single virtual environment with all dependencies is described in the single `Pipfile`.
 
 ### Prerequisites
-- Install Python 3.7 (the minimal supported version) or greater.
+- Install Python 3.9 (the minimal supported version) or greater.
     - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesnt work as expected.
-    - If you have some trouble with other version you can resolve it by installing Python 3.7 separately, via pyenv or via system package manager e.g.:
+    - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via pyenv or via system package manager e.g.:
       ```bash
       # In Ubuntu
       sudo add-apt-repository ppa:deadsnakes/ppa
       sudo apt update
-      sudo apt install python3.7
+      sudo apt install python3.9
       ```
 - Install `poetry`
     - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation)`.
-- Install dependencies via `./scripts/pysync`. Note that CI uses Python 3.7 so if you have different version some linting tools can yield different result locally vs in the CI.
+- Install dependencies via `./scripts/pysync`. Note that CI uses Python 3.9 so if you have different version some linting tools can yield different result locally vs in the CI.
 
 Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.
