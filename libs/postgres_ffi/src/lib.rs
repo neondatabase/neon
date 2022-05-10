@@ -41,7 +41,7 @@ pub const fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> 
 
 // Check if page is not yet initialized (port of Postgres PageIsInit() macro)
 pub fn page_is_new(pg: &[u8]) -> bool {
-    pg[10] == 0 && pg[11] == 0 // pg_upper == 0
+    pg[14] == 0 && pg[15] == 0 // pg_upper == 0
 }
 
 // ExtractLSN from page header
