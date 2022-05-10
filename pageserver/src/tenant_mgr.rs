@@ -370,6 +370,15 @@ pub fn list_tenants() -> Vec<TenantInfo> {
         .collect()
 }
 
+pub fn get_tenant_by_id(id: ZTenantId) -> Option<TenantInfo> {
+    tenants_state::read_tenants()
+        .get(&id)
+        .map(|tenant| TenantInfo {
+            id,
+            state: tenant.state,
+        })
+}
+
 fn init_local_repositories(
     conf: &'static PageServerConf,
     local_timeline_init_statuses: HashMap<ZTenantId, HashMap<ZTimelineId, LocalTimelineInitStatus>>,
