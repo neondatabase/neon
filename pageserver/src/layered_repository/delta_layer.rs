@@ -40,9 +40,6 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::*;
-// avoid binding to Write (conflicts with std::sio::Write)
-// while being able to use std::fmt::Write's methods
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
@@ -384,6 +381,33 @@ impl Layer for DeltaLayer {
             None => None,
         };
 
+        // A subroutine to dump a single blob
+        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
+            let buf = cursor.read_blob(blob_ref.pos())?;
+            let val = if let Some(decompressor) = &mut decompressor {
+                let decompressed = decompressor
+                    .decompress(&buf, config::ZSTD_DECOMPRESS_BUFFER_LIMIT)?;
+                Value::des(&decompressed)
+            } else {
+                Value::des(&buf)
+            }?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec);
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        };
+
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
@@ -392,41 +416,10 @@ impl Layer for DeltaLayer {
                 let key = DeltaKey::extract_key_from_buf(delta_key);
                 let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
 
-                let mut desc = String::new();
-                match cursor.read_blob(blob_ref.pos()) {
-                    Ok(buf) => {
-                        let val = if let Some(decompressor) = &mut decompressor {
-                            let decompressed = decompressor
-                                .decompress(&buf, config::ZSTD_DECOMPRESS_BUFFER_LIMIT)
-                                .unwrap();
-                            Value::des(&decompressed)
-                        } else {
-                            Value::des(&buf)
-                        };
-                        match val {
-                            Ok(Value::Image(img)) => {
-                                write!(&mut desc, " img {} bytes", img.len()).unwrap();
-                            }
-                            Ok(Value::WalRecord(rec)) => {
-                                let wal_desc = walrecord::describe_wal_record(&rec);
-                                write!(
-                                    &mut desc,
-                                    " rec {} bytes will_init: {} {}",
-                                    buf.len(),
-                                    rec.will_init(),
-                                    wal_desc
-                                )
-                                .unwrap();
-                            }
-                            Err(err) => {
-                                write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        write!(&mut desc, " READ ERROR: {}", err).unwrap();
-                    }
-                }
+                let desc = match dump_blob(blob_ref) {
+                    Ok(desc) => desc,
+                    Err(err) => format!("ERROR: {}", err),
+                };
                 println!("  key {} at {}: {}", key, lsn, desc);
                 true
             },
