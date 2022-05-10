@@ -58,7 +58,8 @@ rusoto_core = "0.47"
 rusoto_s3 = "0.47"
 async-trait = "0.1"
 
-zstd = "0.11.1"
+# 'experimental' is needed for the `zstd::bulk::Decompressor::upper_bound` function.
+zstd = { version = "0.11.1", features = ["experimental"] }
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }

@@ -73,7 +73,7 @@ pub struct BlockCursor<R>
 where
     R: BlockReader,
 {
-    pub reader: R,
+    reader: R,
     /// last accessed page
     cache: Option<(u32, R::BlockLease)>,
 }
