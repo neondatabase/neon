@@ -9,14 +9,16 @@
 mod exchange;
 mod key;
 mod messages;
-mod password;
 mod secret;
 mod signature;
 
-pub use secret::*;
+#[cfg(test)]
+mod password;
 
 pub use exchange::Exchange;
+pub use key::ScramKey;
 pub use secret::ServerSecret;
+pub use secret::*;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};

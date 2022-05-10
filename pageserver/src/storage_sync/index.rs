@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Ok};
+use anyhow::{anyhow, Context, Ok};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
@@ -113,7 +113,7 @@ impl RemoteTimelineIndex {
         awaits_download: bool,
     ) -> anyhow::Result<()> {
         self.timeline_entry_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown timeline sync {}", id))?
+            .ok_or_else(|| anyhow!("unknown timeline sync {id}"))?
             .awaits_download = awaits_download;
         Ok(())
     }
@@ -145,6 +145,13 @@ impl RemoteTimeline {
 
     pub fn add_upload_failures(&mut self, upload_failures: impl IntoIterator<Item = PathBuf>) {
         self.missing_layers.extend(upload_failures.into_iter());
+    }
+
+    pub fn remove_layers(&mut self, layers_to_remove: &HashSet<PathBuf>) {
+        self.timeline_layers
+            .retain(|layer| !layers_to_remove.contains(layer));
+        self.missing_layers
+            .retain(|layer| !layers_to_remove.contains(layer));
     }
 
     /// Lists all layer files in the given remote timeline. Omits the metadata file.

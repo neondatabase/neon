@@ -31,7 +31,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::repository::Repository;
@@ -42,12 +42,16 @@ use crate::thread_mgr::ThreadKind;
 use crate::walreceiver;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
+use postgres_ffi::xlog_utils::to_pg_timestamp;
+
+use postgres_ffi::pg_constants;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
+    DbSize(PagestreamDbSizeRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -56,6 +60,7 @@ enum PagestreamBeMessage {
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
+    DbSize(PagestreamDbSizeResponse),
 }
 
 #[derive(Debug)]
@@ -81,6 +86,13 @@ struct PagestreamGetPageRequest {
 }
 
 #[derive(Debug)]
+struct PagestreamDbSizeRequest {
+    latest: bool,
+    lsn: Lsn,
+    dbnode: u32,
+}
+
+#[derive(Debug)]
 struct PagestreamExistsResponse {
     exists: bool,
 }
@@ -98,6 +110,11 @@ struct PagestreamGetPageResponse {
 #[derive(Debug)]
 struct PagestreamErrorResponse {
     message: String,
+}
+
+#[derive(Debug)]
+struct PagestreamDbSizeResponse {
+    db_size: i64,
 }
 
 impl PagestreamFeMessage {
@@ -141,6 +158,11 @@ impl PagestreamFeMessage {
                 },
                 blkno: body.get_u32(),
             })),
+            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                latest: body.get_u8() != 0,
+                lsn: Lsn::from(body.get_u64()),
+                dbnode: body.get_u32(),
+            })),
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
         }
     }
@@ -170,6 +192,10 @@ impl PagestreamBeMessage {
                 bytes.put_u8(103); /* tag from pagestore_client.h */
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
+            }
+            Self::DbSize(resp) => {
+                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_i64(resp.db_size);
             }
         }
 
@@ -366,6 +392,11 @@ impl PageServerHandler {
                                 .observe_closure_duration(|| {
                                     self.handle_get_page_at_lsn_request(timeline.as_ref(), &req)
                                 }),
+                            PagestreamFeMessage::DbSize(req) => SMGR_QUERY_TIME
+                                .with_label_values(&["get_db_size", &tenant_id, &timeline_id])
+                                .observe_closure_duration(|| {
+                                    self.handle_db_size_request(timeline.as_ref(), &req)
+                                }),
                         };
 
                         let response = response.unwrap_or_else(|e| {
@@ -483,6 +514,32 @@ impl PageServerHandler {
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
+        }))
+    }
+
+    fn handle_db_size_request<R: Repository>(
+        &self,
+        timeline: &DatadirTimeline<R>,
+        req: &PagestreamDbSizeRequest,
+    ) -> Result<PagestreamBeMessage> {
+        let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
+        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+
+        let all_rels = timeline.list_rels(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
+        let mut total_blocks: i64 = 0;
+
+        for rel in all_rels {
+            if rel.forknum == 0 {
+                let n_blocks = timeline.get_rel_size(rel, lsn).unwrap_or(0);
+                total_blocks += n_blocks as i64;
+            }
+        }
+
+        let db_size = total_blocks * pg_constants::BLCKSZ as i64;
+
+        Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
+            db_size,
         }))
     }
 
@@ -805,6 +862,33 @@ impl postgres_backend::Handler for PageServerHandler {
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("get_lsn_by_timestamp ") {
+            // Locate LSN of last transaction with timestamp less or equal than sppecified
+            // TODO lazy static
+            let re = Regex::new(r"^get_lsn_by_timestamp ([[:xdigit:]]+) ([[:xdigit:]]+) '(.*)'$")
+                .unwrap();
+            let caps = re
+                .captures(query_string)
+                .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
+
+            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
+            let timestamp_pg = to_pg_timestamp(timestamp);
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+                b"lsn",
+            )]))?;
+            let result = match timeline.find_lsn_for_timestamp(timestamp_pg)? {
+                LsnForTimestamp::Present(lsn) => format!("{}", lsn),
+                LsnForTimestamp::Future(_lsn) => "future".into(),
+                LsnForTimestamp::Past(_lsn) => "past".into(),
+            };
+            pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
+            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             bail!("unknown command");
         }

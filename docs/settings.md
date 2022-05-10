@@ -6,7 +6,6 @@ If there's no such file during `init` phase of the server, it creates the file i
 There's a possibility to pass an arbitrary config value to the pageserver binary as an argument: such values override
 the values in the config file, if any are specified for the same key and get into the final config during init phase.
 
-
 ### Config example
 
 ```toml
@@ -35,9 +34,9 @@ Yet, it validates the config values it can (e.g. postgres install dir) and error
 
 Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#table) in TOML specification and
 
-* either has to be placed in the config after the table-less values such as `initial_superuser_name = 'zenith_admin'`
+- either has to be placed in the config after the table-less values such as `initial_superuser_name = 'zenith_admin'`
 
-* or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
+- or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
 
 ### Config values
 
@@ -57,7 +56,7 @@ but it will trigger a checkpoint operation to get it back below the
 limit.
 
 `checkpoint_distance` also determines how much WAL needs to be kept
-durable in the safekeeper.  The safekeeper must have capacity to hold
+durable in the safekeeper. The safekeeper must have capacity to hold
 this much WAL, with some headroom, otherwise you can get stuck in a
 situation where the safekeeper is full and stops accepting new WAL,
 but the pageserver is not flushing out and releasing the space in the
@@ -72,7 +71,7 @@ The unit is # of bytes.
 
 Every `compaction_period` seconds, the page server checks if
 maintenance operations, like compaction, are needed on the layer
-files.  Default is 1 s, which should be fine.
+files. Default is 1 s, which should be fine.
 
 #### compaction_target_size
 
@@ -163,15 +162,11 @@ bucket_region = 'eu-north-1'
 # Optional, pageserver uses entire bucket if the prefix is not specified.
 prefix_in_bucket = '/some/prefix/'
 
-# Access key to connect to the bucket ("login" part of the credentials)
-access_key_id = 'SOMEKEYAAAAASADSAH*#'
-
-# Secret access key to connect to the bucket ("password" part of the credentials)
-secret_access_key = 'SOMEsEcReTsd292v'
-
 # S3 API query limit to avoid getting errors/throttling from AWS.
 concurrency_limit = 100
 ```
+
+If no IAM bucket access is used during the remote storage usage, use the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables to set the access credentials.
 
 ###### General remote storage configuration
 
@@ -183,12 +178,11 @@ Besides, there are parameters common for all types of remote storage that can be
 ```toml
 [remote_storage]
 # Max number of concurrent timeline synchronized (layers uploaded or downloaded) with the remote storage at the same time.
-max_concurrent_timelines_sync = 50
+max_concurrent_syncs = 50
 
 # Max number of errors a single task can have before it's considered failed and not attempted to run anymore.
 max_sync_errors = 10
 ```
-
 
 ## safekeeper
 

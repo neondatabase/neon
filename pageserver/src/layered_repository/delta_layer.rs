@@ -222,6 +222,10 @@ impl Layer for DeltaLayer {
         PathBuf::from(self.layer_name().to_string())
     }
 
+    fn local_path(&self) -> Option<PathBuf> {
+        Some(self.path())
+    }
+
     fn get_value_reconstruct_data(
         &self,
         key: Key,
@@ -388,17 +392,31 @@ impl Layer for DeltaLayer {
 
         // A subroutine to dump a single blob
         let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(blob_ref.pos())?;
-            let val = if let Some(decompressor) = &mut decompressor {
+            let buf = cursor.read_blob(pos).with_context(|| {
+                format!(
+                    "Failed to read blob from virtual file {}",
+                    file.file.path.display()
+                )
+            })?;
+            let decompressed_buf = if let Some(decompressor) = &mut decompressor {
                 let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
                     .ok_or_else(|| anyhow!("could not get decompressed length"))?;
                 decompress_buf.clear();
                 decompress_buf.reserve(decompressed_max_len);
                 let _ = decompressor.decompress_to_buffer(&buf, &mut decompress_buf);
-                Value::des(&decompress_buf)
+                &decompress_buf
             } else {
-                Value::des(&buf)
-            }?;
+                &buf
+            };
+
+            let val = Value::des(decompressed_buf)
+                .with_context(|| {
+                    format!(
+                        "Failed to deserialize file blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
+
             let desc = match val {
                 Value::Image(img) => {
                     format!(" img {} bytes", img.len())

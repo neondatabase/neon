@@ -9,8 +9,8 @@ pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod profiling;
 pub mod reltag;
-pub mod remote_storage;
 pub mod repository;
+pub mod storage_sync;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_threads;
@@ -67,7 +67,7 @@ pub type RepositoryImpl = LayeredRepository;
 
 pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;
 
-pub fn shutdown_pageserver() {
+pub fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint thread. This prevents new connections from
     // being accepted.
     thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
@@ -94,5 +94,5 @@ pub fn shutdown_pageserver() {
     thread_mgr::shutdown_threads(None, None, None);
 
     info!("Shut down successfully completed");
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }

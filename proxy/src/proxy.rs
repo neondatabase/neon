@@ -73,7 +73,7 @@ pub async fn thread_main(
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -144,9 +144,14 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
 
                 // Here and forth: `or_else` demands that we use a future here
-                let creds = async { params.try_into() }
+                let mut creds: auth::ClientCredentials = async { params.try_into() }
                     .or_else(|e| stream.throw_error(e))
                     .await?;
+
+                // Set SNI info when available
+                if let Stream::Tls { tls } = stream.get_ref() {
+                    creds.sni_data = tls.get_ref().1.sni_hostname().map(|s| s.to_owned());
+                }
 
                 break Ok(Some((stream, creds)));
             }
@@ -174,7 +179,7 @@ impl<S> Client<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(
         self,
@@ -185,10 +190,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 
         // Authenticate and connect to a compute node.
         let auth = creds.authenticate(config, &mut stream).await;
-        let db_info = async { auth }.or_else(|e| stream.throw_error(e)).await?;
+        let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
         let (db, version, cancel_closure) =
-            db_info.connect().or_else(|e| stream.throw_error(e)).await?;
+            node.connect().or_else(|e| stream.throw_error(e)).await?;
         let cancel_key_data = session.enable_cancellation(cancel_closure);
 
         stream

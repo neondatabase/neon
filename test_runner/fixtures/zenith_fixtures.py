@@ -472,20 +472,16 @@ class ZenithEnvBuilder:
 
         mock_endpoint = self.s3_mock_server.endpoint()
         mock_region = self.s3_mock_server.region()
-        mock_access_key = self.s3_mock_server.access_key()
-        mock_secret_key = self.s3_mock_server.secret_key()
         boto3.client(
             's3',
             endpoint_url=mock_endpoint,
             region_name=mock_region,
-            aws_access_key_id=mock_access_key,
-            aws_secret_access_key=mock_secret_key,
+            aws_access_key_id=self.s3_mock_server.access_key(),
+            aws_secret_access_key=self.s3_mock_server.secret_key(),
         ).create_bucket(Bucket=bucket_name)
         self.pageserver_remote_storage = S3Storage(bucket=bucket_name,
                                                    endpoint=mock_endpoint,
-                                                   region=mock_region,
-                                                   access_key=mock_access_key,
-                                                   secret_key=mock_secret_key)
+                                                   region=mock_region)
 
     def __enter__(self):
         return self
@@ -811,8 +807,6 @@ class LocalFsStorage:
 class S3Storage:
     bucket: str
     region: str
-    access_key: Optional[str]
-    secret_key: Optional[str]
     endpoint: Optional[str]
 
 
@@ -980,12 +974,32 @@ class ZenithCli:
             res.check_returncode()
             return res
 
+    def pageserver_enabled_features(self) -> Any:
+        bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+        args = [bin_pageserver, '--enabled-features']
+        log.info('Running command "{}"'.format(' '.join(args)))
+
+        res = subprocess.run(args,
+                             check=True,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        log.info(f"pageserver_enabled_features success: {res.stdout}")
+        return json.loads(res.stdout)
+
     def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start', *overrides]
         append_pageserver_param_overrides(start_args,
                                           self.env.pageserver.remote_storage,
                                           self.env.pageserver.config_override)
-        return self.raw_cli(start_args)
+
+        s3_env_vars = None
+        if self.env.s3_mock_server:
+            s3_env_vars = {
+                'AWS_ACCESS_KEY_ID': self.env.s3_mock_server.access_key(),
+                'AWS_SECRET_ACCESS_KEY': self.env.s3_mock_server.secret_key(),
+            }
+        return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
         cmd = ['pageserver', 'stop']
@@ -1080,6 +1094,7 @@ class ZenithCli:
 
     def raw_cli(self,
                 arguments: List[str],
+                extra_env_vars: Optional[Dict[str, str]] = None,
                 check_return_code=True) -> 'subprocess.CompletedProcess[str]':
         """
         Run "zenith" with the specified arguments.
@@ -1095,7 +1110,7 @@ class ZenithCli:
 
         assert type(arguments) == list
 
-        bin_zenith = os.path.join(str(zenith_binpath), 'zenith')
+        bin_zenith = os.path.join(str(zenith_binpath), 'neon_local')
 
         args = [bin_zenith] + arguments
         log.info('Running command "{}"'.format(' '.join(args)))
@@ -1104,9 +1119,10 @@ class ZenithCli:
         env_vars = os.environ.copy()
         env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override
+        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+            env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
         var = 'LLVM_PROFILE_FILE'
@@ -1204,10 +1220,6 @@ def append_pageserver_param_overrides(
             pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
                 bucket_region='{pageserver_remote_storage.region}'"
 
-            if pageserver_remote_storage.access_key is not None:
-                pageserver_storage_override += f",access_key_id='{pageserver_remote_storage.access_key}'"
-            if pageserver_remote_storage.secret_key is not None:
-                pageserver_storage_override += f",secret_access_key='{pageserver_remote_storage.secret_key}'"
             if pageserver_remote_storage.endpoint is not None:
                 pageserver_storage_override += f",endpoint='{pageserver_remote_storage.endpoint}'"
 
@@ -1302,7 +1314,7 @@ class VanillaPostgres(PgProtocol):
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
-            conf_file.writelines(options)
+            conf_file.write("\n".join(options))
 
     def start(self, log_path: Optional[str] = None):
         assert not self.running
@@ -1382,8 +1394,8 @@ def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
 class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
         super().__init__(host="127.0.0.1",
-                         user="pytest",
-                         password="pytest",
+                         user="proxy_user",
+                         password="pytest2",
                          port=port,
                          dbname='postgres')
         self.http_port = 7001
@@ -1399,8 +1411,8 @@ class ZenithProxy(PgProtocol):
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
-        args.extend(["--auth-method", "password"])
-        args.extend(["--static-router", addr])
+        args.extend(["--auth-backend", "postgres"])
+        args.extend(["--auth-endpoint", "postgres://proxy_auth:pytest1@localhost:5432/postgres"])
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1422,7 +1434,8 @@ class ZenithProxy(PgProtocol):
 def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
     """Zenith proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+    vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
+    vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
     with ZenithProxy(4432) as proxy:
         proxy.start_static()
@@ -1571,6 +1584,7 @@ class Postgres(PgProtocol):
         assert self.node_name is not None
         self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
+        self.running = False
 
         return self
 
@@ -1747,6 +1761,7 @@ class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
     remote_consistent_lsn: str
+    timeline_start_lsn: str
 
 
 @dataclass
@@ -1771,7 +1786,8 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'],
-                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'],
+                                        timeline_start_lsn=resj['timeline_start_lsn'])
 
     def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
         res = self.post(

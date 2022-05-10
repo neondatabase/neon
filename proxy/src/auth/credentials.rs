@@ -1,7 +1,7 @@
 //! User credentials used in authentication.
 
 use super::AuthError;
-use crate::compute::DatabaseInfo;
+use crate::compute;
 use crate::config::ProxyConfig;
 use crate::error::UserFacingError;
 use crate::stream::PqStream;
@@ -18,10 +18,22 @@ pub enum ClientCredsParseError {
 impl UserFacingError for ClientCredsParseError {}
 
 /// Various client credentials which we use for authentication.
-#[derive(Debug, PartialEq, Eq)]
+/// Note that we don't store any kind of client key or password here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
+
+    // New console API requires SNI info to determine the cluster name.
+    // Other Auth backends don't need it.
+    pub sni_data: Option<String>,
+}
+
+impl ClientCredentials {
+    pub fn is_existing_user(&self) -> bool {
+        // This logic will likely change in the future.
+        self.user.ends_with("@zenith")
+    }
 }
 
 impl TryFrom<HashMap<String, String>> for ClientCredentials {
@@ -37,7 +49,11 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         let user = get_param("user")?;
         let db = get_param("database")?;
 
-        Ok(Self { user, dbname: db })
+        Ok(Self {
+            user,
+            dbname: db,
+            sni_data: None,
+        })
     }
 }
 
@@ -46,21 +62,9 @@ impl ClientCredentials {
     pub async fn authenticate(
         self,
         config: &ProxyConfig,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> Result<DatabaseInfo, AuthError> {
-        use crate::config::ClientAuthMethod::*;
-        use crate::config::RouterConfig::*;
-        match &config.router_config {
-            Static { host, port } => super::handle_static(host.clone(), *port, client, self).await,
-            Dynamic(Mixed) => {
-                if self.user.ends_with("@zenith") {
-                    super::handle_existing_user(config, client, self).await
-                } else {
-                    super::handle_new_user(config, client).await
-                }
-            }
-            Dynamic(Password) => super::handle_existing_user(config, client, self).await,
-            Dynamic(Link) => super::handle_new_user(config, client).await,
-        }
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) -> Result<compute::NodeInfo, AuthError> {
+        // This method is just a convenient facade for `handle_user`
+        super::handle_user(config, client, self).await
     }
 }

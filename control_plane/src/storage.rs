@@ -167,6 +167,9 @@ impl PageServerNode {
             );
         }
 
+        // echo the captured output of the init command
+        println!("{}", String::from_utf8_lossy(&init_output.stdout));
+
         Ok(initial_timeline_id)
     }
 
@@ -186,8 +189,6 @@ impl PageServerNode {
         );
         io::stdout().flush().unwrap();
 
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
-
         let repo_path = self.repo_path();
         let mut args = vec!["-D", repo_path.to_str().unwrap()];
 
@@ -195,9 +196,11 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
-        fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        let mut cmd = Command::new(self.env.pageserver_bin()?);
+        let mut filled_cmd = fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        filled_cmd = fill_aws_secrets_vars(filled_cmd);
 
-        if !cmd.status()?.success() {
+        if !filled_cmd.status()?.success() {
             bail!(
                 "Pageserver failed to start. See '{}' for details.",
                 self.repo_path().join("pageserver.log").display()
@@ -456,4 +459,13 @@ impl PageServerNode {
 
         Ok(timeline_info_response)
     }
+}
+
+fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+    for env_key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
+        if let Ok(value) = std::env::var(env_key) {
+            cmd = cmd.env(env_key, value);
+        }
+    }
+    cmd
 }

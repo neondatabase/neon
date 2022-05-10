@@ -63,6 +63,10 @@ pub struct LocalEnv {
     #[serde(default)]
     pub broker_endpoints: Option<String>,
 
+    /// A prefix to all to any key when pushing/polling etcd from a node.
+    #[serde(default)]
+    pub broker_etcd_prefix: Option<String>,
+
     pub pageserver: PageServerConf,
 
     #[serde(default)]

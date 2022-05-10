@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use etcd_broker::SkTimelineInfo;
 use postgres_ffi::xlog_utils::TimeLineID;
 
 use postgres_ffi::xlog_utils::XLogSegNo;
@@ -16,7 +17,6 @@ use tracing::*;
 
 use lazy_static::lazy_static;
 
-use crate::broker::SafekeeperInfo;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 use crate::wal_storage;
@@ -30,8 +30,8 @@ use utils::{
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 4;
-const SK_PROTOCOL_VERSION: u32 = 1;
+pub const SK_FORMAT_VERSION: u32 = 5;
+const SK_PROTOCOL_VERSION: u32 = 2;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
@@ -52,7 +52,7 @@ impl TermHistory {
     }
 
     // Parse TermHistory as n_entries followed by TermSwitchEntry pairs
-    pub fn from_bytes(mut bytes: Bytes) -> Result<TermHistory> {
+    pub fn from_bytes(bytes: &mut Bytes) -> Result<TermHistory> {
         if bytes.remaining() < 4 {
             bail!("TermHistory misses len");
         }
@@ -183,6 +183,13 @@ pub struct SafeKeeperState {
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
+    /// Since which LSN this timeline generally starts. Safekeeper might have
+    /// joined later.
+    pub timeline_start_lsn: Lsn,
+    /// Since which LSN safekeeper has (had) WAL for this timeline.
+    /// All WAL segments next to one containing local_start_lsn are
+    /// filled with data from the beginning.
+    pub local_start_lsn: Lsn,
     /// Part of WAL acknowledged by quorum and available locally. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
@@ -231,6 +238,8 @@ impl SafeKeeperState {
                 wal_seg_size: 0,
             },
             proposer_uuid: [0; 16],
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             s3_wal_lsn: Lsn(0),
             peer_horizon_lsn: Lsn(0),
@@ -268,6 +277,7 @@ pub struct ProposerGreeting {
 #[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
     term: u64,
+    node_id: ZNodeId,
 }
 
 /// Vote request sent from proposer to safekeepers
@@ -286,6 +296,7 @@ pub struct VoteResponse {
     flush_lsn: Lsn,
     truncate_lsn: Lsn,
     term_history: TermHistory,
+    timeline_start_lsn: Lsn,
 }
 
 /*
@@ -297,6 +308,7 @@ pub struct ProposerElected {
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
+    pub timeline_start_lsn: Lsn,
 }
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
@@ -387,10 +399,15 @@ impl ProposerAcceptorMessage {
                 }
                 let term = msg_bytes.get_u64_le();
                 let start_streaming_at = msg_bytes.get_u64_le().into();
-                let term_history = TermHistory::from_bytes(msg_bytes)?;
+                let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
+                if msg_bytes.remaining() < 8 {
+                    bail!("ProposerElected message is not complete");
+                }
+                let timeline_start_lsn = msg_bytes.get_u64_le().into();
                 let msg = ProposerElected {
                     term,
                     start_streaming_at,
+                    timeline_start_lsn,
                     term_history,
                 };
                 Ok(ProposerAcceptorMessage::Elected(msg))
@@ -437,6 +454,7 @@ impl AcceptorProposerMessage {
             AcceptorProposerMessage::Greeting(msg) => {
                 buf.put_u64_le('g' as u64);
                 buf.put_u64_le(msg.term);
+                buf.put_u64_le(msg.node_id.0);
             }
             AcceptorProposerMessage::VoteResponse(msg) => {
                 buf.put_u64_le('v' as u64);
@@ -449,6 +467,7 @@ impl AcceptorProposerMessage {
                     buf.put_u64_le(e.term);
                     buf.put_u64_le(e.lsn.into());
                 }
+                buf.put_u64_le(msg.timeline_start_lsn.into());
             }
             AcceptorProposerMessage::AppendResponse(msg) => {
                 buf.put_u64_le('a' as u64);
@@ -511,6 +530,8 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     pub state: CTRL,               // persistent state storage
 
     pub wal_store: WAL,
+
+    node_id: ZNodeId, // safekeeper's node id
 }
 
 impl<CTRL, WAL> SafeKeeper<CTRL, WAL>
@@ -523,6 +544,7 @@ where
         ztli: ZTimelineId,
         state: CTRL,
         mut wal_store: WAL,
+        node_id: ZNodeId,
     ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
             bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
@@ -544,6 +566,7 @@ where
             },
             state,
             wal_store,
+            node_id,
         })
     }
 
@@ -635,6 +658,7 @@ where
         );
         Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
             term: self.state.acceptor_state.term,
+            node_id: self.node_id,
         })))
     }
 
@@ -650,6 +674,7 @@ where
             flush_lsn: self.wal_store.flush_lsn(),
             truncate_lsn: self.state.peer_horizon_lsn,
             term_history: self.get_term_history(),
+            timeline_start_lsn: self.state.timeline_start_lsn,
         };
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.clone();
@@ -705,6 +730,23 @@ where
         // and now adopt term history from proposer
         {
             let mut state = self.state.clone();
+
+            // Remeber point where WAL begins globally, if not yet.
+            if state.timeline_start_lsn == Lsn(0) {
+                state.timeline_start_lsn = msg.timeline_start_lsn;
+                info!(
+                    "setting timeline_start_lsn to {:?}",
+                    state.timeline_start_lsn
+                );
+            }
+
+            // Remember point where WAL begins locally, if not yet. (I doubt the
+            // second condition is ever possible)
+            if state.local_start_lsn == Lsn(0) || state.local_start_lsn >= msg.start_streaming_at {
+                state.local_start_lsn = msg.start_streaming_at;
+                info!("setting local_start_lsn to {:?}", state.local_start_lsn);
+            }
+
             state.acceptor_state.term_history = msg.term_history.clone();
             self.state.persist(&state)?;
         }
@@ -844,7 +886,7 @@ where
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&mut self, sk_info: &SafekeeperInfo) -> Result<()> {
+    pub fn record_safekeeper_info(&mut self, sk_info: &SkTimelineInfo) -> Result<()> {
         let mut sync_control_file = false;
         if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
         {
@@ -896,9 +938,7 @@ where
             ),
             self.state.s3_wal_lsn,
         );
-        let res = horizon_lsn.segment_number(self.state.server.wal_seg_size as usize);
-        info!("horizon is {}, res {}", horizon_lsn, res);
-        res
+        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }
 }
 
@@ -968,7 +1008,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -983,7 +1023,7 @@ mod tests {
         let storage = InMemoryState {
             persisted_state: state,
         };
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store).unwrap();
+        sk = SafeKeeper::new(ztli, storage, sk.wal_store, ZNodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -1000,7 +1040,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
@@ -1023,6 +1063,7 @@ mod tests {
                 term: 1,
                 lsn: Lsn(3),
             }]),
+            timeline_start_lsn: Lsn(0),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .unwrap();

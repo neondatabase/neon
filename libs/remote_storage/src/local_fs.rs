@@ -1,7 +1,7 @@
 //! Local filesystem acting as a remote storage.
-//! Multiple pageservers can use the same "storage" of this kind by using different storage roots.
+//! Multiple API users can use the same "storage" of this kind by using different storage roots.
 //!
-//! This storage used in pageserver tests, but can also be used in cases when a certain persistent
+//! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
 use std::{
@@ -17,18 +17,18 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::remote_storage::storage_sync::path_with_suffix_extension;
+use crate::path_with_suffix_extension;
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 
 pub struct LocalFs {
-    pageserver_workdir: &'static Path,
-    root: PathBuf,
+    working_directory: PathBuf,
+    storage_root: PathBuf,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
-    pub fn new(root: PathBuf, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
+    pub fn new(root: PathBuf, working_directory: PathBuf) -> anyhow::Result<Self> {
         if !root.exists() {
             std::fs::create_dir_all(&root).with_context(|| {
                 format!(
@@ -38,15 +38,15 @@ impl LocalFs {
             })?;
         }
         Ok(Self {
-            pageserver_workdir,
-            root,
+            working_directory,
+            storage_root: root,
         })
     }
 
     fn resolve_in_storage(&self, path: &Path) -> anyhow::Result<PathBuf> {
         if path.is_relative() {
-            Ok(self.root.join(path))
-        } else if path.starts_with(&self.root) {
+            Ok(self.storage_root.join(path))
+        } else if path.starts_with(&self.storage_root) {
             Ok(path.to_path_buf())
         } else {
             bail!(
@@ -85,30 +85,30 @@ impl LocalFs {
 
 #[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
-    type StoragePath = PathBuf;
+    type RemoteObjectId = PathBuf;
 
-    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath> {
-        Ok(self.root.join(
-            strip_path_prefix(self.pageserver_workdir, local_path)
+    fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId> {
+        Ok(self.storage_root.join(
+            strip_path_prefix(&self.working_directory, local_path)
                 .context("local path does not belong to this storage")?,
         ))
     }
 
-    fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf> {
-        let relative_path = strip_path_prefix(&self.root, storage_path)
+    fn local_path(&self, storage_path: &Self::RemoteObjectId) -> anyhow::Result<PathBuf> {
+        let relative_path = strip_path_prefix(&self.storage_root, storage_path)
             .context("local path does not belong to this storage")?;
-        Ok(self.pageserver_workdir.join(relative_path))
+        Ok(self.working_directory.join(relative_path))
     }
 
-    async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
-        get_all_files(&self.root).await
+    async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        get_all_files(&self.storage_root).await
     }
 
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
-        to: &Self::StoragePath,
+        to: &Self::RemoteObjectId,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let target_file_path = self.resolve_in_storage(to)?;
@@ -194,7 +194,7 @@ impl RemoteStorage for LocalFs {
 
     async fn download(
         &self,
-        from: &Self::StoragePath,
+        from: &Self::RemoteObjectId,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<Option<StorageMetadata>> {
         let file_path = self.resolve_in_storage(from)?;
@@ -229,9 +229,9 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn download_range(
+    async fn download_byte_range(
         &self,
-        from: &Self::StoragePath,
+        from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
@@ -288,7 +288,7 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()> {
         let file_path = self.resolve_in_storage(path)?;
         if file_path.exists() && file_path.is_file() {
             Ok(fs::remove_file(file_path).await?)
@@ -354,29 +354,30 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
 
 #[cfg(test)]
 mod pure_tests {
-    use crate::{
-        layered_repository::metadata::METADATA_FILE_NAME,
-        repository::repo_harness::{RepoHarness, TIMELINE_ID},
-    };
+    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn storage_path_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("storage_path_positive")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
-            pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root.clone(),
+            working_directory: workdir.clone(),
+            storage_root: storage_root.clone(),
         };
 
-        let local_path = repo_harness.timeline_path(&TIMELINE_ID).join("file_name");
-        let expected_path = storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?);
+        let local_path = workdir
+            .join("timelines")
+            .join("some_timeline")
+            .join("file_name");
+        let expected_path = storage_root.join(local_path.strip_prefix(&workdir)?);
 
         assert_eq!(
             expected_path,
-            storage.storage_path(&local_path).expect("Matching path should map to storage path normally"),
-            "File paths from pageserver workdir should be stored in local fs storage with the same path they have relative to the workdir"
+            storage.remote_object_id(&local_path).expect("Matching path should map to storage path normally"),
+            "File paths from workdir should be stored in local fs storage with the same path they have relative to the workdir"
         );
 
         Ok(())
@@ -386,7 +387,7 @@ mod pure_tests {
     fn storage_path_negatives() -> anyhow::Result<()> {
         #[track_caller]
         fn storage_path_error(storage: &LocalFs, mismatching_path: &Path) -> String {
-            match storage.storage_path(mismatching_path) {
+            match storage.remote_object_id(mismatching_path) {
                 Ok(wrong_path) => panic!(
                     "Expected path '{}' to error, but got storage path: {:?}",
                     mismatching_path.display(),
@@ -396,16 +397,16 @@ mod pure_tests {
             }
         }
 
-        let repo_harness = RepoHarness::create("storage_path_negatives")?;
+        let workdir = tempdir()?.path().to_owned();
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
-            pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root,
+            working_directory: workdir.clone(),
+            storage_root,
         };
 
-        let error_string = storage_path_error(&storage, &repo_harness.conf.workdir);
+        let error_string = storage_path_error(&storage, &workdir);
         assert!(error_string.contains("does not belong to this storage"));
-        assert!(error_string.contains(repo_harness.conf.workdir.to_str().unwrap()));
+        assert!(error_string.contains(workdir.to_str().unwrap()));
 
         let mismatching_path_str = "/something/else";
         let error_message = storage_path_error(&storage, Path::new(mismatching_path_str));
@@ -414,7 +415,7 @@ mod pure_tests {
             "Error should mention wrong path"
         );
         assert!(
-            error_message.contains(repo_harness.conf.workdir.to_str().unwrap()),
+            error_message.contains(workdir.to_str().unwrap()),
             "Error should mention server workdir"
         );
         assert!(error_message.contains("does not belong to this storage"));
@@ -424,29 +425,28 @@ mod pure_tests {
 
     #[test]
     fn local_path_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("local_path_positive")?;
+        let workdir = tempdir()?.path().to_owned();
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
-            pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root.clone(),
+            working_directory: workdir.clone(),
+            storage_root: storage_root.clone(),
         };
 
         let name = "not a metadata";
-        let local_path = repo_harness.timeline_path(&TIMELINE_ID).join(name);
+        let local_path = workdir.join("timelines").join("some_timeline").join(name);
         assert_eq!(
             local_path,
             storage
-                .local_path(
-                    &storage_root.join(local_path.strip_prefix(&repo_harness.conf.workdir)?)
-                )
+                .local_path(&storage_root.join(local_path.strip_prefix(&workdir)?))
                 .expect("For a valid input, valid local path should be parsed"),
             "Should be able to parse metadata out of the correctly named remote delta file"
         );
 
-        let local_metadata_path = repo_harness
-            .timeline_path(&TIMELINE_ID)
-            .join(METADATA_FILE_NAME);
-        let remote_metadata_path = storage.storage_path(&local_metadata_path)?;
+        let local_metadata_path = workdir
+            .join("timelines")
+            .join("some_timeline")
+            .join("metadata");
+        let remote_metadata_path = storage.remote_object_id(&local_metadata_path)?;
         assert_eq!(
             local_metadata_path,
             storage
@@ -472,11 +472,10 @@ mod pure_tests {
             }
         }
 
-        let repo_harness = RepoHarness::create("local_path_negatives")?;
         let storage_root = PathBuf::from("somewhere").join("else");
         let storage = LocalFs {
-            pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root,
+            working_directory: tempdir()?.path().to_owned(),
+            storage_root,
         };
 
         let totally_wrong_path = "wrong_wrong_wrong";
@@ -488,16 +487,19 @@ mod pure_tests {
 
     #[test]
     fn download_destination_matches_original_path() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_destination_matches_original_path")?;
-        let original_path = repo_harness.timeline_path(&TIMELINE_ID).join("some name");
+        let workdir = tempdir()?.path().to_owned();
+        let original_path = workdir
+            .join("timelines")
+            .join("some_timeline")
+            .join("some name");
 
         let storage_root = PathBuf::from("somewhere").join("else");
         let dummy_storage = LocalFs {
-            pageserver_workdir: &repo_harness.conf.workdir,
-            root: storage_root,
+            working_directory: workdir,
+            storage_root,
         };
 
-        let storage_path = dummy_storage.storage_path(&original_path)?;
+        let storage_path = dummy_storage.remote_object_id(&original_path)?;
         let download_destination = dummy_storage.local_path(&storage_path)?;
 
         assert_eq!(
@@ -512,18 +514,17 @@ mod pure_tests {
 #[cfg(test)]
 mod fs_tests {
     use super::*;
-    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     use std::{collections::HashMap, io::Write};
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn upload_file() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("upload_file")?;
+        let workdir = tempdir()?.path().to_owned();
         let storage = create_storage()?;
 
         let (file, size) = create_file_for_upload(
-            &storage.pageserver_workdir.join("whatever"),
+            &storage.working_directory.join("whatever"),
             "whatever_contents",
         )
         .await?;
@@ -538,14 +539,14 @@ mod fs_tests {
         }
         assert!(storage.list().await?.is_empty());
 
-        let target_path_1 = upload_dummy_file(&repo_harness, &storage, "upload_1", None).await?;
+        let target_path_1 = upload_dummy_file(&workdir, &storage, "upload_1", None).await?;
         assert_eq!(
             storage.list().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&repo_harness, &storage, "upload_2", None).await?;
+        let target_path_2 = upload_dummy_file(&workdir, &storage, "upload_2", None).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -556,17 +557,16 @@ mod fs_tests {
     }
 
     fn create_storage() -> anyhow::Result<LocalFs> {
-        let pageserver_workdir = Box::leak(Box::new(tempdir()?.path().to_owned()));
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), pageserver_workdir)?;
-        Ok(storage)
+        LocalFs::new(tempdir()?.path().to_owned(), tempdir()?.path().to_owned())
     }
 
     #[tokio::test]
     async fn download_file() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_file")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
         let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let metadata = storage.download(&upload_target, &mut content_bytes).await?;
@@ -597,14 +597,15 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_file_range_positive")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
         let mut full_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let metadata = storage
-            .download_range(&upload_target, 0, None, &mut full_range_bytes)
+            .download_byte_range(&upload_target, 0, None, &mut full_range_bytes)
             .await?;
         assert!(
             metadata.is_none(),
@@ -620,7 +621,7 @@ mod fs_tests {
         let mut zero_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let same_byte = 1_000_000_000;
         let metadata = storage
-            .download_range(
+            .download_byte_range(
                 &upload_target,
                 same_byte,
                 Some(same_byte + 1), // exclusive end
@@ -642,7 +643,7 @@ mod fs_tests {
 
         let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let metadata = storage
-            .download_range(
+            .download_byte_range(
                 &upload_target,
                 0,
                 Some(first_part_local.len() as u64),
@@ -664,7 +665,7 @@ mod fs_tests {
 
         let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let metadata = storage
-            .download_range(
+            .download_byte_range(
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
@@ -689,16 +690,17 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_negative() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_file_range_negative")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
         let start = 10000;
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_range(&upload_target, start, Some(end), &mut io::sink())
+            .download_byte_range(&upload_target, start, Some(end), &mut io::sink())
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -712,7 +714,7 @@ mod fs_tests {
 
         let non_existing_path = PathBuf::from("somewhere").join("else");
         match storage
-            .download_range(&non_existing_path, 1, Some(3), &mut io::sink())
+            .download_byte_range(&non_existing_path, 1, Some(3), &mut io::sink())
             .await
         {
             Ok(_) => panic!("Should not allow downloading non-existing storage file ranges"),
@@ -727,10 +729,11 @@ mod fs_tests {
 
     #[tokio::test]
     async fn delete_file() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("delete_file")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&repo_harness, &storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
         storage.delete(&upload_target).await?;
         assert!(storage.list().await?.is_empty());
@@ -748,7 +751,8 @@ mod fs_tests {
 
     #[tokio::test]
     async fn file_with_metadata() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_file")?;
+        let workdir = tempdir()?.path().to_owned();
+
         let storage = create_storage()?;
         let upload_name = "upload_1";
         let metadata = StorageMetadata(HashMap::from([
@@ -756,7 +760,7 @@ mod fs_tests {
             ("two".to_string(), "2".to_string()),
         ]));
         let upload_target =
-            upload_dummy_file(&repo_harness, &storage, upload_name, Some(metadata.clone())).await?;
+            upload_dummy_file(&workdir, &storage, upload_name, Some(metadata.clone())).await?;
 
         let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let full_download_metadata = storage.download(&upload_target, &mut content_bytes).await?;
@@ -780,7 +784,7 @@ mod fs_tests {
 
         let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         let partial_download_metadata = storage
-            .download_range(
+            .download_byte_range(
                 &upload_target,
                 0,
                 Some(first_part_local.len() as u64),
@@ -805,16 +809,16 @@ mod fs_tests {
     }
 
     async fn upload_dummy_file(
-        harness: &RepoHarness<'_>,
+        workdir: &Path,
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<PathBuf> {
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
-        let relative_timeline_path = timeline_path.strip_prefix(&harness.conf.workdir)?;
-        let storage_path = storage.root.join(relative_timeline_path).join(name);
+        let timeline_path = workdir.join("timelines").join("some_timeline");
+        let relative_timeline_path = timeline_path.strip_prefix(&workdir)?;
+        let storage_path = storage.storage_root.join(relative_timeline_path).join(name);
 
-        let from_path = storage.pageserver_workdir.join(name);
+        let from_path = storage.working_directory.join(name);
         let (file, size) = create_file_for_upload(&from_path, &dummy_contents(name)).await?;
         storage.upload(file, size, &storage_path, metadata).await?;
         Ok(storage_path)

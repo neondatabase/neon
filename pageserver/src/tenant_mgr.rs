@@ -4,8 +4,9 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::DatadirTimeline;
-use crate::remote_storage::{self, LocalTimelineInitStatus, RemoteIndex, SyncStartupData};
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
+use crate::storage_sync::index::RemoteIndex;
+use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -96,7 +97,7 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
     let SyncStartupData {
         remote_index,
         local_timeline_init_statuses,
-    } = remote_storage::start_local_timeline_sync(conf)
+    } = storage_sync::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
     init_local_repositories(conf, local_timeline_init_statuses, &remote_index)?;
     Ok(remote_index)
@@ -244,7 +245,7 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
                 Some(tenant_id),
                 None,
                 "Compactor thread",
-                true,
+                false,
                 move || crate::tenant_threads::compact_loop(tenant_id),
             )?;
 
@@ -253,7 +254,7 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
                 Some(tenant_id),
                 None,
                 "GC thread",
-                true,
+                false,
                 move || crate::tenant_threads::gc_loop(tenant_id),
             )
             .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));

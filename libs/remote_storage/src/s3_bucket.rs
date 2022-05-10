@@ -1,7 +1,7 @@
 //! AWS S3 storage wrapper around `rusoto` library.
 //!
 //! Respects `prefix_in_bucket` property from [`S3Config`],
-//! allowing multiple pageservers to independently work with the same S3 bucket, if
+//! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
 use std::path::{Path, PathBuf};
@@ -19,16 +19,13 @@ use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
-use crate::{
-    config::S3Config,
-    remote_storage::{strip_path_prefix, RemoteStorage},
-};
+use crate::{strip_path_prefix, RemoteStorage, S3Config};
 
 use super::StorageMetadata;
 
-const S3_FILE_SEPARATOR: char = '/';
+const S3_PREFIX_SEPARATOR: char = '/';
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct S3ObjectKey(String);
 
 impl S3ObjectKey {
@@ -36,11 +33,7 @@ impl S3ObjectKey {
         &self.0
     }
 
-    fn download_destination(
-        &self,
-        pageserver_workdir: &Path,
-        prefix_to_strip: Option<&str>,
-    ) -> PathBuf {
+    fn download_destination(&self, workdir: &Path, prefix_to_strip: Option<&str>) -> PathBuf {
         let path_without_prefix = match prefix_to_strip {
             Some(prefix) => self.0.strip_prefix(prefix).unwrap_or_else(|| {
                 panic!(
@@ -51,9 +44,9 @@ impl S3ObjectKey {
             None => &self.0,
         };
 
-        pageserver_workdir.join(
+        workdir.join(
             path_without_prefix
-                .split(S3_FILE_SEPARATOR)
+                .split(S3_PREFIX_SEPARATOR)
                 .collect::<PathBuf>(),
         )
     }
@@ -61,7 +54,7 @@ impl S3ObjectKey {
 
 /// AWS S3 storage.
 pub struct S3Bucket {
-    pageserver_workdir: &'static Path,
+    workdir: PathBuf,
     client: S3Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
@@ -73,7 +66,7 @@ pub struct S3Bucket {
 
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
-    pub fn new(aws_config: &S3Config, pageserver_workdir: &'static Path) -> anyhow::Result<Self> {
+    pub fn new(aws_config: &S3Config, workdir: PathBuf) -> anyhow::Result<Self> {
         debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
@@ -89,8 +82,11 @@ impl S3Bucket {
                 .context("Failed to parse the s3 region from config")?,
         };
         let request_dispatcher = HttpClient::new().context("Failed to create S3 http client")?;
-        let client = if aws_config.access_key_id.is_none() && aws_config.secret_access_key.is_none()
-        {
+
+        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+
+        let client = if access_key_id.is_none() && secret_access_key.is_none() {
             debug!("Using IAM-based AWS access");
             S3Client::new_with(request_dispatcher, InstanceMetadataProvider::new(), region)
         } else {
@@ -98,8 +94,8 @@ impl S3Bucket {
             S3Client::new_with(
                 request_dispatcher,
                 StaticProvider::new_minimal(
-                    aws_config.access_key_id.clone().unwrap_or_default(),
-                    aws_config.secret_access_key.clone().unwrap_or_default(),
+                    access_key_id.unwrap_or_default(),
+                    secret_access_key.unwrap_or_default(),
                 ),
                 region,
             )
@@ -107,12 +103,12 @@ impl S3Bucket {
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
             let mut prefix = prefix;
-            while prefix.starts_with(S3_FILE_SEPARATOR) {
+            while prefix.starts_with(S3_PREFIX_SEPARATOR) {
                 prefix = &prefix[1..]
             }
 
             let mut prefix = prefix.to_string();
-            while prefix.ends_with(S3_FILE_SEPARATOR) {
+            while prefix.ends_with(S3_PREFIX_SEPARATOR) {
                 prefix.pop();
             }
             prefix
@@ -120,7 +116,7 @@ impl S3Bucket {
 
         Ok(Self {
             client,
-            pageserver_workdir,
+            workdir,
             bucket_name: aws_config.bucket_name.clone(),
             prefix_in_bucket,
             concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
@@ -130,24 +126,23 @@ impl S3Bucket {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    type StoragePath = S3ObjectKey;
+    type RemoteObjectId = S3ObjectKey;
 
-    fn storage_path(&self, local_path: &Path) -> anyhow::Result<Self::StoragePath> {
-        let relative_path = strip_path_prefix(self.pageserver_workdir, local_path)?;
+    fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId> {
+        let relative_path = strip_path_prefix(&self.workdir, local_path)?;
         let mut key = self.prefix_in_bucket.clone().unwrap_or_default();
         for segment in relative_path {
-            key.push(S3_FILE_SEPARATOR);
+            key.push(S3_PREFIX_SEPARATOR);
             key.push_str(&segment.to_string_lossy());
         }
         Ok(S3ObjectKey(key))
     }
 
-    fn local_path(&self, storage_path: &Self::StoragePath) -> anyhow::Result<PathBuf> {
-        Ok(storage_path
-            .download_destination(self.pageserver_workdir, self.prefix_in_bucket.as_deref()))
+    fn local_path(&self, storage_path: &Self::RemoteObjectId) -> anyhow::Result<PathBuf> {
+        Ok(storage_path.download_destination(&self.workdir, self.prefix_in_bucket.as_deref()))
     }
 
-    async fn list(&self) -> anyhow::Result<Vec<Self::StoragePath>> {
+    async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
         let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
@@ -187,7 +182,7 @@ impl RemoteStorage for S3Bucket {
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
-        to: &Self::StoragePath,
+        to: &Self::RemoteObjectId,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let _guard = self
@@ -212,7 +207,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn download(
         &self,
-        from: &Self::StoragePath,
+        from: &Self::RemoteObjectId,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
     ) -> anyhow::Result<Option<StorageMetadata>> {
         let _guard = self
@@ -237,9 +232,9 @@ impl RemoteStorage for S3Bucket {
         Ok(object_output.metadata.map(StorageMetadata))
     }
 
-    async fn download_range(
+    async fn download_byte_range(
         &self,
-        from: &Self::StoragePath,
+        from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
         to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
@@ -274,7 +269,7 @@ impl RemoteStorage for S3Bucket {
         Ok(object_output.metadata.map(StorageMetadata))
     }
 
-    async fn delete(&self, path: &Self::StoragePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()> {
         let _guard = self
             .concurrency_limiter
             .acquire()
@@ -293,34 +288,30 @@ impl RemoteStorage for S3Bucket {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        layered_repository::metadata::METADATA_FILE_NAME,
-        repository::repo_harness::{RepoHarness, TIMELINE_ID},
-    };
+    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn download_destination() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_destination")?;
-
-        let local_path = repo_harness.timeline_path(&TIMELINE_ID).join("test_name");
-        let relative_path = local_path.strip_prefix(&repo_harness.conf.workdir)?;
+        let workdir = tempdir()?.path().to_owned();
+        let local_path = workdir.join("one").join("two").join("test_name");
+        let relative_path = local_path.strip_prefix(&workdir)?;
 
         let key = S3ObjectKey(format!(
             "{}{}",
-            S3_FILE_SEPARATOR,
+            S3_PREFIX_SEPARATOR,
             relative_path
                 .iter()
                 .map(|segment| segment.to_str().unwrap())
                 .collect::<Vec<_>>()
-                .join(&S3_FILE_SEPARATOR.to_string()),
+                .join(&S3_PREFIX_SEPARATOR.to_string()),
         ));
 
         assert_eq!(
             local_path,
-            key.download_destination(&repo_harness.conf.workdir, None),
-            "Download destination should consist of s3 path joined with the pageserver workdir prefix"
+            key.download_destination(&workdir, None),
+            "Download destination should consist of s3 path joined with the workdir prefix"
         );
 
         Ok(())
@@ -328,24 +319,21 @@ mod tests {
 
     #[test]
     fn storage_path_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("storage_path_positive")?;
+        let workdir = tempdir()?.path().to_owned();
 
         let segment_1 = "matching";
         let segment_2 = "file";
-        let local_path = &repo_harness.conf.workdir.join(segment_1).join(segment_2);
+        let local_path = &workdir.join(segment_1).join(segment_2);
 
-        let storage = dummy_storage(&repo_harness.conf.workdir);
+        let storage = dummy_storage(workdir);
 
         let expected_key = S3ObjectKey(format!(
-            "{}{SEPARATOR}{}{SEPARATOR}{}",
+            "{}{S3_PREFIX_SEPARATOR}{segment_1}{S3_PREFIX_SEPARATOR}{segment_2}",
             storage.prefix_in_bucket.as_deref().unwrap_or_default(),
-            segment_1,
-            segment_2,
-            SEPARATOR = S3_FILE_SEPARATOR,
         ));
 
         let actual_key = storage
-            .storage_path(local_path)
+            .remote_object_id(local_path)
             .expect("Matching path should map to S3 path normally");
         assert_eq!(
             expected_key,
@@ -360,7 +348,7 @@ mod tests {
     fn storage_path_negatives() -> anyhow::Result<()> {
         #[track_caller]
         fn storage_path_error(storage: &S3Bucket, mismatching_path: &Path) -> String {
-            match storage.storage_path(mismatching_path) {
+            match storage.remote_object_id(mismatching_path) {
                 Ok(wrong_key) => panic!(
                     "Expected path '{}' to error, but got S3 key: {:?}",
                     mismatching_path.display(),
@@ -370,10 +358,10 @@ mod tests {
             }
         }
 
-        let repo_harness = RepoHarness::create("storage_path_negatives")?;
-        let storage = dummy_storage(&repo_harness.conf.workdir);
+        let workdir = tempdir()?.path().to_owned();
+        let storage = dummy_storage(workdir.clone());
 
-        let error_message = storage_path_error(&storage, &repo_harness.conf.workdir);
+        let error_message = storage_path_error(&storage, &workdir);
         assert!(
             error_message.contains("Prefix and the path are equal"),
             "Message '{}' does not contain the required string",
@@ -387,7 +375,7 @@ mod tests {
             "Error should mention wrong path"
         );
         assert!(
-            error_message.contains(repo_harness.conf.workdir.to_str().unwrap()),
+            error_message.contains(workdir.to_str().unwrap()),
             "Error should mention server workdir"
         );
         assert!(
@@ -401,20 +389,17 @@ mod tests {
 
     #[test]
     fn local_path_positive() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("local_path_positive")?;
-        let storage = dummy_storage(&repo_harness.conf.workdir);
-        let timeline_dir = repo_harness.timeline_path(&TIMELINE_ID);
-        let relative_timeline_path = timeline_dir.strip_prefix(&repo_harness.conf.workdir)?;
+        let workdir = tempdir()?.path().to_owned();
+        let storage = dummy_storage(workdir.clone());
+        let timeline_dir = workdir.join("timelines").join("test_timeline");
+        let relative_timeline_path = timeline_dir.strip_prefix(&workdir)?;
 
         let s3_key = create_s3_key(
             &relative_timeline_path.join("not a metadata"),
             storage.prefix_in_bucket.as_deref(),
         );
         assert_eq!(
-            s3_key.download_destination(
-                &repo_harness.conf.workdir,
-                storage.prefix_in_bucket.as_deref()
-            ),
+            s3_key.download_destination(&workdir, storage.prefix_in_bucket.as_deref()),
             storage
                 .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
@@ -422,14 +407,11 @@ mod tests {
         );
 
         let s3_key = create_s3_key(
-            &relative_timeline_path.join(METADATA_FILE_NAME),
+            &relative_timeline_path.join("metadata"),
             storage.prefix_in_bucket.as_deref(),
         );
         assert_eq!(
-            s3_key.download_destination(
-                &repo_harness.conf.workdir,
-                storage.prefix_in_bucket.as_deref()
-            ),
+            s3_key.download_destination(&workdir, storage.prefix_in_bucket.as_deref()),
             storage
                 .local_path(&s3_key)
                 .expect("For a valid input, valid S3 info should be parsed"),
@@ -441,12 +423,15 @@ mod tests {
 
     #[test]
     fn download_destination_matches_original_path() -> anyhow::Result<()> {
-        let repo_harness = RepoHarness::create("download_destination_matches_original_path")?;
-        let original_path = repo_harness.timeline_path(&TIMELINE_ID).join("some name");
+        let workdir = tempdir()?.path().to_owned();
+        let original_path = workdir
+            .join("timelines")
+            .join("some_timeline")
+            .join("some name");
 
-        let dummy_storage = dummy_storage(&repo_harness.conf.workdir);
+        let dummy_storage = dummy_storage(workdir);
 
-        let key = dummy_storage.storage_path(&original_path)?;
+        let key = dummy_storage.remote_object_id(&original_path)?;
         let download_destination = dummy_storage.local_path(&key)?;
 
         assert_eq!(
@@ -457,9 +442,9 @@ mod tests {
         Ok(())
     }
 
-    fn dummy_storage(pageserver_workdir: &'static Path) -> S3Bucket {
+    fn dummy_storage(workdir: PathBuf) -> S3Bucket {
         S3Bucket {
-            pageserver_workdir,
+            workdir,
             client: S3Client::new("us-east-1".parse().unwrap()),
             bucket_name: "dummy-bucket".to_string(),
             prefix_in_bucket: Some("dummy_prefix/".to_string()),
@@ -471,7 +456,7 @@ mod tests {
         S3ObjectKey(relative_file_path.iter().fold(
             prefix.unwrap_or_default().to_string(),
             |mut path_string, segment| {
-                path_string.push(S3_FILE_SEPARATOR);
+                path_string.push(S3_PREFIX_SEPARATOR);
                 path_string.push_str(segment.to_str().unwrap());
                 path_string
             },

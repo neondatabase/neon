@@ -23,8 +23,8 @@ use utils::{
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::TimelineMetadata,
-    remote_storage::RemoteIndex,
     repository::{LocalTimelineState, Repository},
+    storage_sync::index::RemoteIndex,
     tenant_config::TenantConfOpt,
     DatadirTimeline, RepositoryImpl,
 };

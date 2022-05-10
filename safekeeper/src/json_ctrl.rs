@@ -95,7 +95,7 @@ pub fn handle_json_ctrl(
 /// by sending ProposerGreeting with default server.wal_seg_size.
 fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
     let greeting_request = ProposerAcceptorMessage::Greeting(ProposerGreeting {
-        protocol_version: 1, // current protocol
+        protocol_version: 2, // current protocol
         pg_version: 0,       // unknown
         proposer_id: [0u8; 16],
         system_id: 0,
@@ -124,6 +124,7 @@ fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: L
         term,
         start_streaming_at: lsn,
         term_history: history,
+        timeline_start_lsn: Lsn(0),
     });
 
     spg.timeline.get().process_msg(&proposer_elected_request)?;
@@ -238,13 +239,13 @@ fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
         xl_crc: 0, // crc will be calculated later
     };
 
-    let header_bytes = header.encode();
+    let header_bytes = header.encode().expect("failed to encode header");
     let crc = crc32c_append(0, &data);
     let crc = crc32c_append(crc, &header_bytes[0..xlog_utils::XLOG_RECORD_CRC_OFFS]);
     header.xl_crc = crc;
 
     let mut wal: Vec<u8> = Vec::new();
-    wal.extend_from_slice(&header.encode());
+    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
     wal.extend_from_slice(&data);
 
     // WAL start position must be aligned at 8 bytes,
