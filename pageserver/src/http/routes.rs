@@ -15,6 +15,7 @@ use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
+use crate::walreceiver::get_wal_receiver_entry;
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
     auth::JwtAuth,
@@ -138,6 +139,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
                     remote_consistent_lsn: remote_entry.metadata.disk_consistent_lsn(),
                     awaits_download: remote_entry.awaits_download,
                 }),
+            wal_receiver: None,
         })
     }
 
@@ -214,9 +216,19 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         ));
     }
 
+    let wal_receiver = tokio::task::spawn_blocking(move || {
+        let _enter =
+            info_span!("wal_receiver_get", tenant = %tenant_id, timeline = %timeline_id).entered();
+
+        get_wal_receiver_entry(tenant_id, timeline_id)
+    })
+    .await
+    .map_err(ApiError::from_err)?;
+
     let timeline_info = TimelineInfo {
         tenant_id,
         timeline_id,
+        wal_receiver,
         local: local_timeline_info,
         remote: remote_timeline_info,
     };

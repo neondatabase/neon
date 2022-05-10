@@ -18,6 +18,8 @@ use lazy_static::lazy_static;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -35,15 +37,18 @@ use utils::{
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
-//
-// We keep one WAL Receiver active per timeline.
-//
-#[derive(Debug, Clone)]
+///
+/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
+/// We keep one WAL receiver active per timeline.
+///
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalReceiverEntry {
     thread_id: u64,
     wal_producer_connstr: String,
+    #[serde_as(as = "Option<DisplayFromStr>")]
     last_received_msg_lsn: Option<Lsn>,
-    last_received_msg_ts: Option<SystemTime>,
+    last_received_msg_ts: Option<u128>,
 }
 
 lazy_static! {
@@ -106,7 +111,7 @@ pub fn launch_wal_receiver(
     Ok(())
 }
 
-// Look up a WAL receiver's data in the hash table
+/// Look up a WAL receiver's data in the global `WAL_RECEIVERS`
 pub fn get_wal_receiver_entry(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
@@ -343,7 +348,11 @@ fn walreceiver_main(
                     });
 
                 entry.last_received_msg_lsn = Some(last_lsn);
-                entry.last_received_msg_ts = Some(ts);
+                entry.last_received_msg_ts = Some(
+                    ts.duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("Received message time should be before UNIX EPOCH!")
+                        .as_micros(),
+                );
             }
 
             // Send zenith feedback message.

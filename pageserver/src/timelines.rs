@@ -26,6 +26,7 @@ use crate::{
     repository::{LocalTimelineState, Repository},
     storage_sync::index::RemoteIndex,
     tenant_config::TenantConfOpt,
+    walreceiver::WalReceiverEntry,
     DatadirTimeline, RepositoryImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
@@ -131,6 +132,8 @@ pub struct TimelineInfo {
     pub timeline_id: ZTimelineId,
     pub local: Option<LocalTimelineInfo>,
     pub remote: Option<RemoteTimelineInfo>,
+
+    pub wal_receiver: Option<WalReceiverEntry>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -403,5 +406,7 @@ pub(crate) fn create_timeline(
         timeline_id: new_timeline_id,
         local: Some(new_timeline_info),
         remote: None,
+
+        wal_receiver: None,
     }))
 }
