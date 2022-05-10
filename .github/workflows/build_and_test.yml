@@ -162,7 +162,15 @@ jobs:
 
   check-codestyle-python:
     runs-on: [ self-hosted, Linux ]
+    strategy:
+      matrix:
+        rust_toolchain: [ 1.58 ]
+    container:
+      image: zimg/rust:${{ matrix.rust_toolchain }}
     steps:
+      - name: Fix permissions
+        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
+
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -183,6 +191,5 @@ jobs:
       - name: Run yapf to ensure code format
         run: poetry run yapf --recursive --diff .
 
-      # TOOD: Need to upgrade python to 3.9 in runner image
-      #- name: Run mypy to check types
-      #  run: poetry run mypy .
+      - name: Run mypy to check types
+        run: poetry run mypy .
