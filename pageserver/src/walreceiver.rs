@@ -42,6 +42,8 @@ use utils::{
 pub struct WalReceiverEntry {
     thread_id: u64,
     wal_producer_connstr: String,
+    last_received_msg_lsn: Option<Lsn>,
+    last_received_msg_ts: Option<SystemTime>,
 }
 
 lazy_static! {
@@ -92,6 +94,8 @@ pub fn launch_wal_receiver(
             let receiver = WalReceiverEntry {
                 thread_id,
                 wal_producer_connstr: wal_producer_connstr.into(),
+                last_received_msg_lsn: None,
+                last_received_msg_ts: None,
             };
             receivers.insert((tenantid, timelineid), receiver);
 
@@ -325,6 +329,22 @@ fn walreceiver_main(
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
+
+            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
+            {
+                let mut receivers = WAL_RECEIVERS.lock().unwrap();
+                let entry = receivers
+                    .get_mut(&(tenant_id, timeline_id))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Should exist a WAL receiver entry for tenant {} and timeline {}",
+                            tenant_id, timeline_id
+                        )
+                    });
+
+                entry.last_received_msg_lsn = Some(last_lsn);
+                entry.last_received_msg_ts = Some(ts);
+            }
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
