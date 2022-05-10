@@ -115,6 +115,14 @@ fn main() -> Result<()> {
             .takes_value(true)
             .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
         )
+        .arg(
+            Arg::new("enable-s3-offload")
+                .long("enable-s3-offload")
+                .takes_value(true)
+                .default_value("true")
+                .default_missing_value("true")
+                .help("Enable/disable s3 offloading. When disabled, safekeeper removes WAL ignoring s3 WAL horizon."),
+        )
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
@@ -171,6 +179,13 @@ fn main() -> Result<()> {
     if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
         conf.broker_etcd_prefix = prefix.to_string();
     }
+
+    // Seems like there is no better way to accept bool values explicitly in clap.
+    conf.s3_offload_enabled = arg_matches
+        .value_of("enable-s3-offload")
+        .unwrap()
+        .parse()
+        .context("failed to parse bool enable-s3-offload bool")?;
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
