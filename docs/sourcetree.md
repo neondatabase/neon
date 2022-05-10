@@ -93,7 +93,7 @@ A single virtual environment with all dependencies is described in the single `P
 ### Prerequisites
 - Install Python 3.9 (the minimal supported version) or greater.
     - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesnt work as expected.
-    - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via pyenv or via system package manager e.g.:
+    - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via [pyenv](https://github.com/pyenv/pyenv) or via system package manager e.g.:
       ```bash
       # In Ubuntu
       sudo add-apt-repository ppa:deadsnakes/ppa
@@ -102,7 +102,11 @@ A single virtual environment with all dependencies is described in the single `P
       ```
 - Install `poetry`
     - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation)`.
-- Install dependencies via `./scripts/pysync`. Note that CI uses Python 3.9 so if you have different version some linting tools can yield different result locally vs in the CI.
+- Install dependencies via `./scripts/pysync`.
+    - Note that CI uses specific Python version (look for `PYTHON_VERSION` [here](https://github.com/neondatabase/docker-images/blob/main/rust/Dockerfile))
+      so if you have different version some linting tools can yield different result locally vs in the CI.
+    - You can explicitly specify which Python to use by running `poetry env use /path/to/python`, e.g. `poetry env use python3.9`.
+      This may also disable the `The currently activated Python version X.Y.Z is not supported by the project` warning.
 
 Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.
