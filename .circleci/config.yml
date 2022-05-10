@@ -223,6 +223,12 @@ jobs:
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
+          name: Print versions
+          when: always
+          command: |
+              poetry run python --version
+              poetry show
+      - run:
           name: Run yapf to ensure code format
           when: always
           command: poetry run yapf --recursive --diff .
