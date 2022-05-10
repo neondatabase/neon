@@ -38,7 +38,8 @@ use utils::{
 //
 // We keep one WAL Receiver active per timeline.
 //
-struct WalReceiverEntry {
+#[derive(Debug, Clone)]
+pub struct WalReceiverEntry {
     thread_id: u64,
     wal_producer_connstr: String,
 }
@@ -101,15 +102,13 @@ pub fn launch_wal_receiver(
     Ok(())
 }
 
-// Look up current WAL producer connection string in the hash table
-fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> String {
+// Look up a WAL receiver's data in the hash table
+pub fn get_wal_receiver_entry(
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> Option<WalReceiverEntry> {
     let receivers = WAL_RECEIVERS.lock().unwrap();
-
-    receivers
-        .get(&(tenantid, timelineid))
-        .unwrap()
-        .wal_producer_connstr
-        .clone()
+    receivers.get(&(tenant_id, timeline_id)).cloned()
 }
 
 //
@@ -120,7 +119,14 @@ fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id:
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_producer_connstr(tenant_id, timeline_id);
+    let wal_producer_connstr = get_wal_receiver_entry(tenant_id, timeline_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "Should exist a WAL receiver entry for tenant {} and timeline {}",
+                tenant_id, timeline_id
+            )
+        })
+        .wal_producer_connstr;
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
