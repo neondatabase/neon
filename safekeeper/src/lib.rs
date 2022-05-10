@@ -53,6 +53,7 @@ pub struct SafeKeeperConf {
     pub my_id: ZNodeId,
     pub broker_endpoints: Option<Vec<Url>>,
     pub broker_etcd_prefix: String,
+    pub s3_offload_enabled: bool,
 }
 
 impl SafeKeeperConf {
@@ -79,6 +80,7 @@ impl Default for SafeKeeperConf {
             my_id: ZNodeId(0),
             broker_endpoints: None,
             broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
+            s3_offload_enabled: true,
         }
     }
 }

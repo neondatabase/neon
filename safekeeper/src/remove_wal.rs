@@ -12,7 +12,7 @@ pub fn thread_main(conf: SafeKeeperConf) {
         let active_tlis = GlobalTimelines::get_active_timelines();
         for zttid in &active_tlis {
             if let Ok(tli) = GlobalTimelines::get(&conf, *zttid, false) {
-                if let Err(e) = tli.remove_old_wal() {
+                if let Err(e) = tli.remove_old_wal(conf.s3_offload_enabled) {
                     warn!(
                         "failed to remove WAL for tenant {} timeline {}: {}",
                         tli.zttid.tenant_id, tli.zttid.timeline_id, e
