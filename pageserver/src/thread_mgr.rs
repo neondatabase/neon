@@ -139,7 +139,7 @@ pub fn spawn<F>(
     name: &str,
     shutdown_process_on_error: bool,
     f: F,
-) -> std::io::Result<()>
+) -> std::io::Result<u64>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
@@ -193,7 +193,7 @@ where
     drop(jh_guard);
 
     // The thread is now running. Nothing more to do here
-    Ok(())
+    Ok(thread_id)
 }
 
 /// This wrapper function runs in a newly-spawned thread. It initializes the

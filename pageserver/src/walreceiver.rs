@@ -39,6 +39,7 @@ use utils::{
 // We keep one WAL Receiver active per timeline.
 //
 struct WalReceiverEntry {
+    thread_id: u64,
     wal_producer_connstr: String,
 }
 
@@ -74,7 +75,7 @@ pub fn launch_wal_receiver(
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            thread_mgr::spawn(
+            let thread_id = thread_mgr::spawn(
                 ThreadKind::WalReceiver,
                 Some(tenantid),
                 Some(timelineid),
@@ -88,6 +89,7 @@ pub fn launch_wal_receiver(
             )?;
 
             let receiver = WalReceiverEntry {
+                thread_id,
                 wal_producer_connstr: wal_producer_connstr.into(),
             };
             receivers.insert((tenantid, timelineid), receiver);
