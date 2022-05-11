@@ -117,7 +117,7 @@ async fn get_auth_info(
     let mut url = reqwest::Url::parse(&format!("{auth_endpoint}/proxy_get_role_secret"))?;
 
     url.query_pairs_mut()
-        .append_pair("cluster", cluster)
+        .append_pair("project", cluster)
         .append_pair("role", user);
 
     // TODO: use a proper logger
@@ -141,7 +141,7 @@ async fn wake_compute(
     cluster: &str,
 ) -> Result<(String, u16), ConsoleAuthError> {
     let mut url = reqwest::Url::parse(&format!("{auth_endpoint}/proxy_wake_compute"))?;
-    url.query_pairs_mut().append_pair("cluster", cluster);
+    url.query_pairs_mut().append_pair("project", cluster);
 
     // TODO: use a proper logger
     println!("cplane request: {}", url);
