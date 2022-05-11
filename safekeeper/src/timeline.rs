@@ -24,13 +24,13 @@ use utils::{
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-use crate::wal_backup;
 use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState,
 };
 use crate::send_wal::HotStandbyFeedback;
+use crate::wal_backup;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
@@ -110,8 +110,23 @@ impl SharedState {
         let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
         let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
 
-        wal_backup::create(conf, zttid, control_store.backup_lsn, wal_seg_size_receiver, lsn_committed_receiver, lsn_backed_up_sender)?;
-        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id, lsn_committed_sender, lsn_backed_up_receiver, wal_seg_size_sender)?;
+        wal_backup::create(
+            conf,
+            zttid,
+            control_store.backup_lsn,
+            wal_seg_size_receiver,
+            lsn_committed_receiver,
+            lsn_backed_up_sender,
+        )?;
+        let sk = SafeKeeper::new(
+            zttid.timeline_id,
+            control_store,
+            wal_store,
+            conf.my_id,
+            lsn_committed_sender,
+            lsn_backed_up_receiver,
+            wal_seg_size_sender,
+        )?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
@@ -127,10 +142,7 @@ impl SharedState {
 
     /// Restore SharedState from control file.
     /// If file doesn't exist, bails out.
-    fn restore(
-        conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
-    ) -> Result<Self> {
+    fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
         let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
 
@@ -140,11 +152,26 @@ impl SharedState {
         let (lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
         let (wal_seg_size_sender, wal_seg_size_receiver) = watch::channel::<u32>(0);
 
-        wal_backup::create(conf, zttid, control_store.backup_lsn, wal_seg_size_receiver, lsn_committed_receiver, lsn_backed_up_sender)?;
+        wal_backup::create(
+            conf,
+            zttid,
+            control_store.backup_lsn,
+            wal_seg_size_receiver,
+            lsn_committed_receiver,
+            lsn_backed_up_sender,
+        )?;
 
         Ok(Self {
             notified_commit_lsn: Lsn(0),
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id, lsn_committed_sender, lsn_backed_up_receiver, wal_seg_size_sender)?,
+            sk: SafeKeeper::new(
+                zttid.timeline_id,
+                control_store,
+                wal_store,
+                conf.my_id,
+                lsn_committed_sender,
+                lsn_backed_up_receiver,
+                wal_seg_size_sender,
+            )?,
             replicas: Vec::new(),
             active: false,
             num_computes: 0,
@@ -577,7 +604,6 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         peer_ids: Vec<ZNodeId>,
     ) -> Result<Arc<Timeline>> {
-
         match timelines.get(&zttid) {
             Some(_) => bail!("timeline {} already exists", zttid),
             None => {
@@ -616,9 +642,7 @@ impl GlobalTimelines {
         match timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-
-                let shared_state =
-                    SharedState::restore(conf, &zttid);
+                let shared_state = SharedState::restore(conf, &zttid);
 
                 let shared_state = match shared_state {
                     Ok(shared_state) => shared_state,

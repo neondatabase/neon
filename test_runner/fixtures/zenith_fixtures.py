@@ -1765,6 +1765,7 @@ class Safekeeper:
         else:
             return os.path.join(self.data_dir(), self.backup_dir)
 
+
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int

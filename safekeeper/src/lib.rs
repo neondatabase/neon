@@ -1,7 +1,7 @@
 //
+use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
 use std::time::Duration;
-use remote_storage::RemoteStorageConfig;
 use url::Url;
 
 use utils::zid::{ZNodeId, ZTenantTimelineId};

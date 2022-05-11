@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use serde_json::Value;
 use tokio::io;
 use tracing::info;
@@ -205,7 +205,6 @@ pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str)
 
 impl RemoteStorageConfig {
     pub fn from_json_string(s: String) -> anyhow::Result<RemoteStorageConfig> {
-
         let jv: Value = serde_json::from_str(&s).unwrap();
 
         let local_path = &jv["local_path"];
@@ -213,47 +212,73 @@ impl RemoteStorageConfig {
         let bucket_region = &jv["bucket_region"];
 
         let max_concurrent_syncs = NonZeroUsize::new(
-            jv["max_concurrent_syncs"].as_u64().map(|x| x as usize)
+            jv["max_concurrent_syncs"]
+                .as_u64()
+                .map(|x| x as usize)
                 .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
-        ).context("Failed to parse 'max_concurrent_syncs' as a positive integer").unwrap();
+        )
+        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")
+        .unwrap();
 
         let max_sync_errors = NonZeroU32::new(
-            jv["max_sync_errors"].as_u64().map(|x| x as u32)
+            jv["max_sync_errors"]
+                .as_u64()
+                .map(|x| x as u32)
                 .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
-        ).context("Failed to parse 'max_sync_errors' as a positive integer").unwrap();
+        )
+        .context("Failed to parse 'max_sync_errors' as a positive integer")
+        .unwrap();
 
-        let storage = match (local_path.is_string(), bucket_name.is_string(), bucket_region.is_string()) {
-            (true, true, true) => bail!("no 'local_path' nor 'bucket_name' option"), 
-            (_, true, false) => bail!("'bucket_region' option is mandatory if 'bucket_name' is given "),
-            (_, false, true) => bail!("'bucket_name' option is mandatory if 'bucket_region' is given "),
+        let storage = match (
+            local_path.is_string(),
+            bucket_name.is_string(),
+            bucket_region.is_string(),
+        ) {
+            (true, true, true) => bail!("no 'local_path' nor 'bucket_name' option"),
+            (_, true, false) => {
+                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
+            }
+            (_, false, true) => {
+                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
+            }
             (true, false, false) => {
-                
                 let concurrency_limit = NonZeroUsize::new(
-                    jv["concurrency_limit"].as_u64().map(|x| x as usize)
+                    jv["concurrency_limit"]
+                        .as_u64()
+                        .map(|x| x as usize)
                         .unwrap_or(DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
-                ).context("Failed to parse 'concurrency_limit' as a positive integer").unwrap();
-
+                )
+                .context("Failed to parse 'concurrency_limit' as a positive integer")
+                .unwrap();
 
                 let bucket_name = bucket_name.as_str().unwrap().to_string();
-                let bucket_region= bucket_region.as_str().unwrap().to_string();
+                let bucket_region = bucket_region.as_str().unwrap().to_string();
 
                 let endpoint = &jv["endpoint"];
                 let prefix = &jv["prefix_in_bucket"];
 
                 RemoteStorageKind::AwsS3(S3Config {
-                        bucket_name,
-                        bucket_region,
-                        prefix_in_bucket: if !prefix.is_string() { Some(prefix.as_str().unwrap().to_string()) } else { None },
-                        endpoint: if !endpoint.is_string() { Some(endpoint.as_str().unwrap().to_string()) } else { None },
-                        concurrency_limit,
-                    })},
-            (false, true, true) => { 
+                    bucket_name,
+                    bucket_region,
+                    prefix_in_bucket: if !prefix.is_string() {
+                        Some(prefix.as_str().unwrap().to_string())
+                    } else {
+                        None
+                    },
+                    endpoint: if !endpoint.is_string() {
+                        Some(endpoint.as_str().unwrap().to_string())
+                    } else {
+                        None
+                    },
+                    concurrency_limit,
+                })
+            }
+            (false, true, true) => {
                 let local_path = local_path.as_str().unwrap().to_string();
-                RemoteStorageKind::LocalFs(PathBuf::from(local_path)) 
-            },
+                RemoteStorageKind::LocalFs(PathBuf::from(local_path))
+            }
             (false, false, false) => bail!("local_path and bucket_name are mutually exclusive"),
         };
-
 
         Ok(RemoteStorageConfig {
             max_concurrent_syncs,
@@ -262,8 +287,6 @@ impl RemoteStorageConfig {
         })
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

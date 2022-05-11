@@ -17,11 +17,11 @@ use url::{ParseError, Url};
 
 use safekeeper::control_file::{self};
 use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use safekeeper::http;
 use safekeeper::remove_wal;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
-use safekeeper::http;
 use utils::{
     http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
 };
@@ -174,13 +174,17 @@ fn main() -> Result<()> {
     }
 
     if let Some(backup_threads) = arg_matches.value_of("backup-threads") {
-        conf.backup_runtime_threads = Some(backup_threads
-            .parse()
-            .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?);
+        conf.backup_runtime_threads = Some(
+            backup_threads
+                .parse()
+                .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?,
+        );
     }
 
     if let Some(storage_conf) = arg_matches.value_of("backup-storage") {
-        conf.remote_storage_config = Some(RemoteStorageConfig::from_json_string(storage_conf.to_string())?);
+        conf.remote_storage_config = Some(RemoteStorageConfig::from_json_string(
+            storage_conf.to_string(),
+        )?);
     }
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))

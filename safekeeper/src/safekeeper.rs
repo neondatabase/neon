@@ -9,12 +9,12 @@ use postgres_ffi::xlog_utils::TimeLineID;
 
 use postgres_ffi::xlog_utils::XLogSegNo;
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch::Receiver;
-use tokio::sync::watch::Sender;
 use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+use tokio::sync::watch::Receiver;
+use tokio::sync::watch::Sender;
 use tracing::*;
 
 use lazy_static::lazy_static;
@@ -659,7 +659,9 @@ where
             self.state.persist(&state)?;
         }
 
-        self.wal_segment_size.send(self.state.server.wal_seg_size).context("Failed to notify wal segment size")?;
+        self.wal_segment_size
+            .send(self.state.server.wal_seg_size)
+            .context("Failed to notify wal segment size")?;
         self.wal_store.init_storage(&self.state)?;
 
         info!(
@@ -1030,7 +1032,16 @@ mod tests {
         let (_lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
         let (seg_size_sender, _seg_size_receiver) = watch::channel::<u32>(0);
 
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0), lsn_committed_sender, lsn_backed_up_receiver, seg_size_sender).unwrap();
+        let mut sk = SafeKeeper::new(
+            ztli,
+            storage,
+            wal_store,
+            ZNodeId(0),
+            lsn_committed_sender,
+            lsn_backed_up_receiver,
+            seg_size_sender,
+        )
+        .unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1049,7 +1060,16 @@ mod tests {
         let (_lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn::INVALID);
         let (seg_size_sender, _seg_size_receiver) = watch::channel::<u32>(0);
 
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, ZNodeId(0), lsn_committed_sender, lsn_backed_up_receiver, seg_size_sender).unwrap();
+        sk = SafeKeeper::new(
+            ztli,
+            storage,
+            sk.wal_store,
+            ZNodeId(0),
+            lsn_committed_sender,
+            lsn_backed_up_receiver,
+            seg_size_sender,
+        )
+        .unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -1071,7 +1091,16 @@ mod tests {
         let (_lsn_backed_up_sender, lsn_backed_up_receiver) = watch::channel(Lsn(0));
         let (seg_size_sender, _seg_size_receiver) = watch::channel::<u32>(0);
 
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0), lsn_committed_sender, lsn_backed_up_receiver, seg_size_sender).unwrap();
+        let mut sk = SafeKeeper::new(
+            ztli,
+            storage,
+            wal_store,
+            ZNodeId(0),
+            lsn_committed_sender,
+            lsn_backed_up_receiver,
+            seg_size_sender,
+        )
+        .unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
