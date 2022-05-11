@@ -305,6 +305,11 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
+            //
+            // Match the logic of XLogReadBufferForRedoExtended:
+            // The page may be uninitialized. If so, we can't set the LSN because
+            // that would corrupt the page.
+            //
             if !page_is_new(&image) {
                 page_set_lsn(&mut image, lsn)
             }
