@@ -254,6 +254,9 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                if entry_lsn < lsn_range.start {
+                    break;
+                }
                 offsets.push((entry_lsn, blob_ref.pos()));
 
                 !blob_ref.will_init()
