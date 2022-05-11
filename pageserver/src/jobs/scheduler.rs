@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::thread_mgr::shutdown_watcher;
@@ -5,6 +6,7 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::time::sleep;
 
 use super::worker::{Job, Worker, Report};
+
 
 #[derive(Debug)]
 pub struct Sched<J: Job> {
@@ -29,20 +31,42 @@ impl<J: Job> Sched<J> {
 
         runtime.block_on(async {
             let mut workers = Vec::<Worker<J>>::new();
+            let mut jobs = VecDeque::<J>::new();
             loop {
                 let shutdown_watcher = shutdown_watcher();
                 tokio::select! {
                     _ = shutdown_watcher => break,
-                    w = self.worker.1.recv() => workers.push(w.expect("oopsie")),
+                    w = self.worker.1.recv() => {
+                        // Assign to next job in queue, if nonempty
+                        println!("got worker");
+                        if let Some(j) = jobs.pop_front() {
+                            println!("found job from queue");
+                            w.unwrap().0.send(j).await.unwrap();
+                        } else {
+                            println!("no jobs in queue");
+                            workers.push(w.unwrap());
+                        }
+                    },
                     j = self.work.1.recv() => {
+                        // Assign to first worker in pool, if nonempty
+                        println!("got job");
                         if let Some(w) = workers.pop() {
+                            println!("found worker in pool");
                             w.0.send(j.unwrap()).await.unwrap();
                         } else {
-                            // no workers available, spawn?
+                            println!("no workers in pool");
+                            jobs.push_back(j.unwrap());
                         }
                     },
                     r = self.report.1.recv() => {
-                        // TODO
+                        // Reschedule job to run again
+                        let send_work = self.work.0.clone();
+                        let job = r.unwrap().for_job;
+                        println!("rescheduling");
+                        tokio::spawn(async move {
+                            sleep(Duration::from_millis(10)).await;
+                            send_work.send(job).await.unwrap();
+                        });
                     }
                 }
             }
@@ -108,7 +132,7 @@ mod tests {
         };
         send_work.send(j.clone()).await.unwrap();
 
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(100)).await;
 
         thread_mgr::shutdown_threads(None, None, None);
     }

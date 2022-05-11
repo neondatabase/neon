@@ -4,7 +4,7 @@
 use crate::thread_mgr::shutdown_watcher;
 use tokio::sync::mpsc::{Sender, channel};
 
-pub trait Job: std::fmt::Debug {
+pub trait Job: std::fmt::Debug + Send + 'static {
     fn run(&self);
 }
 
@@ -13,7 +13,7 @@ pub struct Worker<J: Job>(pub Sender<J>);
 
 #[derive(Debug)]
 pub struct Report<J: Job> {
-    for_job: J,
+    pub for_job: J,
 }
 
 pub fn run_worker<J: Job>(enlist: Sender<Worker<J>>, report: Sender<Report<J>>) -> anyhow::Result<()> {
@@ -30,11 +30,15 @@ pub fn run_worker<J: Job>(enlist: Sender<Worker<J>>, report: Sender<Report<J>>) 
             tokio::select! {
                 _ = shutdown_watcher => break,
                 j = get_work.recv() => {
-                    let job = j.unwrap();
-                    job.run();
-                    report.send(Report {
-                        for_job: job,
-                    }).await.unwrap();
+                    if let Some(job) = j {
+                        job.run();
+                        report.send(Report {
+                            for_job: job,
+                        }).await.unwrap();
+                    } else {
+                        println!("fffffffff")
+                        // TODO ??
+                    }
                 }
             };
         }
