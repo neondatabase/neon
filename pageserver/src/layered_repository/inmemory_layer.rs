@@ -4,7 +4,6 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
-use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
 use crate::layered_repository::block_io::BlockReader;
@@ -323,39 +322,20 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
 
-        let mut samples: Vec<Vec<u8>> = Vec::with_capacity(config::ZSTD_MAX_SAMPLES);
-        let mut buf = Vec::new();
-
-        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
-        keys.sort_by_key(|k| k.0);
-
-        let mut cursor = inner.file.block_cursor();
-
-        // First learn dictionary
-        'train: for (_key, vec_map) in keys.iter() {
-            // Write all page versions
-            for (_lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf)?;
-                samples.push(buf.clone());
-                if samples.len() == config::ZSTD_MAX_SAMPLES {
-                    break 'train;
-                }
-            }
-        }
-
-        let dictionary = if samples.len() >= config::ZSTD_MIN_SAMPLES {
-            zstd::dict::from_samples(&samples, config::ZSTD_MAX_DICTIONARY_SIZE)?
-        } else {
-            Vec::new()
-        };
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timelineid,
             self.tenantid,
             Key::MIN,
             self.start_lsn..inner.end_lsn.unwrap(),
-            dictionary,
         )?;
+
+        let mut buf = Vec::new();
+
+        let mut cursor = inner.file.block_cursor();
+
+        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
+        keys.sort_by_key(|k| k.0);
 
         for (key, vec_map) in keys.iter() {
             let key = **key;

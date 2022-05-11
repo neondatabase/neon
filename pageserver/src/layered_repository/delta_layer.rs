@@ -23,6 +23,24 @@
 //! "values" part.  The actual page images and WAL records are stored in the
 //! "values" part.
 //!
+//! # Compression
+//!
+//! Each value is stored as a Blob, which can optionally be compressed. Compression
+//! is done by ZStandard, in dictionary mode, which gives pretty good compression
+//! ratio even for small inputs, like WAL records.
+//!
+//! The dictionary is built separately for each delta layer file, and stored in
+//! the file itself.
+//!
+//! TODO: The ZStandard format includes constant 4-byte "magic bytes" in the beginning
+//! of each compressed block. With small values like WAL records, that's pretty wasteful.
+//! We could disable those bytes by setting the `include_magibytes' flag to false,
+//! but as of this writing that's considered experimental in the zstd crate, and the
+//! zstd::bulk::Decompressor::upper_bound() function doesn't work without the magic bytes
+//! so we would have to find a different way of allocating the decompression buffer if
+//! we did that.
+//!
+
 use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
@@ -54,8 +72,6 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-const DICTIONARY_OFFSET: u64 = PAGE_SZ as u64;
-
 ///
 /// Header stored in the beginning of the file
 ///
@@ -77,6 +93,8 @@ struct Summary {
     index_start_blk: u32,
     /// Block within the 'index', where the B-tree root page is stored
     index_root_blk: u32,
+
+    dictionary_offset: u64,
 }
 
 impl From<&DeltaLayer> for Summary {
@@ -92,33 +110,46 @@ impl From<&DeltaLayer> for Summary {
 
             index_start_blk: 0,
             index_root_blk: 0,
+
+            dictionary_offset: 0,
         }
     }
 }
 
-// Flag indicating that this version initialize the page
-const WILL_INIT: u64 = 1;
-
 ///
-/// Struct representing reference to BLOB in layers. Reference contains BLOB
-/// offset, and for WAL records it also contains `will_init` flag. The flag
-/// helps to determine the range of records that needs to be applied, without
-/// reading/deserializing records themselves.
+/// Struct representing reference to BLOB in the file. The reference
+/// contains the offset to the BLOB within the file, a flag indicating
+/// if it's compressed or not, and also the `will_init` flag. The flag
+/// helps to determine the range of records that needs to be applied,
+/// without reading/deserializing records themselves.
 ///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 struct BlobRef(u64);
 
+/// Flag indicating that this blob is compressed
+const BLOB_COMPRESSED: u64 = 1;
+
+/// Flag indicating that this version initializes the page
+const WILL_INIT: u64 = 2;
+
 impl BlobRef {
+    pub fn compressed(&self) -> bool {
+        (self.0 & BLOB_COMPRESSED) != 0
+    }
+
     pub fn will_init(&self) -> bool {
         (self.0 & WILL_INIT) != 0
     }
 
     pub fn pos(&self) -> u64 {
-        self.0 >> 1
+        self.0 >> 2
     }
 
-    pub fn new(pos: u64, will_init: bool) -> BlobRef {
-        let mut blob_ref = pos << 1;
+    pub fn new(pos: u64, compressed: bool, will_init: bool) -> BlobRef {
+        let mut blob_ref = pos << 2;
+        if compressed {
+            blob_ref |= BLOB_COMPRESSED;
+        }
         if will_init {
             blob_ref |= WILL_INIT;
         }
@@ -201,6 +232,33 @@ pub struct DeltaLayerInner {
     prepared_dictionary: Option<zstd::dict::DecoderDictionary<'static>>, // None if not loaded
 }
 
+impl DeltaLayerInner {
+    // Create a new Decompressor, using the prepared dictionary
+    fn create_decompressor(&self) -> Result<Option<zstd::bulk::Decompressor<'_>>> {
+        if let Some(dict) = &self.prepared_dictionary {
+            let decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(dict)?;
+            Ok(Some(decompressor))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // Create a new Decompressor, without using the prepared dictionary.
+    //
+    // For the cases that you cannot use 'create_decompressor', if the
+    // Decompressor needs to outlive 'self'.
+    fn create_decompressor_not_prepared(
+        &self,
+    ) -> Result<Option<zstd::bulk::Decompressor<'static>>> {
+        if !self.dictionary.is_empty() {
+            let decompressor = zstd::bulk::Decompressor::with_dictionary(&self.dictionary)?;
+            Ok(Some(decompressor))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 impl Layer for DeltaLayer {
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
@@ -240,12 +298,7 @@ impl Layer for DeltaLayer {
         {
             // Open the file and lock the metadata in memory
             let inner = self.load()?;
-            let mut decompressor = match &inner.prepared_dictionary {
-                Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
-                    dictionary,
-                )?),
-                None => None,
-            };
+            let mut decompressor = inner.create_decompressor()?;
             let mut decompress_buf = Vec::new();
 
             // Scan the page versions backwards, starting from `lsn`.
@@ -257,7 +310,7 @@ impl Layer for DeltaLayer {
             );
             let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
-            let mut offsets: Vec<(Lsn, u64)> = Vec::new();
+            let mut blob_refs: Vec<(Lsn, BlobRef)> = Vec::new();
 
             tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
                 let blob_ref = BlobRef(value);
@@ -265,31 +318,36 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                offsets.push((entry_lsn, blob_ref.pos()));
+                blob_refs.push((entry_lsn, blob_ref));
 
                 !blob_ref.will_init()
             })?;
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let mut cursor = file.block_cursor();
-            for (entry_lsn, pos) in offsets {
-                let buf = cursor.read_blob(pos).with_context(|| {
+            for (entry_lsn, blob_ref) in blob_refs {
+                let buf = cursor.read_blob(blob_ref.pos()).with_context(|| {
                     format!(
                         "Failed to read blob from virtual file {}",
                         file.file.path.display()
                     )
                 })?;
-                let val = if let Some(decompressor) = &mut decompressor {
-                    let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
-                        .ok_or_else(|| anyhow!("could not get decompressed length"))?;
-                    decompress_buf.clear();
-                    decompress_buf.reserve(decompressed_max_len);
-                    let _ = decompressor.decompress_to_buffer(&buf, &mut decompress_buf)?;
-                    Value::des(&decompress_buf)
+                let uncompressed_bytes = if blob_ref.compressed() {
+                    if let Some(ref mut decompressor) = decompressor {
+                        let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
+                            .ok_or_else(|| anyhow!("could not get decompressed length"))?;
+                        decompress_buf.clear();
+                        decompress_buf.reserve(decompressed_max_len);
+                        let _ = decompressor.decompress_to_buffer(&buf, &mut decompress_buf)?;
+                        &decompress_buf
+                    } else {
+                        bail!("blob is compressed, but there was no dictionary");
+                    }
                 } else {
-                    Value::des(&buf)
-                }
-                .with_context(|| {
+                    &buf
+                };
+
+                let val = Value::des(uncompressed_bytes).with_context(|| {
                     format!(
                         "Failed to deserialize file blob from virtual file {}",
                         file.file.path.display()
@@ -382,12 +440,7 @@ impl Layer for DeltaLayer {
         tree_reader.dump()?;
 
         let mut cursor = file.block_cursor();
-        let mut decompressor = match &inner.prepared_dictionary {
-            Some(dictionary) => Some(zstd::bulk::Decompressor::with_prepared_dictionary(
-                dictionary,
-            )?),
-            None => None,
-        };
+        let mut decompressor = inner.create_decompressor()?;
         let mut decompress_buf = Vec::new();
 
         // A subroutine to dump a single blob
@@ -398,33 +451,38 @@ impl Layer for DeltaLayer {
                     file.file.path.display()
                 )
             })?;
-            let decompressed_buf = if let Some(decompressor) = &mut decompressor {
-                let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
-                    .ok_or_else(|| anyhow!("could not get decompressed length"))?;
-                decompress_buf.clear();
-                decompress_buf.reserve(decompressed_max_len);
-                let _ = decompressor.decompress_to_buffer(&buf, &mut decompress_buf);
-                &decompress_buf
+
+            let uncompressed_bytes = if blob_ref.compressed() {
+                if let Some(ref mut decompressor) = decompressor {
+                    let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
+                        .ok_or_else(|| anyhow!("could not get decompressed length"))?;
+                    decompress_buf.clear();
+                    decompress_buf.reserve(decompressed_max_len);
+                    let _ = decompressor.decompress_to_buffer(&buf, &mut decompress_buf)?;
+                    &decompress_buf
+                } else {
+                    bail!("blob is compressed, but there was no dictionary");
+                }
             } else {
                 &buf
             };
 
-            let val = Value::des(decompressed_buf)
-                .with_context(|| {
-                    format!(
-                        "Failed to deserialize file blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
+            let val = Value::des(uncompressed_bytes).with_context(|| {
+                format!(
+                    "Failed to deserialize file blob from virtual file {}",
+                    file.file.path.display()
+                )
+            })?;
 
             let desc = match val {
                 Value::Image(img) => {
-                    format!(" img {} bytes", img.len())
+                    format!("img {} bytes, {} compressed", img.len(), buf.len())
                 }
                 Value::WalRecord(rec) => {
                     let wal_desc = walrecord::describe_wal_record(&rec)?;
                     format!(
-                        " rec {} bytes will_init: {} {}",
+                        "rec {} bytes, {} compressed, will_init {}: {}",
+                        uncompressed_bytes.len(),
                         buf.len(),
                         rec.will_init(),
                         wal_desc
@@ -521,6 +579,7 @@ impl DeltaLayer {
                 let mut expected_summary = Summary::from(self);
                 expected_summary.index_start_blk = actual_summary.index_start_blk;
                 expected_summary.index_root_blk = actual_summary.index_root_blk;
+                expected_summary.dictionary_offset = actual_summary.dictionary_offset;
                 if actual_summary != expected_summary {
                     bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
                 }
@@ -540,12 +599,11 @@ impl DeltaLayer {
         }
 
         let mut cursor = file.block_cursor();
-        inner.dictionary = cursor.read_blob(DICTIONARY_OFFSET)?;
-        inner.prepared_dictionary = if inner.dictionary.is_empty() {
-            None
-        } else {
-            Some(zstd::dict::DecoderDictionary::copy(&inner.dictionary))
-        };
+        if actual_summary.dictionary_offset != 0 {
+            inner.dictionary = cursor.read_blob(actual_summary.dictionary_offset)?;
+            inner.prepared_dictionary =
+                Some(zstd::dict::DecoderDictionary::copy(&inner.dictionary));
+        }
         inner.index_start_blk = actual_summary.index_start_blk;
         inner.index_root_blk = actual_summary.index_root_blk;
 
@@ -637,6 +695,16 @@ impl DeltaLayer {
 ///
 /// 3. Call `finish`.
 ///
+///
+/// To train the dictionary for compression, the first ZSTD_MAX_SAMPLES values
+/// (or up ZSTD_MAX_SAMPLE_BYTES) are buffered in memory, before writing them
+/// to disk. When the "sample buffer" fills up, the buffered values are used
+/// to train a zstandard dictionary, which is then used to compress all the
+/// buffered values, and all subsequent values. So the dictionary is built
+/// based on just the first values, but in practice that usually gives pretty
+/// good compression for all subsequent data as well. Things like page and
+/// tuple headers are similar across all pages of the same relation.
+///
 pub struct DeltaLayerWriter {
     conf: &'static PageServerConf,
     path: PathBuf,
@@ -650,6 +718,12 @@ pub struct DeltaLayerWriter {
 
     blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
     compressor: Option<zstd::bulk::Compressor<'static>>,
+    dictionary_offset: u64,
+
+    training: bool,
+    sample_key_lsn_willinit: Vec<(Key, Lsn, bool)>,
+    sample_sizes: Vec<usize>,
+    sample_data: Vec<u8>,
 }
 
 impl DeltaLayerWriter {
@@ -662,7 +736,6 @@ impl DeltaLayerWriter {
         tenantid: ZTenantId,
         key_start: Key,
         lsn_range: Range<Lsn>,
-        dictionary: Vec<u8>,
     ) -> Result<DeltaLayerWriter> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
@@ -678,20 +751,9 @@ impl DeltaLayerWriter {
         ));
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
-        file.seek(SeekFrom::Start(DICTIONARY_OFFSET))?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
         let buf_writer = BufWriter::new(file);
-        let mut blob_writer = WriteBlobWriter::new(buf_writer, DICTIONARY_OFFSET);
-
-        let off = blob_writer.write_blob(&dictionary)?;
-        assert!(off == DICTIONARY_OFFSET);
-        let compressor = if dictionary.is_empty() {
-            None
-        } else {
-            Some(zstd::bulk::Compressor::with_dictionary(
-                config::ZSTD_COMPRESSION_LEVEL,
-                &dictionary,
-            )?)
-        };
+        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -705,7 +767,13 @@ impl DeltaLayerWriter {
             lsn_range,
             tree: tree_builder,
             blob_writer,
-            compressor,
+            compressor: None,
+            dictionary_offset: 0,
+
+            training: true,
+            sample_key_lsn_willinit: Vec::new(),
+            sample_sizes: Vec::new(),
+            sample_data: Vec::new(),
         })
     }
 
@@ -715,24 +783,116 @@ impl DeltaLayerWriter {
     /// The values must be appended in key, lsn order.
     ///
     pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+        let blob_content = &Value::ser(&val)?;
+
+        // Are we still accumulating values for training the compression dictionary?
+        if self.training {
+            self.put_value_train(key, lsn, val.will_init(), blob_content)?;
+
+            if self.sample_sizes.len() >= config::ZSTD_MAX_SAMPLES
+                || self.sample_data.len() >= config::ZSTD_MAX_SAMPLE_BYTES
+            {
+                self.finish_training()?;
+            }
+        } else {
+            self.put_value_flush(key, lsn, val.will_init(), blob_content)?;
+        }
+        Ok(())
+    }
+
+    /// Accumulate one key-value pair in the samples buffer
+    fn put_value_train(&mut self, key: Key, lsn: Lsn, will_init: bool, bytes: &[u8]) -> Result<()> {
+        assert!(self.training);
+        self.sample_key_lsn_willinit.push((key, lsn, will_init));
+        self.sample_sizes.push(bytes.len());
+        self.sample_data.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Train the compression dictionary, and flush out all the accumulated
+    /// key-value pairs to disk.
+    fn finish_training(&mut self) -> Result<()> {
+        assert!(self.training);
+        assert!(self.sample_sizes.len() == self.sample_key_lsn_willinit.len());
+
+        // Create the dictionary, if we had enough samples for it.
+        if self.sample_sizes.len() >= config::ZSTD_MIN_SAMPLES {
+            let dictionary = zstd::dict::from_continuous(
+                &self.sample_data,
+                &self.sample_sizes,
+                config::ZSTD_MAX_DICTIONARY_SIZE,
+            )?;
+
+            let off = self.blob_writer.write_blob(&dictionary)?;
+            self.dictionary_offset = off;
+
+            let compressor = zstd::bulk::Compressor::with_dictionary(
+                config::ZSTD_COMPRESSION_LEVEL,
+                &dictionary,
+            )?;
+            self.compressor = Some(compressor);
+        };
+        self.training = false;
+
+        // release the memory used by the sample buffers
+        let sample_key_lsn_willinit = std::mem::take(&mut self.sample_key_lsn_willinit);
+        let sample_sizes = std::mem::take(&mut self.sample_sizes);
+        let sample_data = std::mem::take(&mut self.sample_data);
+
+        // Compress and write out all the buffered key-value pairs
+        let mut buf_idx: usize = 0;
+        for ((key, lsn, will_init), len) in
+            itertools::izip!(sample_key_lsn_willinit.iter(), sample_sizes.iter())
+        {
+            let end = buf_idx + len;
+            self.put_value_flush(*key, *lsn, *will_init, &sample_data[buf_idx..end])?;
+            buf_idx = end;
+        }
+        assert!(buf_idx == sample_data.len());
+
+        Ok(())
+    }
+
+    /// Write a key-value pair to the file, compressing it if applicable.
+    pub fn put_value_flush(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        will_init: bool,
+        bytes: &[u8],
+    ) -> Result<()> {
+        assert!(!self.training);
         assert!(self.lsn_range.start <= lsn);
 
-        let body = &Value::ser(&val)?;
-        let off = if let Some(ref mut compressor) = self.compressor {
-            let compressed = compressor.compress(body)?;
-            self.blob_writer.write_blob(&compressed)?
-        } else {
-            self.blob_writer.write_blob(body)?
-        };
+        let mut blob_content = bytes;
+        let mut compressed = false;
 
-        let blob_ref = BlobRef::new(off, val.will_init());
+        // Try to compress the blob
+        let compressed_bytes;
+        if let Some(ref mut compressor) = self.compressor {
+            compressed_bytes = compressor.compress(blob_content)?;
+            // If compressed version is not any smaller than the original,
+            // store it uncompressed.
+            if compressed_bytes.len() < blob_content.len() {
+                blob_content = &compressed_bytes;
+                compressed = true;
+            }
+        }
 
+        // Write it to the file
+        let off = self.blob_writer.write_blob(blob_content)?;
+        let blob_ref = BlobRef::new(off, compressed, will_init);
+
+        // And store the reference in the B-tree
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
         self.tree.append(&delta_key.0, blob_ref.0)?;
 
         Ok(())
     }
 
+    ///
+    /// Return an estimate of the file, if it was finished now.
+    ///
     pub fn size(&self) -> u64 {
         self.blob_writer.size() + self.tree.borrow_writer().size()
     }
@@ -740,7 +900,11 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+        if self.training {
+            self.finish_training()?;
+        }
+
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -764,6 +928,7 @@ impl DeltaLayerWriter {
             lsn_range: self.lsn_range.clone(),
             index_start_blk,
             index_root_blk,
+            dictionary_offset: self.dictionary_offset,
         };
         file.seek(SeekFrom::Start(0))?;
         Summary::ser_into(&summary, &mut file)?;
@@ -860,13 +1025,15 @@ impl<'a> DeltaValueIter<'a> {
                 true
             },
         )?;
-        let decompressor = if !inner.dictionary.is_empty() {
-            Some(zstd::bulk::Decompressor::with_dictionary(
-                &inner.dictionary,
-            )?)
-        } else {
-            None
-        };
+
+        // We cannot use inner.create_decompressor() here, because it returns
+        // a Decompressor with lifetime that depends on 'inner', and that
+        // doesn't live long enough here. Cannot use the prepared dictionary
+        // for that reason either. Doesn't matter too much in practice because
+        // this Iterator is used for bulk operations, and loading the dictionary
+        // isn't that expensive in comparison.
+        let decompressor = inner.create_decompressor_not_prepared()?;
+
         let iter = DeltaValueIter {
             all_offsets,
             next_idx: 0,
@@ -886,16 +1053,31 @@ impl<'a> DeltaValueIter<'a> {
             let lsn = delta_key.lsn();
 
             let buf = self.reader.read_blob(blob_ref.pos())?;
-            let val = if let Some(decompressor) = &mut self.decompressor {
-                let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
-                    .ok_or_else(|| anyhow!("could not get decompressed length"))?;
-                self.decompress_buf.clear();
-                self.decompress_buf.reserve(decompressed_max_len);
-                let _ = decompressor.decompress_to_buffer(&buf, &mut self.decompress_buf)?;
-                Value::des(&self.decompress_buf)
+            let uncompressed_bytes = if blob_ref.compressed() {
+                if let Some(decompressor) = &mut self.decompressor {
+                    let decompressed_max_len = zstd::bulk::Decompressor::upper_bound(&buf)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "could not get decompressed length at offset {}",
+                                blob_ref.pos()
+                            )
+                        })?;
+                    self.decompress_buf.clear();
+                    self.decompress_buf.reserve(decompressed_max_len);
+                    let _ = decompressor.decompress_to_buffer(&buf, &mut self.decompress_buf)?;
+                    &self.decompress_buf
+                } else {
+                    bail!("blob is compressed, but there was no dictionary");
+                }
             } else {
-                Value::des(&buf)
-            }?;
+                &buf
+            };
+            let val = Value::des(uncompressed_bytes).with_context(|| {
+                format!(
+                    "Failed to deserialize file blob at offset {}",
+                    blob_ref.pos()
+                )
+            })?;
             self.next_idx += 1;
             Ok(Some((key, lsn, val)))
         } else {
