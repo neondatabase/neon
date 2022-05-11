@@ -128,14 +128,18 @@ fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id:
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_receiver_entry(tenant_id, timeline_id)
-        .unwrap_or_else(|| {
-            panic!(
-                "Should exist a WAL receiver entry for tenant {} and timeline {}",
-                tenant_id, timeline_id
-            )
-        })
-        .wal_producer_connstr;
+    let wal_producer_connstr = {
+        match get_wal_receiver_entry(tenant_id, timeline_id) {
+            Some(e) => e.wal_producer_connstr,
+            None => {
+                info!(
+                    "Unable to create the WAL receiver thread: no WAL receiver entry found for tenant {} and timeline {}",
+                    tenant_id, timeline_id
+                );
+                return;
+            }
+        }
+    };
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
@@ -338,14 +342,16 @@ fn walreceiver_main(
             // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
             {
                 let mut receivers = WAL_RECEIVERS.lock().unwrap();
-                let entry = receivers
-                    .get_mut(&(tenant_id, timeline_id))
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Should exist a WAL receiver entry for tenant {} and timeline {}",
-                            tenant_id, timeline_id
-                        )
-                    });
+                let entry = match receivers.get_mut(&(tenant_id, timeline_id)) {
+                    Some(e) => e,
+                    None => {
+                        anyhow::bail!(
+                            "no WAL receiver entry found for tenant {} and timeline {}",
+                            tenant_id,
+                            timeline_id
+                        );
+                    }
+                };
 
                 entry.last_received_msg_lsn = Some(last_lsn);
                 entry.last_received_msg_ts = Some(
