@@ -1512,7 +1512,7 @@ impl LayeredTimeline {
             .ensure_loaded()
             .with_context(|| {
                 format!(
-                    "Ancestor timeline is not is not loaded. Timeline id: {} Ancestor id {:?}",
+                    "Ancestor timeline is not loaded. Timeline id: {} Ancestor id {:?}",
                     self.timeline_id,
                     self.get_ancestor_timeline_id(),
                 )
