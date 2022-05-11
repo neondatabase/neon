@@ -15,9 +15,8 @@ def test_pageserver_init_node_id(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init()
     with pytest.raises(
             Exception,
-            match="node id can only be set during pageserver init and cannot be overridden",
-    ):
-        env.pageserver.start(overrides=["--pageserver-config-override=id=10"])
+            match="node id can only be set during pageserver init and cannot be overridden"):
+        env.pageserver.start(overrides=['--pageserver-config-override=id=10'])
 
 
 def create_tenant_and_root_branch(
@@ -43,12 +42,12 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
     client.check_status()
 
     # check initial tenant is there
-    assert initial_tenant.hex in {t["id"] for t in client.tenant_list()}
+    assert initial_tenant.hex in {t['id'] for t in client.tenant_list()}
 
     # create new tenant and check it is also there
     tenant_id = uuid4()
     client.tenant_create(tenant_id)
-    assert tenant_id.hex in {t["id"] for t in client.tenant_list()}
+    assert tenant_id.hex in {t['id'] for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) == 0, "initial tenant should not have any timelines"
@@ -61,16 +60,16 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
     assert len(timelines) > 0
 
     # check it is there
-    assert timeline_id.hex in {b["timeline_id"] for b in client.timeline_list(tenant_id)}
+    assert timeline_id.hex in {b['timeline_id'] for b in client.timeline_list(tenant_id)}
     for timeline in timelines:
-        timeline_id_str = str(timeline["timeline_id"])
+        timeline_id_str = str(timeline['timeline_id'])
         timeline_details = client.timeline_detail(tenant_id=tenant_id,
                                                   timeline_id=UUID(timeline_id_str))
 
-        assert timeline_details["tenant_id"] == tenant_id.hex
-        assert timeline_details["timeline_id"] == timeline_id_str
+        assert timeline_details['tenant_id'] == tenant_id.hex
+        assert timeline_details['timeline_id'] == timeline_id_str
 
-        local_timeline_details = timeline_details.get("local")
+        local_timeline_details = timeline_details.get('local')
         assert local_timeline_details is not None
         assert local_timeline_details["timeline_state"] == "Loaded"
 
