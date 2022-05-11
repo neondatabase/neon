@@ -31,7 +31,7 @@ pub mod defaults {
 
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
-    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
 }
 
 #[derive(Debug, Clone)]
