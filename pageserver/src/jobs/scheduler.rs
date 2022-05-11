@@ -36,33 +36,26 @@ impl<J: Job> Sched<J> {
                 let shutdown_watcher = shutdown_watcher();
                 tokio::select! {
                     _ = shutdown_watcher => break,
-                    w = self.worker.1.recv() => {
+                    worker = self.worker.1.recv() => {
                         // Assign to next job in queue, if nonempty
-                        println!("got worker");
                         if let Some(j) = jobs.pop_front() {
-                            println!("found job from queue");
-                            w.unwrap().0.send(j).await.unwrap();
+                            worker.unwrap().0.send(j).await.unwrap();
                         } else {
-                            println!("no jobs in queue");
-                            workers.push(w.unwrap());
+                            workers.push(worker.unwrap());
                         }
                     },
-                    j = self.work.1.recv() => {
+                    job = self.work.1.recv() => {
                         // Assign to first worker in pool, if nonempty
-                        println!("got job");
                         if let Some(w) = workers.pop() {
-                            println!("found worker in pool");
-                            w.0.send(j.unwrap()).await.unwrap();
+                            w.0.send(job.unwrap()).await.unwrap();
                         } else {
-                            println!("no workers in pool");
-                            jobs.push_back(j.unwrap());
+                            jobs.push_back(job.unwrap());
                         }
                     },
-                    r = self.report.1.recv() => {
+                    report = self.report.1.recv() => {
                         // Reschedule job to run again
                         let send_work = self.work.0.clone();
-                        let job = r.unwrap().for_job;
-                        println!("rescheduling");
+                        let job = report.unwrap().for_job;
                         tokio::spawn(async move {
                             sleep(Duration::from_millis(10)).await;
                             send_work.send(job).await.unwrap();
