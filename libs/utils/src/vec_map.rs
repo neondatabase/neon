@@ -1,11 +1,9 @@
 use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
 
-use serde::{Deserialize, Serialize};
-
 /// Ordered map datastructure implemented in a Vec.
 /// Append only - can only add keys that are larger than the
 /// current max key.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct VecMap<K, V>(Vec<(K, V)>);
 
 impl<K, V> Default for VecMap<K, V> {
