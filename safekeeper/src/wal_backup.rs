@@ -44,6 +44,8 @@ async fn detect_task(
     lsn_backed_up: Sender<Lsn>,
     ) -> Result<()> {
 
+    info!("Starting backup task, backup_lsn {}", backup_start);
+
     segment_size_set.changed().await.expect("Failed to recieve wal segment size");
     let wal_seg_size = *segment_size_set.borrow() as usize;
     ensure!((MIN_WAL_SEGMENT_SIZE..=MAX_WAL_SEGMENT_SIZE).contains(&wal_seg_size), "Invalid wal seg size provided, should be between 1MiB and 1GiB per postgres");
@@ -113,13 +115,16 @@ async fn detect_task(
                     }
                 }
 
-                info!("Woken up for lsn {} committed, will back it up. backup lsn {}", commit_lsn, backup_lsn);
+                debug!("Woken up for lsn {} committed, will back it up. backup lsn {}", commit_lsn, backup_lsn);
 
-                if let Ok(backup_lsn_result) = backup_lsn_range(backup_lsn, commit_lsn, wal_seg_size, &conf, timeline_id).await {
-                    backup_lsn = backup_lsn_result;
-                    lsn_backed_up.send(backup_lsn)?;    
-                } else {
-                    error!("Something went wrong with backup commit_lsn {} backup lsn {}", commit_lsn, backup_lsn);
+                match backup_lsn_range(backup_lsn, commit_lsn, wal_seg_size, &conf, timeline_id).await {
+                    Ok(backup_lsn_result) => {
+                        backup_lsn = backup_lsn_result;
+                        lsn_backed_up.send(backup_lsn)?;    
+                    },
+                    Err(e) => {
+                        error!("Failure in backup backup commit_lsn {} backup lsn {}, {:?}", commit_lsn, backup_lsn, e);
+                    },
                 }
             }
         }
@@ -165,17 +170,16 @@ async fn backup_single_segment(seg: Segment, wal_seg_size: usize, conf: &SafeKee
     let segment_file_name = seg.file_path(&timeline_id, conf)?;
     let dest_name = PathBuf::from(format!("{}/{}", timeline_id.tenant_id, timeline_id.timeline_id)).with_file_name(seg.file_name());
 
-    info!("Backup of {} requested", segment_file_name.display());
+    debug!("Backup of {} requested", segment_file_name.display());
     ensure!(seg.size() == wal_seg_size);
 
     if !segment_file_name.exists() {
         // TODO: antons return a specific error
         bail!("Segment file is Missing");
-    } 
+    }
 
     backup_object(conf.remote_storage_config.as_ref(), conf.timeline_dir(&timeline_id), &segment_file_name, seg.size(), &dest_name).await?;
-
-    info!("Backup of {} done", segment_file_name.display());
+    debug!("Backup of {} done", segment_file_name.display());
 
     Ok(())
 }
@@ -187,27 +191,25 @@ pub fn create(
         wal_seg_size: Receiver<u32>,
         lsn_committed: Receiver<Lsn>,
         lsn_backed_up: Sender<Lsn>) -> Result<()> {
-    info!("Creating wal backup task for timeline {}, starting with Lsn {}", timeline_id.timeline_id, initial_lsn);
 
     let runtime = BACKUP_RUNTIME.get_or_init(|| {
         let rt_size =  usize::try_from(conf.backup_runtime_threads.unwrap_or(DEFAULT_BACKUP_RUNTIME_SIZE))
             .expect("Could not get configuration value for backup_runtime_threads");
 
-        info!("initialize backup async runtime with {} threads", rt_size);
+        info!("Initializing backup async runtime with {} threads", rt_size);
 
         Builder::new_multi_thread()
             .worker_threads(rt_size)
             .enable_all()
             .build()
-            .expect("Couldn't create wal backup runtime")
+            .expect("Failed to create wal backup runtime")
     });
 
-    // TODO: antons add timeline id to the info span
     runtime.spawn(
         detect_task(conf.clone(), *timeline_id, initial_lsn, wal_seg_size, lsn_committed, lsn_backed_up)
-        .instrument(info_span!("wal backup")));
+        .instrument(info_span!("Wal Backup", timeline_id.timeline_id = %timeline_id)));
 
-        Ok(())
+    Ok(())
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -256,8 +258,10 @@ static REMOTE_STORAGE: OnceCell<Box<Option<GenericRemoteStorage>>> = OnceCell::n
 async fn backup_object(remote_storage_config: Option<&RemoteStorageConfig>, source_directory: PathBuf, source_file: &PathBuf, size: usize, destination: &PathBuf) -> Result<()> {
 
     let storage = REMOTE_STORAGE.get_or_init(|| {
-        // TODO: antons clean the next line
-        let rs = remote_storage_config.map(|c|  GenericRemoteStorage::new(source_directory, c).expect("Could not create remote storage"));
+        let rs = remote_storage_config
+            .map(|c|  
+                    GenericRemoteStorage::new(source_directory, c)
+                        .expect("Failed to create remote storage"));
 
         Box::new(rs)
     });
@@ -267,17 +271,17 @@ async fn backup_object(remote_storage_config: Option<&RemoteStorageConfig>, sour
     match storage.as_ref() {
         Some(GenericRemoteStorage::Local(local_storage)) => 
         {
-            info!("local upload about to start from {} to {}", source_file.display(), destination.display());
+            debug!("local upload about to start from {} to {}", source_file.display(), destination.display());
             local_storage.upload(file, size, destination, None).await
         }
         Some(GenericRemoteStorage::S3(s3_storage)) => 
         {
-            let s3path = s3_storage
+            let s3key = s3_storage
                 .remote_object_id(destination.as_path())
                 .with_context(|| format!("Could not format remote path for {}", destination.display()))?;
 
-            info!("S3 upload about to start from {} to {}", source_file.display(), destination.display());
-            s3_storage.upload(file, size, &s3path, None).await
+            debug!("S3 upload about to start from {} to {}", source_file.display(), destination.display());
+            s3_storage.upload(file, size, &s3key, None).await
         }
         None => {
             info!("no backup storage configured, skipping backup {}", destination.display());

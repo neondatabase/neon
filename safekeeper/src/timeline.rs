@@ -445,7 +445,6 @@ impl Timeline {
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
-            // backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
             // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: Some(max(
                 shared_state.get_replicas_state().remote_consistent_lsn,

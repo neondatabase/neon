@@ -589,11 +589,14 @@ class ZenithEnv:
                 http=self.port_distributor.get_port(),
             )
             id = i  # assign ids sequentially
+            # TODO: antons configure passing --backup-storage
             toml += textwrap.dedent(f"""
                 [[safekeepers]]
                 id = {id}
                 pg_port = {port.pg}
                 http_port = {port.http}
+                local_backup_path = '../wal_backup'
+                backup_threads = 7
                 sync = false # Disable fsyncs to make the tests go faster
             """)
             safekeeper = Safekeeper(env=self, id=id, port=port)
@@ -1695,6 +1698,7 @@ class Safekeeper:
     id: int
     auth_token: Optional[str] = None
     running: bool = False
+    backup_dir: Optional[str] = None
 
     def start(self) -> 'Safekeeper':
         assert self.running == False
@@ -1755,6 +1759,11 @@ class Safekeeper:
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
 
+    def local_backup_directory(self) -> str:
+        if backup_dir == None:
+            return None
+        else:
+            return os.path.join(self.data_dir(), self.backup_dir)
 
 @dataclass
 class SafekeeperTimelineStatus:

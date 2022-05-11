@@ -1,15 +1,14 @@
 //
 // Main entry point for the safekeeper executable
 //
-use anyhow::{bail, Context, Result, ensure};
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
-use remote_storage::{RemoteStorageConfig, RemoteStorageKind, S3Config};
+use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
-use std::num::{NonZeroUsize, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::thread;
 use tokio::sync::mpsc;
@@ -113,17 +112,7 @@ fn main() -> Result<()> {
         ).arg(
             Arg::new("backup-threads").long("backup-threads").takes_value(true).help("number of threads for wal backup: integer")
         ).arg(
-            Arg::new("backup-locally").long("backup-locally").takes_value(true).help("local directory for WAL backup. not for production")
-        ).arg(
-            Arg::new("backup-s3-bucket").long("backup-s3-bucket").takes_value(true).help("s3 bucket for WAL backup")
-        ).arg(
-            Arg::new("backup-s3-prefix").long("backup-s3-prefix").takes_value(true).help("wal backup storage configuration: a lot of words")
-        ).arg(
-            Arg::new("backup-s3-region").long("s3-bucket-region").takes_value(true).help("s3 bucket region")
-        ).arg(
-            Arg::new("s3-endpoint").long("s3-endpoint").takes_value(true).help("wal backup storage configuration: a lot of words")
-        ).arg(
-            Arg::new("s3-concurrency-limit").long("s3-concurrency-limit").takes_value(true).help("wal backup storage configuration: a lot of words")
+            Arg::new("backup-storage").long("backup-storage").takes_value(true).help("backup storage configuration: e.g. {\"max_concurrent_syncs\": \"17\", \"max_sync_errors\": \"13\", \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": \"119\"} ")
         )
         .arg(
             Arg::new("broker-etcd-prefix")
@@ -190,93 +179,11 @@ fn main() -> Result<()> {
             .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?);
     }
 
-    if let Some(local_directory) = arg_matches.value_of("backup-locally") {
-        conf.remote_storage_config = local_backup_config(local_directory).ok();
-    }
-
-    if let Some(bucket) = arg_matches.value_of("backup-s3-bucket") {
-        ensure!(arg_matches.value_of("backup-locally").is_none(), "Either backup-s3-bucket or backup-locally should be specified, not both");
-
-        let prefix = arg_matches.value_of("backup-s3-prefix");
-        let region = arg_matches.value_of("s3-bucket-region");
-        let endpoint = arg_matches.value_of("s3-endpoint");
-        let concurrency_limit = arg_matches.value_of("s3-concurrency-limit");
-        let max_concurrent_syncs = arg_matches.value_of("max-concurrent-syncs");
-        let max_sync_errors = arg_matches.value_of("max-sync-errors");
-
-        conf.remote_storage_config = s3_backup_config(
-            bucket.to_string(),
-            prefix,
-            region,
-            endpoint,
-            concurrency_limit,
-            max_concurrent_syncs,
-            max_sync_errors
-        ).ok();
+    if let Some(storage_conf) = arg_matches.value_of("backup-storage") {
+        conf.remote_storage_config = Some(RemoteStorageConfig::from_json_string(storage_conf.to_string())?);
     }
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
-}
-
-// TODO: antons move this function to the remote_storage library?
-fn local_backup_config(path: &str) -> Result<RemoteStorageConfig> {
-    // This configuration is meant for testing reasons, using default values for simplicity
-    let max_concurrent_syncs = NonZeroUsize::new(128).context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
-    let max_sync_errors = NonZeroU32::new(64).context("Failed to parse 'max_sync_errors' as a positive integer")?;
-    let storage =  RemoteStorageKind::LocalFs(PathBuf::from(path));
-
-    Ok(RemoteStorageConfig {
-        max_concurrent_syncs,
-        max_sync_errors,
-        storage,
-    })
-}
-
-// TODO: antons move this function to the remote_storage library?
-fn s3_backup_config(
-    bucket: String,
-    prefix: Option<&str>,
-    region: Option<&str>,
-    endpoint: Option<&str>,
-    concurrency_limit: Option<&str>,
-    max_concurrent_syncs: Option<&str>, 
-    max_sync_errors: Option<&str>) -> Result<RemoteStorageConfig> {
-
-    let max_concurrent_syncs = max_concurrent_syncs
-        .map(|x| x.to_string().parse::<usize>().ok())
-        .flatten()
-        .map(|y| NonZeroUsize::new(y))
-        .flatten()
-        .context("Failed to parse 'max-concurrent-syncs' as a positive integer")?;
-
-    let max_sync_errors = max_sync_errors
-        .map(|x| x.to_string().parse::<u32>().ok())
-        .flatten()
-        .map(|y| NonZeroU32::new(y))
-        .flatten()
-        .context("Failed to parse 'max-sync-errors' as a positive integer")?;
-
-    let concurrency_limit = concurrency_limit
-        .map(|x| x.to_string().parse::<usize>().ok())
-        .flatten()
-        .map(|y| NonZeroUsize::new(y))
-        .flatten()
-        .context("Failed to parse 's3-concurrency-limit' as a positive integer")?;
-
-
-    let storage =  RemoteStorageKind::AwsS3(S3Config {
-                    bucket_name: bucket,
-                    bucket_region: region.expect("region name should be provided with s3 bucket").to_string(),
-                    prefix_in_bucket: prefix.map(|p| p.to_string()),
-                    endpoint: endpoint.map(|p| p.to_string()),
-                    concurrency_limit: concurrency_limit,
-                });
-
-    Ok(RemoteStorageConfig {
-        max_concurrent_syncs,
-        max_sync_errors,
-        storage,
-    })
 }
 
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {

@@ -67,40 +67,6 @@ pub struct LocalEnv {
     #[serde(default)]
     pub broker_etcd_prefix: Option<String>,
 
-    #[serde(default)]
-    pub local_backup_path: Option<String>,
-    
-    // TODO: antons: put configuration for remote storage here
-    // pub remote_storage_type: ,
-    // pub remote storage destination, etc.
-    // s3 bucket name for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_s3_bucket: Option<String>,
-
-    // s3 key prefix for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_s3_prefix: Option<String>,
-
-    // s3 bucket region for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_s3_bucket_region: Option<String>,
-
-    // s3 endpoint for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_s3_endpoint:  Option<String>,
-
-    // concurrency limit for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_s3_concurrency_limit: Option<String>,
-
-    // Max concurrency for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_max_concurrent_sync: Option<String>,
-
-    // Max sync errors for for SK WAL Backup
-    #[serde(default)]
-    pub wal_backup_max_sync_errors: Option<String>,
-
     pub pageserver: PageServerConf,
 
     #[serde(default)]
@@ -150,7 +116,7 @@ pub struct SafekeeperConf {
     pub pg_port: u16,
     pub http_port: u16,
     pub sync: bool,
-    pub local_backup_path: Option<String>,
+    pub backup_storage: Option<String>,
     pub backup_threads: Option<u32>,
 }
 
@@ -161,7 +127,7 @@ impl Default for SafekeeperConf {
             pg_port: 0,
             http_port: 0,
             sync: true,
-            local_backup_path: None,
+            backup_storage: None,
             backup_threads: None,
         }
     }

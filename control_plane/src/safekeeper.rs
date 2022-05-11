@@ -77,15 +77,6 @@ pub struct SafekeeperNode {
     pub pageserver: Arc<PageServerNode>,
     broker_endpoints: Option<String>,
     broker_etcd_prefix: Option<String>,
-
-    s3_bucket: Option<String>,
-    s3_prefix: Option<String>,
-    s3_region: Option<String>,
-    s3_endpoint: Option<String>,
-    concurrency_limit: Option<String>,
-    max_concurrent_timelines_sync: Option<String>,
-    max_sync_errors: Option<String>,
-    
 }
 
 impl SafekeeperNode {
@@ -104,13 +95,6 @@ impl SafekeeperNode {
             pageserver,
             broker_endpoints: env.broker_endpoints.clone(),
             broker_etcd_prefix: env.broker_etcd_prefix.clone(),
-            s3_bucket: env.wal_backup_s3_bucket.clone(),
-            s3_prefix: env.wal_backup_s3_prefix.clone(),
-            s3_region: env.wal_backup_s3_bucket_region.clone(),
-            s3_endpoint: env.wal_backup_s3_endpoint.clone(),
-            concurrency_limit: env.wal_backup_s3_concurrency_limit.clone(),
-            max_concurrent_timelines_sync: env.wal_backup_max_concurrent_sync.clone(),
-            max_sync_errors: env.wal_backup_max_sync_errors.clone(),
         }
     }
 
@@ -166,19 +150,8 @@ impl SafekeeperNode {
         if let Some(threads) = self.conf.backup_threads {
             cmd.args(&["--backup-threads", threads.to_string().as_ref()]);
         }
-        if let Some(ref local_storage_path) = self.conf.local_backup_path {
-            cmd.args(&["--backup-locally", local_storage_path]);
-        }
-
-        if let Some(ref bucket) = self.s3_bucket {
-            cmd.args(&["--backup-s3-bucket", bucket.to_string().as_ref()]);
-            
-            cmd.args(&["--backup-s3-prefix", self.s3_prefix.as_ref().expect("s3 prefix is expected with s3 bucket")]);
-            cmd.args(&["--s3-bucket-region", self.s3_region.as_ref().expect("s3 region is expected with s3 bucket")]);
-            cmd.args(&["--s3-endpoint", self.s3_endpoint.as_ref().expect("s3 endpoint is expected with s3 bucket")]);
-            cmd.args(&["--s3-concurrency-limit", self.concurrency_limit.as_ref().expect("s3 concurrency limit is expected with s3 bucket")]);
-            cmd.args(&["--max-concurrent-syncs", self.max_concurrent_timelines_sync.as_ref().expect("max concurrent sync is expected with s3 bucket")]);
-            cmd.args(&["--max-sync-errors", self.max_sync_errors.as_ref().expect("max sync errors is expected with s3 bucket")]);
+        if let Some(ref backup_storage) = self.conf.backup_storage {
+            cmd.args(&["--backup-storage", backup_storage]);
         }
 
         if !cmd.status()?.success() {
