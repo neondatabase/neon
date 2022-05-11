@@ -97,6 +97,12 @@ pub enum ThreadKind {
     // Thread that handles compaction of all timelines for a tenant.
     Compactor,
 
+    // Thread that schedules GC tasks
+    GcScheduler,
+
+    // Thread that works on GC tasks
+    GcWorker,
+
     // Thread that handles GC of a tenant
     GarbageCollector,
 
