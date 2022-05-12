@@ -89,7 +89,6 @@ struct SharedState {
     active: bool,
     num_computes: u32,
     pageserver_connstr: Option<String>,
-    listen_pg_addr: String,
     last_removed_segno: XLogSegNo,
 }
 
@@ -112,7 +111,6 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
-            listen_pg_addr: conf.listen_pg_addr.clone(),
             last_removed_segno: 0,
         })
     }
@@ -132,7 +130,6 @@ impl SharedState {
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
-            listen_pg_addr: conf.listen_pg_addr.clone(),
             last_removed_segno: 0,
         })
     }
@@ -421,7 +418,7 @@ impl Timeline {
     }
 
     /// Prepare public safekeeper info for reporting.
-    pub fn get_public_info(&self) -> anyhow::Result<SkTimelineInfo> {
+    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> anyhow::Result<SkTimelineInfo> {
         let shared_state = self.mutex.lock().unwrap();
         Ok(SkTimelineInfo {
             last_log_term: Some(shared_state.sk.get_epoch()),
@@ -435,18 +432,7 @@ impl Timeline {
                 shared_state.sk.inmem.remote_consistent_lsn,
             )),
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
-            wal_stream_connection_string: shared_state
-                .pageserver_connstr
-                .as_deref()
-                .map(|pageserver_connstr| {
-                    wal_stream_connection_string(
-                        self.zttid,
-                        &shared_state.listen_pg_addr,
-                        pageserver_connstr,
-                    )
-                })
-                .transpose()
-                .context("Failed to get the pageserver callmemaybe connstr")?,
+            safekeeper_connection_string: Some(conf.listen_pg_addr.clone()),
         })
     }
 
@@ -502,29 +488,6 @@ impl Timeline {
         self.mutex.lock().unwrap().last_removed_segno = horizon_segno;
         Ok(())
     }
-}
-
-// pageserver connstr is needed to be able to distinguish between different pageservers
-// it is required to correctly manage callmemaybe subscriptions when more than one pageserver is involved
-// TODO it is better to use some sort of a unique id instead of connection string, see https://github.com/zenithdb/zenith/issues/1105
-fn wal_stream_connection_string(
-    ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    }: ZTenantTimelineId,
-    listen_pg_addr_str: &str,
-    pageserver_connstr: &str,
-) -> anyhow::Result<String> {
-    let me_connstr = format!("postgresql://no_user@{}/no_db", listen_pg_addr_str);
-    let me_conf = me_connstr
-        .parse::<postgres::config::Config>()
-        .with_context(|| {
-            format!("Failed to parse pageserver connection string '{me_connstr}' as a postgres one")
-        })?;
-    let (host, port) = utils::connstring::connection_host_port(&me_conf);
-    Ok(format!(
-        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id} pageserver_connstr={pageserver_connstr}'",
-    ))
 }
 
 // Utilities needed by various Connection-like objects

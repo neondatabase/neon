@@ -51,7 +51,7 @@ pub struct SkTimelineInfo {
     #[serde(default)]
     pub peer_horizon_lsn: Option<Lsn>,
     #[serde(default)]
-    pub wal_stream_connection_string: Option<String>,
+    pub safekeeper_connection_string: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -217,16 +217,22 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                 break;
             }
 
-            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>> =
-                HashMap::new();
+            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>> = HashMap::new();
+            // Keep track that the timeline data updates from etcd arrive in the right order.
+            // https://etcd.io/docs/v3.5/learning/api_guarantees/#isolation-level-and-consistency-of-replicas
+            // > etcd does not ensure linearizability for watch operations. Users are expected to verify the revision of watch responses to ensure correct ordering.
+            let mut timeline_etcd_versions: HashMap<ZTenantTimelineId, i64> = HashMap::new();
+
 
             let events = resp.events();
             debug!("Processing {} events", events.len());
 
             for event in events {
                 if EventType::Put == event.event_type() {
-                    if let Some(kv) = event.kv() {
-                        match parse_etcd_key_value(subscription_kind, &regex, kv) {
+                    if let Some(new_etcd_kv) = event.kv() {
+                        let new_kv_version = new_etcd_kv.version();
+
+                        match parse_etcd_key_value(subscription_kind, &regex, new_etcd_kv) {
                             Ok(Some((zttid, timeline))) => {
                                 match timeline_updates
                                     .entry(zttid)
@@ -234,12 +240,15 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                     .entry(timeline.safekeeper_id)
                                 {
                                     hash_map::Entry::Occupied(mut o) => {
-                                        if o.get().flush_lsn < timeline.info.flush_lsn {
+                                        let old_etcd_kv_version = timeline_etcd_versions.get(&zttid).copied().unwrap_or(i64::MIN);
+                                        if old_etcd_kv_version < new_kv_version {
                                             o.insert(timeline.info);
+                                            timeline_etcd_versions.insert(zttid,new_kv_version);
                                         }
                                     }
                                     hash_map::Entry::Vacant(v) => {
                                         v.insert(timeline.info);
+                                        timeline_etcd_versions.insert(zttid,new_kv_version);
                                     }
                                 }
                             }

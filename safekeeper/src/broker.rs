@@ -60,7 +60,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // lock is held.
         for zttid in GlobalTimelines::get_active_timelines() {
             if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                let sk_info = tli.get_public_info()?;
+                let sk_info = tli.get_public_info(&conf)?;
                 let put_opts = PutOptions::new().with_lease(lease.id());
                 client
                     .put(
