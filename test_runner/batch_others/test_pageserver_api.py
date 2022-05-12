@@ -51,7 +51,7 @@ def check_client(client: ZenithPageserverHttpClient, initial_tenant: UUID):
 
         local_timeline_details = timeline_details.get('local')
         assert local_timeline_details is not None
-        assert local_timeline_details["timeline_state"] == "Loaded"
+        assert local_timeline_details['timeline_state'] == 'Loaded'
 
 
 def test_pageserver_http_get_wal_receiver_not_found(zenith_simple_env: ZenithEnv):
