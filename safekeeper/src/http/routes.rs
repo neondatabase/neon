@@ -3,19 +3,20 @@ use hyper::{Body, Request, Response, StatusCode};
 
 use serde::Serialize;
 use serde::Serializer;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline::GlobalTimelines;
+use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
 use crate::SafeKeeperConf;
 use utils::{
     http::{
         endpoint,
         error::ApiError,
         json::{json_request, json_response},
-        request::parse_request_param,
+        request::{ensure_no_body, parse_request_param},
         RequestExt, RouterBuilder,
     },
     lsn::Lsn,
@@ -130,6 +131,44 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::CREATED, ())
 }
 
+/// Deactivates the timeline and removes its data directory.
+///
+/// It does not try to stop any processing of the timeline; there is no such code at the time of writing.
+/// However, it tries to check whether the timeline was active and report it to caller just in case.
+/// Note that this information is inaccurate:
+/// 1. There is a race condition between checking the timeline for activity and actual directory deletion.
+/// 2. At the time of writing Safekeeper rarely marks a timeline inactive. E.g. disconnecting the compute node does nothing.
+async fn timeline_delete_force_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let zttid = ZTenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    ensure_no_body(&mut request).await?;
+    json_response(
+        StatusCode::OK,
+        GlobalTimelines::delete_force(get_conf(&request), &zttid).map_err(ApiError::from_err)?,
+    )
+}
+
+/// Deactivates all timelines for the tenant and removes its data directory.
+/// See `timeline_delete_force_handler`.
+async fn tenant_delete_force_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id = parse_request_param(&request, "tenant_id")?;
+    ensure_no_body(&mut request).await?;
+    json_response(
+        StatusCode::OK,
+        GlobalTimelines::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
+            .map_err(ApiError::from_err)?
+            .iter()
+            .map(|(zttid, resp)| (format!("{}", zttid.timeline_id), *resp))
+            .collect::<HashMap<String, TimelineDeleteForceResult>>(),
+    )
+}
+
 /// Used only in tests to hand craft required data.
 async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let zttid = ZTenantTimelineId::new(
@@ -155,6 +194,11 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             timeline_status_handler,
         )
         .post("/v1/timeline", timeline_create_handler)
+        .delete(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
+            timeline_delete_force_handler,
+        )
+        .delete("/v1/tenant/:tenant_id", tenant_delete_force_handler)
         // for tests
         .post(
             "/v1/record_safekeeper_info/:tenant_id/:timeline_id",

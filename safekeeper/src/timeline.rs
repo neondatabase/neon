@@ -7,6 +7,8 @@ use etcd_broker::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
+use serde::Serialize;
+
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self};
@@ -19,7 +21,7 @@ use tracing::*;
 use utils::{
     lsn::Lsn,
     pq_proto::ZenithFeedback,
-    zid::{ZNodeId, ZTenantTimelineId},
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId},
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
@@ -345,6 +347,20 @@ impl Timeline {
         Ok(false)
     }
 
+    /// Deactivates the timeline, assuming it is being deleted.
+    /// Returns whether the timeline was already active.
+    ///
+    /// The callmemaybe thread is stopped by the deactivation message. We assume all other threads
+    /// will stop by themselves eventually (possibly with errors, but no panics). There should be no
+    /// compute threads (as we're deleting the timeline), actually. Some WAL may be left unsent, but
+    /// we're deleting the timeline anyway.
+    pub fn deactivate_for_delete(&self) -> Result<bool> {
+        let mut shared_state = self.mutex.lock().unwrap();
+        let was_active = shared_state.active;
+        shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
+        Ok(was_active)
+    }
+
     fn is_active(&self) -> bool {
         let shared_state = self.mutex.lock().unwrap();
         shared_state.active
@@ -515,6 +531,12 @@ lazy_static! {
     });
 }
 
+#[derive(Clone, Copy, Serialize)]
+pub struct TimelineDeleteForceResult {
+    pub dir_existed: bool,
+    pub was_active: bool,
+}
+
 /// A zero-sized struct used to manage access to the global timelines map.
 pub struct GlobalTimelines;
 
@@ -612,5 +634,79 @@ impl GlobalTimelines {
             .filter(|&(_, tli)| tli.is_active())
             .map(|(zttid, _)| *zttid)
             .collect()
+    }
+
+    fn delete_force_internal(
+        conf: &SafeKeeperConf,
+        zttid: &ZTenantTimelineId,
+        was_active: bool,
+    ) -> Result<TimelineDeleteForceResult> {
+        match std::fs::remove_dir_all(conf.timeline_dir(zttid)) {
+            Ok(_) => Ok(TimelineDeleteForceResult {
+                dir_existed: true,
+                was_active,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TimelineDeleteForceResult {
+                dir_existed: false,
+                was_active,
+            }),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Deactivates and deletes the timeline, see `Timeline::deactivate_for_delete()`, the deletes
+    /// the corresponding data directory.
+    /// We assume all timeline threads do not care about `GlobalTimelines` not containing the timeline
+    /// anymore, and they will eventually terminate without panics.
+    ///
+    /// There are multiple ways the timeline may be accidentally "re-created" (so we end up with two
+    /// `Timeline` objects in memory):
+    /// a) a compute node connects after this method is called, or
+    /// b) an HTTP GET request about the timeline is made and it's able to restore the current state, or
+    /// c) an HTTP POST request for timeline creation is made after the timeline is already deleted.
+    /// TODO: ensure all of the above never happens.
+    pub fn delete_force(
+        conf: &SafeKeeperConf,
+        zttid: &ZTenantTimelineId,
+    ) -> Result<TimelineDeleteForceResult> {
+        info!("deleting timeline {}", zttid);
+        let was_active = match TIMELINES_STATE.lock().unwrap().timelines.remove(zttid) {
+            None => false,
+            Some(tli) => tli.deactivate_for_delete()?,
+        };
+        GlobalTimelines::delete_force_internal(conf, zttid, was_active)
+    }
+
+    /// Deactivates and deletes all timelines for the tenant, see `delete()`.
+    /// Returns map of all timelines which the tenant had, `true` if a timeline was active.
+    pub fn delete_force_all_for_tenant(
+        conf: &SafeKeeperConf,
+        tenant_id: &ZTenantId,
+    ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
+        info!("deleting all timelines for tenant {}", tenant_id);
+        let mut state = TIMELINES_STATE.lock().unwrap();
+        let mut deleted = HashMap::new();
+        for (zttid, tli) in &state.timelines {
+            if zttid.tenant_id == *tenant_id {
+                deleted.insert(
+                    *zttid,
+                    GlobalTimelines::delete_force_internal(
+                        conf,
+                        zttid,
+                        tli.deactivate_for_delete()?,
+                    )?,
+                );
+            }
+        }
+        // TODO: test that the exact subset of timelines is removed.
+        state
+            .timelines
+            .retain(|zttid, _| !deleted.contains_key(zttid));
+        match std::fs::remove_dir_all(conf.tenant_dir(tenant_id)) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            e => e?,
+        };
+        Ok(deleted)
     }
 }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::zid::{ZNodeId, ZTenantTimelineId};
+use utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId};
 
 pub mod broker;
 pub mod callmemaybe;
@@ -57,9 +57,12 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
+    pub fn tenant_dir(&self, tenant_id: &ZTenantId) -> PathBuf {
+        self.workdir.join(tenant_id.to_string())
+    }
+
     pub fn timeline_dir(&self, zttid: &ZTenantTimelineId) -> PathBuf {
-        self.workdir
-            .join(zttid.tenant_id.to_string())
+        self.tenant_dir(&zttid.tenant_id)
             .join(zttid.timeline_id.to_string())
     }
 }
