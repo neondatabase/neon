@@ -95,6 +95,10 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
+@pytest.mark.skip(
+    reason=
+    "needs to replace callmemaybe call with better idea how to migrate timelines between pageservers"
+)
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                            port_distributor: PortDistributor,
