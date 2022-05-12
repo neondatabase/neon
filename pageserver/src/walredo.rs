@@ -106,16 +106,16 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
 // each tenant.
 lazy_static! {
     static ref WAL_REDO_TIME: Histogram =
-        register_histogram!("pageserver_wal_redo_time", "Time spent on WAL redo")
+        register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
             .expect("failed to define a metric");
     static ref WAL_REDO_WAIT_TIME: Histogram = register_histogram!(
-        "pageserver_wal_redo_wait_time",
+        "pageserver_wal_redo_wait_seconds",
         "Time spent waiting for access to the WAL redo process"
     )
     .expect("failed to define a metric");
     static ref WAL_REDO_RECORD_COUNTER: IntCounter = register_int_counter!(
-        "pageserver_wal_records_replayed",
-        "Number of WAL records replayed"
+        "pageserver_replayed_wal_records_total",
+        "Number of WAL records replayed in WAL redo process"
     )
     .unwrap();
 }
