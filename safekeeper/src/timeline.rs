@@ -278,15 +278,21 @@ impl SharedState {
 /// Database instance (tenant)
 pub struct Timeline {
     pub zttid: ZTenantTimelineId,
+    pub callmemaybe_tx: UnboundedSender<CallmeEvent>,
     mutex: Mutex<SharedState>,
     /// conditional variable used to notify wal senders
     cond: Condvar,
 }
 
 impl Timeline {
-    fn new(zttid: ZTenantTimelineId, shared_state: SharedState) -> Timeline {
+    fn new(
+        zttid: ZTenantTimelineId,
+        callmemaybe_tx: UnboundedSender<CallmeEvent>,
+        shared_state: SharedState,
+    ) -> Timeline {
         Timeline {
             zttid,
+            callmemaybe_tx,
             mutex: Mutex::new(shared_state),
             cond: Condvar::new(),
         }
@@ -295,34 +301,27 @@ impl Timeline {
     /// Register compute connection, starting timeline-related activity if it is
     /// not running yet.
     /// Can fail only if channel to a static thread got closed, which is not normal at all.
-    pub fn on_compute_connect(
-        &self,
-        pageserver_connstr: Option<&String>,
-        callmemaybe_tx: &UnboundedSender<CallmeEvent>,
-    ) -> Result<()> {
+    pub fn on_compute_connect(&self, pageserver_connstr: Option<&String>) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.num_computes += 1;
         // FIXME: currently we always adopt latest pageserver connstr, but we
         // should have kind of generations assigned by compute to distinguish
         // the latest one or even pass it through consensus to reliably deliver
         // to all safekeepers.
-        shared_state.activate(&self.zttid, pageserver_connstr, callmemaybe_tx)?;
+        shared_state.activate(&self.zttid, pageserver_connstr, &self.callmemaybe_tx)?;
         Ok(())
     }
 
     /// De-register compute connection, shutting down timeline activity if
     /// pageserver doesn't need catchup.
     /// Can fail only if channel to a static thread got closed, which is not normal at all.
-    pub fn on_compute_disconnect(
-        &self,
-        callmemaybe_tx: &UnboundedSender<CallmeEvent>,
-    ) -> Result<()> {
+    pub fn on_compute_disconnect(&self) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.num_computes -= 1;
         // If there is no pageserver, can suspend right away; otherwise let
         // walsender do that.
         if shared_state.num_computes == 0 && shared_state.pageserver_connstr.is_none() {
-            shared_state.deactivate(&self.zttid, callmemaybe_tx)?;
+            shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
         }
         Ok(())
     }
@@ -330,11 +329,7 @@ impl Timeline {
     /// Deactivate tenant if there is no computes and pageserver is caughtup,
     /// assuming the pageserver status is in replica_id.
     /// Returns true if deactivated.
-    pub fn check_deactivate(
-        &self,
-        replica_id: usize,
-        callmemaybe_tx: &UnboundedSender<CallmeEvent>,
-    ) -> Result<bool> {
+    pub fn check_deactivate(&self, replica_id: usize) -> Result<bool> {
         let mut shared_state = self.mutex.lock().unwrap();
         if !shared_state.active {
             // already suspended
@@ -346,7 +341,7 @@ impl Timeline {
             (replica_state.last_received_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.last_received_lsn >= shared_state.sk.inmem.commit_lsn);
             if deactivate {
-                shared_state.deactivate(&self.zttid, callmemaybe_tx)?;
+                shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
                 return Ok(true);
             }
         }
@@ -545,22 +540,35 @@ impl TimelineTools for Option<Arc<Timeline>> {
     }
 }
 
+struct GlobalTimelinesState {
+    timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
+    callmemaybe_tx: Option<UnboundedSender<CallmeEvent>>,
+}
+
 lazy_static! {
-    pub static ref TIMELINES: Mutex<HashMap<ZTenantTimelineId, Arc<Timeline>>> =
-        Mutex::new(HashMap::new());
+    static ref TIMELINES_STATE: Mutex<GlobalTimelinesState> = Mutex::new(GlobalTimelinesState {
+        timelines: HashMap::new(),
+        callmemaybe_tx: None
+    });
 }
 
 /// A zero-sized struct used to manage access to the global timelines map.
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
+    pub fn set_callmemaybe_tx(callmemaybe_tx: UnboundedSender<CallmeEvent>) {
+        let mut state = TIMELINES_STATE.lock().unwrap();
+        assert!(state.callmemaybe_tx.is_none());
+        state.callmemaybe_tx = Some(callmemaybe_tx);
+    }
+
     fn create_internal(
-        mut timelines: MutexGuard<HashMap<ZTenantTimelineId, Arc<Timeline>>>,
+        mut state: MutexGuard<GlobalTimelinesState>,
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
         peer_ids: Vec<ZNodeId>,
     ) -> Result<Arc<Timeline>> {
-        match timelines.get(&zttid) {
+        match state.timelines.get(&zttid) {
             Some(_) => bail!("timeline {} already exists", zttid),
             None => {
                 // TODO: check directory existence
@@ -569,8 +577,12 @@ impl GlobalTimelines {
                 let shared_state = SharedState::create(conf, &zttid, peer_ids)
                     .context("failed to create shared state")?;
 
-                let new_tli = Arc::new(Timeline::new(zttid, shared_state));
-                timelines.insert(zttid, Arc::clone(&new_tli));
+                let new_tli = Arc::new(Timeline::new(
+                    zttid,
+                    state.callmemaybe_tx.as_ref().unwrap().clone(),
+                    shared_state,
+                ));
+                state.timelines.insert(zttid, Arc::clone(&new_tli));
                 Ok(new_tli)
             }
         }
@@ -581,20 +593,20 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         peer_ids: Vec<ZNodeId>,
     ) -> Result<Arc<Timeline>> {
-        let timelines = TIMELINES.lock().unwrap();
-        GlobalTimelines::create_internal(timelines, conf, zttid, peer_ids)
+        let state = TIMELINES_STATE.lock().unwrap();
+        GlobalTimelines::create_internal(state, conf, zttid, peer_ids)
     }
 
-    /// Get a timeline with control file loaded from the global TIMELINES map.
+    /// Get a timeline with control file loaded from the global TIMELINES_STATE.timelines map.
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
-        let mut timelines = TIMELINES.lock().unwrap();
+        let mut state = TIMELINES_STATE.lock().unwrap();
 
-        match timelines.get(&zttid) {
+        match state.timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
                 let shared_state =
@@ -610,20 +622,19 @@ impl GlobalTimelines {
                             .contains("No such file or directory")
                             && create
                         {
-                            return GlobalTimelines::create_internal(
-                                timelines,
-                                conf,
-                                zttid,
-                                vec![],
-                            );
+                            return GlobalTimelines::create_internal(state, conf, zttid, vec![]);
                         } else {
                             return Err(error);
                         }
                     }
                 };
 
-                let new_tli = Arc::new(Timeline::new(zttid, shared_state));
-                timelines.insert(zttid, Arc::clone(&new_tli));
+                let new_tli = Arc::new(Timeline::new(
+                    zttid,
+                    state.callmemaybe_tx.as_ref().unwrap().clone(),
+                    shared_state,
+                ));
+                state.timelines.insert(zttid, Arc::clone(&new_tli));
                 Ok(new_tli)
             }
         }
@@ -631,8 +642,9 @@ impl GlobalTimelines {
 
     /// Get ZTenantTimelineIDs of all active timelines.
     pub fn get_active_timelines() -> Vec<ZTenantTimelineId> {
-        let timelines = TIMELINES.lock().unwrap();
-        timelines
+        let state = TIMELINES_STATE.lock().unwrap();
+        state
+            .timelines
             .iter()
             .filter(|&(_, tli)| tli.is_active())
             .map(|(zttid, _)| *zttid)
