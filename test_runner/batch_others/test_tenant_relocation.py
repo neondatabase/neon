@@ -107,7 +107,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant, _ = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
 
     # attach does not download ancestor branches (should it?), just use root branch for now

@@ -21,7 +21,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
-    tenant = env.zenith_cli.create_tenant(
+    tenant, _ = env.zenith_cli.create_tenant(
         conf={
             'gc_period': '10 m',
             'gc_horizon': '1048576',
