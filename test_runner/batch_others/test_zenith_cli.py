@@ -1,7 +1,7 @@
 import uuid
 import requests
 
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
+from fixtures.zenith_fixtures import DEFAULT_BRANCH_NAME, ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
 from typing import cast
 
 
@@ -81,6 +81,16 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert env.initial_tenant.hex in tenants
     assert tenant1.hex in tenants
     assert tenant2.hex in tenants
+
+
+def test_cli_tenant_create(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+    tenant_id = env.zenith_cli.create_tenant()
+    timelines = env.zenith_cli.list_timelines(tenant_id)
+
+    # an initial timeline should be created upon tenant creation
+    assert len(timelines) == 1
+    assert timelines[0][0] == DEFAULT_BRANCH_NAME
 
 
 def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
