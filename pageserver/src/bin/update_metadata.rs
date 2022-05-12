@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use utils::{lsn::Lsn, project_git_version};
 
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith update metadata utility")

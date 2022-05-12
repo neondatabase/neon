@@ -20,8 +20,8 @@ use utils::{
     auth::{Claims, Scope},
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
     project_git_version,
+    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use pageserver::timelines::TimelineInfo;
@@ -30,7 +30,7 @@ use pageserver::timelines::TimelineInfo;
 const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
 const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 fn default_conf() -> String {
     format!(

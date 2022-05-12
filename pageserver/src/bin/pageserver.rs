@@ -27,7 +27,7 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 fn version() -> String {
     format!(

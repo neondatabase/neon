@@ -9,7 +9,7 @@ use pageserver::virtual_file;
 use std::path::PathBuf;
 use utils::project_git_version;
 
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith dump_layerfile utility")
