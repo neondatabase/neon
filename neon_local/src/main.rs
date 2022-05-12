@@ -540,6 +540,33 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 "tenant {} successfully created on the pageserver",
                 new_tenant_id
             );
+
+            // Create an initial timeline for the new tenant
+            let new_timeline_id = parse_timeline_id(create_match)?;
+            let timeline = pageserver
+                .timeline_create(new_tenant_id, new_timeline_id, None, None)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Failed to create initial timeline for tenant {}",
+                        new_tenant_id
+                    )
+                })?;
+            let new_timeline_id = timeline.timeline_id;
+            let last_record_lsn = timeline
+                .local
+                .expect("no local timeline info")
+                .last_record_lsn;
+
+            env.register_branch_mapping(
+                DEFAULT_BRANCH_NAME.to_string(),
+                new_tenant_id,
+                new_timeline_id,
+            )?;
+
+            println!(
+                "Created an initial timeline '{}' at Lsn {} for tenant: {}",
+                new_timeline_id, last_record_lsn, new_tenant_id
+            );
         }
         Some(("config", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
