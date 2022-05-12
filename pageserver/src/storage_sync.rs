@@ -208,12 +208,12 @@ lazy_static! {
     )
     .expect("failed to register pageserver remote storage remaining sync items int gauge");
     static ref FATAL_TASK_FAILURES: IntCounter = register_int_counter!(
-        "pageserver_remote_storage_fatal_task_failures",
+        "pageserver_remote_storage_fatal_task_failures_total",
         "Number of critically failed tasks"
     )
     .expect("failed to register pageserver remote storage remaining sync items int gauge");
     static ref IMAGE_SYNC_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_remote_storage_image_sync_time",
+        "pageserver_remote_storage_image_sync_seconds",
         "Time took to synchronize (download or upload) a whole pageserver image. \
         Grouped by `operation_kind` (upload|download) and `status` (success|failure)",
         &["operation_kind", "status"],
