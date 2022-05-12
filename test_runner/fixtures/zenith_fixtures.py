@@ -1795,6 +1795,21 @@ class SafekeeperHttpClient(requests.Session):
             json=body)
         res.raise_for_status()
 
+    def timeline_delete_force(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def tenant_delete_force(self, tenant_id: str) -> Dict[Any, Any]:
+        res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
         request_result.raise_for_status()
