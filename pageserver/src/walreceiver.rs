@@ -48,6 +48,7 @@ pub struct WalReceiverEntry {
     wal_producer_connstr: String,
     #[serde_as(as = "Option<DisplayFromStr>")]
     last_received_msg_lsn: Option<Lsn>,
+    /// the timestamp (in microseconds) of the last received message
     last_received_msg_ts: Option<u128>,
 }
 
