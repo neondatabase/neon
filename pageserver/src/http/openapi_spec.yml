@@ -123,6 +123,53 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/wal_receiver:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get wal receiver's data attached to the timeline
+      responses:
+        "200":
+          description: WalReceiverEntry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalReceiverEntry"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Error when no wal receiver is running or found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
     parameters:
@@ -519,6 +566,21 @@ components:
         current_logical_size:
           type: integer
         current_logical_size_non_incremental:
+          type: integer
+    WalReceiverEntry:
+      type: object
+      required:
+        - thread_id
+        - wal_producer_connstr
+      properties:
+        thread_id:
+          type: integer
+        wal_producer_connstr:
+          type: string
+        last_received_msg_lsn:
+          type: string
+          format: hex
+        last_received_msg_ts:
           type: integer
 
     Error:
