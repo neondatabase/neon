@@ -89,7 +89,7 @@ pub use crate::layered_repository::ephemeral_file::writeback as writeback_epheme
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_storage_time",
+        "pageserver_storage_operations_seconds",
         "Time spent on storage operations",
         &["operation", "tenant_id", "timeline_id"]
     )
@@ -99,8 +99,8 @@ lazy_static! {
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_getpage_reconstruct_time",
-        "Time spent on storage operations",
+        "pageserver_getpage_reconstruct_seconds",
+        "Time spent in reconstruct_value",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
@@ -108,13 +108,13 @@ lazy_static! {
 
 lazy_static! {
     static ref MATERIALIZED_PAGE_CACHE_HIT: IntCounterVec = register_int_counter_vec!(
-        "materialize_page_cache_hits",
+        "pageserver_materialized_cache_hits_total",
         "Number of cache hits from materialized page cache",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
     static ref WAIT_LSN_TIME: HistogramVec = register_histogram_vec!(
-        "wait_lsn_time",
+        "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
         &["tenant_id", "timeline_id"]
     )
@@ -134,12 +134,12 @@ lazy_static! {
 // or in testing they estimate how much we would upload if we did.
 lazy_static! {
     static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
-        "pageserver_num_persistent_files_created",
+        "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
     static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
-        "pageserver_persistent_bytes_written",
+        "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
     )
     .expect("failed to define a metric");
