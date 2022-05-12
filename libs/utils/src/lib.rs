@@ -76,9 +76,17 @@ pub mod signals;
 // so if we changed the index state git_version will pick that up and rerun the macro.
 //
 // Note that with git_version prefix is `git:` and in case of git version from env its `git-env:`.
-use git_version::git_version;
-pub const GIT_VERSION: &str = git_version!(
-    prefix = "git:",
-    fallback = concat!("git-env:", env!("GIT_VERSION")),
-    args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha
-);
+#[macro_export]
+// TODO kb add identifier into the capture
+macro_rules! project_git_version {
+    () => {
+        const GIT_VERSION: &str = git_version::git_version!(
+            prefix = "git:",
+            fallback = concat!(
+                "git-env:",
+                env!("GIT_VERSION", "Missing GIT_VERSION envvar")
+            ),
+            args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha
+        );
+    };
+}

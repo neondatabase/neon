@@ -52,6 +52,7 @@ nix = "0.23"
 once_cell = "1.8.0"
 crossbeam-utils = "0.8.5"
 fail = "0.5.0"
+git-version = "0.3.5"
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }
