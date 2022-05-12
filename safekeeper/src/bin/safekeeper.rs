@@ -22,11 +22,13 @@ use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
 use safekeeper::{http, s3_offload};
 use utils::{
-    http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
+    http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
+    zid::ZNodeId,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
+project_git_version!();
 
 fn main() -> Result<()> {
     metrics::set_common_metrics_prefix("safekeeper");
@@ -193,7 +195,7 @@ fn main() -> Result<()> {
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
