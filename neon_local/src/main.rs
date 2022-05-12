@@ -545,16 +545,13 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             let new_timeline_id = parse_timeline_id(create_match)?;
             let timeline = pageserver
                 .timeline_create(new_tenant_id, new_timeline_id, None, None)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Failed to create initial timeline for tenant {}",
-                        new_tenant_id
-                    )
-                })?;
+                .context(format!(
+                    "Failed to create initial timeline for tenant {new_tenant_id}"
+                ))?;
             let new_timeline_id = timeline.timeline_id;
             let last_record_lsn = timeline
                 .local
-                .expect("no local timeline info")
+                .context(format!("Failed to get last record LSN: no local timeline info for timeline {new_timeline_id}"))?
                 .last_record_lsn;
 
             env.register_branch_mapping(
@@ -564,8 +561,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             )?;
 
             println!(
-                "Created an initial timeline '{}' at Lsn {} for tenant: {}",
-                new_timeline_id, last_record_lsn, new_tenant_id
+                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {new_tenant_id}",
             );
         }
         Some(("config", create_match)) => {
