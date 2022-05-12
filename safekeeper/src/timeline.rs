@@ -479,7 +479,7 @@ impl Timeline {
         shared_state.sk.wal_store.flush_lsn()
     }
 
-    pub fn remove_old_wal(&self) -> Result<()> {
+    pub fn remove_old_wal(&self, s3_offload_enabled: bool) -> Result<()> {
         let horizon_segno: XLogSegNo;
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
@@ -488,7 +488,7 @@ impl Timeline {
             if shared_state.sk.state.server.wal_seg_size == 0 {
                 return Ok(());
             }
-            horizon_segno = shared_state.sk.get_horizon_segno();
+            horizon_segno = shared_state.sk.get_horizon_segno(s3_offload_enabled);
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(());

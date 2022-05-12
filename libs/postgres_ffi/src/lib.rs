@@ -8,6 +8,7 @@
 #![allow(deref_nullptr)]
 
 use serde::{Deserialize, Serialize};
+use utils::lsn::Lsn;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -36,4 +37,22 @@ pub const fn transaction_id_precedes(id1: TransactionId, id2: TransactionId) -> 
 
     let diff = id1.wrapping_sub(id2) as i32;
     diff < 0
+}
+
+// Check if page is not yet initialized (port of Postgres PageIsInit() macro)
+pub fn page_is_new(pg: &[u8]) -> bool {
+    pg[14] == 0 && pg[15] == 0 // pg_upper == 0
+}
+
+// ExtractLSN from page header
+pub fn page_get_lsn(pg: &[u8]) -> Lsn {
+    Lsn(
+        ((u32::from_le_bytes(pg[0..4].try_into().unwrap()) as u64) << 32)
+            | u32::from_le_bytes(pg[4..8].try_into().unwrap()) as u64,
+    )
+}
+
+pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
+    pg[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
+    pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
 }

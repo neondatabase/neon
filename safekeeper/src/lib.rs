@@ -31,7 +31,7 @@ pub mod defaults {
 
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
-    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +53,7 @@ pub struct SafeKeeperConf {
     pub my_id: ZNodeId,
     pub broker_endpoints: Option<Vec<Url>>,
     pub broker_etcd_prefix: String,
+    pub s3_offload_enabled: bool,
 }
 
 impl SafeKeeperConf {
@@ -79,6 +80,7 @@ impl Default for SafeKeeperConf {
             my_id: ZNodeId(0),
             broker_endpoints: None,
             broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
+            s3_offload_enabled: true,
         }
     }
 }
