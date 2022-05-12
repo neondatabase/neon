@@ -28,7 +28,7 @@ use utils::{
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
     metrics::set_common_metrics_prefix("safekeeper");

@@ -27,7 +27,7 @@ use std::{future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
 
-project_git_version!();
+project_git_version!(GIT_VERSION);
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
