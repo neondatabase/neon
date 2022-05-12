@@ -5,7 +5,6 @@
 use anyhow::{anyhow, bail, Result};
 
 use bytes::BytesMut;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
 use crate::timeline::Timeline;
@@ -27,8 +26,6 @@ use utils::{
     pq_proto::{BeMessage, FeMessage},
     sock_split::ReadStream,
 };
-
-use crate::callmemaybe::CallmeEvent;
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -91,10 +88,9 @@ impl<'pg> ReceiveWalConn<'pg> {
         // Register the connection and defer unregister.
         spg.timeline
             .get()
-            .on_compute_connect(self.pageserver_connstr.as_ref(), &spg.tx)?;
+            .on_compute_connect(self.pageserver_connstr.as_ref())?;
         let _guard = ComputeConnectionGuard {
             timeline: Arc::clone(spg.timeline.get()),
-            callmemaybe_tx: spg.tx.clone(),
         };
 
         let mut next_msg = Some(next_msg);
@@ -194,13 +190,10 @@ impl ProposerPollStream {
 
 struct ComputeConnectionGuard {
     timeline: Arc<Timeline>,
-    callmemaybe_tx: UnboundedSender<CallmeEvent>,
 }
 
 impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline
-            .on_compute_disconnect(&self.callmemaybe_tx)
-            .unwrap();
+        self.timeline.on_compute_disconnect().unwrap();
     }
 }

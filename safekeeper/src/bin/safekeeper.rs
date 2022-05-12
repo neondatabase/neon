@@ -17,6 +17,7 @@ use url::{ParseError, Url};
 use safekeeper::control_file::{self};
 use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use safekeeper::remove_wal;
+use safekeeper::timeline::GlobalTimelines;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
@@ -251,6 +252,8 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
 
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
+    let (callmemaybe_tx, callmemaybe_rx) = mpsc::unbounded_channel();
+    GlobalTimelines::set_callmemaybe_tx(callmemaybe_tx);
 
     let conf_ = conf.clone();
     threads.push(
@@ -279,13 +282,12 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         );
     }
 
-    let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
         .name("Safekeeper thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = wal_service::thread_main(conf_cloned, pg_listener, tx);
+            let thread_result = wal_service::thread_main(conf_cloned, pg_listener);
             if let Err(e) = thread_result {
                 info!("safekeeper thread terminated: {}", e);
             }
@@ -299,7 +301,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         .name("callmemaybe thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = callmemaybe::thread_main(conf_cloned, rx);
+            let thread_result = callmemaybe::thread_main(conf_cloned, callmemaybe_rx);
             if let Err(e) = thread_result {
                 error!("callmemaybe thread terminated: {}", e);
             }
