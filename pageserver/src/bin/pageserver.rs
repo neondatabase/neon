@@ -98,6 +98,8 @@ fn main() -> anyhow::Result<()> {
         let features: &[&str] = &[
             #[cfg(feature = "failpoints")]
             "failpoints",
+            #[cfg(feature = "profiling")]
+            "profiling",
         ];
         println!("{{\"features\": {features:?} }}");
         return Ok(());
