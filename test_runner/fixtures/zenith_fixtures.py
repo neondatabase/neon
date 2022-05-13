@@ -558,7 +558,7 @@ class ZenithEnv:
                                port=self.port_distributor.get_port(),
                                peer_port=self.port_distributor.get_port())
             toml += textwrap.dedent(f"""
-            broker_endpoints = 'http://127.0.0.1:{self.broker.port}'
+            broker_endpoints = ['http://127.0.0.1:{self.broker.port}']
         """)
 
         # Create config for pageserver
