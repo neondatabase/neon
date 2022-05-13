@@ -8,7 +8,6 @@ from fixtures.log_helper import log
 import psycopg2.extras
 import random
 import time
-from fixtures.utils import print_gc_result
 
 
 # This is a clear-box test that demonstrates the worst case scenario for the

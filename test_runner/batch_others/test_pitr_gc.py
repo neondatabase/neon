@@ -16,7 +16,7 @@ def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
 
     zenith_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
-    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1day', gc_horizon = 0}"
+    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
 
     env = zenith_env_builder.init_start()
     pgmain = env.postgres.create_start('main')

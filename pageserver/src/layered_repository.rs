@@ -2121,7 +2121,7 @@ impl LayeredTimeline {
         let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
-        // By default, we don't want to GC anything.
+        // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
         let mut pitr_cutoff_lsn: Lsn = *self.get_latest_gc_cutoff_lsn();
 
         if let Ok(timeline) =
@@ -2137,6 +2137,7 @@ impl LayeredTimeline {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
+                        pitr_cutoff_lsn = cutoff;
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
@@ -2144,7 +2145,7 @@ impl LayeredTimeline {
                 }
                 debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
             }
-        } else {
+        } else if cfg!(test) {
             // We don't have local timeline in mocked cargo tests.
             // So, just ignore pitr_interval setting in this case.
             pitr_cutoff_lsn = cutoff;
@@ -2153,7 +2154,11 @@ impl LayeredTimeline {
         let new_gc_cutoff = Lsn::min(cutoff, pitr_cutoff_lsn);
 
         // Nothing to GC. Return early.
-        if *self.get_latest_gc_cutoff_lsn() == new_gc_cutoff {
+        if *self.get_latest_gc_cutoff_lsn() >= new_gc_cutoff {
+            info!(
+                "Nothing to GC for timeline {}. cutoff_lsn {}",
+                self.timeline_id, new_gc_cutoff
+            );
             result.elapsed = now.elapsed()?;
             return Ok(result);
         }
