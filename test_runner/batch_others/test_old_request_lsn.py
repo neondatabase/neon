@@ -1,5 +1,7 @@
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
+from fixtures.utils import print_gc_result
+import psycopg2.extras
 
 
 #
@@ -12,9 +14,11 @@ from fixtures.log_helper import log
 # just a hint that the page hasn't been modified since that LSN, and the page
 # server should return the latest page version regardless of the LSN.
 #
-def test_old_request_lsn(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_old_request_lsn", "empty")
+def test_old_request_lsn(zenith_env_builder: ZenithEnvBuilder):
+    # Disable pitr, because here we want to test branch creation after GC
+    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
+    env = zenith_env_builder.init_start()
+    env.zenith_cli.create_branch("test_old_request_lsn", "main")
     pg = env.postgres.create_start('test_old_request_lsn')
     log.info('postgres is running on test_old_request_lsn branch')
 
@@ -26,7 +30,7 @@ def test_old_request_lsn(zenith_simple_env: ZenithEnv):
     timeline = cur.fetchone()[0]
 
     psconn = env.pageserver.connect()
-    pscur = psconn.cursor()
+    pscur = psconn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers.
@@ -53,6 +57,9 @@ def test_old_request_lsn(zenith_simple_env: ZenithEnv):
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
         pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
+        row = pscur.fetchone()
+        print_gc_result(row)
+
         for j in range(100):
             cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
 

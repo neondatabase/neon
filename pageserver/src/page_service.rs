@@ -19,7 +19,6 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
-use std::time::Duration;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
@@ -796,7 +795,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
+            // Use tenant's pitr setting
+            let pitr = repo.get_pitr_interval();
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),
