@@ -863,16 +863,16 @@ def test_delete_force(zenith_env_builder: ZenithEnvBuilder):
     timeline_id_3 = env.zenith_cli.create_branch('br3').hex  # Active, delete with the tenant
     timeline_id_4 = env.zenith_cli.create_branch('br4').hex  # Inactive, delete with the tenant
 
-    tenant_id_other = env.zenith_cli.create_tenant().hex
-    timeline_id_other = env.zenith_cli.create_root_branch(
-        'br-other', tenant_id=uuid.UUID(hex=tenant_id_other)).hex
+    tenant_id_other_uuid, timeline_id_other_uuid = env.zenith_cli.create_tenant()
+    tenant_id_other = tenant_id_other_uuid.hex
+    timeline_id_other = timeline_id_other_uuid.hex
 
     # Populate branches
     pg_1 = env.postgres.create_start('br1')
     pg_2 = env.postgres.create_start('br2')
     pg_3 = env.postgres.create_start('br3')
     pg_4 = env.postgres.create_start('br4')
-    pg_other = env.postgres.create_start('br-other', tenant_id=uuid.UUID(hex=tenant_id_other))
+    pg_other = env.postgres.create_start('main', tenant_id=uuid.UUID(hex=tenant_id_other))
     for pg in [pg_1, pg_2, pg_3, pg_4, pg_other]:
         with closing(pg.connect()) as conn:
             with conn.cursor() as cur:
