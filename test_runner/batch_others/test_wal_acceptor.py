@@ -850,3 +850,116 @@ def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
 
     # there shouldn't be more than 2 WAL segments (but dir may have archive_status files)
     assert wal_size_after_checkpoint < 16 * 2.5
+
+
+def test_delete_force(zenith_env_builder: ZenithEnvBuilder):
+    zenith_env_builder.num_safekeepers = 1
+    env = zenith_env_builder.init_start()
+
+    # Create two tenants: one will be deleted, other should be preserved.
+    tenant_id = env.initial_tenant.hex
+    timeline_id_1 = env.zenith_cli.create_branch('br1').hex  # Acive, delete explicitly
+    timeline_id_2 = env.zenith_cli.create_branch('br2').hex  # Inactive, delete explictly
+    timeline_id_3 = env.zenith_cli.create_branch('br3').hex  # Active, delete with the tenant
+    timeline_id_4 = env.zenith_cli.create_branch('br4').hex  # Inactive, delete with the tenant
+
+    tenant_id_other_uuid, timeline_id_other_uuid = env.zenith_cli.create_tenant()
+    tenant_id_other = tenant_id_other_uuid.hex
+    timeline_id_other = timeline_id_other_uuid.hex
+
+    # Populate branches
+    pg_1 = env.postgres.create_start('br1')
+    pg_2 = env.postgres.create_start('br2')
+    pg_3 = env.postgres.create_start('br3')
+    pg_4 = env.postgres.create_start('br4')
+    pg_other = env.postgres.create_start('main', tenant_id=uuid.UUID(hex=tenant_id_other))
+    for pg in [pg_1, pg_2, pg_3, pg_4, pg_other]:
+        with closing(pg.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute('CREATE TABLE t(key int primary key)')
+    sk = env.safekeepers[0]
+    sk_data_dir = Path(sk.data_dir())
+    sk_http = sk.http_client()
+    assert (sk_data_dir / tenant_id / timeline_id_1).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_2).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Stop branches which should be inactive and restart Safekeeper to drop its in-memory state.
+    pg_2.stop_and_destroy()
+    pg_4.stop_and_destroy()
+    sk.stop()
+    sk.start()
+
+    # Ensure connections to Safekeeper are established
+    for pg in [pg_1, pg_3, pg_other]:
+        with closing(pg.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO t (key) VALUES (1)')
+
+    # Remove initial tenant's br1 (active)
+    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1) == {
+        "dir_existed": True,
+        "was_active": True,
+    }
+    assert not (sk_data_dir / tenant_id / timeline_id_1).exists()
+    assert (sk_data_dir / tenant_id / timeline_id_2).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Ensure repeated deletion succeeds
+    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1) == {
+        "dir_existed": False, "was_active": False
+    }
+    assert not (sk_data_dir / tenant_id / timeline_id_1).exists()
+    assert (sk_data_dir / tenant_id / timeline_id_2).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Remove initial tenant's br2 (inactive)
+    assert sk_http.timeline_delete_force(tenant_id, timeline_id_2) == {
+        "dir_existed": True,
+        "was_active": False,
+    }
+    assert not (sk_data_dir / tenant_id / timeline_id_1).exists()
+    assert not (sk_data_dir / tenant_id / timeline_id_2).exists()
+    assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
+    assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Remove non-existing branch, should succeed
+    assert sk_http.timeline_delete_force(tenant_id, '00' * 16) == {
+        "dir_existed": False,
+        "was_active": False,
+    }
+    assert not (sk_data_dir / tenant_id / timeline_id_1).exists()
+    assert not (sk_data_dir / tenant_id / timeline_id_2).exists()
+    assert (sk_data_dir / tenant_id / timeline_id_3).exists()
+    assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Remove initial tenant fully (two branches are active)
+    response = sk_http.tenant_delete_force(tenant_id)
+    assert response == {
+        timeline_id_3: {
+            "dir_existed": True,
+            "was_active": True,
+        }
+    }
+    assert not (sk_data_dir / tenant_id).exists()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Remove initial tenant again.
+    response = sk_http.tenant_delete_force(tenant_id)
+    assert response == {}
+    assert not (sk_data_dir / tenant_id).exists()
+    assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    # Ensure the other tenant still works
+    sk_http.timeline_status(tenant_id_other, timeline_id_other)
+    with closing(pg_other.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute('INSERT INTO t (key) VALUES (123)')

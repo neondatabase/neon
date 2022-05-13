@@ -18,7 +18,6 @@ from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
 def test_bulk_insert(zenith_with_baseline: PgCompare):
     env = zenith_with_baseline
 
-    # Get the timeline ID of our branch. We need it for the 'do_gc' command
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table huge (i int, j int);")

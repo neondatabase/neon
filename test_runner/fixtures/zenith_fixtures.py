@@ -831,20 +831,25 @@ class ZenithCli:
 
     def create_tenant(self,
                       tenant_id: Optional[uuid.UUID] = None,
-                      conf: Optional[Dict[str, str]] = None) -> uuid.UUID:
+                      timeline_id: Optional[uuid.UUID] = None,
+                      conf: Optional[Dict[str, str]] = None) -> Tuple[uuid.UUID, uuid.UUID]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
+        if timeline_id is None:
+            timeline_id = uuid.uuid4()
         if conf is None:
-            res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+            res = self.raw_cli([
+                'tenant', 'create', '--tenant-id', tenant_id.hex, '--timeline-id', timeline_id.hex
+            ])
         else:
-            res = self.raw_cli(
-                ['tenant', 'create', '--tenant-id', tenant_id.hex] +
-                sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
+            res = self.raw_cli([
+                'tenant', 'create', '--tenant-id', tenant_id.hex, '--timeline-id', timeline_id.hex
+            ] + sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
         res.check_returncode()
-        return tenant_id
+        return tenant_id, timeline_id
 
     def config_tenant(self, tenant_id: uuid.UUID, conf: Dict[str, str]):
         """
@@ -1794,6 +1799,21 @@ class SafekeeperHttpClient(requests.Session):
             f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
             json=body)
         res.raise_for_status()
+
+    def timeline_delete_force(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def tenant_delete_force(self, tenant_id: str) -> Dict[Any, Any]:
+        res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
     def get_metrics(self) -> SafekeeperMetrics:
         request_result = self.get(f"http://localhost:{self.port}/metrics")

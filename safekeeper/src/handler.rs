@@ -21,9 +21,6 @@ use utils::{
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
-use crate::callmemaybe::CallmeEvent;
-use tokio::sync::mpsc::UnboundedSender;
-
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
@@ -33,8 +30,6 @@ pub struct SafekeeperPostgresHandler {
     pub ztimelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
     pageserver_connstr: Option<String>,
-    //sender to communicate with callmemaybe thread
-    pub tx: UnboundedSender<CallmeEvent>,
 }
 
 /// Parsed Postgres command.
@@ -140,7 +135,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf, tx: UnboundedSender<CallmeEvent>) -> Self {
+    pub fn new(conf: SafeKeeperConf) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
@@ -148,7 +143,6 @@ impl SafekeeperPostgresHandler {
             ztimelineid: None,
             timeline: None,
             pageserver_connstr: None,
-            tx,
         }
     }
 

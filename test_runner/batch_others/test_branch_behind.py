@@ -19,6 +19,8 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     #
     # See https://github.com/zenithdb/zenith/issues/1068
     zenith_env_builder.num_safekeepers = 1
+    # Disable pitr, because here we want to test branch creation after GC
+    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = zenith_env_builder.init_start()
 
     # Branch at the point where only 100 rows were inserted

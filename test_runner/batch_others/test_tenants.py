@@ -12,8 +12,8 @@ def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_safekeep
 
     env = zenith_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
-    tenant_1 = env.zenith_cli.create_tenant()
-    tenant_2 = env.zenith_cli.create_tenant()
+    tenant_1, _ = env.zenith_cli.create_tenant()
+    tenant_2, _ = env.zenith_cli.create_tenant()
 
     env.zenith_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
                                    tenant_id=tenant_1)

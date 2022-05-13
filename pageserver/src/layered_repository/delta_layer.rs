@@ -318,6 +318,9 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                if entry_lsn < lsn_range.start {
+                    return false;
+                }
                 blob_refs.push((entry_lsn, blob_ref));
 
                 !blob_ref.will_init()
@@ -532,7 +535,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
+    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>>{
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();

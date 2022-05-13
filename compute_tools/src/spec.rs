@@ -136,13 +136,20 @@ pub fn handle_roles(spec: &ClusterSpec, client: &mut Client) -> Result<()> {
                 xact.execute(query.as_str(), &[])?;
             }
         } else {
-            info!("role name {}", &name);
+            info!("role name: '{}'", &name);
             let mut query: String = format!("CREATE ROLE {} ", name.quote());
-            info!("role create query {}", &query);
+            info!("role create query: '{}'", &query);
             info_print!(" -> create");
 
             query.push_str(&role.to_pg_options());
             xact.execute(query.as_str(), &[])?;
+
+            let grant_query = format!(
+                "grant pg_read_all_data, pg_write_all_data to {}",
+                name.quote()
+            );
+            xact.execute(grant_query.as_str(), &[])?;
+            info!("role grant query: '{}'", &grant_query);
         }
 
         info_print!("\n");

@@ -20,17 +20,18 @@ use utils::{
     http::endpoint,
     logging,
     postgres_backend::AuthType,
+    project_git_version,
     shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
     zid::{ZTenantId, ZTimelineId},
-    GIT_VERSION,
 };
+
+project_git_version!(GIT_VERSION);
 
 fn version() -> String {
     format!(
-        "{} profiling:{} failpoints:{}",
-        GIT_VERSION,
+        "{GIT_VERSION} profiling:{} failpoints:{}",
         cfg!(feature = "profiling"),
         fail::has_failpoints()
     )
@@ -217,7 +218,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // TODO: Check that it looks like a valid repository before going further
 
