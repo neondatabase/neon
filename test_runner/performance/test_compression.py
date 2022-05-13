@@ -19,5 +19,6 @@ def test_compression(zenith_with_baseline: PgCompare, rows: int):
                 cur.execute(
                     f'create table t as select generate_series(1,{rows}) as pk,(random()*10)::bigint as r10,(random()*100)::bigint as r100,(random()*1000)::bigint as r1000,(random()*10000)::bigint as r10000'
                 )
+            cur.execute("vacuum t")
             with env.record_duration('select'):
                 cur.execute('select sum(r100) from t')
