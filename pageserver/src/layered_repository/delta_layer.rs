@@ -27,7 +27,7 @@
 //!
 //! Each value is stored as a Blob, which can optionally be compressed. Compression
 //! is done by ZStandard, in dictionary mode, which gives pretty good compression
-//! ratio even for small inputs, like WAL records.
+//! ratio even for small inputs like WAL records.
 //!
 //! The dictionary is built separately for each delta layer file, and stored in
 //! the file itself.
@@ -94,6 +94,7 @@ struct Summary {
     /// Block within the 'index', where the B-tree root page is stored
     index_root_blk: u32,
 
+    /// Byte offset of the compression dictionary, or 0 if no compression
     dictionary_offset: u64,
 }
 
@@ -117,11 +118,11 @@ impl From<&DeltaLayer> for Summary {
 }
 
 ///
-/// Struct representing reference to BLOB in the file. The reference
-/// contains the offset to the BLOB within the file, a flag indicating
-/// if it's compressed or not, and also the `will_init` flag. The flag
-/// helps to determine the range of records that needs to be applied,
-/// without reading/deserializing records themselves.
+/// Struct representing reference to BLOB in the file. The reference contains
+/// the offset to the BLOB within the file, a flag indicating if it's
+/// compressed or not, and also the `will_init` flag. The `will_init` flag
+/// helps to determine the range of records that needs to be applied, without
+/// reading/deserializing records themselves.
 ///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 struct BlobRef(u64);
@@ -227,15 +228,15 @@ pub struct DeltaLayerInner {
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
 
-    /// Compression dictionary.
-    dictionary: Vec<u8>, // empty if not loaded
-    prepared_dictionary: Option<zstd::dict::DecoderDictionary<'static>>, // None if not loaded
+    /// Compression dictionary, as raw bytes, and in prepared format ready for use
+    /// for decompression. None if there is no dictionary, or if 'loaded' is false.
+    dictionary: Option<(Vec<u8>, zstd::dict::DecoderDictionary<'static>)>,
 }
 
 impl DeltaLayerInner {
     // Create a new Decompressor, using the prepared dictionary
     fn create_decompressor(&self) -> Result<Option<zstd::bulk::Decompressor<'_>>> {
-        if let Some(dict) = &self.prepared_dictionary {
+        if let Some((_, dict)) = &self.dictionary {
             let decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(dict)?;
             Ok(Some(decompressor))
         } else {
@@ -250,8 +251,8 @@ impl DeltaLayerInner {
     fn create_decompressor_not_prepared(
         &self,
     ) -> Result<Option<zstd::bulk::Decompressor<'static>>> {
-        if !self.dictionary.is_empty() {
-            let decompressor = zstd::bulk::Decompressor::with_dictionary(&self.dictionary)?;
+        if let Some((dict, _)) = &self.dictionary {
+            let decompressor = zstd::bulk::Decompressor::with_dictionary(dict)?;
             Ok(Some(decompressor))
         } else {
             Ok(None)
@@ -535,7 +536,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>>{
+    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();
@@ -601,11 +602,12 @@ impl DeltaLayer {
             }
         }
 
-        let mut cursor = file.block_cursor();
+        // Load and prepare the dictionary, if any
         if actual_summary.dictionary_offset != 0 {
-            inner.dictionary = cursor.read_blob(actual_summary.dictionary_offset)?;
-            inner.prepared_dictionary =
-                Some(zstd::dict::DecoderDictionary::copy(&inner.dictionary));
+            let mut cursor = file.block_cursor();
+            let dict = cursor.read_blob(actual_summary.dictionary_offset)?;
+            let prepared_dict = zstd::dict::DecoderDictionary::copy(&dict);
+            inner.dictionary = Some((dict, prepared_dict));
         }
         inner.index_start_blk = actual_summary.index_start_blk;
         inner.index_root_blk = actual_summary.index_root_blk;
@@ -632,8 +634,7 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: Vec::new(),
-                prepared_dictionary: None,
+                dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -661,8 +662,7 @@ impl DeltaLayer {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: Vec::new(),
-                prepared_dictionary: None,
+                dictionary: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
             }),
@@ -819,6 +819,12 @@ impl DeltaLayerWriter {
         assert!(self.sample_sizes.len() == self.sample_key_lsn_willinit.len());
 
         // Create the dictionary, if we had enough samples for it.
+        //
+        // If there weren't enough samples, we don't do any compression at
+        // all. Possibly we could still benefit from compression; for example
+        // if you have only one gigantic value in a single layer, it would
+        // still be good to compress that, without a dictionary. But we don't
+        // do that currently.
         if self.sample_sizes.len() >= config::ZSTD_MIN_SAMPLES {
             let dictionary = zstd::dict::from_continuous(
                 &self.sample_data,
@@ -948,8 +954,7 @@ impl DeltaLayerWriter {
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
-                dictionary: Vec::new(),
-                prepared_dictionary: None,
+                dictionary: None,
                 index_start_blk,
                 index_root_blk,
             }),

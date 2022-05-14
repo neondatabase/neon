@@ -22,7 +22,7 @@
 //!
 //! Each page image is compressed with ZStandard. See Compression section
 //! in the delta_layer.rs for more discussion. Difference from a delta
-//! layer is that we don't currently use a dictionary.
+//! layer is that we don't currently use a dictionary for image layers.
 use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
@@ -540,7 +540,6 @@ impl ImageLayerWriter {
         // Try to compress the blob
         let compressed_bytes;
         if let Some(ref mut compressor) = self.compressor {
-            // Try to compress it
             compressed_bytes = compressor.compress(blob_content)?;
 
             // If compressed version is not any smaller than the original,
