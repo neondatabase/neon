@@ -3,8 +3,10 @@ import os
 import pathlib
 import subprocess
 import threading
+import typing
 from uuid import UUID
 from fixtures.log_helper import log
+from typing import Optional
 import signal
 import pytest
 
@@ -22,7 +24,7 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
                           remote_storage_mock_path: pathlib.Path,
                           pg_port: int,
                           http_port: int,
-                          broker: Etcd):
+                          broker: Optional[Etcd]):
     """
     cannot use ZenithPageserver yet because it depends on zenith cli
     which currently lacks support for multiple pageservers
@@ -37,8 +39,10 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c pg_distrib_dir='{pg_distrib_dir}'",
         f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
-        f"-c broker_endpoints=['{broker.client_url()}']",
     ]
+
+    if broker is not None:
+        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
 
     subprocess.check_output(cmd, text=True)
 
