@@ -1,0 +1,19 @@
+[pageservers]
+neon-eu-stage-ps-1 console_region_id=1
+neon-eu-stage-ps-2 console_region_id=1
+
+[safekeepers]
+neon-eu-stage-sk-1 console_region_id=1
+neon-eu-stage-sk-2 console_region_id=1
+neon-eu-stage-sk-3 console_region_id=1
+
+[storage:children]
+pageservers
+safekeepers
+
+[storage:vars]
+console_mgmt_base_url = http://neon-stress-console.local
+bucket_name           = neon-storage-ireland
+bucket_region         = eu-west-1
+etcd_endpoints        = etcd-stress.local:2379
+safekeeper_enable_s3_offload = false
