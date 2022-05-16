@@ -1,11 +1,11 @@
 [pageservers]
-neon-eu-stage-ps-1 console_region_id=1
-neon-eu-stage-ps-2 console_region_id=1
+neon-stress-ps-1 console_region_id=1
+neon-stress-ps-2 console_region_id=1
 
 [safekeepers]
-neon-eu-stage-sk-1 console_region_id=1
-neon-eu-stage-sk-2 console_region_id=1
-neon-eu-stage-sk-3 console_region_id=1
+neon-stress-sk-1 console_region_id=1
+neon-stress-sk-2 console_region_id=1
+neon-stress-sk-3 console_region_id=1
 
 [storage:children]
 pageservers
