@@ -2,6 +2,9 @@
 //! page server.
 
 use crate::config::PageServerConf;
+use crate::jobs::chore::{Chore, ChoreHandle, Schedule, Scheduler};
+use crate::jobs::compaction::{COMPACTION_SCHEDULER, CompactionJob};
+use crate::jobs::gc::{GC_SCHEDULER, GcJob};
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
@@ -21,6 +24,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::*;
 
 use utils::zid::{ZTenantId, ZTimelineId};
@@ -71,7 +75,7 @@ pub enum TenantState {
     //Ready,
     // This tenant exists on local disk, and the layer map has been loaded into memory.
     // The local disk might have some newer files that don't exist in cloud storage yet.
-    Active,
+    Active(ChoreHandle<GcJob>, ChoreHandle<CompactionJob>),
     // Tenant is active, but there is no walreceiver connection.
     Idle,
     // This tenant exists on local disk, and the layer map has been loaded into memory.
@@ -83,7 +87,7 @@ pub enum TenantState {
 impl fmt::Display for TenantState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TenantState::Active => f.write_str("Active"),
+            TenantState::Active(_, _) => f.write_str("Active"),
             TenantState::Idle => f.write_str("Idle"),
             TenantState::Stopping => f.write_str("Stopping"),
         }
@@ -236,35 +240,26 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
 
     match tenant.state {
         // If the tenant is already active, nothing to do.
-        TenantState::Active => {}
+        TenantState::Active(_, _) => {}
 
         // If it's Idle, launch the compactor and GC threads
         TenantState::Idle => {
-            thread_mgr::spawn(
-                ThreadKind::Compactor,
-                Some(tenant_id),
-                None,
-                "Compactor thread",
-                false,
-                move || crate::tenant_threads::compact_loop(tenant_id),
-            )?;
+            let repo = crate::tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
-            let gc_spawn_result = thread_mgr::spawn(
-                ThreadKind::GarbageCollector,
-                Some(tenant_id),
-                None,
-                "GC thread",
-                false,
-                move || crate::tenant_threads::gc_loop(tenant_id),
-            )
-            .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
+            let compaction_chore_handle = COMPACTION_SCHEDULER.get().unwrap().add_chore(Chore {
+                job: CompactionJob {
+                    tenant: tenant_id,
+                },
+                schedule: Schedule::Every(repo.get_compaction_period()),
+            });
 
-            if let Err(e) = &gc_spawn_result {
-                error!("Failed to start GC thread for tenant {tenant_id}, stopping its checkpointer thread: {e:?}");
-                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
-                return gc_spawn_result;
-            }
-            tenant.state = TenantState::Active;
+            let gc_chore_handle = GC_SCHEDULER.get().unwrap().add_chore(Chore {
+                job: GcJob {
+                    tenant: tenant_id,
+                },
+                schedule: Schedule::Every(repo.get_gc_period()),
+            });
+            tenant.state = TenantState::Active(gc_chore_handle, compaction_chore_handle);
         }
 
         TenantState::Stopping => {

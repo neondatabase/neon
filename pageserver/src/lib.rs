@@ -13,7 +13,6 @@ pub mod repository;
 pub mod storage_sync;
 pub mod tenant_config;
 pub mod tenant_mgr;
-pub mod tenant_threads;
 pub mod thread_mgr;
 pub mod timelines;
 pub mod virtual_file;
