@@ -12,7 +12,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::{IntoUrl, Method};
+use reqwest::{IntoUrl, Method, Url};
 use safekeeper::http::models::TimelineCreateRequest;
 use thiserror::Error;
 use utils::{
@@ -52,7 +52,7 @@ impl ResponseErrorMessageExt for Response {
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
                 Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+                Err(_) => format!("Http error ({}) at {url}.", status.as_u16()),
             },
         ))
     }
@@ -76,7 +76,7 @@ pub struct SafekeeperNode {
 
     pub pageserver: Arc<PageServerNode>,
 
-    broker_endpoints: Option<String>,
+    broker_endpoints: Vec<Url>,
     broker_etcd_prefix: Option<String>,
 }
 
@@ -142,8 +142,21 @@ impl SafekeeperNode {
         if !self.conf.sync {
             cmd.arg("--no-sync");
         }
-        if let Some(ref ep) = self.broker_endpoints {
-            cmd.args(&["--broker-endpoints", ep]);
+
+        if !self.broker_endpoints.is_empty() {
+            cmd.args(&[
+                "--broker-endpoints",
+                &self.broker_endpoints.iter().map(Url::as_str).fold(
+                    String::new(),
+                    |mut comma_separated_urls, url| {
+                        if !comma_separated_urls.is_empty() {
+                            comma_separated_urls.push(',');
+                        }
+                        comma_separated_urls.push_str(url);
+                        comma_separated_urls
+                    },
+                ),
+            ]);
         }
         if let Some(prefix) = self.broker_etcd_prefix.as_deref() {
             cmd.args(&["--broker-etcd-prefix", prefix]);

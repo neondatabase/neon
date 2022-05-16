@@ -74,6 +74,7 @@ pub mod metadata;
 mod par_fsync;
 mod storage_layer;
 
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use delta_layer::{DeltaLayer, DeltaLayerWriter};
 use ephemeral_file::is_ephemeral_file;
 use filename::{DeltaFileName, ImageFileName};
@@ -81,6 +82,7 @@ use image_layer::{ImageLayer, ImageLayerWriter};
 use inmemory_layer::InMemoryLayer;
 use layer_map::LayerMap;
 use layer_map::SearchResult;
+use postgres_ffi::xlog_utils::to_pg_timestamp;
 use storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 
 // re-export this function so that page_cache.rs can use it.
@@ -2118,11 +2120,54 @@ impl LayeredTimeline {
         let cutoff = gc_info.cutoff;
         let pitr = gc_info.pitr;
 
+        // Calculate pitr cutoff point.
+        // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
+        let mut pitr_cutoff_lsn: Lsn = *self.get_latest_gc_cutoff_lsn();
+
+        if let Ok(timeline) =
+            tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
+        {
+            // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
+            // If we don't have enough data to convert to LSN,
+            // play safe and don't remove any layers.
+            if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
+                let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
+
+                match timeline.find_lsn_for_timestamp(pitr_timestamp)? {
+                    LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
+                    LsnForTimestamp::Future(lsn) => {
+                        debug!("future({})", lsn);
+                        pitr_cutoff_lsn = cutoff;
+                    }
+                    LsnForTimestamp::Past(lsn) => {
+                        debug!("past({})", lsn);
+                    }
+                }
+                debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
+            }
+        } else if cfg!(test) {
+            // We don't have local timeline in mocked cargo tests.
+            // So, just ignore pitr_interval setting in this case.
+            pitr_cutoff_lsn = cutoff;
+        }
+
+        let new_gc_cutoff = Lsn::min(cutoff, pitr_cutoff_lsn);
+
+        // Nothing to GC. Return early.
+        if *self.get_latest_gc_cutoff_lsn() >= new_gc_cutoff {
+            info!(
+                "Nothing to GC for timeline {}. cutoff_lsn {}",
+                self.timeline_id, new_gc_cutoff
+            );
+            result.elapsed = now.elapsed()?;
+            return Ok(result);
+        }
+
         let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %cutoff).entered();
 
         // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.
-        *self.latest_gc_cutoff_lsn.write().unwrap() = cutoff;
+        *self.latest_gc_cutoff_lsn.write().unwrap() = new_gc_cutoff;
 
         info!("GC starting");
 
@@ -2162,30 +2207,18 @@ impl LayeredTimeline {
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
-            // 2. It is newer than PiTR interval?
-            // We use modification time of layer file to estimate update time.
-            // This estimation is not quite precise but maintaining LSN->timestamp map seems to be overkill.
-            // It is not expected that users will need high precision here. And this estimation
-            // is conservative: modification time of file is always newer than actual time of version
-            // creation. So it is safe for users.
-            // TODO A possible "bloat" issue still persists here.
-            // If modification time changes because of layer upload/download, we will keep these files
-            // longer than necessary.
-            // https://github.com/neondatabase/neon/issues/1554
-            //
-            if let Ok(metadata) = fs::metadata(&l.filename()) {
-                let last_modified = metadata.modified()?;
-                if now.duration_since(last_modified)? < pitr {
-                    debug!(
-                        "keeping {} because it's modification time {:?} is newer than PITR {:?}",
-                        l.filename().display(),
-                        last_modified,
-                        pitr
-                    );
-                    result.layers_needed_by_pitr += 1;
-                    continue 'outer;
-                }
+
+            // 2. It is newer than PiTR cutoff point?
+            if l.get_lsn_range().end > pitr_cutoff_lsn {
+                debug!(
+                    "keeping {} because it's newer than pitr_cutoff_lsn {}",
+                    l.filename().display(),
+                    pitr_cutoff_lsn
+                );
+                result.layers_needed_by_pitr += 1;
+                continue 'outer;
             }
+
             // 3. Is it needed by a child branch?
             // NOTE With that wee would keep data that
             // might be referenced by child branches forever.

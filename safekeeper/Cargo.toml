@@ -29,6 +29,7 @@ hex = "0.4.3"
 const_format = "0.2.21"
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 tokio-util = { version = "0.7", features = ["io"] }
+git-version = "0.3.5"
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
 metrics = { path = "../libs/metrics" }
