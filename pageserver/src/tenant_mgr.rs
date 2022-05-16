@@ -281,6 +281,7 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
                 false,
                 move || crate::tenant_threads::gc_loop(tenant_id),
             )
+            .map(|_thread_id| ()) // update the `Result::Ok` type to match the outer function's return signature
             .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
 
             if let Err(e) = &gc_spawn_result {

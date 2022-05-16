@@ -18,6 +18,8 @@ use lazy_static::lazy_static;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -35,11 +37,19 @@ use utils::{
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
-//
-// We keep one WAL Receiver active per timeline.
-//
-struct WalReceiverEntry {
+///
+/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
+/// We keep one WAL receiver active per timeline.
+///
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WalReceiverEntry {
+    thread_id: u64,
     wal_producer_connstr: String,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    last_received_msg_lsn: Option<Lsn>,
+    /// the timestamp (in microseconds) of the last received message
+    last_received_msg_ts: Option<u128>,
 }
 
 lazy_static! {
@@ -74,7 +84,7 @@ pub fn launch_wal_receiver(
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            thread_mgr::spawn(
+            let thread_id = thread_mgr::spawn(
                 ThreadKind::WalReceiver,
                 Some(tenantid),
                 Some(timelineid),
@@ -88,7 +98,10 @@ pub fn launch_wal_receiver(
             )?;
 
             let receiver = WalReceiverEntry {
+                thread_id,
                 wal_producer_connstr: wal_producer_connstr.into(),
+                last_received_msg_lsn: None,
+                last_received_msg_ts: None,
             };
             receivers.insert((tenantid, timelineid), receiver);
 
@@ -99,15 +112,13 @@ pub fn launch_wal_receiver(
     Ok(())
 }
 
-// Look up current WAL producer connection string in the hash table
-fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> String {
+/// Look up a WAL receiver's data in the global `WAL_RECEIVERS`
+pub fn get_wal_receiver_entry(
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> Option<WalReceiverEntry> {
     let receivers = WAL_RECEIVERS.lock().unwrap();
-
-    receivers
-        .get(&(tenantid, timelineid))
-        .unwrap()
-        .wal_producer_connstr
-        .clone()
+    receivers.get(&(tenant_id, timeline_id)).cloned()
 }
 
 //
@@ -118,7 +129,18 @@ fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id:
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_producer_connstr(tenant_id, timeline_id);
+    let wal_producer_connstr = {
+        match get_wal_receiver_entry(tenant_id, timeline_id) {
+            Some(e) => e.wal_producer_connstr,
+            None => {
+                info!(
+                    "Unable to create the WAL receiver thread: no WAL receiver entry found for tenant {} and timeline {}",
+                    tenant_id, timeline_id
+                );
+                return;
+            }
+        }
+    };
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
@@ -317,6 +339,28 @@ fn walreceiver_main(
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
+
+            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
+            {
+                let mut receivers = WAL_RECEIVERS.lock().unwrap();
+                let entry = match receivers.get_mut(&(tenant_id, timeline_id)) {
+                    Some(e) => e,
+                    None => {
+                        anyhow::bail!(
+                            "no WAL receiver entry found for tenant {} and timeline {}",
+                            tenant_id,
+                            timeline_id
+                        );
+                    }
+                };
+
+                entry.last_received_msg_lsn = Some(last_lsn);
+                entry.last_received_msg_ts = Some(
+                    ts.duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("Received message time should be before UNIX EPOCH!")
+                        .as_micros(),
+                );
+            }
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
