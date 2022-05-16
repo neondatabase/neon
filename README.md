@@ -66,6 +66,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 3. Install PostgreSQL Client
 ```
+# from https://stackoverflow.com/questions/44654216/correct-way-to-install-psql-without-full-postgres-on-macos
 brew install libpq
 brew link --force libpq
 ```
