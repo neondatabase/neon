@@ -82,8 +82,7 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
     ]
 
     # make a DB modification then expect getting a new WAL receiver's data
-    cur = pg.connect().cursor()
-    cur.execute("CREATE TABLE t(key int primary key, value text)")
+    pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
     res2 = client.wal_receiver_get(tenant_id, timeline_id)
     assert res2["last_received_msg_lsn"] > res["last_received_msg_lsn"]
 
