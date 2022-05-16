@@ -34,6 +34,10 @@ libssl-dev clang pkg-config libpq-dev
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
+```
+# recommended approach from https://www.rust-lang.org/tools/install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 3. Install PostgreSQL Client
 ```
@@ -55,6 +59,10 @@ xcode-select --install
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
+```
+# recommended approach from https://www.rust-lang.org/tools/install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 3. Install PostgreSQL Client
 ```
