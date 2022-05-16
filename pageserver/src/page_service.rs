@@ -730,7 +730,18 @@ impl postgres_backend::Handler for PageServerHandler {
             for failpoint in failpoints.split(';') {
                 if let Some((name, actions)) = failpoint.split_once('=') {
                     info!("cfg failpoint: {} {}", name, actions);
-                    fail::cfg(name, actions).unwrap();
+
+                    // We recognize one extra "action" that's not natively recognized
+                    // by the failpoints crate: exit, to immediately kill the process
+                    if actions == "exit" {
+                        fail::cfg_callback(name, || {
+                            info!("Exit requested by failpoint");
+                            std::process::exit(1);
+                        })
+                        .unwrap();
+                    } else {
+                        fail::cfg(name, actions).unwrap();
+                    }
                 } else {
                     bail!("Invalid failpoints format");
                 }

@@ -183,13 +183,8 @@ fn main() -> anyhow::Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-    // If failpoints are used, terminate the whole pageserver process if they are hit.
+    // Initialize up failpoints support
     let scenario = FailScenario::setup();
-    if fail::has_failpoints() {
-        std::panic::set_hook(Box::new(|_| {
-            std::process::exit(1);
-        }));
-    }
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);

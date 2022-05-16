@@ -45,14 +45,14 @@ def test_pageserver_recovery(zenith_env_builder: ZenithEnvBuilder):
 
                     # Configure failpoints
                     pscur.execute(
-                        "failpoints checkpoint-before-sync=sleep(2000);checkpoint-after-sync=panic")
+                        "failpoints checkpoint-before-sync=sleep(2000);checkpoint-after-sync=exit")
 
                     # Do some updates until pageserver is crashed
                     try:
                         while True:
                             cur.execute("update foo set x=x+1")
                     except Exception as err:
-                        log.info(f"Excepted server crash {err}")
+                        log.info(f"Expected server crash {err}")
 
     log.info("Wait before server restart")
     env.pageserver.stop()

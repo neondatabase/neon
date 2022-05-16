@@ -4,6 +4,7 @@
 //! script which will use local paths.
 
 use anyhow::{bail, ensure, Context};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
@@ -59,9 +60,10 @@ pub struct LocalEnv {
     #[serde(default)]
     pub private_key_path: PathBuf,
 
-    // A comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
+    // Broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
     #[serde(default)]
-    pub broker_endpoints: Option<String>,
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub broker_endpoints: Vec<Url>,
 
     /// A prefix to all to any key when pushing/polling etcd from a node.
     #[serde(default)]
@@ -184,12 +186,7 @@ impl LocalEnv {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
-                bail!(
-                    "branch '{}' is already mapped to timeline {}, cannot map to another timeline {}",
-                    branch_name,
-                    old_timeline_id,
-                    timeline_id
-                );
+                bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
             }
         } else {
             existing_values.push((tenant_id, timeline_id));
@@ -225,7 +222,7 @@ impl LocalEnv {
     ///
     /// Unlike 'load_config', this function fills in any defaults that are missing
     /// from the config file.
-    pub fn create_config(toml: &str) -> anyhow::Result<Self> {
+    pub fn parse_config(toml: &str) -> anyhow::Result<Self> {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
@@ -238,25 +235,20 @@ impl LocalEnv {
                 env.pg_distrib_dir = cwd.join("tmp_install")
             }
         }
-        if !env.pg_distrib_dir.join("bin/postgres").exists() {
-            bail!(
-                "Can't find postgres binary at {}",
-                env.pg_distrib_dir.display()
-            );
-        }
 
         // Find zenith binaries.
         if env.zenith_distrib_dir == Path::new("") {
-            env.zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
-        }
-        for binary in ["pageserver", "safekeeper"] {
-            if !env.zenith_distrib_dir.join(binary).exists() {
-                bail!(
-                    "Can't find binary '{}' in zenith distrib dir '{}'",
-                    binary,
-                    env.zenith_distrib_dir.display()
-                );
-            }
+            let current_exec_path =
+                env::current_exe().context("Failed to find current excecutable's path")?;
+            env.zenith_distrib_dir = current_exec_path
+                .parent()
+                .with_context(|| {
+                    format!(
+                        "Failed to find a parent directory for executable {}",
+                        current_exec_path.display(),
+                    )
+                })?
+                .to_owned();
         }
 
         // If no initial tenant ID was given, generate it.
@@ -351,6 +343,20 @@ impl LocalEnv {
             "directory '{}' already exists. Perhaps already initialized?",
             base_path.display()
         );
+        for binary in ["pageserver", "safekeeper"] {
+            if !self.zenith_distrib_dir.join(binary).exists() {
+                bail!(
+                    "Can't find binary '{binary}' in zenith distrib dir '{}'",
+                    self.zenith_distrib_dir.display()
+                );
+            }
+        }
+        if !self.pg_distrib_dir.join("bin/postgres").exists() {
+            bail!(
+                "Can't find postgres binary at {}",
+                self.pg_distrib_dir.display()
+            );
+        }
 
         fs::create_dir(&base_path)?;
 
@@ -408,7 +414,49 @@ impl LocalEnv {
 
 fn base_path() -> PathBuf {
     match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => PathBuf::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
+        Some(val) => PathBuf::from(val),
+        None => PathBuf::from(".zenith"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_conf_parsing() {
+        let simple_conf_toml = include_str!("../simple.conf");
+        let simple_conf_parse_result = LocalEnv::parse_config(simple_conf_toml);
+        assert!(
+            simple_conf_parse_result.is_ok(),
+            "failed to parse simple config {simple_conf_toml}, reason: {simple_conf_parse_result:?}"
+        );
+
+        let regular_url_string = "broker_endpoints = ['localhost:1111']";
+        let regular_url_toml = simple_conf_toml.replace(
+            "[pageserver]",
+            &format!("\n{regular_url_string}\n[pageserver]"),
+        );
+        match LocalEnv::parse_config(&regular_url_toml) {
+            Ok(regular_url_parsed) => {
+                assert_eq!(
+                    regular_url_parsed.broker_endpoints,
+                    vec!["localhost:1111".parse().unwrap()],
+                    "Unexpectedly parsed broker endpoint url"
+                );
+            }
+            Err(e) => panic!("failed to parse simple config {regular_url_toml}, reason: {e}"),
+        }
+
+        let spoiled_url_string = "broker_endpoints = ['!@$XOXO%^&']";
+        let spoiled_url_toml = simple_conf_toml.replace(
+            "[pageserver]",
+            &format!("\n{spoiled_url_string}\n[pageserver]"),
+        );
+        let spoiled_url_parse_result = LocalEnv::parse_config(&spoiled_url_toml);
+        assert!(
+            spoiled_url_parse_result.is_err(),
+            "expected toml with invalid Url {spoiled_url_toml} to fail the parsing, but got {spoiled_url_parse_result:?}"
+        );
     }
 }
