@@ -21,7 +21,7 @@
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use hex;
-use std::{cmp::Ordering, io, result};
+use std::{cmp::Ordering, io, num::NonZeroUsize, result};
 use thiserror::Error;
 use tracing::error;
 
@@ -428,6 +428,53 @@ where
     }
 }
 
+/// This is a small sort of ad-hoc implementation of a vec that always has at least one item.
+/// This property allows to avoid returning Option from methods like `Self::first` or `Self::last_mut`.
+/// Currently implementation uses unwraps internally but they can be replaced with unwrap_unchecked, or get_unchecked.
+/// Since disk_btree is focused on io and this type is used only for writing the gain in using unsafe options is negligible.
+struct NonEmptyVec<T> {
+    inner: Vec<T>,
+}
+
+impl<T> NonEmptyVec<T> {
+    fn new(first: T) -> Self {
+        Self { inner: vec![first] }
+    }
+
+    fn push(&mut self, value: T) {
+        self.inner.push(value)
+    }
+
+    /// Allows to preserve length invariant by pushing new item constructed
+    /// by a function passed as an argument when inner vector becomes empty
+    fn pop_with<F: FnOnce(&T) -> T>(&mut self, empty: F) -> T {
+        let res = self
+            .inner
+            .pop()
+            .expect("guaranteed to have at least one item");
+        if self.inner.is_empty() {
+            self.push(empty(&res));
+        }
+        res
+    }
+
+    fn first(&self) -> &T {
+        self.inner
+            .first()
+            .expect("guaranteed to have at least one item")
+    }
+
+    fn last_mut(&mut self) -> &mut T {
+        self.inner
+            .last_mut()
+            .expect("guaranteed to have at least one item")
+    }
+
+    fn len(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.inner.len()).expect("guaranteed to have at least one item")
+    }
+}
+
 ///
 /// Public builder object, for creating a new tree.
 ///
@@ -444,7 +491,7 @@ where
     ///
     /// stack[0] is the current root page, stack.last() is the leaf.
     ///
-    stack: Vec<BuildNode<L>>,
+    stack: NonEmptyVec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append
     /// is called in increasing key order.
@@ -459,7 +506,7 @@ where
         DiskBtreeBuilder {
             writer,
             last_key: None,
-            stack: vec![BuildNode::new(0)],
+            stack: NonEmptyVec::new(BuildNode::new(0)),
         }
     }
 
@@ -482,7 +529,7 @@ where
 
     fn append_internal(&mut self, key: &[u8; L], value: Value) -> Result<()> {
         // Try to append to the current leaf buffer
-        let last = self.stack.last_mut().unwrap();
+        let last = self.stack.last_mut();
         let level = last.level;
         if last.push(key, value) {
             return Ok(());
@@ -513,18 +560,14 @@ where
     }
 
     fn flush_node(&mut self) -> Result<()> {
-        let last = self.stack.pop().unwrap();
+        // Append the downlink to the parent if there is no more items in the stack
+        let last = self.stack.pop_with(|last| BuildNode::new(last.level + 1));
+
         let buf = last.pack();
         let downlink_key = last.first_key();
         let downlink_ptr = self.writer.write_blk(buf)?;
 
-        // Append the downlink to the parent
-        if self.stack.is_empty() {
-            self.stack.push(BuildNode::new(last.level + 1));
-        }
-        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))?;
-
-        Ok(())
+        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))
     }
 
     ///
@@ -536,11 +579,13 @@ where
     ///
     pub fn finish(mut self) -> Result<(u32, W)> {
         // flush all levels, except the root.
-        while self.stack.len() > 1 {
+        // XXX: both NonZeroUsize::new and Option::unwrap are const so they
+        //    should collapse into noop at compile time
+        while self.stack.len() > NonZeroUsize::new(1).unwrap() {
             self.flush_node()?;
         }
 
-        let root = self.stack.first().unwrap();
+        let root = self.stack.first();
         let buf = root.pack();
         let root_blknum = self.writer.write_blk(buf)?;
 
