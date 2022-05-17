@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.zenith_fixtures import ZenithEnvBuilder, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload
+from fixtures.zenith_fixtures import ZenithEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 import pytest
@@ -109,9 +109,9 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
 
     log.info("waiting for timeline redownload")
-    wait_for(number_of_iterations=10,
-             interval=1,
-             func=lambda: assert_local(client, UUID(tenant_id), UUID(timeline_id)))
+    wait_until(number_of_iterations=10,
+               interval=1,
+               func=lambda: assert_local(client, UUID(tenant_id), UUID(timeline_id)))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     assert detail['local'] is not None
