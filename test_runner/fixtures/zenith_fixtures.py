@@ -34,7 +34,12 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (etcd_path, get_self_dir, mkdir_if_needed, subprocess_capture, lsn_from_hex)
+from .utils import (etcd_path,
+                    get_self_dir,
+                    mkdir_if_needed,
+                    subprocess_capture,
+                    lsn_from_hex,
+                    lsn_to_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -2065,7 +2070,11 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     assert (mismatch, error) == ([], [])
 
 
-def wait_for(number_of_iterations: int, interval: int, func):
+def wait_until(number_of_iterations: int, interval: int, func):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the last return value
+    from the the function.
+    """
     last_exception = None
     for i in range(number_of_iterations):
         try:
@@ -2092,9 +2101,15 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail['remote']['remote_consistent_lsn']
-    assert isinstance(lsn_str, str)
-    return lsn_from_hex(lsn_str)
+    if detail['remote'] is None:
+        # No remote information at all. This happens right after creating
+        # a timeline, before any part of it it has been uploaded to remote
+        # storage yet.
+        return 0
+    else:
+        lsn_str = detail['remote']['remote_consistent_lsn']
+        assert isinstance(lsn_str, str)
+        return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
@@ -2102,8 +2117,15 @@ def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
                     timeline: uuid.UUID,
                     lsn: int):
     """waits for local timeline upload up to specified lsn"""
-
-    wait_for(10, 1, lambda: remote_consistent_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+    for i in range(10):
+        current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
+        if current_lsn >= lsn:
+            return
+        log.info("waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        time.sleep(1)
+    raise Exception("timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
+        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
 
 
 def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
@@ -2121,5 +2143,12 @@ def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                              timeline: uuid.UUID,
                              lsn: int):
     """waits for pageserver to catch up to a certain lsn"""
-
-    wait_for(10, 1, lambda: last_record_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+    for i in range(10):
+        current_lsn = last_record_lsn(pageserver_http_client, tenant, timeline)
+        if current_lsn >= lsn:
+            return
+        log.info("waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        time.sleep(1)
+    raise Exception("timed out while waiting for last_record_lsn to reach {}, was {}".format(
+        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
