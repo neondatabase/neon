@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn regular_layer_upload() -> anyhow::Result<()> {
         let harness = RepoHarness::create("regular_layer_upload")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
@@ -327,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn layer_upload_after_local_fs_update() -> anyhow::Result<()> {
         let harness = RepoHarness::create("layer_upload_after_local_fs_update")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
