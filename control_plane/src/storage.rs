@@ -281,12 +281,13 @@ impl PageServerNode {
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
         let sig = if immediate {
-            println!("Stop pageserver immediately");
+            print!("Stopping pageserver immediately..");
             Signal::SIGQUIT
         } else {
-            println!("Stop pageserver gracefully");
+            print!("Stopping pageserver gracefully..");
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -308,25 +309,36 @@ impl PageServerNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if pageserver checkpoints a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Pageserver stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Pageserver status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Pageserver status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nPageserver connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Pageserver still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+
+                match self.check_status() {
+                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nPageserver status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);

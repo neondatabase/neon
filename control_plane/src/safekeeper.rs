@@ -81,8 +81,6 @@ impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
         let pageserver = Arc::new(PageServerNode::from_env(env));
 
-        println!("initializing for sk {} for {}", conf.id, conf.http_port);
-
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
@@ -207,12 +205,13 @@ impl SafekeeperNode {
         let pid = Pid::from_raw(pid);
 
         let sig = if immediate {
-            println!("Stop safekeeper immediately");
+            print!("Stopping safekeeper {} immediately..", self.id);
             Signal::SIGQUIT
         } else {
-            println!("Stop safekeeper gracefully");
+            print!("Stopping safekeeper {} gracefully..", self.id);
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -234,25 +233,35 @@ impl SafekeeperNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if safekeeper flushes a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Safekeeper stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Safekeeper status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Safekeeper status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nSafekeeper connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Safekeeper still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+                match self.check_status() {
+                    Err(SafekeeperHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nSafekeeper status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop safekeeper with pid {}", pid);
