@@ -32,7 +32,6 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 
 fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("safekeeper");
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)

@@ -38,7 +38,6 @@ fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())

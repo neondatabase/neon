@@ -1833,10 +1833,13 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def get_metrics(self) -> SafekeeperMetrics:
+    def get_metrics_str(self) -> str:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
         request_result.raise_for_status()
-        all_metrics_text = request_result.text
+        return request_result.text
+
+    def get_metrics(self) -> SafekeeperMetrics:
+        all_metrics_text = self.get_metrics_str()
 
         metrics = SafekeeperMetrics()
         for match in re.finditer(
