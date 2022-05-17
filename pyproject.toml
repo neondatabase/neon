@@ -23,6 +23,7 @@ boto3-stubs = "^1.20.40"
 moto = {version = "^3.0.0", extras = ["server"]}
 backoff = "^1.11.1"
 pytest-lazy-fixture = "^0.6.3"
+prometheus-client = "^0.14.1"
 
 [tool.poetry.dev-dependencies]
 yapf = "==0.31.0"
