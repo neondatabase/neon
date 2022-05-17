@@ -820,6 +820,25 @@ workflows:
           requires:
             - docker-image
 
+      - deploy-neon-stress:
+          # Context gives an ability to login
+          context: Docker Hub
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - docker-image
+      - deploy-neon-stress-proxy:
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - docker-image
+
       - docker-image-release:
           # Context gives an ability to login
           context: Docker Hub
