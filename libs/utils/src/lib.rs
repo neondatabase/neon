@@ -95,3 +95,11 @@ macro_rules! project_git_version {
         );
     };
 }
+
+/// Same as `assert!`, but evaluated during compilation and gets optimized out in runtime.
+#[macro_export]
+macro_rules! const_assert {
+    ($($args:tt)*) => {
+        const _: () = assert!($($args)*);
+    };
+}
