@@ -34,6 +34,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -242,17 +243,19 @@ impl ImageLayer {
     }
 
     fn temp_path_for(
-        path_or_conf: &PathOrConf,
+        conf: &PageServerConf,
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         fname: &ImageFileName,
     ) -> PathBuf {
-        match path_or_conf {
-            PathOrConf::Path(path) => path.to_path_buf(),
-            PathOrConf::Conf(conf) => conf
-                .timeline_path(&timelineid, &tenantid)
-                .join(format!("{}.temp", fname)),
-        }
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+
+        conf.timeline_path(&timelineid, &tenantid)
+            .join(format!("{}.{}.temp", fname, rand_string))
     }
 
     ///
@@ -433,7 +436,7 @@ impl ImageLayerWriter {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
         let path = ImageLayer::temp_path_for(
-            &PathOrConf::Conf(conf),
+            conf,
             timelineid,
             tenantid,
             &ImageFileName {
