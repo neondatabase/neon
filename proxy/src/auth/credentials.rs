@@ -1,6 +1,5 @@
 //! User credentials used in authentication.
 
-use super::AuthError;
 use crate::compute;
 use crate::config::ProxyConfig;
 use crate::error::UserFacingError;
@@ -36,6 +35,27 @@ impl ClientCredentials {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum ProjectNameError {
+    #[error("SNI is missing, please upgrade the postgres client library")]
+    Missing,
+
+    #[error("SNI is malformed")]
+    Bad,
+}
+
+impl UserFacingError for ProjectNameError {}
+
+impl ClientCredentials {
+    /// Determine project name from SNI.
+    pub fn project_name(&self) -> Result<&str, ProjectNameError> {
+        // Currently project name is passed as a top level domain
+        let sni = self.sni_data.as_ref().ok_or(ProjectNameError::Missing)?;
+        let (first, _) = sni.split_once('.').ok_or(ProjectNameError::Bad)?;
+        Ok(first)
+    }
+}
+
 impl TryFrom<HashMap<String, String>> for ClientCredentials {
     type Error = ClientCredsParseError;
 
@@ -47,11 +67,11 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         };
 
         let user = get_param("user")?;
-        let db = get_param("database")?;
+        let dbname = get_param("database")?;
 
         Ok(Self {
             user,
-            dbname: db,
+            dbname,
             sni_data: None,
         })
     }
@@ -63,8 +83,8 @@ impl ClientCredentials {
         self,
         config: &ProxyConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> Result<compute::NodeInfo, AuthError> {
+    ) -> super::Result<compute::NodeInfo> {
         // This method is just a convenient facade for `handle_user`
-        super::handle_user(config, client, self).await
+        super::backend::handle_user(config, client, self).await
     }
 }

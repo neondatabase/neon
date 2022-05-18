@@ -1,39 +1,38 @@
-use anyhow::{ensure, Context};
+use crate::url::ApiUrl;
+use anyhow::{bail, ensure, Context};
 use std::{str::FromStr, sync::Arc};
 
-#[non_exhaustive]
 pub enum AuthBackendType {
+    /// Legacy Cloud API (V1).
     LegacyConsole,
-    Console,
-    Postgres,
+    /// Authentication via a web browser.
     Link,
+    /// Current Cloud API (V2).
+    Console,
+    /// Local mock of Cloud API (V2).
+    Postgres,
 }
 
 impl FromStr for AuthBackendType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        println!("ClientAuthMethod::from_str: '{}'", s);
         use AuthBackendType::*;
-        match s {
-            "legacy" => Ok(LegacyConsole),
-            "console" => Ok(Console),
-            "postgres" => Ok(Postgres),
-            "link" => Ok(Link),
-            _ => Err(anyhow::anyhow!("Invlid option for auth method")),
-        }
+        Ok(match s {
+            "legacy" => LegacyConsole,
+            "console" => Console,
+            "postgres" => Postgres,
+            "link" => Link,
+            _ => bail!("Invalid option `{s}` for auth method"),
+        })
     }
 }
 
 pub struct ProxyConfig {
-    /// TLS configuration for the proxy.
     pub tls_config: Option<TlsConfig>,
-
     pub auth_backend: AuthBackendType,
-
-    pub auth_endpoint: reqwest::Url,
-
-    pub auth_link_uri: reqwest::Url,
+    pub auth_endpoint: ApiUrl,
+    pub auth_link_uri: ApiUrl,
 }
 
 pub type TlsConfig = Arc<rustls::ServerConfig>;
