@@ -525,6 +525,9 @@ impl ImageLayerWriter {
             }),
         };
 
+        // fsync the file
+        file.sync_all()?;
+
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.
