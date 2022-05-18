@@ -679,29 +679,34 @@ impl GlobalTimelines {
 
     /// Deactivates and deletes all timelines for the tenant, see `delete()`.
     /// Returns map of all timelines which the tenant had, `true` if a timeline was active.
+    /// There may be a race if new timelines are created simultaneously.
     pub fn delete_force_all_for_tenant(
         conf: &SafeKeeperConf,
         tenant_id: &ZTenantId,
     ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
-        let mut state = TIMELINES_STATE.lock().unwrap();
-        let mut deleted = HashMap::new();
-        for (zttid, tli) in &state.timelines {
-            if zttid.tenant_id == *tenant_id {
-                deleted.insert(
-                    *zttid,
-                    GlobalTimelines::delete_force_internal(
-                        conf,
-                        zttid,
-                        tli.deactivate_for_delete()?,
-                    )?,
-                );
+        let mut to_delete = HashMap::new();
+        {
+            let mut state = TIMELINES_STATE.lock().unwrap();
+            for (zttid, tli) in &state.timelines {
+                if zttid.tenant_id == *tenant_id {
+                    to_delete.insert(*zttid, tli.deactivate_for_delete()?);
+                }
             }
+            // TODO: test that the correct subset of timelines is removed. It's complicated because they are implicitly created currently.
+            state
+                .timelines
+                .retain(|zttid, _| !to_delete.contains_key(zttid));
         }
-        // TODO: test that the exact subset of timelines is removed.
-        state
-            .timelines
-            .retain(|zttid, _| !deleted.contains_key(zttid));
+        let mut deleted = HashMap::new();
+        for (&zttid, &was_active) in &to_delete {
+            deleted.insert(
+                zttid,
+                GlobalTimelines::delete_force_internal(conf, &zttid, was_active)?,
+            );
+        }
+        drop(to_delete);
+        // There may be inactive timelines, so delete the whole tenant dir as well.
         match std::fs::remove_dir_all(conf.tenant_dir(tenant_id)) {
             Ok(_) => (),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
