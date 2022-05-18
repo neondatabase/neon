@@ -420,6 +420,21 @@ impl DeltaLayer {
         }
     }
 
+    fn temp_path_for(
+        conf: &PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        key_start: Key,
+        lsn_range: Range<Lsn>,
+    ) -> PathBuf {
+        conf.timeline_path(&timelineid, &tenantid).join(format!(
+            "{}-XXX__{:016X}-{:016X}.temp",
+            key_start,
+            u64::from(lsn_range.start),
+            u64::from(lsn_range.end)
+        ))
+    }
+
     ///
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
@@ -607,12 +622,9 @@ impl DeltaLayerWriter {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
-            "{}-XXX__{:016X}-{:016X}.temp",
-            key_start,
-            u64::from(lsn_range.start),
-            u64::from(lsn_range.end)
-        ));
+        let path =
+            DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, lsn_range.clone());
+
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
