@@ -18,7 +18,7 @@ use super::error::ApiError;
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
-        "libmetrics_serve_metrics_count",
+        "libmetrics_metric_handler_requests_total",
         "Number of metric requests made"
     )
     .expect("failed to define a metric");

@@ -15,17 +15,17 @@ const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
 lazy_static! {
     static ref NUM_CONNECTIONS_ACCEPTED_COUNTER: IntCounter = register_int_counter!(
-        "proxy_accepted_connections",
+        "proxy_accepted_connections_total",
         "Number of TCP client connections accepted."
     )
     .unwrap();
     static ref NUM_CONNECTIONS_CLOSED_COUNTER: IntCounter = register_int_counter!(
-        "proxy_closed_connections",
+        "proxy_closed_connections_total",
         "Number of TCP client connections closed."
     )
     .unwrap();
     static ref NUM_BYTES_PROXIED_COUNTER: IntCounter = register_int_counter!(
-        "proxy_io_bytes",
+        "proxy_io_bytes_total",
         "Number of bytes sent/received between any client and backend."
     )
     .unwrap();
