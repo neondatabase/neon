@@ -687,25 +687,23 @@ impl GlobalTimelines {
         info!("deleting all timelines for tenant {}", tenant_id);
         let mut to_delete = HashMap::new();
         {
-            let mut state = TIMELINES_STATE.lock().unwrap();
-            for (zttid, tli) in &state.timelines {
+            // Keep mutex in this scope.
+            let timelines = &mut TIMELINES_STATE.lock().unwrap().timelines;
+            for (&zttid, tli) in timelines.iter() {
                 if zttid.tenant_id == *tenant_id {
-                    to_delete.insert(*zttid, tli.deactivate_for_delete()?);
+                    to_delete.insert(zttid, tli.deactivate_for_delete()?);
                 }
             }
             // TODO: test that the correct subset of timelines is removed. It's complicated because they are implicitly created currently.
-            state
-                .timelines
-                .retain(|zttid, _| !to_delete.contains_key(zttid));
+            timelines.retain(|zttid, _| !to_delete.contains_key(zttid));
         }
         let mut deleted = HashMap::new();
-        for (&zttid, &was_active) in &to_delete {
+        for (zttid, was_active) in to_delete {
             deleted.insert(
                 zttid,
                 GlobalTimelines::delete_force_internal(conf, &zttid, was_active)?,
             );
         }
-        drop(to_delete);
         // There may be inactive timelines, so delete the whole tenant dir as well.
         match std::fs::remove_dir_all(conf.tenant_dir(tenant_id)) {
             Ok(_) => (),
