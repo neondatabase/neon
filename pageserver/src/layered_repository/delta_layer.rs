@@ -37,6 +37,7 @@ use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -427,11 +428,18 @@ impl DeltaLayer {
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> PathBuf {
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+
         conf.timeline_path(&timelineid, &tenantid).join(format!(
-            "{}-XXX__{:016X}-{:016X}.temp",
+            "{}-XXX__{:016X}-{:016X}.{}.temp",
             key_start,
             u64::from(lsn_range.start),
-            u64::from(lsn_range.end)
+            u64::from(lsn_range.end),
+            rand_string
         ))
     }
 
