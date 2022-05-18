@@ -236,7 +236,7 @@ class ZenithBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        metric_name = r'libmetrics_disk_io_bytes{io_operation="write"}'
+        metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
         return self.get_int_counter_value(pageserver, metric_name)
 
     def get_peak_mem(self, pageserver) -> int:
