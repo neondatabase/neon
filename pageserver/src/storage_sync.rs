@@ -421,6 +421,14 @@ fn collect_timeline_files(
                         entry_path.display()
                     )
                 })?;
+            } else if entry_path.extension().and_then(OsStr::to_str) == Some("temp") {
+                info!("removing temp layer file at {}", entry_path.display());
+                std::fs::remove_file(&entry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp layer file at {}",
+                        entry_path.display()
+                    )
+                })?;
             } else {
                 timeline_files.insert(entry_path);
             }
