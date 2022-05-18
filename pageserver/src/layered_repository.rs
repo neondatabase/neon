@@ -18,7 +18,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use tracing::*;
 
-use std::cmp::{max, min, Ordering};
+use std::cmp::{max, Ordering};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
@@ -1946,41 +1946,87 @@ impl LayeredTimeline {
         Ok(new_path)
     }
 
+    ///
+    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
+    /// as Level 1 files.
+    ///
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.read().unwrap();
-
-        let level0_deltas = layers.get_level0_deltas()?;
-
-        // We compact or "shuffle" the level-0 delta layers when they've
-        // accumulated over the compaction threshold.
-        if level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(());
-        }
+        let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
-        // FIXME: this function probably won't work correctly if there's overlap
-        // in the deltas.
-        let lsn_range = level0_deltas
-            .iter()
-            .map(|l| l.get_lsn_range())
-            .reduce(|a, b| min(a.start, b.start)..max(a.end, b.end))
-            .unwrap();
+        // Only compact if enough layers have accumulated.
+        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
+            return Ok(());
+        }
 
-        let all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
-            if let Ok((a_key, a_lsn, _)) = a {
-                if let Ok((b_key, b_lsn, _)) = b {
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
+        // Gather the files to compact in this iteration.
+        //
+        // Start with the oldest Level 0 delta file, and collect any other
+        // level 0 files that form a contiguous sequence, such that the end
+        // LSN of previous file matches the start LSN of the next file.
+        //
+        // Note that if the files don't form such a sequence, we might
+        // "compact" just a single file. That's a bit pointless, but it allows
+        // us to get rid of the level 0 file, and compact the other files on
+        // the next iteration. This could probably made smarter, but such
+        // "gaps" in the sequence of level 0 files should only happen in case
+        // of a crash, partial download from cloud storage, or something like
+        // that, so it's not a big deal in practice.
+        level0_deltas.sort_by_key(|l| l.get_lsn_range().start);
+        let mut level0_deltas_iter = level0_deltas.iter();
+
+        let first_level0_delta = level0_deltas_iter.next().unwrap();
+        let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
+        let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
+        for l in level0_deltas_iter {
+            let lsn_range = l.get_lsn_range();
+
+            if lsn_range.start != prev_lsn_end {
+                break;
+            }
+            deltas_to_compact.push(Arc::clone(l));
+            prev_lsn_end = lsn_range.end;
+        }
+        let lsn_range = Range {
+            start: deltas_to_compact.first().unwrap().get_lsn_range().start,
+            end: deltas_to_compact.last().unwrap().get_lsn_range().end,
+        };
+
+        info!(
+            "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
+            lsn_range.start,
+            lsn_range.end,
+            deltas_to_compact.len(),
+            level0_deltas.len()
+        );
+        for l in deltas_to_compact.iter() {
+            info!("compact includes {}", l.filename().display());
+        }
+        // We don't need the original list of layers anymore. Drop it so that
+        // we don't accidentally use it later in the function.
+        drop(level0_deltas);
+
+        // This iterator walks through all key-value pairs from all the layers
+        // we're compacting, in key, LSN order.
+        let all_values_iter = deltas_to_compact
+            .iter()
+            .map(|l| l.iter())
+            .kmerge_by(|a, b| {
+                if let Ok((a_key, a_lsn, _)) = a {
+                    if let Ok((b_key, b_lsn, _)) = b {
+                        match a_key.cmp(b_key) {
+                            Ordering::Less => true,
+                            Ordering::Equal => a_lsn <= b_lsn,
+                            Ordering::Greater => false,
+                        }
+                    } else {
+                        false
                     }
                 } else {
-                    false
+                    true
                 }
-            } else {
-                true
-            }
-        });
+            });
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -2046,8 +2092,8 @@ impl LayeredTimeline {
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_do_delete = HashSet::with_capacity(level0_deltas.len());
-        for l in level0_deltas {
+        let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
+        for l in deltas_to_compact {
             l.delete()?;
             if let Some(path) = l.local_path() {
                 layer_paths_do_delete.insert(path);
