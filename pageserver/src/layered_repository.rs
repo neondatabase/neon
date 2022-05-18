@@ -1621,22 +1621,30 @@ impl LayeredTimeline {
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
 
+        // Has more than 'checkpoint_distance' of WAL been accumulated?
         let distance = last_lsn.widening_sub(self.last_freeze_at.load());
         if distance >= self.get_checkpoint_distance().into() {
+            // Yes. Freeze the current in-memory layer.
             self.freeze_inmem_layer(true);
             self.last_freeze_at.store(last_lsn);
-        }
-        if let Ok(guard) = self.layer_flush_lock.try_lock() {
-            drop(guard);
-            let self_clone = Arc::clone(self);
-            thread_mgr::spawn(
-                thread_mgr::ThreadKind::LayerFlushThread,
-                Some(self.tenant_id),
-                Some(self.timeline_id),
-                "layer flush thread",
-                false,
-                move || self_clone.flush_frozen_layers(false),
-            )?;
+
+            // Launch a thread to flush the frozen layer to disk, unless
+            // a thread was already running. (If the thread was running
+            // at the time that we froze the layer, it must've seen the
+            // the layer we just froze before it exited; see comments
+            // in flush_frozen_layers())
+            if let Ok(guard) = self.layer_flush_lock.try_lock() {
+                drop(guard);
+                let self_clone = Arc::clone(self);
+                thread_mgr::spawn(
+                    thread_mgr::ThreadKind::LayerFlushThread,
+                    Some(self.tenant_id),
+                    Some(self.timeline_id),
+                    "layer flush thread",
+                    false,
+                    move || self_clone.flush_frozen_layers(false),
+                )?;
+            }
         }
         Ok(())
     }
