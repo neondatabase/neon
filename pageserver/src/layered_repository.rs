@@ -1357,7 +1357,9 @@ impl LayeredTimeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+        // For debugging purposes, collect the path of layers that we traversed
+        // through. It's included in the error message if we fail to find the key.
+        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1387,32 +1389,24 @@ impl LayeredTimeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-
-                        // For debugging purposes, print the path of layers that we traversed
-                        // through.
-                        for (r, c, l) in path {
-                            error!(
-                                "PATH: result {:?}, cont_lsn {}, layer: {}",
-                                r,
-                                c,
-                                l.filename().display()
-                            );
-                        }
-                        bail!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                          key,
-                          Lsn(cont_lsn.0 - 1),
-                              request_lsn,
-                        timeline.ancestor_lsn)
+                        return layer_traversal_error(format!(
+                            "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                            key,
+                            Lsn(cont_lsn.0 - 1),
+                            request_lsn,
+                            timeline.ancestor_lsn
+                        ), traversal_path);
                     }
                     prev_lsn = cont_lsn;
                 }
                 ValueReconstructResult::Missing => {
-                    bail!(
-                        "could not find data for key {} at LSN {}, for request at LSN {}",
-                        key,
-                        cont_lsn,
-                        request_lsn
-                    )
+                    return layer_traversal_error(
+                        format!(
+                            "could not find data for key {} at LSN {}, for request at LSN {}",
+                            key, cont_lsn, request_lsn
+                        ),
+                        traversal_path,
+                    );
                 }
             }
 
@@ -1447,7 +1441,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    path.push((result, cont_lsn, open_layer.clone()));
+                    traversal_path.push((result, cont_lsn, open_layer.clone()));
                     continue;
                 }
             }
@@ -1462,7 +1456,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    path.push((result, cont_lsn, frozen_layer.clone()));
+                    traversal_path.push((result, cont_lsn, frozen_layer.clone()));
                     continue 'outer;
                 }
             }
@@ -1477,7 +1471,7 @@ impl LayeredTimeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                path.push((result, cont_lsn, layer));
+                traversal_path.push((result, cont_lsn, layer));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -2373,6 +2367,32 @@ impl LayeredTimeline {
             }
         }
     }
+}
+
+/// Helper function for get_reconstruct_data() to add the path of layers traversed
+/// to an error, as anyhow context information.
+fn layer_traversal_error(
+    msg: String,
+    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+) -> anyhow::Result<()> {
+    // We want the original 'msg' to be the outermost context. The outermost context
+    // is the most high-level information, which also gets propagated to the client.
+    let mut msg_iter = path
+        .iter()
+        .map(|(r, c, l)| {
+            format!(
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                r,
+                c,
+                l.filename().display()
+            )
+        })
+        .chain(std::iter::once(msg));
+    // Construct initial message from the first traversed layer
+    let err = anyhow!(msg_iter.next().unwrap());
+
+    // Append all subsequent traversals, and the error message 'msg', as contexts.
+    Err(msg_iter.fold(err, |err, msg| err.context(msg)))
 }
 
 struct LayeredTimelineWriter<'a> {
