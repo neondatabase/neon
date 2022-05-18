@@ -5,7 +5,6 @@
 //! in somewhat transparent manner (again via communication with control plane API).
 
 mod auth;
-mod auth_backend;
 mod cancellation;
 mod compute;
 mod config;
@@ -17,6 +16,7 @@ mod proxy;
 mod sasl;
 mod scram;
 mod stream;
+mod url;
 mod waiters;
 
 use anyhow::{bail, Context};

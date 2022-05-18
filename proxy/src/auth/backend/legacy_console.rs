@@ -1,19 +1,17 @@
 //! Cloud API V1.
 
-use super::console::DatabaseInfo;
-
-use crate::auth::ClientCredentials;
-use crate::stream::PqStream;
-
-use crate::{compute, waiters};
+use super::DatabaseInfo;
+use crate::{
+    auth::{self, ClientCredentials},
+    compute,
+    error::UserFacingError,
+    stream::PqStream,
+    waiters,
+};
 use serde::{Deserialize, Serialize};
-
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
-
-use thiserror::Error;
-
-use crate::error::UserFacingError;
 
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
@@ -45,7 +43,7 @@ pub struct AuthError(Box<AuthErrorImpl>);
 impl AuthError {
     /// Smart constructor for authentication error reported by `mgmt`.
     pub fn auth_failed(msg: impl Into<String>) -> Self {
-        AuthError(Box::new(AuthErrorImpl::AuthFailed(msg.into())))
+        Self(Box::new(AuthErrorImpl::AuthFailed(msg.into())))
     }
 }
 
@@ -54,7 +52,7 @@ where
     AuthErrorImpl: From<T>,
 {
     fn from(e: T) -> Self {
-        AuthError(Box::new(e.into()))
+        Self(Box::new(e.into()))
     }
 }
 
@@ -120,7 +118,7 @@ async fn handle_existing_user(
     auth_endpoint: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     creds: &ClientCredentials,
-) -> Result<crate::compute::NodeInfo, crate::auth::AuthError> {
+) -> Result<compute::NodeInfo, auth::AuthError> {
     let psql_session_id = super::link::new_psql_session_id();
     let md5_salt = rand::random();
 
@@ -130,7 +128,7 @@ async fn handle_existing_user(
 
     // Read client's password hash
     let msg = client.read_password_message().await?;
-    let md5_response = parse_password(&msg).ok_or(crate::auth::AuthErrorImpl::MalformedPassword)?;
+    let md5_response = parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword)?;
 
     let db_info = authenticate_proxy_client(
         auth_endpoint,
@@ -156,11 +154,11 @@ pub async fn handle_user(
     auth_link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     creds: &ClientCredentials,
-) -> Result<crate::compute::NodeInfo, crate::auth::AuthError> {
+) -> auth::Result<compute::NodeInfo> {
     if creds.is_existing_user() {
         handle_existing_user(auth_endpoint, client, creds).await
     } else {
-        super::link::handle_user(auth_link_uri.as_ref(), client).await
+        super::link::handle_user(auth_link_uri, client).await
     }
 }
 
