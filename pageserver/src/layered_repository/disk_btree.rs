@@ -444,6 +444,13 @@ where
     ///
     /// stack[0] is the current root page, stack.last() is the leaf.
     ///
+    /// We maintain the length of the stack to be always greater than zero.
+    /// Two exceptions are:
+    /// 1. `Self::flush_node`. The method will push the new node if it extracted the last one.
+    ///   So because other methods cannot see the intermediate state invariant still holds.
+    /// 2. `Self::finish`. It consumes self and does not return it back,
+    ///  which means that this is where the structure is destroyed.
+    ///  Thus stack of zero length cannot be observed by other methods.
     stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append
@@ -482,7 +489,10 @@ where
 
     fn append_internal(&mut self, key: &[u8; L], value: Value) -> Result<()> {
         // Try to append to the current leaf buffer
-        let last = self.stack.last_mut().unwrap();
+        let last = self
+            .stack
+            .last_mut()
+            .expect("should always have at least one item");
         let level = last.level;
         if last.push(key, value) {
             return Ok(());
@@ -512,19 +522,25 @@ where
         Ok(())
     }
 
+    /// Flush the bottommost node in the stack to disk. Appends a downlink to its parent,
+    /// and recursively flushes the parent too, if it becomes full. If the root page becomes full,
+    /// creates a new root page, increasing the height of the tree.
     fn flush_node(&mut self) -> Result<()> {
-        let last = self.stack.pop().unwrap();
+        // Get the current bottommost node in the stack and flush it to disk.
+        let last = self
+            .stack
+            .pop()
+            .expect("should always have at least one item");
         let buf = last.pack();
         let downlink_key = last.first_key();
         let downlink_ptr = self.writer.write_blk(buf)?;
 
-        // Append the downlink to the parent
+        // Append the downlink to the parent. If there is no parent, ie. this was the root page,
+        // create a new root page, increasing the height of the tree.
         if self.stack.is_empty() {
             self.stack.push(BuildNode::new(last.level + 1));
         }
-        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))?;
-
-        Ok(())
+        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))
     }
 
     ///
@@ -540,7 +556,10 @@ where
             self.flush_node()?;
         }
 
-        let root = self.stack.first().unwrap();
+        let root = self
+            .stack
+            .first()
+            .expect("by the check above we left one item there");
         let buf = root.pack();
         let root_blknum = self.writer.write_blk(buf)?;
 
