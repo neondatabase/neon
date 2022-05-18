@@ -425,7 +425,7 @@ impl DeltaLayer {
         timelineid: ZTimelineId,
         tenantid: ZTenantId,
         key_start: Key,
-        lsn_range: Range<Lsn>,
+        lsn_range: &Range<Lsn>,
     ) -> PathBuf {
         conf.timeline_path(&timelineid, &tenantid).join(format!(
             "{}-XXX__{:016X}-{:016X}.temp",
@@ -622,8 +622,7 @@ impl DeltaLayerWriter {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path =
-            DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, lsn_range.clone());
+        let path = DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, &lsn_range);
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
@@ -717,6 +716,8 @@ impl DeltaLayerWriter {
             }),
         };
 
+        // fsync the file
+        file.sync_all()?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.
