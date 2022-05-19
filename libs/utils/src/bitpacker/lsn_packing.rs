@@ -1,3 +1,11 @@
+//! Wrapper around U64 delta packer.
+//!
+//! Because LSNs are always aligned (or: Start of each record is MAXALIGNed)
+//! we can ditch the last 3 bits (our systems are always 8-aligned).
+//! This saves us 3 bits per LSN (unless we somehow have LSN gaps of > 2^53 in
+//! one layer), which is not a lot, but at least several bytes per block of
+//! LSNs.
+
 use crate::bitpacker::u64delta_packing::{U64DeltaPacker, U64DeltaUnpacker};
 use crate::bitpacker::{Packer, U64DeltaPackedData, Unpacker, IGNORE_LSN_BITS};
 use crate::lsn::Lsn;

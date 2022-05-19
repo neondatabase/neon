@@ -6,8 +6,19 @@ use utils::bitpacker::u64packing::U64Unpacker;
 use utils::bitpacker::{U64DeltaPackedData, U64PackedData, Unpacker};
 use utils::lsn::Lsn;
 
+/// LineageReader reads a serialized version of a lineage. This struct is
+/// responsible for the deserialization of the LSNs, and delegates the
+/// deserialization of records to it's inner type.
+///
+/// Values are only returned through iteration, so as to limit deserialization
+/// efforts to a minimum.
+///
+/// [T] is unbound on the type to provide num_records without a concrete reader
+/// implementation type.
 pub struct LineageReader<T> {
+    /// The unpacker for the contained LSNs. Returned in increasing order.
     lsns: LsnUnpacker,
+    /// Up to which LSN must we return the values?
     lsn_limit: Lsn,
     inner: T,
 }
@@ -26,6 +37,8 @@ impl<T> LineageReader<T> {
         }
     }
 
+    /// How many records are there in this lineage, assuming that the Bytes is
+    /// the serialized representation of that lineage?
     pub fn num_records(bytes: &Bytes) -> usize {
         let (dpd, _) = U64DeltaPackedData::from_bytes(bytes.clone());
 
@@ -33,6 +46,7 @@ impl<T> LineageReader<T> {
     }
 }
 
+/// Iterator implementation for LineageReader.
 impl<T> Iterator for LineageReader<T>
 where
     T: Iterator<Item = Value> + From<Bytes>,
@@ -49,6 +63,7 @@ where
     }
 }
 
+/// Helper for reading lineages have been written on a record-by-record basis
 pub struct ReadRecords<T: RecordIOps> {
     iter: <T as RecordIOps>::ReaderIter,
 }
@@ -75,6 +90,7 @@ where
     }
 }
 
+/// Deserializer helper for serialized Iter<Bytes>.
 struct BytesUnpacker {
     lengths: U64Unpacker,
     remainder: Bytes,

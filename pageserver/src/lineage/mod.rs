@@ -29,6 +29,11 @@ fn default<T: Default>() -> T {
     <T as Default>::default()
 }
 
+/// Kinds of lineages we distinguish.
+///
+/// These mostly are one for each type of ZenithWalRecord, but also includes
+/// an ANY type (for all record types) and one that can contain any of the CLOG
+/// record variants (COMMIT and ABORT).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum LineageType {
     /// Non-specialized variants.
@@ -67,12 +72,15 @@ enum LineageType {
     MultixactMemberCreatesWithPageImage = 15,
 }
 
+/// Have a default
 impl Default for LineageType {
     fn default() -> Self {
         LineageType::AnyValueType
     }
 }
 
+/// Macro that defines a function on &self that forwards the calls to the
+/// corresponding handler, based on the type.
 macro_rules! forward_to_impl {
     ($name:ident ($($params:ident : $typ:ty),* ) -> $ret:ty) => {
         pub fn $name(&self, $($params : $typ),* ) -> $ret {
@@ -116,6 +124,10 @@ impl LineageType {
     forward_to_impl!(get_reader (bytes: Bytes, limit: Lsn) -> Vec<(Lsn, Value)>);
     forward_to_impl!(write (vec: &[(Lsn, Value)]) -> Result<Bytes>);
 
+    /// Determines what type can best handle this Value type.
+    /// Note that for Image this is only stored in AnyValueType, and that the
+    /// ...WithPrefixImage cannot be returned here: images are only prefixed at
+    /// the final stage when the rest of the types are already determined.
     pub fn type_for(value: &Value) -> LineageType {
         match value {
             Value::Image(_) => LineageType::AnyValueType,
@@ -132,111 +144,54 @@ impl LineageType {
         }
     }
 
+    /// Combine the lineage type with another. Unordered combine operations:
+    /// A + B == B + A
+    ///
+    /// Note that we cannot combine ...WithPrefixImage, as that has ordering and could result in pageImage in the middle -- which is incorrect.
     fn combine_with(&self, other_type: &LineageType) -> LineageType {
         match &self {
             LineageType::AnyValueType => *self,
             LineageType::PGWal => match other_type {
-                LineageType::PGWal => *other_type,
-                LineageType::PGWalWithPageImage => *other_type,
+                LineageType::PGWal => LineageType::PGWal,
                 _ => default(),
             },
-            LineageType::PGWalWithPageImage => match other_type {
-                LineageType::PGWal => *self,
-                LineageType::PGWalWithPageImage => *self,
-                _ => default(),
-            },
+            LineageType::PGWalWithPageImage => default(),
             LineageType::VisMapFlags => match other_type {
-                LineageType::VisMapFlags => *other_type,
-                LineageType::VisMapFlagsWithPageImage => *other_type,
+                LineageType::VisMapFlags => LineageType::VisMapFlags,
                 _ => default(),
             },
-            LineageType::VisMapFlagsWithPageImage => match other_type {
-                LineageType::VisMapFlags => *self,
-                LineageType::VisMapFlagsWithPageImage => *self,
-                _ => default(),
-            },
+            LineageType::VisMapFlagsWithPageImage => default(),
             LineageType::CLogCommits => match other_type {
-                LineageType::CLogCommits => *other_type,
-                LineageType::CLogCommitsWithPageImage => *other_type,
+                LineageType::CLogCommits => LineageType::CLogCommits,
                 LineageType::CLogAborts => LineageType::CLogAny,
-                LineageType::CLogAbortsWithPageImage => LineageType::CLogAnyWithPageImage,
                 LineageType::CLogAny => LineageType::CLogAny,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
                 _ => default(),
             },
-            LineageType::CLogCommitsWithPageImage => match other_type {
-                LineageType::CLogCommits => *self,
-                LineageType::CLogCommitsWithPageImage => *self,
-                LineageType::CLogAborts => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAbortsWithPageImage => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAny => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
-                _ => default(),
-            },
+            LineageType::CLogCommitsWithPageImage => default(),
             LineageType::CLogAborts => match other_type {
                 LineageType::CLogCommits => LineageType::CLogAny,
-                LineageType::CLogCommitsWithPageImage => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAborts => *other_type,
-                LineageType::CLogAbortsWithPageImage => *other_type,
-                LineageType::CLogAny => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
-                _ => default(),
-            },
-            LineageType::CLogAbortsWithPageImage => match other_type {
-                LineageType::CLogCommits => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogCommitsWithPageImage => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAborts => *self,
-                LineageType::CLogAbortsWithPageImage => *self,
+                LineageType::CLogAborts => LineageType::CLogAborts,
                 LineageType::CLogAny => LineageType::CLogAny,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
                 _ => default(),
             },
+            LineageType::CLogAbortsWithPageImage => default(),
             LineageType::CLogAny => match other_type {
                 LineageType::CLogCommits => LineageType::CLogAny,
-                LineageType::CLogCommitsWithPageImage => LineageType::CLogAnyWithPageImage,
                 LineageType::CLogAborts => LineageType::CLogAny,
-                LineageType::CLogAbortsWithPageImage => LineageType::CLogAnyWithPageImage,
                 LineageType::CLogAny => LineageType::CLogAny,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
                 _ => default(),
             },
-            LineageType::CLogAnyWithPageImage => match other_type {
-                LineageType::CLogCommits => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogCommitsWithPageImage => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAborts => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAbortsWithPageImage => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAny => LineageType::CLogAnyWithPageImage,
-                LineageType::CLogAnyWithPageImage => LineageType::CLogAnyWithPageImage,
-                _ => default(),
-            },
+            LineageType::CLogAnyWithPageImage => default(),
             LineageType::MultixactOffsetCreates => match other_type {
-                LineageType::MultixactOffsetCreates => *other_type,
-                LineageType::MultixactOffsetCreatesWithPageImage => *other_type,
+                LineageType::MultixactOffsetCreates => LineageType::MultixactOffsetCreates,
                 _ => default(),
             },
-            LineageType::MultixactOffsetCreatesWithPageImage => match other_type {
-                LineageType::MultixactOffsetCreates => {
-                    LineageType::MultixactOffsetCreatesWithPageImage
-                }
-                LineageType::MultixactOffsetCreatesWithPageImage => {
-                    LineageType::MultixactOffsetCreatesWithPageImage
-                }
-                _ => default(),
-            },
+            LineageType::MultixactOffsetCreatesWithPageImage => default(),
             LineageType::MultixactMemberCreates => match other_type {
-                LineageType::MultixactMemberCreates => *other_type,
-                LineageType::MultixactMemberCreatesWithPageImage => *other_type,
+                LineageType::MultixactMemberCreates => LineageType::MultixactMemberCreates,
                 _ => default(),
             },
-            LineageType::MultixactMemberCreatesWithPageImage => match other_type {
-                LineageType::MultixactOffsetCreates => {
-                    LineageType::MultixactOffsetCreatesWithPageImage
-                }
-                LineageType::MultixactOffsetCreatesWithPageImage => {
-                    LineageType::MultixactOffsetCreatesWithPageImage
-                }
-                _ => default(),
-            },
+            LineageType::MultixactMemberCreatesWithPageImage => default(),
         }
     }
 
@@ -251,11 +206,20 @@ impl LineageType {
             LineageType::MultixactMemberCreates => LineageType::MultixactMemberCreatesWithPageImage,
             // Anything that already has an image would have 2 prefixing images, which should not
             // happen and thus requires AnyValueType -- we can't efficiently handle it otherwise.
-            _ => LineageType::AnyValueType,
+            LineageType::AnyValueType => LineageType::AnyValueType,
+            LineageType::PGWalWithPageImage => LineageType::AnyValueType,
+            LineageType::VisMapFlagsWithPageImage => LineageType::AnyValueType,
+            LineageType::CLogCommitsWithPageImage => LineageType::AnyValueType,
+            LineageType::CLogAbortsWithPageImage => LineageType::AnyValueType,
+            LineageType::CLogAnyWithPageImage => LineageType::AnyValueType,
+            LineageType::MultixactOffsetCreatesWithPageImage => LineageType::AnyValueType,
+            LineageType::MultixactMemberCreatesWithPageImage => LineageType::AnyValueType,
         }
     }
 }
 
+/// Storage structure, used in Value::[NonInitiatingLineage, InitiatingLineage]
+/// Contains the serialized information of a Vec<(Lsn, Value)>.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Lineage {
     kind: LineageType,
@@ -274,6 +238,7 @@ impl Lineage {
     }
 }
 
+/// helper for debug information.
 pub fn describe_lineage(lineage: &Lineage) -> String {
     format!(
         "kind: {:?} n_records: {}",
@@ -282,6 +247,11 @@ pub fn describe_lineage(lineage: &Lineage) -> String {
     )
 }
 
+/// Helper struct for writing Lineages.
+///
+/// Contains the current cached state of (Lsn, Value)-pairs, and an optionally
+/// determined type of the Lineage up to the last received record, plus a
+/// guesstimated size cache.
 pub struct LineageWriteHandler {
     state: Vec<(Lsn, Value)>,
     determined_type: Option<LineageType>,
@@ -310,11 +280,13 @@ impl LineageWriteHandler {
     /// to get the yet-to-be-processed lineage.
     pub fn append_record(&mut self, lsn: Lsn, val: Value) -> Result<Option<(Lsn, Value)>> {
         if self.state.is_empty() {
+            // prefix image is only added to the type at the end.
             if val.is_image() {
                 self.determined_type = None
             } else {
                 self.determined_type = Some(LineageType::type_for(&val));
             }
+            // add sizing estimate.
             self.guestimated_size += (size_of::<Lsn>() + val.guestimate_size()) as u64;
             self.state.push((lsn, val));
 

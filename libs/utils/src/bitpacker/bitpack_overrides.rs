@@ -1,3 +1,8 @@
+//! tantivy_bitpacker::BitUnpacker does not support unpacking from `&[u8]` that
+//! do not have trailing padding bytes. We do want to support those, so we
+//! copy the definition and modify it so that we can unpack those trailing
+//! values.
+
 #[derive(Clone, Debug, Default)]
 pub struct BitUnpacker {
     num_bits: u64,
@@ -36,6 +41,10 @@ impl BitUnpacker {
             let val_shifted = (val_unshifted_unmasked >> bit_shift) as u64;
             val_shifted & mask
         } else {
+            // We're operating at the end of the array, so be careful not to
+            // go past it.
+            //
+            // Fixes limitation mentioned in the header of the file.
             let mut bytes = [0u8; 8];
 
             for i in 0..(data.len() - (addr as usize)) {

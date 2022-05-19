@@ -10,6 +10,7 @@ use postgres_ffi::XLogRecord;
 use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Formatter};
 use std::mem::size_of;
 use tracing::trace;
 
@@ -34,10 +35,26 @@ macro_rules! impl_value_casts {
     };
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Default, Deserialize, PartialEq, Eq)]
 pub struct Postgres {
     pub will_init: bool,
     pub rec: Bytes,
+}
+
+impl Debug for Postgres {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let data = decode_wal_record(self.rec.clone());
+
+        if data.is_err() {
+            return Err(std::fmt::Error);
+        }
+        let data = data.unwrap();
+
+        f.debug_struct("Postgres")
+            .field("will_init", &self.will_init)
+            .field("rec", &data)
+            .finish()
+    }
 }
 
 impl_value_casts!(Postgres);
@@ -136,7 +153,7 @@ impl ZenithWalRecord {
 }
 
 /// DecodedBkpBlock represents per-page data contained in a WAL record.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct DecodedBkpBlock {
     /* Is this block ref in use? */
     //in_use: bool,
@@ -174,6 +191,7 @@ impl DecodedBkpBlock {
     }
 }
 
+#[derive(Debug)]
 pub struct DecodedWALRecord {
     pub xl_xid: TransactionId,
     pub xl_info: u8,

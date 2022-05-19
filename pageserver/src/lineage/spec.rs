@@ -34,12 +34,6 @@ pub trait LineageRecordHandler: Sized {
     }
 }
 
-// pub struct LineageIO();
-//
-// impl LineageIO {
-//     fn get_reader<Handler: LineageRecordHandler>(bytes: Bytes, limit: Lsn) -> LineageRea
-// }
-
 fn get_reader<RecordHandler: LineageRecordHandler>(
     bytes: Bytes,
     limit: Lsn,
@@ -50,16 +44,9 @@ fn get_reader<RecordHandler: LineageRecordHandler>(
 fn write<RecordHandler: LineageRecordHandler>(vec: &[(Lsn, Value)]) -> Result<Bytes> {
     LineageWriter::<RecordHandler::Writer>::write(vec)
 }
-//
-// pub trait LineageIO<RecordHandler, R, W>
-//     where
-//         R: Iterator<Item=Value> + From<Bytes> + Sized,
-//         W: TryFrom<Vec<Value>, Error=Error> + Into<Bytes> + Sized,
-//         RecordHandler: LineageRecordHandler<Reader=R, Writer=W>
-// {
-// }
 
-/// Record-by-record IO, only needs to know de/serialization of Value types.
+/// Record-by-record IO operations
+/// The implementations only needs to provide de-/serializers of the Value types.
 pub trait RecordIOps {
     type ReaderIter: Iterator<Item = Value>;
     type WriterIter: Iterator<Item = Result<Bytes>>;

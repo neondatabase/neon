@@ -291,6 +291,7 @@ impl PostgresRedoManager {
                 records.len(),
                 lsn
             );
+            info!("records: {:?}", records);
             let process = process_guard.take().unwrap();
             process.kill();
         }

@@ -286,6 +286,7 @@ impl Layer for DeltaLayer {
                         file.file.path.display()
                     )
                 })?;
+
                 match val {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((entry_lsn, img));

@@ -1,3 +1,5 @@
+//! This module contains RecordIOps implementations for common Value types.
+
 use crate::lineage::spec::{LineageRecordHandler, RecordIOps};
 use crate::repository::Value;
 use anyhow::{anyhow, Context, Error, Result};
@@ -9,6 +11,8 @@ use std::iter::{once, Chain, FilterMap, Map};
 use std::marker::PhantomData;
 use utils::bin_ser::LeSer;
 
+/// Wrapper for when the Lineage is prefixed by an Image. Handles Image
+/// (de)serialization, and forwards the rest of the stuff to the inner type.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct PrefixedByPageImage<T>(pub T);
 
@@ -143,6 +147,7 @@ where
     type Writer = PrefixedByPageImageWriteHandler<T>;
 }
 
+/// Handles (de)serialization for lineages containing un-specializable records.
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct LineageAnyValue();
 
@@ -168,6 +173,7 @@ impl RecordIOps for LineageAnyValue {
     }
 }
 
+/// Handles (de)serialization of the inner T type of records for a lineage.
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct RecordType<T>
 where

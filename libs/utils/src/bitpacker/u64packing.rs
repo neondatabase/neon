@@ -1,3 +1,32 @@
+/// (Un)Packer implementations for for U64s. Low values are preferred,
+/// but not critical.
+///
+/// Metadata format:
+/// [section-header] [rle-offsets]
+///
+/// section header: u8:
+///     mask 0b00XX_XXXX (6 bits): nbits
+///         Bit-length of the stored values in this segment.
+///         Value mapping:
+///             0-56 : N,
+///             57-62: unused, tantivy doesn't support this
+///             63   : 64
+///     0bXX00_0000 (2 bits): length
+///         The number of blocks in this segment.
+///         Values are offset by 1: 0b00 == 1 block, 0b11 == 4 blocks.
+///
+/// rle-offsets:
+///     See varuint spec. Uses 1 byte for values < 240. Repeats N times for
+///     n blocks indicated in the section header - each for one block.
+///     Used as the base offset for the next 16 values extracted from the data
+///     stream, i.e. values extracted from the data stream will have this value
+///     added.
+///
+/// Data is stored in blocks of 32 values that contain section.nbits bits each
+/// (for a total of `nbits * 2` bytes per block), with up to 4 blocks per
+/// section (see also metadata section header).
+///
+/// Expected access time is O(n) for nth value, iteration is O(1) for next value.
 use crate::bitpacker::bitpack_overrides::BitUnpacker;
 use crate::bitpacker::{Packer, U64PackedData, Unpacker, COMPRESS_BLOCK_SIZE};
 use bytes::{Buf, Bytes};
@@ -7,18 +36,20 @@ use varuint::{ReadVarint, WriteVarint};
 
 /// See tantivy_bitpacker::compute_num_bits -- we don't support encoding of bitlengths between 56
 /// and 64 bits, as a limitation of the current implementation.
+#[inline]
 fn encode_bits(num: u8) -> u8 {
     match num {
         0..=56 => num,
-        64 => 57,
+        64 => 63,
         _ => panic!("encode_n_bits: invalid num {}", num),
     }
 }
 
+#[inline]
 fn decode_bits(num: u8) -> u8 {
     match num & 0b0011_1111 {
         0..=56 => num,
-        57 => 64,
+        63 => 64,
         _ => panic!("decode_bits: invalid num {}", num),
     }
 }
@@ -149,6 +180,7 @@ impl Packer for U64Packer {
         }
     }
 
+    #[inline]
     fn finish(mut self) -> U64PackedData {
         self.flush();
 

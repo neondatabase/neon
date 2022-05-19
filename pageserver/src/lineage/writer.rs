@@ -22,7 +22,9 @@ impl<T> LineageWriter<T>
 where
     T: TryFrom<Vec<Value>, Error = Error> + Into<Bytes>,
 {
+    /// Write out the
     pub fn write(vec: &[(Lsn, Value)]) -> Result<Bytes> {
+        assert_ne!(vec.len(), 0usize);
         let mut lsns = None;
         let values = vec
             .iter()
@@ -92,18 +94,26 @@ where
     }
 }
 
+/// A serializer helper that serializes multiple Bytes objects into one blob of
+/// bytes.
+///
+/// When it receives a Bytes, it stores the length in the length_coder and
+/// stores the received value in the record buffer. When the user is finished,
+/// the length_coder and contained records are then appended into a single
+/// Bytes object.
+
 pub struct LineageBytesWriter {
     length_coder: U64Packer,
-    records_length: u64,
-    records: Vec<Bytes>,
+    total_records_length: u64,
+    buffered_records: Vec<Bytes>,
 }
 
 impl LineageBytesWriter {
     fn new() -> Self {
         Self {
             length_coder: U64Packer::new(),
-            records_length: 0,
-            records: vec![],
+            total_records_length: 0,
+            buffered_records: vec![],
         }
     }
 }
@@ -111,19 +121,20 @@ impl LineageBytesWriter {
 impl LineageBytesWriter {
     fn add(&mut self, input: Bytes) -> Result<()> {
         self.length_coder.add(input.len() as u64);
-        self.records_length += input.len() as u64;
-        self.records.push(input);
+        self.total_records_length += input.len() as u64;
+        self.buffered_records.push(input);
 
         Ok(())
     }
 
     fn finish(self) -> Result<Bytes> {
         let coder_result = self.length_coder.finish().as_bytes();
-        let mut result = Vec::with_capacity(self.records_length as usize + coder_result.len());
+        let mut result =
+            Vec::with_capacity(self.total_records_length as usize + coder_result.len());
 
         result.extend_from_slice(&coder_result);
 
-        for rec in &self.records {
+        for rec in &self.buffered_records {
             result.extend_from_slice(rec);
         }
 

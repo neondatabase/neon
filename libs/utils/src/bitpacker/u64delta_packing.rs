@@ -1,6 +1,10 @@
 use crate::bitpacker::u64packing::{U64Packer, U64Unpacker};
 use crate::bitpacker::{Packer, U64DeltaPackedData, Unpacker};
 
+/// Wrapper around U64Packer, but stores only the deltas of the stored integers.
+/// Can only accept non-decreasing order values (duplicate values are OK).
+///
+/// See u64packing for more info.
 #[derive(Clone, Debug)]
 pub struct U64DeltaPacker {
     /// base value of the packer.

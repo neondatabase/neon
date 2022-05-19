@@ -11,6 +11,7 @@ use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, TransactionId}
 use utils::bitpacker::u64packing::{U64Packer, U64Unpacker};
 use utils::bitpacker::{Packer, U64PackedData, Unpacker};
 
+/// Reader implementation for Lineages containing only CLOG/Commit records
 #[derive(Clone, Debug)]
 pub struct CLogCommittedReader {
     counts: U64Unpacker,
@@ -18,6 +19,7 @@ pub struct CLogCommittedReader {
     xids: U64Unpacker,
 }
 
+/// Writer implementation for Lineages containing only CLOG/Commit records
 #[derive(Clone, Debug)]
 pub struct CLogCommittedWriter {
     counts: U64Packer,
@@ -25,18 +27,21 @@ pub struct CLogCommittedWriter {
     xids: U64Packer,
 }
 
+/// Reader implementation for Lineages containing only CLOG/Abort records
 #[derive(Clone, Debug)]
 pub struct CLogAbortedReader {
     counts: U64Unpacker,
     xids: U64Unpacker,
 }
 
+/// Writer implementation for Lineages containing only CLOG/Abort records
 #[derive(Clone, Debug)]
 pub struct CLogAbortedWriter {
     counts: U64Packer,
     xids: U64Packer,
 }
 
+/// Reader implementation for Lineages that contain both CLOG/Commit and CLOG/Abort records
 #[derive(Clone, Debug)]
 pub struct CLogBothReader {
     status: U64Unpacker,
@@ -45,6 +50,7 @@ pub struct CLogBothReader {
     xids: U64Unpacker,
 }
 
+/// Writer implementation for Lineages that contain both CLOG/Commit and CLOG/Abort records
 #[derive(Clone, Debug)]
 pub struct CLogBothWriter {
     status: U64Packer,
@@ -53,18 +59,21 @@ pub struct CLogBothWriter {
     xids: U64Packer,
 }
 
+/// Reader implementation for Lineages that contain only CLOG/MultixactOffsetCreate records
 #[derive(Clone, Debug)]
 pub struct MultixactOffsetsReader {
     mxids: U64Unpacker,
     moffs: U64Unpacker,
 }
 
+/// Writer implementation for Lineages that contain only CLOG/MultixactOffsetCreate records
 #[derive(Clone, Debug)]
 pub struct MultixactOffsetsWriter {
     mxids: U64Packer,
     moffs: U64Packer,
 }
 
+/// Writer implementation for Lineages that contain only CLOG/MultixactMembersCreate records
 #[derive(Clone, Debug)]
 pub struct MultixactMembersReader {
     moffs: U64Unpacker,
@@ -73,6 +82,7 @@ pub struct MultixactMembersReader {
     member_stati: U64Unpacker,
 }
 
+/// Writer implementation for Lineages that contain only CLOG/MultixactMembersCreate records
 #[derive(Clone, Debug)]
 pub struct MultixactMembersWriter {
     moffs: U64Packer,
