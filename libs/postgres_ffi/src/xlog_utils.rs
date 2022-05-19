@@ -160,9 +160,11 @@ fn find_end_of_wal_segment(
     file.seek(SeekFrom::Start(offs as u64))?;
     let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
 
+    trace!("find_end_of_wal_segment(data_dir={}, segno={}, tli={}, wal_seg_size={}, start_offset=0x{:x})", data_dir.display(), segno, tli, wal_seg_size, start_offset);
     while offs < wal_seg_size {
         // we are at the beginning of the page; read it in
         if offs % XLOG_BLCKSZ == 0 {
+            trace!("offs=0x{:x}: new page", offs);
             let bytes_read = file.read(&mut buf)?;
             if bytes_read != buf.len() {
                 bail!(
@@ -176,10 +178,16 @@ fn find_end_of_wal_segment(
             let xlp_magic = LittleEndian::read_u16(&buf[0..2]);
             let xlp_info = LittleEndian::read_u16(&buf[2..4]);
             let xlp_rem_len = LittleEndian::read_u32(&buf[XLP_REM_LEN_OFFS..XLP_REM_LEN_OFFS + 4]);
+            trace!(
+                "  xlp_magic=0x{:x}, xlp_info=0x{:x}, xlp_rem_len={}",
+                xlp_magic,
+                xlp_info,
+                xlp_rem_len
+            );
             // this is expected in current usage when valid WAL starts after page header
             if xlp_magic != XLOG_PAGE_MAGIC as u16 {
                 trace!(
-                    "invalid WAL file {}.partial magic {} at {:?}",
+                    "  invalid WAL file {}.partial magic {} at {:?}",
                     file_name,
                     xlp_magic,
                     Lsn(XLogSegNoOffsetToRecPtr(segno, offs as u32, wal_seg_size)),
@@ -194,12 +202,13 @@ fn find_end_of_wal_segment(
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
             }
             // ... and step forward again if asked
+            trace!("  skipped header to 0x{:x}", offs);
             offs = max(offs, start_offset);
-
         // beginning of the next record
         } else if contlen == 0 {
             let page_offs = offs % XLOG_BLCKSZ;
             let xl_tot_len = LittleEndian::read_u32(&buf[page_offs..page_offs + 4]) as usize;
+            trace!("offs=0x{:x}: new record, xl_tot_len={}", offs, xl_tot_len);
             if xl_tot_len == 0 {
                 info!(
                     "find_end_of_wal_segment reached zeros at {:?}, last records ends at {:?}",
@@ -212,10 +221,20 @@ fn find_end_of_wal_segment(
                 );
                 break; // zeros, reached the end
             }
+            trace!(
+                "  updating last_valid_rec_pos: 0x{:x} --> 0x{:x}",
+                last_valid_rec_pos,
+                offs
+            );
             last_valid_rec_pos = offs;
             offs += 4;
             rec_offs = 4;
             contlen = xl_tot_len - 4;
+            trace!(
+                "  reading rec_hdr[0..4] <-- [0x{:x}; 0x{:x})",
+                page_offs,
+                page_offs + 4
+            );
             rec_hdr[0..4].copy_from_slice(&buf[page_offs..page_offs + 4]);
         } else {
             // we're continuing a record, possibly from previous page.
@@ -224,28 +243,79 @@ fn find_end_of_wal_segment(
 
             // read the rest of the record, or as much as fits on this page.
             let n = min(contlen, pageleft);
+            trace!(
+                "offs=0x{:x}, record continuation, pageleft={}, contlen={}",
+                offs,
+                pageleft,
+                contlen
+            );
             // fill rec_hdr (header up to (but not including) xl_crc field)
+            trace!(
+                "  rec_offs={}, XLOG_RECORD_CRC_OFFS={}, XLOG_SIZE_OF_XLOG_RECORD={}",
+                rec_offs,
+                XLOG_RECORD_CRC_OFFS,
+                XLOG_SIZE_OF_XLOG_RECORD
+            );
             if rec_offs < XLOG_RECORD_CRC_OFFS {
                 let len = min(XLOG_RECORD_CRC_OFFS - rec_offs, n);
+                trace!(
+                    "  reading rec_hdr[{}..{}] <-- [0x{:x}; 0x{:x})",
+                    rec_offs,
+                    rec_offs + len,
+                    page_offs,
+                    page_offs + len
+                );
                 rec_hdr[rec_offs..rec_offs + len].copy_from_slice(&buf[page_offs..page_offs + len]);
             }
             if rec_offs <= XLOG_RECORD_CRC_OFFS && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
                 let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
                 xl_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
+                trace!(
+                    "  reading xl_crc: [0x{:x}; 0x{:x}) = 0x{:x}",
+                    crc_offs,
+                    crc_offs + 4,
+                    xl_crc
+                );
                 crc = crc32c_append(0, &buf[crc_offs + 4..page_offs + n]);
+                trace!(
+                    "  initializing crc: [0x{:x}; 0x{:x}); crc = 0x{:x}",
+                    crc_offs + 4,
+                    page_offs + n,
+                    crc
+                );
             } else {
+                let old_crc = crc;
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
+                trace!(
+                    "  appending to crc: [0x{:x}; 0x{:x}); 0x{:x} --> 0x{:x}",
+                    page_offs,
+                    page_offs + n,
+                    old_crc,
+                    crc
+                );
             }
             rec_offs += n;
             offs += n;
             contlen -= n;
 
             if contlen == 0 {
+                trace!("  record completed at 0x{:x}", offs);
                 crc = crc32c_append(crc, &rec_hdr);
                 offs = (offs + 7) & !7; // pad on 8 bytes boundary */
+                trace!(
+                    "  padded offs to 0x{:x}, crc is {:x}, expected crc is {:x}",
+                    offs,
+                    crc,
+                    xl_crc
+                );
                 if crc == xl_crc {
                     // record is valid, advance the result to its end (with
                     // alignment to the next record taken into account)
+                    trace!(
+                        "  updating last_valid_rec_pos: 0x{:x} --> 0x{:x}",
+                        last_valid_rec_pos,
+                        offs
+                    );
                     last_valid_rec_pos = offs;
                 } else {
                     info!(
@@ -257,6 +327,7 @@ fn find_end_of_wal_segment(
             }
         }
     }
+    trace!("last_valid_rec_pos=0x{:x}", last_valid_rec_pos);
     Ok(last_valid_rec_pos as u32)
 }
 
