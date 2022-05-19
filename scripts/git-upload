@@ -80,12 +80,14 @@ class GitRepo:
                 print('No changes detected, quitting')
                 return
 
-            run([
+            git_with_user = [
                 'git',
                 '-c',
                 'user.name=vipvap',
                 '-c',
                 'user.email=vipvap@zenith.tech',
+            ]
+            run(git_with_user + [
                 'commit',
                 '--author="vipvap <vipvap@zenith.tech>"',
                 f'--message={message}',
@@ -94,7 +96,7 @@ class GitRepo:
             for _ in range(5):
                 try:
                     run(['git', 'fetch', 'origin', branch])
-                    run(['git', 'rebase', f'origin/{branch}'])
+                    run(git_with_user + ['rebase', f'origin/{branch}'])
                     run(['git', 'push', 'origin', branch])
                     return
 
