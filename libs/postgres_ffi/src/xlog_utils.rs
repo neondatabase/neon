@@ -15,7 +15,7 @@ use crate::XLogPageHeaderData;
 use crate::XLogRecord;
 use crate::XLOG_PAGE_MAGIC;
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -149,6 +149,7 @@ fn find_end_of_wal_segment(
 ) -> anyhow::Result<u32> {
     // step back to the beginning of the page to read it in...
     let mut offs: usize = start_offset - start_offset % XLOG_BLCKSZ;
+    let mut skipping_first_contrecord: bool = false;
     let mut contlen: usize = 0;
     let mut xl_crc: u32 = 0;
     let mut crc: u32 = 0;
@@ -194,9 +195,21 @@ fn find_end_of_wal_segment(
                 );
             }
             if offs == 0 {
-                offs = XLOG_SIZE_OF_XLOG_LONG_PHD;
+                offs += XLOG_SIZE_OF_XLOG_LONG_PHD;
                 if (xlp_info & XLP_FIRST_IS_CONTRECORD) != 0 {
-                    offs += ((xlp_rem_len + 7) & !7) as usize;
+                    trace!("  first record is contrecord");
+                    skipping_first_contrecord = true;
+                    contlen = xlp_rem_len as usize;
+                    if offs < start_offset {
+                        // Pre-condition failed: the beginning of the segment is unexpectedly corrupted.
+                        ensure!(start_offset - offs >= contlen,
+                            "start_offset is in the middle of the first record (which happens to be a contrecord), \
+                             expected to be on a record boundary. Is beginning of the segment corrupted?");
+                        contlen = 0;
+                        // keep skipping_first_contrecord to avoid counting the contrecord as valid, we did not check it.
+                    }
+                } else {
+                    trace!("  first record is not contrecord");
                 }
             } else {
                 offs += XLOG_SIZE_OF_XLOG_SHORT_PHD;
@@ -221,12 +234,17 @@ fn find_end_of_wal_segment(
                 );
                 break; // zeros, reached the end
             }
-            trace!(
-                "  updating last_valid_rec_pos: 0x{:x} --> 0x{:x}",
-                last_valid_rec_pos,
-                offs
-            );
-            last_valid_rec_pos = offs;
+            if skipping_first_contrecord {
+                skipping_first_contrecord = false;
+                trace!("  first contrecord has been just completed");
+            } else {
+                trace!(
+                    "  updating last_valid_rec_pos: 0x{:x} --> 0x{:x}",
+                    last_valid_rec_pos,
+                    offs
+                );
+                last_valid_rec_pos = offs;
+            }
             offs += 4;
             rec_offs = 4;
             contlen = xl_tot_len - 4;
@@ -308,7 +326,10 @@ fn find_end_of_wal_segment(
                     crc,
                     xl_crc
                 );
-                if crc == xl_crc {
+                if skipping_first_contrecord {
+                    // do nothing, the flag will go down on next iteration when we're reading new record
+                    trace!("  first conrecord has been just completed");
+                } else if crc == xl_crc {
                     // record is valid, advance the result to its end (with
                     // alignment to the next record taken into account)
                     trace!(
@@ -642,7 +663,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "not yet fixed, needs correct skipping of contrecord"] // TODO
     pub fn test_find_end_of_wal_crossing_segment_followed_by_small_one() {
         init_logging();
         test_end_of_wal(
