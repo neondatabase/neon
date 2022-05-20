@@ -55,9 +55,15 @@ fn main() -> Result<()> {
     }
 
     if let Some(prev_lsn) = arg_matches.value_of("prev_lsn") {
+        let prev_record_lsn = if prev_lsn.is_empty() {
+            None
+        } else {
+            Some(Lsn::from_str(prev_lsn)?)
+        };
+
         meta = TimelineMetadata::new(
             meta.disk_consistent_lsn(),
-            Some(Lsn::from_str(prev_lsn)?),
+            prev_record_lsn,
             meta.ancestor_timeline(),
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
