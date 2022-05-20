@@ -23,6 +23,12 @@ else
 $(error Bad build type `$(BUILD_TYPE)', see Makefile for options)
 endif
 
+# macOS with brew-installed openssl requires explicit paths
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    PG_CONFIGURE_OPTS += --with-includes=/usr/local/opt/openssl/include --with-libraries=/usr/local/opt/openssl/lib
+endif
+
 # Choose whether we should be silent or verbose
 CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)
 # Fix for a corner case when make doesn't pass a jobserver
