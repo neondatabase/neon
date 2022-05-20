@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use utils::bin_ser::DeserializeError;
 use utils::bin_ser::SerializeError;
+use utils::const_assert;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
@@ -159,6 +160,8 @@ fn find_end_of_wal_segment(
     let mut last_valid_rec_pos: usize = start_offset; // assume at given start_offset begins new record
     let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
     file.seek(SeekFrom::Start(offs as u64))?;
+    // xl_crc is the last field in XLogRecord, will not be read into rec_hdr
+    const_assert!(XLOG_RECORD_CRC_OFFS + 4 == XLOG_SIZE_OF_XLOG_RECORD);
     let mut rec_hdr = [0u8; XLOG_RECORD_CRC_OFFS];
 
     trace!("find_end_of_wal_segment(data_dir={}, segno={}, tli={}, wal_seg_size={}, start_offset=0x{:x})", data_dir.display(), segno, tli, wal_seg_size, start_offset);
@@ -267,7 +270,7 @@ fn find_end_of_wal_segment(
                 pageleft,
                 contlen
             );
-            // fill rec_hdr (header up to (but not including) xl_crc field)
+            // fill rec_hdr header up to (but not including) xl_crc field
             trace!(
                 "  rec_offs={}, XLOG_RECORD_CRC_OFFS={}, XLOG_SIZE_OF_XLOG_RECORD={}",
                 rec_offs,
@@ -287,6 +290,14 @@ fn find_end_of_wal_segment(
             }
             if rec_offs <= XLOG_RECORD_CRC_OFFS && rec_offs + n >= XLOG_SIZE_OF_XLOG_RECORD {
                 let crc_offs = page_offs - rec_offs + XLOG_RECORD_CRC_OFFS;
+                // All records are aligned on 8-byte boundary, so their 8-byte frames
+                // cannot be split between pages. As xl_crc is the last field,
+                // its content is always on the same page.
+                const_assert!(XLOG_RECORD_CRC_OFFS % 8 == 4);
+                // We should always start reading aligned records even in incorrect WALs so if
+                // the condition is false it is likely a bug. However, it is localized somewhere
+                // in this function, hence we do not crash and just report failure instead.
+                ensure!(crc_offs % 8 == 4, "Record is not aligned properly (bug?)");
                 xl_crc = LittleEndian::read_u32(&buf[crc_offs..crc_offs + 4]);
                 trace!(
                     "  reading xl_crc: [0x{:x}; 0x{:x}) = 0x{:x}",
@@ -301,7 +312,9 @@ fn find_end_of_wal_segment(
                     page_offs + n,
                     crc
                 );
-            } else {
+            } else if rec_offs > XLOG_RECORD_CRC_OFFS {
+                // As all records are 8-byte aligned, the header is already fully read and `crc` is initialized in the branch above.
+                ensure!(rec_offs >= XLOG_SIZE_OF_XLOG_RECORD);
                 let old_crc = crc;
                 crc = crc32c_append(crc, &buf[page_offs..page_offs + n]);
                 trace!(
@@ -311,6 +324,20 @@ fn find_end_of_wal_segment(
                     old_crc,
                     crc
                 );
+            } else {
+                // Correct because of the way conditions are written above.
+                assert!(rec_offs + n < XLOG_SIZE_OF_XLOG_RECORD);
+                // If `skipping_first_contrecord == true`, we may be reading from a middle of a record
+                // which started in the previous segment. Hence there is no point in validating the header.
+                if !skipping_first_contrecord && rec_offs + n > XLOG_RECORD_CRC_OFFS {
+                    info!(
+                        "Curiously corrupted WAL: a record stops inside the header; \
+                             offs=0x{:x}, record continuation, pageleft={}, contlen={}",
+                        offs, pageleft, contlen
+                    );
+                    break;
+                }
+                // Do nothing: we are still reading the header. It's accounted in CRC in the end of the record.
             }
             rec_offs += n;
             offs += n;
