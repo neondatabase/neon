@@ -4,14 +4,14 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::DatadirTimeline;
-use crate::repository::{Repository, TimelineSyncStatusUpdate};
+use crate::repository::{Repository, Timeline, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::timelines;
 use crate::timelines::CreateRepo;
+use crate::timelines::{self, init_timeline};
 use crate::walredo::PostgresRedoManager;
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{bail, Context};
@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tracing::*;
+use utils::lsn::Lsn;
 
 use utils::zid::{ZTenantId, ZTimelineId};
 
@@ -433,6 +434,41 @@ fn init_local_repository(
     Ok(())
 }
 
+/// Find for broken timelines and try to fix them.
+fn find_and_fix_unintialized_timelines(
+    repo: &LayeredRepository,
+    registration_queue: &[ZTimelineId],
+) -> anyhow::Result<()> {
+    for timeline_id in registration_queue {
+        let inmem_timeline = repo.get_timeline_load(*timeline_id).with_context(|| {
+            format!("Inmem timeline {timeline_id} not found in tenant's repository")
+        })?;
+
+        if inmem_timeline.get_disk_consistent_lsn() == Lsn(0) {
+            info!(
+                "Attempting to fix an uninitialized timeline (id={})",
+                timeline_id
+            );
+
+            // A zero `disk_consistent_lsn` can probably happen because of the failure
+            // when creating a new timeline.
+            // Attempt to fix this "uninitialized" timeline by re-initializing the timeline.
+            let tenant_id = repo.tenant_id();
+            let initdb_path = repo
+                .conf
+                .tenant_path(&tenant_id)
+                .join(format!("tmp-timeline-{}", timeline_id));
+
+            init_timeline(inmem_timeline, initdb_path, *timeline_id, repo).context(format!(
+                "Failed to re-initialize timeline {} for tenant {}",
+                timeline_id, tenant_id
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn apply_timeline_remote_sync_status_updates(
     repo: &LayeredRepository,
     status_updates: HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
@@ -450,12 +486,19 @@ fn apply_timeline_remote_sync_status_updates(
         }
     }
 
+    find_and_fix_unintialized_timelines(repo, &registration_queue)
+        .context("Failed to find and fix uninitialized timelines.")?;
+
     for timeline_id in registration_queue {
         let tenant_id = repo.tenant_id();
         match tenants_state::write_tenants().get_mut(&tenant_id) {
             Some(tenant) => match tenant.local_timelines.entry(timeline_id) {
                 Entry::Occupied(_) => {
-                    bail!("Local timeline {timeline_id} already registered")
+                    // The local timeline is already registered which probably happens
+                    // when the timeline is uninitialized and fixed with `find_and_fix_unintialized_timelines`.
+                    //
+                    // The function fixes an uninitialized timeline by re-initializing them.
+                    // The re-initialization progress also updates the in-memory `local_timelines` mapping of the tenant.
                 }
                 Entry::Vacant(v) => {
                     v.insert(new_local_timeline(repo, timeline_id).with_context(|| {

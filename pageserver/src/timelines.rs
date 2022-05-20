@@ -273,6 +273,37 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn init_timeline<R: Repository>(
+    timeline: Arc<R::Timeline>,
+    pgdata_path: std::path::PathBuf,
+    tli: ZTimelineId,
+    // needs to pass an unused `_repo` for type assertion of the `timeline` parameter,
+    // which depends on the generic `impl Repository` type.
+    _repo: &R,
+) -> Result<()> {
+    // Import the contents of the data directory at the initial checkpoint
+    // LSN, and any WAL after that.
+    // Initdb lsn will be equal to last_record_lsn which will be set after import.
+    // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
+
+    let lsn = get_lsn_from_controlfile(&pgdata_path)?.align();
+
+    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
+    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
+    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
+
+    println!(
+        "created initial timeline {} timeline.lsn {}",
+        tli,
+        page_tline.tline.get_last_record_lsn()
+    );
+
+    // Remove temp dir. We don't need it anymore
+    fs::remove_dir_all(pgdata_path)?;
+
+    Ok(())
+}
+
 //
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
@@ -287,31 +318,18 @@ fn bootstrap_timeline<R: Repository>(
 
     let initdb_path = conf
         .tenant_path(&tenantid)
-        .join(format!("tmp-tenant-{}-timeline-{}", tenantid, tli));
+        .join(format!("tmp-timeline-{}", tli));
 
     // Init temporarily repo to get bootstrap data
     run_initdb(conf, &initdb_path)?;
-    let pgdata_path = initdb_path;
 
-    let lsn = get_lsn_from_controlfile(&pgdata_path)?.align();
-
-    // Import the contents of the data directory at the initial checkpoint
-    // LSN, and any WAL after that.
-    // Initdb lsn will be equal to last_record_lsn which will be set after import.
-    // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
+    let lsn = get_lsn_from_controlfile(&initdb_path)?.align();
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
-    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
-    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
-    println!(
-        "created initial timeline {} timeline.lsn {}",
-        tli,
-        page_tline.tline.get_last_record_lsn()
-    );
-
-    // Remove temp dir. We don't need it anymore
-    fs::remove_dir_all(pgdata_path)?;
+    init_timeline(timeline, initdb_path, tli, repo).context(format!(
+        "Failed to initialize timeline {} for tenant {}",
+        tli, tenantid
+    ))?;
 
     Ok(())
 }
