@@ -273,7 +273,51 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn init_timeline<R: Repository>(
+/// Find for uninitialized timelines and try to fix them.
+pub fn find_and_fix_unintialized_timelines(
+    repo: &LayeredRepository,
+    registration_queue: &[ZTimelineId],
+) -> anyhow::Result<()> {
+    let tenant_id = repo.tenant_id();
+
+    for timeline_id in registration_queue {
+        let inmem_timeline = repo.get_timeline_load(*timeline_id).with_context(|| {
+            format!("Inmem timeline {timeline_id} not found in tenant's repository")
+        })?;
+
+        if inmem_timeline.get_disk_consistent_lsn() == Lsn(0) {
+            let _enter = info_span!("fix_unintialized_timeline", timeline = %timeline_id, tenant = %tenant_id).entered();
+
+            info!(
+                "Attempting to fix an uninitialized timeline (id={})",
+                timeline_id
+            );
+
+            // A zero `disk_consistent_lsn` can probably happen because of the failure
+            // when creating a new timeline.
+            // Attempt to fix this "uninitialized" timeline by re-initializing the timeline.
+            let initdb_path = repo
+                .conf
+                .tenant_path(&tenant_id)
+                .join(format!("tmp-timeline-{}", timeline_id));
+
+            if !std::path::Path::exists(&initdb_path) {
+                // Temporary directory to bootstrap timeline data doesn't exist, create a new one.
+                // Init temporarily repo to get bootstrap data
+                run_initdb(repo.conf, &initdb_path)?;
+            }
+
+            init_timeline(inmem_timeline, initdb_path, *timeline_id, repo).context(format!(
+                "Failed to re-initialize timeline {} for tenant {}",
+                timeline_id, tenant_id
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn init_timeline<R: Repository>(
     timeline: Arc<R::Timeline>,
     pgdata_path: std::path::PathBuf,
     tli: ZTimelineId,
