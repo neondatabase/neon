@@ -1,6 +1,6 @@
 # WAL service
 
-The zenith WAL service acts as a holding area and redistribution
+The neon WAL service acts as a holding area and redistribution
 center for recently generated WAL. The primary Postgres server streams
 the WAL to the WAL safekeeper, and treats it like a (synchronous)
 replica. A replication slot is used in the primary to prevent the
