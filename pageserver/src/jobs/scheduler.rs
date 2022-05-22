@@ -55,11 +55,19 @@ impl<J: Job> Sched<J> {
                     report = self.report.1.recv() => {
                         // Reschedule job to run again
                         let send_work = self.work.0.clone();
-                        let job = report.unwrap().for_job;
-                        tokio::spawn(async move {
-                            sleep(Duration::from_millis(10)).await;
-                            send_work.send(job).await.unwrap();
-                        });
+                        let report = report.unwrap();
+                        let job = report.for_job;
+                        match report.result {
+                            Ok(()) => {
+                                tokio::spawn(async move {
+                                    sleep(Duration::from_millis(10)).await;
+                                    send_work.send(job).await.unwrap();
+                                });
+                            },
+                            Err(e) => {
+                                println!("task panicked");
+                            }
+                        }
                     }
                 }
             }

@@ -3,6 +3,9 @@
 //!
 use crate::thread_mgr::shutdown_watcher;
 use tokio::sync::mpsc::{Sender, channel};
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
 pub trait Job: std::fmt::Debug + Send + 'static {
     fn run(&self);
@@ -14,6 +17,7 @@ pub struct Worker<J: Job>(pub Sender<J>);
 #[derive(Debug)]
 pub struct Report<J: Job> {
     pub for_job: J,
+    pub result: Result<(), Box<dyn Any + Send>>
 }
 
 pub fn run_worker<J: Job>(enlist: Sender<Worker<J>>, report: Sender<Report<J>>) -> anyhow::Result<()> {
@@ -31,13 +35,16 @@ pub fn run_worker<J: Job>(enlist: Sender<Worker<J>>, report: Sender<Report<J>>) 
                 _ = shutdown_watcher => break,
                 j = get_work.recv() => {
                     if let Some(job) = j {
-                        job.run();
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            job.run();
+                        }));
                         report.send(Report {
                             for_job: job,
+                            result: result,
                         }).await.unwrap();
                     } else {
-                        println!("fffffffff")
-                        // TODO ??
+                        // channel closed
+                        return;
                     }
                 }
             };
