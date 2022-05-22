@@ -30,6 +30,8 @@ impl<J: Job> Pool<J> {
             if let Some(command) = q.pop_front() {
                 drop(q);
                 match command {
+                    // TODO catch unwind. On error:
+                    // - report back so that only that tenant would get stuck
                     WorkerCommand::DoJob(job) => job.run(),
                     WorkerCommand::Shutdown => return Ok(()),
                 }
