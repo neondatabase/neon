@@ -207,8 +207,8 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
         # needs to be streamed to the new pageserver
         # TODO (rodionov) use attach to start replication
         with pg_cur(PgProtocol(host='localhost', port=new_pageserver_pg_port)) as cur:
-            # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} tenantId={}'"
-            safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} tenantId={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
+            # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} tenantid={}'"
+            safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} tenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
             cur.execute("callmemaybe {} {} {}".format(tenant.hex,
                                                       timeline.hex,
                                                       safekeeper_connstring))
