@@ -26,7 +26,7 @@ use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
     pq_proto::{SystemId, ZenithFeedback},
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
@@ -164,7 +164,7 @@ impl PeerInfo {
 // vector-based node id -> peer state map with very limited functionality we
 // need/
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Peers(pub Vec<(ZNodeId, PeerInfo)>);
+pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
 
 /// Persistent information stored on safekeeper node
 /// On disk data is prefixed by magic and format version and followed by checksum.
@@ -224,7 +224,7 @@ pub struct SafekeeperMemState {
 }
 
 impl SafeKeeperState {
-    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<ZNodeId>) -> SafeKeeperState {
+    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<NodeId>) -> SafeKeeperState {
         SafeKeeperState {
             tenant_id: zttid.tenant_id,
             timeline_id: zttid.timeline_id,
@@ -277,7 +277,7 @@ pub struct ProposerGreeting {
 #[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
     term: u64,
-    node_id: ZNodeId,
+    node_id: NodeId,
 }
 
 /// Vote request sent from proposer to safekeepers
@@ -531,7 +531,7 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
 
     pub wal_store: WAL,
 
-    node_id: ZNodeId, // safekeeper's node id
+    node_id: NodeId, // safekeeper's node id
 }
 
 impl<CTRL, WAL> SafeKeeper<CTRL, WAL>
@@ -544,7 +544,7 @@ where
         ztli: ZTimelineId,
         state: CTRL,
         mut wal_store: WAL,
-        node_id: ZNodeId,
+        node_id: NodeId,
     ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
             bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
@@ -1013,7 +1013,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1028,7 +1028,7 @@ mod tests {
         let storage = InMemoryState {
             persisted_state: state,
         };
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store, ZNodeId(0)).unwrap();
+        sk = SafeKeeper::new(ztli, storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -1045,7 +1045,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store, ZNodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
