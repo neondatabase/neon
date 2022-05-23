@@ -75,12 +75,15 @@ pub trait WalRedoManager: Send + Sync {
     /// The caller passes an old page image, and WAL records that should be
     /// applied over it. The return value is a new page image, after applying
     /// the reords.
+    ///
+    /// img_was_cache is for helping debug potential cache-related issues.
     fn request_redo(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
+        img_was_cache: bool,
     ) -> Result<Bytes, WalRedoError>;
 }
 
@@ -97,6 +100,7 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<(Lsn, ZenithWalRecord)>,
+        _img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         Err(WalRedoError::InvalidState)
     }
@@ -182,6 +186,7 @@ impl WalRedoManager for PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
+        img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
             error!("invalid WAL redo request with no records");
@@ -204,6 +209,7 @@ impl WalRedoManager for PostgresRedoManager {
                         img,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
+                        img_source_was_cache,
                     )
                 };
                 img = Some(result?);
@@ -222,6 +228,7 @@ impl WalRedoManager for PostgresRedoManager {
                 img,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
+                img_source_was_cache,
             )
         }
     }
@@ -250,6 +257,7 @@ impl PostgresRedoManager {
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
+        img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
@@ -270,7 +278,7 @@ impl PostgresRedoManager {
         // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
         let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
+            .apply_wal_records(buf_tag, base_img.clone(), records, wal_redo_timeout)
             .map_err(WalRedoError::IoError);
 
         let end_time = Instant::now();
@@ -291,7 +299,19 @@ impl PostgresRedoManager {
                 records.len(),
                 lsn
             );
-            info!("records: {:?}", records);
+            error!("records: {:#?}", records);
+            if let Some(img) = base_img {
+                let source = if img_source_was_cache {
+                    "Cache"
+                } else {
+                    "Layer"
+                };
+
+                error!("base_image ({}): 0x{:#X}", source, &img);
+            } else {
+                error!("no base image")
+            }
+
             let process = process_guard.take().unwrap();
             process.kill();
         }

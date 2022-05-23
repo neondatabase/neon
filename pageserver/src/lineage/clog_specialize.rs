@@ -111,17 +111,17 @@ impl Iterator for CLogCommittedReader {
     type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let count = self.counts.next()?;
+        let count = self.counts.next().unwrap();
         let mut xids: Vec<TransactionId> = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
-            xids.push(self.xids.next()? as TransactionId);
+            xids.push(self.xids.next().unwrap() as TransactionId);
         }
 
         Some(Value::WalRecord(ZenithWalRecord::ClogSetCommitted(
             ClogSetCommitted {
                 xids,
-                timestamp: self.timestamps.next()? as TimestampTz,
+                timestamp: self.timestamps.next().unwrap() as TimestampTz,
             },
         )))
     }
@@ -190,11 +190,11 @@ impl Iterator for CLogAbortedReader {
     type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let count = self.counts.next()?;
+        let count = self.counts.next().unwrap();
         let mut xids: Vec<TransactionId> = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
-            xids.push(self.xids.next()? as TransactionId);
+            xids.push(self.xids.next().unwrap() as TransactionId);
         }
 
         Some(Value::WalRecord(ZenithWalRecord::ClogSetAborted(
@@ -265,19 +265,19 @@ impl Iterator for CLogBothReader {
     type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let status = self.status.next()?;
-        let count = self.counts.next()?;
+        let status = self.status.next().unwrap();
+        let count = self.counts.next().unwrap();
         let mut xids: Vec<TransactionId> = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
-            xids.push(self.xids.next()? as TransactionId);
+            xids.push(self.xids.next().unwrap() as TransactionId);
         }
 
         match status as u8 {
             TRANSACTION_STATUS_COMMITTED => Some(Value::WalRecord(
                 ZenithWalRecord::ClogSetCommitted(ClogSetCommitted {
                     xids,
-                    timestamp: self.timestamps.next()? as TimestampTz,
+                    timestamp: self.timestamps.next().unwrap() as TimestampTz,
                 }),
             )),
             TRANSACTION_STATUS_ABORTED => Some(Value::WalRecord(ZenithWalRecord::ClogSetAborted(
@@ -360,8 +360,8 @@ impl Iterator for MultixactOffsetsReader {
     type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mid = self.mxids.next()? as MultiXactId;
-        let moff = self.moffs.next()? as MultiXactOffset;
+        let mid = self.mxids.next().unwrap() as MultiXactId;
+        let moff = self.moffs.next().unwrap() as MultiXactOffset;
 
         Some(Value::WalRecord(ZenithWalRecord::MultixactOffsetCreate(
             MultixactOffsetCreate { mid, moff },
@@ -428,15 +428,15 @@ impl Iterator for MultixactMembersReader {
     type Item = Value;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let moff = self.moffs.next()? as MultiXactOffset;
-        let nmembers = self.nmembers.next()? as usize;
+        let moff = self.moffs.next().unwrap() as MultiXactOffset;
+        let nmembers = self.nmembers.next().unwrap() as usize;
 
         let mut members = Vec::with_capacity(nmembers);
 
         for _ in 0..nmembers {
             members.push(MultiXactMember {
-                xid: self.member_xids.next()? as TransactionId,
-                status: self.member_stati.next()? as MultiXactStatus,
+                xid: self.member_xids.next().unwrap() as TransactionId,
+                status: self.member_stati.next().unwrap() as MultiXactStatus,
             })
         }
 

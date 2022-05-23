@@ -36,6 +36,7 @@
 //! mapping is automatically removed and the slot is marked free.
 //!
 
+use crossbeam_utils::atomic::AtomicConsume;
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
@@ -585,6 +586,8 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
             inner.dirty = false;
+
+            assert_eq!(slot.usage_count.load_consume(), 0);
             slot.usage_count.store(1, Ordering::Relaxed);
 
             return WriteBufResult::NotFound(PageWriteGuard {

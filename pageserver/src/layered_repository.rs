@@ -1070,19 +1070,107 @@ impl Timeline for LayeredTimeline {
 
         let mut reconstruct_state = ValueReconstructState {
             records: Vec::new(),
+            img_src_is_cache: cached_page_img.is_some(),
             img: cached_page_img,
         };
 
+        let mut cache_rcs = ValueReconstructState {
+            records: Vec::new(),
+            img: None,
+            img_src_is_cache: false,
+        };
+        let validate_rc_cache = cfg!(debug_assertions) && reconstruct_state.img_src_is_cache;
+
+        if validate_rc_cache {
+            let (lsn, _) = &reconstruct_state.img.as_ref().unwrap();
+            self.get_reconstruct_data(key, *lsn, &mut cache_rcs)?;
+        }
+
+        // fill reconstruct_state with records CacheLsn | Base ..target lsn
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
 
-        let mut high_lsn = lsn;
-        for (low_lsn, _) in reconstruct_state.records.iter() {
-            assert!(*low_lsn <= high_lsn);
-            high_lsn = *low_lsn;
+        if cfg!(debug_assertions) {
+            let mut high_lsn = lsn;
+            for (low_lsn, _) in reconstruct_state.records.iter() {
+                assert!(*low_lsn <= high_lsn);
+                high_lsn = *low_lsn;
+            }
+
+            if validate_rc_cache {
+                // by now, rc_state_cache contains records for Base..CacheLsn, while
+                // reconstruct_state contains records for CacheLsn..TargetLsn.
+                // These added together should be the same as all records BaseLsn..TargetLsn,
+                // which is what we're testing here:
+                let mut combined_rcs = ValueReconstructState {
+                    records: Vec::new(),
+                    img: None,
+                    img_src_is_cache: false,
+                };
+
+                self.get_reconstruct_data(key, lsn, &mut combined_rcs)?;
+                let cache_lsn = reconstruct_state.img.as_ref().unwrap().0;
+
+                // It is possible that there is an extra page image between
+                // CacheLsn and TargetLsn. In that case, the combined_rcs and
+                // reconstruct_state will both only contain the same set of
+                // records, all > cache_lsn. However, the reconstruct_state.img
+                // may still contain the cached image due to an will_init
+                // wal record not clearing the img field.
+                // We also need to take into account the case where the cache
+                // is of a single will_init record, which would also be returned
+                // for both the combined and the reconstruct_state results.
+                if combined_rcs.records.len() == reconstruct_state.records.len()
+                    && !cache_rcs.records.is_empty()
+                {
+                    let combined_base_lsn = match &combined_rcs.img {
+                        None => combined_rcs.records[0].0,
+                        Some((lsn, _)) => *lsn,
+                    };
+
+                    assert_eq!(&combined_rcs.records[..], &reconstruct_state.records[..],);
+
+                    assert!(
+                        combined_base_lsn >= cache_lsn,
+                        "The records retrieved for redo without cache are different from those used for the cache plus those to be replayed on top of the cache\n cache: {:?}\nlsn: {:?}\nreplay: {:?}",
+                        &cache_rcs.records[..],
+                        lsn,
+                        &reconstruct_state.records[..],
+                    );
+                } else {
+                    if combined_rcs.records.len()
+                        != reconstruct_state.records.len() + cache_rcs.records.len()
+                    {
+                        assert!(
+                            combined_rcs.records.len() >= cache_rcs.records.len(),
+                            "#records of base_image .. request_lsn must not be smaller than #records cache_image .. request_lsn",
+                        );
+                        assert_eq!(
+                            &combined_rcs.records
+                                [combined_rcs.records.len() - cache_rcs.records.len()..],
+                            &cache_rcs.records[..]
+                        );
+                        assert_eq!(
+                            &combined_rcs.records[..combined_rcs.records.len() - cache_rcs.records.len()],
+                            &reconstruct_state.records[..],
+                            "Unexpected records when replaying from cache: \n     cache_lsn: {:?}\n   request_lsn: {:?}\n   request_key: {:?}\n cache records: {:?}",
+                            cache_lsn,
+                            lsn,
+                            key,
+                            &cache_rcs.records[..],
+                        );
+                    }
+                    let (lsn, cache_image) = &reconstruct_state.img.as_ref().unwrap();
+
+                    let img = self.reconstruct_value(key, *lsn, cache_rcs, false);
+                    assert!(img.is_ok());
+                    let img = img.unwrap();
+                    assert_eq!(&img, cache_image);
+                }
+            }
         }
 
         self.reconstruct_time_histo
-            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state, true))
     }
 
     /// Public entry point for checkpoint(). All the logic is in the private
@@ -2075,6 +2163,80 @@ impl LayeredTimeline {
             new_layers.push(writer.finish(prev_key.unwrap().next())?);
         }
 
+        if cfg!(debug_assertions) {
+            let old_layers_data_iter = deltas_to_compact
+                .iter()
+                .map(|l| l.iter())
+                .kmerge_by(|a, b| {
+                    if let Ok((a_key, a_lsn, _)) = a {
+                        if let Ok((b_key, b_lsn, _)) = b {
+                            match a_key.cmp(b_key) {
+                                Ordering::Less => true,
+                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Greater => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                })
+                .flat_map(|it| match it {
+                    Ok((key, lsn, value)) => match value {
+                        Value::Image(_) | Value::WalRecord(_) => vec![Ok((key, lsn, value))],
+                        Value::NonInitiatingLineage(lin) | Value::InitiatingLineage(lin) => lin
+                            .recs_up_to(Lsn::MAX)
+                            .into_iter()
+                            .map(|(lsn, value)| Ok((key, lsn, value)))
+                            .collect::<Vec<Result<(Key, Lsn, Value)>>>(),
+                    },
+                    Err(e) => vec![Err(e)],
+                });
+
+            let new_layers_data_iter = new_layers
+                .iter()
+                .map(|l| l.iter())
+                .kmerge_by(|a, b| {
+                    if let Ok((a_key, a_lsn, _)) = a {
+                        if let Ok((b_key, b_lsn, _)) = b {
+                            match a_key.cmp(b_key) {
+                                Ordering::Less => true,
+                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Greater => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                })
+                .flat_map(|it| match it {
+                    Ok((key, lsn, value)) => match value {
+                        Value::Image(_) | Value::WalRecord(_) => vec![Ok((key, lsn, value))],
+                        Value::NonInitiatingLineage(lin) | Value::InitiatingLineage(lin) => lin
+                            .recs_up_to(Lsn::MAX)
+                            .into_iter()
+                            .map(|(lsn, value)| Ok((key, lsn, value)))
+                            .collect::<Vec<Result<(Key, Lsn, Value)>>>(),
+                    },
+                    Err(e) => vec![Err(e)],
+                });
+
+            for (index, (kv1, kv2)) in old_layers_data_iter.zip(new_layers_data_iter).enumerate() {
+                let eq = match &kv1 {
+                    Ok(kv1) => match &kv2 {
+                        Ok(kv2) => kv1 == kv2,
+                        Err(_) => false,
+                    },
+                    Err(_) => kv2.is_err(),
+                };
+
+                assert!(eq, "Old data was not correctly transposed in compaction from L0: {:?} != {:?} @ index {}", kv1, kv2, index);
+            }
+        }
+
         // Sync layers
         if !new_layers.is_empty() {
             let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
@@ -2351,11 +2513,16 @@ impl LayeredTimeline {
     ///
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
     ///
+    /// `do_cache` indicates whether we may store the value in the caches. Used
+    /// when checking the validity of requests, in which case we can't touch
+    /// caches due to potential circular definitions and assertion failures.
+    ///
     fn reconstruct_value(
         &self,
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
+        do_cache: bool,
     ) -> Result<Bytes> {
         // Perform WAL redo if needed
 
@@ -2428,11 +2595,15 @@ impl LayeredTimeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
-                let img =
-                    self.walredo_mgr
-                        .request_redo(key, request_lsn, base_img, data.records)?;
+                let img = self.walredo_mgr.request_redo(
+                    key,
+                    request_lsn,
+                    base_img,
+                    data.records,
+                    data.img_src_is_cache,
+                )?;
 
-                if img.len() == page_cache::PAGE_SZ {
+                if img.len() == page_cache::PAGE_SZ && do_cache {
                     let cache = page_cache::get();
                     cache.memorize_materialized_page(
                         self.tenant_id,

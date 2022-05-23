@@ -593,6 +593,7 @@ pub mod repo_harness {
             lsn: Lsn,
             base_img: Option<Bytes>,
             records: Vec<(Lsn, ZenithWalRecord)>,
+            _img_source_was_cache: bool,
         ) -> Result<Bytes, WalRedoError> {
             let s = format!(
                 "redo for {} to get to {}, with {} and {} records",

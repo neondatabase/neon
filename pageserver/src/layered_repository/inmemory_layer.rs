@@ -121,7 +121,8 @@ impl Layer for InMemoryLayer {
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
-        let mut need_image = true;
+        // Is the request fully served by this layer?
+        let mut is_base = false;
 
         let inner = self.inner.read().unwrap();
 
@@ -129,7 +130,7 @@ impl Layer for InMemoryLayer {
 
         // Scan the page versions backwards, starting from `lsn`.
         if let Some(vec_map) = inner.index.get(&key) {
-            let slice = vec_map.slice_range(lsn_range.clone());
+            let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
                 let buf = reader.read_blob(*pos)?;
                 let value = Value::des(&buf)?;
@@ -143,43 +144,12 @@ impl Layer for InMemoryLayer {
                         reconstruct_state.records.push((*entry_lsn, rec));
                         if will_init {
                             // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
+                            is_base = true;
                             break;
                         }
                     }
-                    Value::NonInitiatingLineage(lin) => {
-                        let recs = lin.recs_up_to(Lsn(lsn_range.end.0 - 1));
-                        // reverse the iterator, because we must add records in
-                        // descending order of LSN.
-                        for (lsn, rec) in recs.into_iter().rev() {
-                            match rec {
-                                Value::WalRecord(rec) => reconstruct_state.records.push((lsn, rec)),
-                                _ => {
-                                    return Err(anyhow::anyhow!(
-                                        "Unexpected result from non-initiating lineage"
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                    Value::InitiatingLineage(lin) => {
-                        let recs = lin.recs_up_to(Lsn(lsn_range.end.0 - 1));
-                        // reverse the iterator, because we must add records in
-                        // descending order of LSN.
-                        for (lsn, rec) in recs.into_iter().rev() {
-                            match rec {
-                                Value::Image(bytes) => {
-                                    reconstruct_state.img = Some((lsn, bytes));
-                                }
-                                Value::WalRecord(rec) => reconstruct_state.records.push((lsn, rec)),
-                                _ => {
-                                    return Err(anyhow::anyhow!(
-                                        "Unexpected result from non-initiating lineage"
-                                    ))
-                                }
-                            }
-                        }
-                        break;
+                    Value::NonInitiatingLineage(_) | Value::InitiatingLineage(_) => {
+                        bail!("Lineage LSN ranges are not handled correctly in VecMap slice_range, and thus should not exist there")
                     }
                 }
             }
@@ -189,7 +159,10 @@ impl Layer for InMemoryLayer {
 
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
-        if need_image {
+        // We only care about our result within the LSN range requested by the
+        // caller, and don't care about reconstruct_state.img being
+        // pre-populated - we may have a better (newer) base image.
+        if !is_base {
             Ok(ValueReconstructResult::Continue)
         } else {
             Ok(ValueReconstructResult::Complete)

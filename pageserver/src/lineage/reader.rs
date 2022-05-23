@@ -58,7 +58,7 @@ where
         if next_lsn > self.lsn_limit {
             return None;
         }
-        let value = <T as Iterator>::next(&mut self.inner)?;
+        let value = <T as Iterator>::next(&mut self.inner).unwrap();
         Some((next_lsn, value))
     }
 }
@@ -111,7 +111,7 @@ impl Iterator for BytesUnpacker {
     type Item = Bytes;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let length = self.lengths.next()?;
+        let length = self.lengths.next().unwrap();
         let result = self.remainder.slice(..length as usize);
         self.remainder = self.remainder.slice(length as usize..);
 
