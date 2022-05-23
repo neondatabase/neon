@@ -52,9 +52,10 @@ make -j5
 ```
 
 #### building on OSX (12.3.1)
-1. Install XCode 
+1. Install XCode and dependencies
 ```
 xcode-select --install
+brew install protobuf etcd
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
