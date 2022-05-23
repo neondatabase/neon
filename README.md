@@ -30,7 +30,7 @@ Pageserver consists of:
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev
+libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
