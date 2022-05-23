@@ -4,17 +4,12 @@
 use crate::thread_mgr::shutdown_watcher;
 use tokio::sync::mpsc::{Sender, channel};
 use std::any::Any;
+use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
-pub trait Job: std::fmt::Debug + Send + 'static + Clone {
+pub trait Job: std::fmt::Debug + Send + 'static + Clone + PartialEq + Eq + Hash {
     fn run(&self);
-}
-
-// TODO make scheduler an async fn, leave rescheduling to chore_mgr
-pub struct Work<J: Job> {
-    pub job: J,
-    pub when_done: Sender<Report<J>>,
 }
 
 #[derive(Debug)]
@@ -66,7 +61,7 @@ mod tests {
     use crate::thread_mgr::{self, ThreadKind};
     use super::*;
 
-    #[derive(Debug, Clone, Eq, PartialEq)]
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
     struct PrintJob {
         to_print: String
     }
