@@ -226,9 +226,9 @@ impl fmt::Display for ZTenantTimelineId {
 // by the console.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ZNodeId(pub u64);
+pub struct NodeId(pub u64);
 
-impl fmt::Display for ZNodeId {
+impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }

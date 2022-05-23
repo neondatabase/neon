@@ -12,7 +12,7 @@ use tokio::{runtime, time::sleep};
 use tracing::*;
 
 use crate::{timeline::GlobalTimelines, SafeKeeperConf};
-use utils::zid::{ZNodeId, ZTenantTimelineId};
+use utils::zid::{NodeId, ZTenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
@@ -36,7 +36,7 @@ pub fn thread_main(conf: SafeKeeperConf) {
 fn timeline_safekeeper_path(
     broker_etcd_prefix: String,
     zttid: ZTenantTimelineId,
-    sk_id: ZNodeId,
+    sk_id: NodeId,
 ) -> String {
     format!(
         "{}/{sk_id}",

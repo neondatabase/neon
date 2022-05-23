@@ -16,7 +16,7 @@ use toml_edit::{Document, Item};
 use url::Url;
 use utils::{
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
@@ -78,7 +78,7 @@ pub mod defaults {
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
     // can safely distinguish different pageservers
-    pub id: ZNodeId,
+    pub id: NodeId,
 
     /// Example (default): 127.0.0.1:64000
     pub listen_pg_addr: String,
@@ -180,7 +180,7 @@ struct PageServerConfigBuilder {
     auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: BuilderValue<ZNodeId>,
+    id: BuilderValue<NodeId>,
 
     profiling: BuilderValue<ProfilingConfig>,
     broker_etcd_prefix: BuilderValue<String>,
@@ -276,7 +276,7 @@ impl PageServerConfigBuilder {
         self.broker_etcd_prefix = BuilderValue::Set(broker_etcd_prefix)
     }
 
-    pub fn id(&mut self, node_id: ZNodeId) {
+    pub fn id(&mut self, node_id: NodeId) {
         self.id = BuilderValue::Set(node_id)
     }
 
@@ -399,7 +399,7 @@ impl PageServerConf {
                 "tenant_config" => {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
-                "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
+                "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
                 "broker_etcd_prefix" => builder.broker_etcd_prefix(parse_toml_string(key, item)?),
                 "broker_endpoints" => builder.broker_endpoints(
@@ -550,7 +550,7 @@ impl PageServerConf {
     #[cfg(test)]
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
-            id: ZNodeId(0),
+            id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
@@ -693,7 +693,7 @@ id = 10
         assert_eq!(
             parsed_config,
             PageServerConf {
-                id: ZNodeId(10),
+                id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
@@ -737,7 +737,7 @@ id = 10
         assert_eq!(
             parsed_config,
             PageServerConf {
-                id: ZNodeId(10),
+                id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
                 wait_lsn_timeout: Duration::from_secs(111),

@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use crate::safekeeper::SafekeeperNode;
@@ -136,7 +136,7 @@ impl EtcdBroker {
 #[serde(default)]
 pub struct PageServerConf {
     // node id
-    pub id: ZNodeId,
+    pub id: NodeId,
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -151,7 +151,7 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
@@ -163,7 +163,7 @@ impl Default for PageServerConf {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
-    pub id: ZNodeId,
+    pub id: NodeId,
     pub pg_port: u16,
     pub http_port: u16,
     pub sync: bool,
@@ -172,7 +172,7 @@ pub struct SafekeeperConf {
 impl Default for SafekeeperConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             pg_port: 0,
             http_port: 0,
             sync: true,

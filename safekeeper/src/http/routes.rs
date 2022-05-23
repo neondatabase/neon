@@ -20,14 +20,14 @@ use utils::{
         RequestExt, RouterBuilder,
     },
     lsn::Lsn,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use super::models::TimelineCreateRequest;
 
 #[derive(Debug, Serialize)]
 struct SafekeeperStatus {
-    id: ZNodeId,
+    id: NodeId,
 }
 
 /// Healthcheck handler.
@@ -178,7 +178,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
-    tli.record_safekeeper_info(&safekeeper_info, ZNodeId(1))?;
+    tli.record_safekeeper_info(&safekeeper_info, NodeId(1))?;
 
     json_response(StatusCode::OK, ())
 }
