@@ -30,7 +30,7 @@ Pageserver consists of:
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev
+libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -52,9 +52,10 @@ make -j5
 ```
 
 #### building on OSX (12.3.1)
-1. Install XCode 
+1. Install XCode and dependencies
 ```
 xcode-select --install
+brew install protobuf etcd
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
