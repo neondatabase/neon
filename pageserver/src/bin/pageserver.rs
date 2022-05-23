@@ -254,7 +254,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(err) => error!(%err, "could not daemonize"),
+            Err(err) => bail!("{err}. could not daemonize. bailing."),
         }
     }
 
