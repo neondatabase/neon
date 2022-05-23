@@ -5,7 +5,10 @@ use crate::thread_mgr::shutdown_watcher;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::time::sleep;
 
-use super::worker::{Job, Worker, Report};
+use super::worker::{Job, Worker, Report, Work};
+
+// TODO spawn a tokio task for each tenant
+// x) Why not use the simpler worker implementation then?
 
 #[derive(Debug)]
 pub struct Sched<J: Job> {
@@ -13,22 +16,18 @@ pub struct Sched<J: Job> {
     workers: Vec<Worker<J>>,
 
     /// Queued due jobs
-    jobs: VecDeque<J>,
+    work_queue: VecDeque<Work<J>>,
 
     /// Channel for registering due jobs
-    pub send_work: Sender<J>, // TODO should job specify report destination?
-    recv_work: Receiver<J>,
+    pub send_work: Sender<Work<J>>,
+    recv_work: Receiver<Work<J>>,
 
     /// Channel for enlisting idle workers
     recv_worker: Receiver<Worker<J>>,
-
-    /// Channel where workers report results
-    recv_report: Receiver<Report<J>>,
 }
 
 pub struct Spawner<J: Job> {
     send_worker: Sender<Worker<J>>,
-    send_report: Sender<Report<J>>,
 }
 
 impl<J: Job> Spawner<J> {
@@ -36,7 +35,6 @@ impl<J: Job> Spawner<J> {
         use crate::{jobs::worker::run_worker, thread_mgr::{self, ThreadKind}};
 
         let enlist = self.send_worker.clone();
-        let report = self.send_report.clone();
         thread_mgr::spawn(
             ThreadKind::GcWorker,
             None,
@@ -44,7 +42,7 @@ impl<J: Job> Spawner<J> {
             "gc_worker_1",
             true,
             move || {
-                run_worker(enlist, report)
+                run_worker(enlist)
             },
         ).unwrap();
     }
@@ -53,60 +51,38 @@ impl<J: Job> Spawner<J> {
 impl<J: Job> Sched<J> {
     pub fn new() -> (Sched<J>, Spawner<J>) {
         let worker = channel::<Worker<J>>(100);
-        let work = channel::<J>(100);
-        let report = channel::<Report<J>>(100);
+        let work = channel::<Work<J>>(100);
 
         let sched = Sched {
             workers: vec![],
-            jobs: VecDeque::new(),
+            work_queue: VecDeque::new(),
             recv_worker: worker.1,
             send_work: work.0,
             recv_work: work.1,
-            recv_report: report.1,
         };
         let spawner = Spawner {
             send_worker: worker.0,
-            send_report: report.0,
         };
 
         (sched, spawner)
     }
 
-
-    pub async fn handle_job(&mut self, job: J) {
+    pub async fn handle_work(&mut self, work: Work<J>) {
         // Assign to a worker if any are availabe
-        while let Some(w) = self.workers.pop() {
-            if let Ok(()) = w.0.send(job.clone()).await {
+        while let Some(worker) = self.workers.pop() {
+            if let Ok(()) = worker.0.send(work.clone()).await {
                 return;
             }
         }
-        self.jobs.push_back(job);
+        self.work_queue.push_back(work);
     }
 
     pub async fn handle_worker(&mut self, worker: Worker<J>) {
         // Assign jobs if any are queued
-        if let Some(j) = self.jobs.pop_front() {
+        if let Some(j) = self.work_queue.pop_front() {
             worker.0.send(j).await.ok();
         } else {
             self.workers.push(worker);
-        }
-    }
-
-    pub async fn handle_report(&mut self, report: Report<J>) {
-        // Reschedule job to run again
-        let send_work = self.send_work.clone();
-        let job = report.for_job;
-        match report.result {
-            Ok(()) => {
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(10)).await;
-                    send_work.send(job).await.unwrap();
-                });
-            },
-            Err(e) => {
-                // TODO mark chore as blocked
-                println!("task panicked");
-            }
         }
     }
 
@@ -124,14 +100,10 @@ impl<J: Job> Sched<J> {
                         let worker = worker.expect("worker channel closed");
                         self.handle_worker(worker).await;
                     },
-                    job = self.recv_work.recv() => {
-                        let job = job.expect("job channel closed");
-                        self.handle_job(job).await;
+                    work = self.recv_work.recv() => {
+                        let work = work.expect("job channel closed");
+                        self.handle_work(work).await;
                     },
-                    report = self.recv_report.recv() => {
-                        let report = report.expect("report channel closed");
-                        self.handle_report(report).await;
-                    }
                 }
             }
         });
@@ -142,7 +114,7 @@ impl<J: Job> Sched<J> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{jobs::worker::run_worker, thread_mgr::{self, ThreadKind}};
+    use crate::thread_mgr::{self, ThreadKind};
     use super::*;
 
     #[derive(Debug, Clone, Eq, PartialEq)]
@@ -177,10 +149,14 @@ mod tests {
         spawner.spawn_worker();
 
         // Send a job
-        let j = PrintJob {
-            to_print: "hello from job".to_string(),
+        let when_done = channel::<Report<PrintJob>>(100);
+        let work = Work {
+            job: PrintJob {
+                to_print: "hello from job".to_string(),
+            },
+            when_done: when_done.0,
         };
-        send_work.send(j.clone()).await.unwrap();
+        send_work.send(work.clone()).await.unwrap();
 
         sleep(Duration::from_millis(100)).await;
 
