@@ -18,7 +18,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use tracing::*;
 
-use std::cmp::{max, Ordering};
+use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
@@ -2165,7 +2165,7 @@ impl LayeredTimeline {
 
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
-        let cutoff = gc_info.cutoff;
+        let cutoff = min(gc_info.cutoff, disk_consistent_lsn);
         let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
@@ -2294,12 +2294,20 @@ impl LayeredTimeline {
             // is 102, then it might not have been fully flushed to disk
             // before crash.
             //
-            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
-            if !layers.newer_image_layer_exists(
-                &l.get_key_range(),
-                l.get_lsn_range().end,
-                disk_consistent_lsn + 1,
-            )? {
+            // For example, imagine that the following layers exist:
+            //
+            // 1000      - image (A)
+            // 1000-2000 - delta (B)
+            // 2000      - image (C)
+            // 2000-3000 - delta (D)
+            // 3000      - image (E)
+            //
+            // If GC horizon is at 2500, we can remove layers A and B, but
+            // we cannot remove C, even though it's older than 2500, because
+            // the delta layer 2000-3000 depends on it.
+            if !layers
+                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+            {
                 debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
