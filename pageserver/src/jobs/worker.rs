@@ -7,8 +7,14 @@ use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
-pub trait Job: std::fmt::Debug + Send + 'static {
+pub trait Job: std::fmt::Debug + Send + 'static + Clone {
     fn run(&self);
+}
+
+// TODO make scheduler an async fn, leave rescheduling to chore_mgr
+pub struct Work<J: Job> {
+    pub job: J,
+    pub when_done: Sender<Report<J>>,
 }
 
 #[derive(Debug)]
