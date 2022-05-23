@@ -26,7 +26,7 @@ pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
     /// assigned application name
     pub appname: Option<String>,
-    pub TenantId: Option<TenantId>,
+    pub tenantId: Option<TenantId>,
     pub ztimelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
     pageserver_connstr: Option<String>,
@@ -72,7 +72,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // ztenant id and ztimeline id are passed in connection string params
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
-            self.TenantId = match params.get("TenantId") {
+            self.tenantId = match params.get("tenantId") {
                 Some(z) => Some(TenantId::from_str(z)?), // just curious, can I do that from .map?
                 _ => None,
             };
@@ -102,7 +102,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
             || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
 
-        let tenantid = self.TenantId.context("tenantid is required")?;
+        let tenantid = self.tenantId.context("tenantid is required")?;
         let timelineid = self.ztimelineid.context("timelineid is required")?;
         if self.timeline.is_none() {
             self.timeline.set(
@@ -139,7 +139,7 @@ impl SafekeeperPostgresHandler {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
-            TenantId: None,
+            tenantId: None,
             ztimelineid: None,
             timeline: None,
             pageserver_connstr: None,

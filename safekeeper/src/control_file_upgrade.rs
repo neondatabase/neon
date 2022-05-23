@@ -193,7 +193,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
-    // migrate to moving TenantId/ztli to the top and adding some lsns
+    // migrate to moving tenantId/ztli to the top and adding some lsns
     } else if version == 3 {
         info!("reading safekeeper control file version {}", version);
         let oldstate = SafeKeeperStateV3::des(&buf[..buf.len()])?;
