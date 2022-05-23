@@ -1,6 +1,6 @@
 # WAL service
 
-The zenith WAL service acts as a holding area and redistribution
+The neon WAL service acts as a holding area and redistribution
 center for recently generated WAL. The primary Postgres server streams
 the WAL to the WAL safekeeper, and treats it like a (synchronous)
 replica. A replication slot is used in the primary to prevent the
@@ -94,7 +94,7 @@ Q: What if the compute node evicts a page, needs it back, but the page is yet
 A: If the compute node has evicted a page, changes to it have been WAL-logged
    (that's why it is called Write Ahead logging; there are some exceptions like
    index builds, but these are exceptions). These WAL records will eventually
-   reach the Page Server. The Page Server notes that the compute note requests
+   reach the Page Server. The Page Server notes that the compute node requests
    pages with a very recent LSN and will not respond to the compute node until a
    corresponding WAL is received from WAL safekeepers.
 
