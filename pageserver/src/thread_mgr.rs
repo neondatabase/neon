@@ -47,7 +47,7 @@ use tracing::{debug, error, info, warn};
 
 use lazy_static::lazy_static;
 
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{TenantId, ZTimelineId};
 
 use crate::shutdown_pageserver;
 
@@ -114,7 +114,7 @@ struct PageServerThread {
     kind: ThreadKind,
 
     /// Tenant and timeline that this thread is associated with.
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
 
     name: String,
@@ -134,7 +134,7 @@ struct PageServerThread {
 ///   of the thread will lead to shutdown of entire process
 pub fn spawn<F>(
     kind: ThreadKind,
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
@@ -278,7 +278,7 @@ fn thread_wrapper<F>(
 ///
 pub fn shutdown_threads(
     kind: Option<ThreadKind>,
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
 ) {
     let mut victim_threads = Vec::new();

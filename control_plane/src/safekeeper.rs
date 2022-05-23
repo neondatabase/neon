@@ -18,7 +18,7 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{ZNodeId, TenantId, ZTimelineId},
 };
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
@@ -284,7 +284,7 @@ impl SafekeeperNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         timeline_id: ZTimelineId,
         peer_ids: Vec<ZNodeId>,
     ) -> Result<()> {

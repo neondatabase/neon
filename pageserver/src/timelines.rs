@@ -17,7 +17,7 @@ use tracing::*;
 use utils::{
     crashsafe_dir, logging,
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::{
@@ -102,7 +102,7 @@ impl LocalTimelineInfo {
     }
 
     pub fn from_repo_timeline<T>(
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         timeline_id: ZTimelineId,
         repo_timeline: &RepositoryTimeline<T>,
         include_non_incremental_logical_size: bool,
@@ -130,7 +130,7 @@ pub struct RemoteTimelineInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: ZTimelineId,
     pub local: Option<LocalTimelineInfo>,
@@ -145,7 +145,7 @@ pub struct PointInTime {
 
 pub fn init_pageserver(
     conf: &'static PageServerConf,
-    create_tenant: Option<ZTenantId>,
+    create_tenant: Option<TenantId>,
     initial_timeline_id: Option<ZTimelineId>,
 ) -> anyhow::Result<()> {
     // Initialize logger
@@ -181,7 +181,7 @@ pub enum CreateRepo {
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     create_repo: CreateRepo,
 ) -> Result<Arc<RepositoryImpl>> {
     let (wal_redo_manager, remote_index) = match create_repo {
@@ -279,7 +279,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 //
 fn bootstrap_timeline<R: Repository>(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     tli: ZTimelineId,
     repo: &R,
 ) -> Result<()> {
@@ -315,7 +315,7 @@ fn bootstrap_timeline<R: Repository>(
 }
 
 pub(crate) fn get_local_timelines(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     include_non_incremental_logical_size: bool,
 ) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
@@ -339,7 +339,7 @@ pub(crate) fn get_local_timelines(
 
 pub(crate) fn create_timeline(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     ancestor_start_lsn: Option<Lsn>,

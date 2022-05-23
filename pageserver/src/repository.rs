@@ -437,7 +437,7 @@ pub mod repo_harness {
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::zid::ZTenantId;
+    use utils::zid::TenantId;
 
     pub const TIMELINE_ID: ZTimelineId =
         ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
@@ -476,7 +476,7 @@ pub mod repo_harness {
     pub struct RepoHarness<'a> {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
-        pub tenant_id: ZTenantId,
+        pub tenant_id: TenantId,
 
         pub lock_guard: (
             Option<RwLockReadGuard<'a, ()>>,
@@ -509,7 +509,7 @@ pub mod repo_harness {
 
             let tenant_conf = TenantConf::dummy_conf();
 
-            let tenant_id = ZTenantId::generate();
+            let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 

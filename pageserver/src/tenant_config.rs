@@ -12,7 +12,7 @@ use crate::config::PageServerConf;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
-use utils::zid::ZTenantId;
+use utils::zid::TenantId;
 
 pub const TENANT_CONFIG_NAME: &str = "config";
 
@@ -160,7 +160,7 @@ impl TenantConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn path(conf: &'static PageServerConf, tenantid: ZTenantId) -> PathBuf {
+    pub fn path(conf: &'static PageServerConf, tenantid: TenantId) -> PathBuf {
         conf.tenant_path(&tenantid).join(TENANT_CONFIG_NAME)
     }
 

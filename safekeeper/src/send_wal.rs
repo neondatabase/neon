@@ -25,7 +25,7 @@ use utils::{
     postgres_backend::PostgresBackend,
     pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback},
     sock_split::ReadStream,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
@@ -89,7 +89,7 @@ impl Drop for ReplicationConnGuard {
 // that receives feedback.
 struct ReplicationStreamGuard {
     tx: UnboundedSender<CallmeEvent>,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
     pageserver_connstr: String,
 }

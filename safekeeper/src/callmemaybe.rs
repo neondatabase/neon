@@ -18,14 +18,14 @@ use tokio_postgres::NoTls;
 use tracing::*;
 use utils::{
     connstring::connection_host_port,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 async fn request_callback(
     pageserver_connstr: String,
     listen_pg_addr_str: String,
     timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
 ) -> Result<()> {
     info!(
         "callmemaybe request_callback Connecting to pageserver {}",
@@ -48,7 +48,7 @@ async fn request_callback(
     // it is required to correctly manage callmemaybe subscriptions when more than one pageserver is involved
     // TODO it is better to use some sort of a unique id instead of connection string, see https://github.com/zenithdb/zenith/issues/1105
     let callme = format!(
-        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={} pageserver_connstr={}'",
+        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} TenantId={} pageserver_connstr={}'",
         tenantid, timelineid, host, port, timelineid, tenantid, pageserver_connstr,
     );
 
@@ -68,13 +68,13 @@ pub fn thread_main(conf: SafeKeeperConf, rx: UnboundedReceiver<CallmeEvent>) -> 
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct SubscriptionStateKey {
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
     pageserver_connstr: String,
 }
 
 impl SubscriptionStateKey {
-    pub fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId, pageserver_connstr: String) -> Self {
+    pub fn new(tenant_id: TenantId, timeline_id: ZTimelineId, pageserver_connstr: String) -> Self {
         Self {
             tenant_id,
             timeline_id,
@@ -100,7 +100,7 @@ pub enum CallmeEvent {
 
 #[derive(Debug)]
 struct SubscriptionState {
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     timelineid: ZTimelineId,
     pageserver_connstr: String,
     handle: Option<task::JoinHandle<()>>,
@@ -110,7 +110,7 @@ struct SubscriptionState {
 
 impl SubscriptionState {
     fn new(
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         timelineid: ZTimelineId,
         pageserver_connstr: String,
     ) -> SubscriptionState {

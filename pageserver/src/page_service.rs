@@ -25,7 +25,7 @@ use utils::{
     lsn::Lsn,
     postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
     pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::basebackup;
@@ -346,7 +346,7 @@ impl PageServerHandler {
         &self,
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
@@ -571,7 +571,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
@@ -605,7 +605,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenantid: Option<ZTenantId>) -> Result<()> {
+    fn check_permission(&self, tenantid: Option<TenantId>) -> Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -665,7 +665,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 params.len() == 2,
                 "invalid param number for pagestream command"
             );
-            let tenantid = ZTenantId::from_str(params[0])?;
+            let tenantid = TenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenantid))?;
@@ -680,7 +680,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 "invalid param number for basebackup command"
             );
 
-            let tenantid = ZTenantId::from_str(params[0])?;
+            let tenantid = TenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenantid))?;
@@ -702,7 +702,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid callmemaybe: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let tenantid = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let connstr = caps.get(3).unwrap().as_str().to_owned();
 
@@ -752,7 +752,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             ensure!(params.len() == 1, "invalid param number for config command");
-            let tenantid = ZTenantId::from_str(params[0])?;
+            let tenantid = TenantId::from_str(params[0])?;
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
@@ -795,7 +795,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid do_gc: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let tenantid = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
@@ -840,7 +840,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("Invalid compact: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let tenantid = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Couldn't load timeline")?;
@@ -858,7 +858,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let tenantid = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
 
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
@@ -883,7 +883,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let tenantid = TenantId::from_str(caps.get(1).unwrap().as_str())?;
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;

@@ -1,6 +1,6 @@
 use crate::auth::{self, Claims, JwtAuth};
 use crate::http::error;
-use crate::zid::ZTenantId;
+use crate::zid::TenantId;
 use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
@@ -137,7 +137,7 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
     })
 }
 
-pub fn check_permission(req: &Request<Body>, tenantid: Option<ZTenantId>) -> Result<(), ApiError> {
+pub fn check_permission(req: &Request<Body>, tenantid: Option<TenantId>) -> Result<(), ApiError> {
     match req.context::<Claims>() {
         Some(claims) => Ok(auth::check_permission(&claims, tenantid)
             .map_err(|err| ApiError::Forbidden(err.to_string()))?),

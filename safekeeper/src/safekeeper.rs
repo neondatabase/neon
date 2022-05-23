@@ -26,7 +26,7 @@ use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
     pq_proto::{SystemId, ZenithFeedback},
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{ZNodeId, TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
@@ -171,7 +171,7 @@ pub struct Peers(pub Vec<(ZNodeId, PeerInfo)>);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     /// Zenith timelineid
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
@@ -267,7 +267,7 @@ pub struct ProposerGreeting {
     pub system_id: SystemId,
     /// Zenith timelineid
     pub ztli: ZTimelineId,
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     pub tli: TimeLineID,
     pub wal_seg_size: u32,
 }
@@ -503,7 +503,7 @@ struct SafeKeeperMetrics {
 }
 
 impl SafeKeeperMetrics {
-    fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
+    fn new(tenant_id: TenantId, timeline_id: ZTimelineId) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
         Self {

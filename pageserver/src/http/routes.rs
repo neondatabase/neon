@@ -25,7 +25,7 @@ use utils::{
         request::parse_request_param,
         RequestExt, RouterBuilder,
     },
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 struct State {
@@ -85,7 +85,7 @@ async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiErr
 }
 
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
     check_permission(&request, Some(tenant_id))?;
@@ -110,7 +110,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 }
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
     let local_timeline_infos = tokio::task::spawn_blocking(move || {
@@ -160,7 +160,7 @@ fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
 }
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
@@ -225,7 +225,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 }
 
 async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
@@ -249,7 +249,7 @@ async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Bod
 }
 
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
@@ -350,7 +350,7 @@ async fn try_download_index_part_data(
 }
 
 async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
@@ -413,8 +413,8 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let target_tenant_id = request_data
         .new_tenant_id
-        .map(ZTenantId::from)
-        .unwrap_or_else(ZTenantId::generate);
+        .map(TenantId::from)
+        .unwrap_or_else(TenantId::generate);
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();

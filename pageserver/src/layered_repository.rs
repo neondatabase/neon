@@ -58,7 +58,7 @@ use utils::{
     crashsafe_dir,
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 mod blob_io;
@@ -163,7 +163,7 @@ pub struct LayeredRepository {
     // This is necessary to allow global config updates.
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -657,7 +657,7 @@ impl LayeredRepository {
         conf: &'static PageServerConf,
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
     ) -> LayeredRepository {
@@ -676,7 +676,7 @@ impl LayeredRepository {
     /// Locate and load config
     pub fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = TenantConf::path(conf, tenantid);
 
@@ -713,7 +713,7 @@ impl LayeredRepository {
 
     pub fn persist_tenant_config(
         conf: &'static PageServerConf,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
@@ -742,7 +742,7 @@ impl LayeredRepository {
     pub fn save_metadata(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         data: &TimelineMetadata,
         first_save: bool,
     ) -> Result<()> {
@@ -891,7 +891,7 @@ impl LayeredRepository {
         Ok(totals)
     }
 
-    pub fn tenant_id(&self) -> ZTenantId {
+    pub fn tenant_id(&self) -> TenantId {
         self.tenant_id
     }
 }
@@ -900,7 +900,7 @@ pub struct LayeredTimeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
 
     layers: RwLock<LayerMap>,
@@ -1176,7 +1176,7 @@ impl LayeredTimeline {
         metadata: TimelineMetadata,
         ancestor: Option<LayeredTimelineEntry>,
         timeline_id: ZTimelineId,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
     ) -> LayeredTimeline {
@@ -2513,7 +2513,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
 fn load_metadata(
     conf: &'static PageServerConf,
     timeline_id: ZTimelineId,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<TimelineMetadata> {
     let metadata_path = metadata_path(conf, timeline_id, tenant_id);
     let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {

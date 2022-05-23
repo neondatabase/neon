@@ -34,7 +34,7 @@ use tracing::*;
 use utils::{
     lsn::Lsn,
     pq_proto::ZenithFeedback,
-    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 ///
@@ -53,7 +53,7 @@ pub struct WalReceiverEntry {
 }
 
 lazy_static! {
-    static ref WAL_RECEIVERS: Mutex<HashMap<(ZTenantId, ZTimelineId), WalReceiverEntry>> =
+    static ref WAL_RECEIVERS: Mutex<HashMap<(TenantId, ZTimelineId), WalReceiverEntry>> =
         Mutex::new(HashMap::new());
 }
 
@@ -64,7 +64,7 @@ thread_local! {
     pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
 }
 
-fn drop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
+fn drop_wal_receiver(tenantid: TenantId, timelineid: ZTimelineId) {
     let mut receivers = WAL_RECEIVERS.lock().unwrap();
     receivers.remove(&(tenantid, timelineid));
 }
@@ -72,7 +72,7 @@ fn drop_wal_receiver(tenantid: ZTenantId, timelineid: ZTimelineId) {
 // Launch a new WAL receiver, or tell one that's running about change in connection string
 pub fn launch_wal_receiver(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     timelineid: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> Result<()> {
@@ -114,7 +114,7 @@ pub fn launch_wal_receiver(
 
 /// Look up a WAL receiver's data in the global `WAL_RECEIVERS`
 pub fn get_wal_receiver_entry(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
 ) -> Option<WalReceiverEntry> {
     let receivers = WAL_RECEIVERS.lock().unwrap();
@@ -124,7 +124,7 @@ pub fn get_wal_receiver_entry(
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id: ZTimelineId) {
+fn thread_main(conf: &'static PageServerConf, tenant_id: TenantId, timeline_id: ZTimelineId) {
     let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
@@ -163,7 +163,7 @@ fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id:
 
 fn walreceiver_main(
     _conf: &PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
 ) -> anyhow::Result<(), Error> {

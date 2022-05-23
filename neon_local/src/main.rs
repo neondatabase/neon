@@ -22,7 +22,7 @@ use utils::{
     lsn::Lsn,
     postgres_backend::AuthType,
     project_git_version,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{ZNodeId, TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use pageserver::timelines::TimelineInfo;
@@ -432,7 +432,7 @@ fn print_timeline(
 /// Connects to the pageserver to query this information.
 fn get_timeline_infos(
     env: &local_env::LocalEnv,
-    tenant_id: &ZTenantId,
+    tenant_id: &TenantId,
 ) -> Result<HashMap<ZTimelineId, TimelineInfo>> {
     Ok(PageServerNode::from_env(env)
         .timeline_list(tenant_id)?
@@ -442,7 +442,7 @@ fn get_timeline_infos(
 }
 
 // Helper function to parse --tenant_id option, or get the default from config file
-fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<ZTenantId> {
+fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<TenantId> {
     if let Some(tenant_id_from_arguments) = parse_tenant_id(sub_match).transpose() {
         tenant_id_from_arguments
     } else if let Some(default_id) = env.default_tenant_id {
@@ -452,10 +452,10 @@ fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::R
     }
 }
 
-fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<ZTenantId>> {
+fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantId>> {
     sub_match
         .value_of("tenant-id")
-        .map(ZTenantId::from_str)
+        .map(TenantId::from_str)
         .transpose()
         .context("Failed to parse tenant id from the argument string")
 }
