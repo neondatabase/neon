@@ -1,3 +1,5 @@
+use std::{ops::Add, time::Instant};
+
 use once_cell::sync::OnceCell;
 use utils::zid::ZTenantId;
 use crate::repository::Repository;
@@ -15,17 +17,16 @@ pub struct CompactionJob {
 impl Job for CompactionJob {
     type ErrorType = anyhow::Error;
 
-    fn run(&self) -> Result<(), Self::ErrorType> {
-        // TODO GC has the same code too
+    fn run(&self) -> Result<Option<Instant>, Self::ErrorType> {
+        // Don't reschedule job if tenant isn't active
         if !matches!(tenant_mgr::get_tenant_state(self.tenant), Some(TenantState::Active)) {
-            // TODO Maybe record this as "didn't run"?
-            return Ok(());
+            return Ok(None);
         }
 
         let repo = tenant_mgr::get_repository_for_tenant(self.tenant)?;
         repo.compaction_iteration()?;
 
-        Ok(())
+        Ok(Some(Instant::now().add(repo.get_compaction_period())))
     }
 }
 

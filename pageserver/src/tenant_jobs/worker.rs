@@ -2,7 +2,7 @@ use std::{any::Any, collections::{BinaryHeap, HashMap}, fmt::Debug, hash::Hash, 
 
 pub trait Job: std::fmt::Debug + Send + Clone + PartialOrd + Ord + Hash + 'static {
     type ErrorType;
-    fn run(&self) -> Result<(), Self::ErrorType>;
+    fn run(&self) -> Result<Option<Instant>, Self::ErrorType>;
 }
 
 #[derive(Debug)]
@@ -18,12 +18,7 @@ enum JobStatus<J: Job> where J::ErrorType: Debug {
     Stuck(JobError<J>),
 }
 
-#[derive(Debug)]
-struct JobEntry<J: Job> where J::ErrorType: Debug {
-    period: Duration,
-    status: JobStatus<J>,
-}
-
+// TODO make this generic event, put in different module
 #[derive(Debug)]
 struct Deadline<J: Job> where J::ErrorType: Debug {
     start_by: Instant,
@@ -52,7 +47,7 @@ impl<J: Job> Eq for Deadline<J> where J::ErrorType: Debug { }
 
 #[derive(Debug)]
 struct JobStatusTable<J: Job> where J::ErrorType: Debug {
-    status: HashMap<J, JobEntry<J>>,
+    status: HashMap<J, JobStatus<J>>,
     queue: BinaryHeap<Deadline<J>>,
 }
 
@@ -68,7 +63,7 @@ impl<J: Job> JobStatusTable<J> where J::ErrorType: Debug {
 
     fn set_status(&mut self, job: &J, status: JobStatus<J>) {
         let s = self.status.get_mut(job).expect("status not found");
-        (*s).status = status;
+        *s = status;
     }
 }
 
@@ -82,7 +77,7 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
     fn new() -> Self {
         Pool {
             job_table: Mutex::new(JobStatusTable::<J> {
-                status: HashMap::<J, JobEntry<J>>::new(),
+                status: HashMap::<J, JobStatus<J>>::new(),
                 queue: BinaryHeap::<Deadline<J>>::new(),
             }),
             condvar: Condvar::new(),
@@ -104,13 +99,15 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
 
                 // Update job status
                 match result {
-                    Ok(Ok(())) => {
+                    Ok(Ok(Some(reschedule_for))) => {
                         job_table.set_status(&job, JobStatus::Ready);
-                        let period = job_table.status.get(&job).unwrap().period;
                         job_table.queue.push(Deadline {
                             job: job.clone(),
-                            start_by: Instant::now().add(period),
+                            start_by: reschedule_for,
                         })
+                    },
+                    Ok(Ok(None)) => {
+                        // TODO remove from job table
                     },
                     Ok(Err(e)) => {
                         job_table.set_status(&job, JobStatus::Stuck(JobError::Error(e)));
@@ -135,13 +132,10 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
         }
     }
 
-    fn queue_job(&self, job: J, period: Duration) {
+    fn queue_job(&self, job: J) {
         // Add the job to the back of the queue
         let mut job_table = self.job_table.lock().unwrap();
-        job_table.status.insert(job.clone(), JobEntry {
-            period,
-            status: JobStatus::Ready,
-        });
+        job_table.status.insert(job.clone(), JobStatus::Ready);
         job_table.queue.push(Deadline {
             job: job.clone(),
             start_by: Instant::now(),
@@ -168,12 +162,12 @@ mod tests {
     impl Job for PrintJob {
         type ErrorType = String;
 
-        fn run(&self) -> Result<(), String> {
+        fn run(&self) -> Result<Option<Instant>, String> {
             if self.to_print == "pls panic" {
                 panic!("AAA");
             }
             println!("{}", self.to_print);
-            Ok(())
+            Ok(Some(Instant::now().add(Duration::from_millis(10))))
         }
     }
 
@@ -207,7 +201,7 @@ mod tests {
 
         TEST_POOL.get().unwrap().queue_job(PrintJob {
             to_print: "hello from job".to_string(),
-        }, Duration::from_millis(10));
+        });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

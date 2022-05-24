@@ -1,3 +1,5 @@
+use std::{ops::Add, time::Instant};
+
 use once_cell::sync::OnceCell;
 use utils::zid::ZTenantId;
 use crate::{repository::Repository, tenant_mgr::{self, TenantState}};
@@ -12,11 +14,10 @@ pub struct GcJob {
 impl Job for GcJob {
     type ErrorType = anyhow::Error;
 
-    fn run(&self) -> Result<(), Self::ErrorType> {
+    fn run(&self) -> Result<Option<Instant>, Self::ErrorType> {
+        // Don't reschedule job if tenant isn't active
         if !matches!(tenant_mgr::get_tenant_state(self.tenant), Some(TenantState::Active)) {
-            // TODO Maybe record this as "didn't run"?
-            // TODO Maybe unschedule?
-            return Ok(());
+            return Ok(None);
         }
 
         let repo = tenant_mgr::get_repository_for_tenant(self.tenant)?;
@@ -25,7 +26,7 @@ impl Job for GcJob {
             repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
         }
 
-        Ok(())
+        Ok(Some(Instant::now().add(repo.get_gc_period())))
     }
 }
 
