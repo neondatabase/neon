@@ -31,5 +31,5 @@ impl Job for CompactionJob {
 
 pub static COMPACTION_SCHEDULER: OnceCell<Pool<CompactionJob>> = OnceCell::new();
 
-// TODO init pool with compaction interval
 // TODO spawn 20 worker threads
+// TODO add tasks when tenant activates

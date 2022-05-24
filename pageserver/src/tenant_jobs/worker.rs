@@ -19,6 +19,12 @@ enum JobStatus<J: Job> where J::ErrorType: Debug {
 }
 
 #[derive(Debug)]
+struct JobEntry<J: Job> where J::ErrorType: Debug {
+    period: Duration,
+    status: JobStatus<J>,
+}
+
+#[derive(Debug)]
 struct Deadline<J: Job> where J::ErrorType: Debug {
     start_by: Instant,
     job: J,
@@ -46,7 +52,7 @@ impl<J: Job> Eq for Deadline<J> where J::ErrorType: Debug { }
 
 #[derive(Debug)]
 struct JobStatusTable<J: Job> where J::ErrorType: Debug {
-    status: HashMap<J, JobStatus<J>>,
+    status: HashMap<J, JobEntry<J>>,
     queue: BinaryHeap<Deadline<J>>,
 }
 
@@ -62,7 +68,7 @@ impl<J: Job> JobStatusTable<J> where J::ErrorType: Debug {
 
     fn set_status(&mut self, job: &J, status: JobStatus<J>) {
         let s = self.status.get_mut(job).expect("status not found");
-        *s = status;
+        (*s).status = status;
     }
 }
 
@@ -76,7 +82,7 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
     fn new() -> Self {
         Pool {
             job_table: Mutex::new(JobStatusTable::<J> {
-                status: HashMap::<J, JobStatus<J>>::new(),
+                status: HashMap::<J, JobEntry<J>>::new(),
                 queue: BinaryHeap::<Deadline<J>>::new(),
             }),
             condvar: Condvar::new(),
@@ -100,9 +106,10 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
                 match result {
                     Ok(Ok(())) => {
                         job_table.set_status(&job, JobStatus::Ready);
+                        let period = job_table.status.get(&job).unwrap().period;
                         job_table.queue.push(Deadline {
                             job: job.clone(),
-                            start_by: Instant::now().add(Duration::from_millis(10)),
+                            start_by: Instant::now().add(period),
                         })
                     },
                     Ok(Err(e)) => {
@@ -128,10 +135,13 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
         }
     }
 
-    fn queue_job(&self, job: J) {
+    fn queue_job(&self, job: J, period: Duration) {
         // Add the job to the back of the queue
         let mut job_table = self.job_table.lock().unwrap();
-        job_table.status.insert(job.clone(), JobStatus::Ready);
+        job_table.status.insert(job.clone(), JobEntry {
+            period,
+            status: JobStatus::Ready,
+        });
         job_table.queue.push(Deadline {
             job: job.clone(),
             start_by: Instant::now(),
@@ -197,36 +207,7 @@ mod tests {
 
         TEST_POOL.get().unwrap().queue_job(PrintJob {
             to_print: "hello from job".to_string(),
-        });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    #[tokio::test]
-    async fn pool_panic() {
-        TEST_POOL.set(Pool::<PrintJob>::new()).unwrap();
-
-        thread_mgr::spawn(
-            ThreadKind::GarbageCollector,  // change this
-            None,
-            None,
-            "test_worker_1",
-            true,
-            move || {
-                TEST_POOL.get().unwrap().worker_main()
-            },
-        ).unwrap();
-
-        let j = PrintJob {
-            to_print: "hello from job".to_string(),
-        };
-        let panic = PrintJob {
-            to_print: "pls panic".to_string(),
-        };
-
-        TEST_POOL.get().unwrap().queue_job(panic.clone());
-        TEST_POOL.get().unwrap().queue_job(j.clone());
-        TEST_POOL.get().unwrap().queue_job(j.clone());
+        }, Duration::from_millis(10));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
