@@ -82,7 +82,7 @@ pub struct Pool<J: Job> where J::ErrorType: Debug {
 }
 
 impl<J: Job> Pool<J> where J::ErrorType: Debug {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Pool {
             job_table: Mutex::new(JobStatusTable::<J> {
                 status: HashMap::<J, JobStatus<J>>::new(),

@@ -9,7 +9,7 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use fail::FailScenario;
-use pageserver::{LOG_FILE_NAME, config::{defaults::*, PageServerConf}, http, page_cache, page_service, profiling, tenant_jobs::gc::GC_POOL, tenant_mgr, thread_mgr, thread_mgr::ThreadKind, timelines, virtual_file};
+use pageserver::{LOG_FILE_NAME, config::{defaults::*, PageServerConf}, http, page_cache, page_service, profiling, tenant_jobs::{compaction::{COMPACTION_POOL, CompactionJob}, gc::{GC_POOL, GcJob}, worker::Pool}, tenant_mgr, thread_mgr, thread_mgr::ThreadKind, timelines, virtual_file};
 use utils::{
     auth::JwtAuth,
     http::endpoint,
@@ -179,11 +179,11 @@ fn main() -> anyhow::Result<()> {
 
     // If failpoints are used, terminate the whole pageserver process if they are hit.
     let scenario = FailScenario::setup();
-    if fail::has_failpoints() {
-        std::panic::set_hook(Box::new(|_| {
-            std::process::exit(1);
-        }));
-    }
+    // if fail::has_failpoints() {
+    //     std::panic::set_hook(Box::new(|_| {
+    //         std::process::exit(1);
+    //     }));
+    // }
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
@@ -301,6 +301,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     )?;
 
     // Spawn GC workers
+    GC_POOL.set(Pool::<GcJob>::new()).unwrap();
     for i in 0..3 {
         let name = format!("gc_worker_{}", i);
         thread_mgr::spawn(
@@ -316,6 +317,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     }
 
     // Spawn compaction workers
+    COMPACTION_POOL.set(Pool::<CompactionJob>::new()).unwrap();
     for i in 0..3 {
         let name = format!("compaction_worker_{}", i);
         thread_mgr::spawn(
