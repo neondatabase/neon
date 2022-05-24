@@ -1,28 +1,33 @@
-use std::{panic::{self, AssertUnwindSafe}, sync::{Condvar, Mutex}, time::{Duration, Instant}};
-
-// TODO maybe make jobs tenant-specific? Makes monitorin easier.
+use std::{any::Any, fmt::Debug, panic::{self, AssertUnwindSafe}, sync::{Condvar, Mutex}, time::{Duration, Instant}};
 
 pub trait Job: std::fmt::Debug + Send + Clone + 'static {
-    fn run(&self);
-}
-
-#[derive(Debug, Clone)]
-enum JobStatus {
-    Ready,
-    Running(Instant),  // TODO add worker id
-    Stuck,  // TODO remember error
+    type ErrorType;
+    fn run(&self) -> Result<(), Self::ErrorType>;
 }
 
 #[derive(Debug)]
-struct JobStatusTable<J: Job> {
+enum JobError<J: Job> {
+    Panic(Box<dyn Any + Send>),
+    Error(J::ErrorType),
+}
+
+#[derive(Debug)]
+enum JobStatus<J: Job> where J::ErrorType: Debug {
+    Ready,
+    Running(Instant),  // TODO add worker id
+    Stuck(JobError<J>),
+}
+
+#[derive(Debug)]
+struct JobStatusTable<J: Job> where J::ErrorType: Debug {
     // TODO this vec is no good. Too much index arithmetic.
-    jobs: Vec<(J, JobStatus)>,
+    jobs: Vec<(J, JobStatus<J>)>,
     next: usize,
     begin: Instant,
     period: Duration,
 }
 
-impl<J: Job> JobStatusTable<J> {
+impl<J: Job> JobStatusTable<J> where J::ErrorType: Debug {
     fn next(&mut self) -> Option<(usize, J)> {
         while self.next < self.jobs.len() {
             let curr = self.next;
@@ -34,7 +39,7 @@ impl<J: Job> JobStatusTable<J> {
                     return Some((curr, self.jobs[curr].0.clone()))
                 }
                 JobStatus::Running(_) => println!("Job already running, skipping this round"),
-                JobStatus::Stuck => println!("Job stuck, skipping"),
+                JobStatus::Stuck(_) => println!("Job stuck, skipping"),
             }
         }
         None
@@ -53,12 +58,12 @@ impl<J: Job> JobStatusTable<J> {
 }
 
 #[derive(Debug)]
-struct Pool<J: Job> {
+pub struct Pool<J: Job> where J::ErrorType: Debug {
     job_table: Mutex<JobStatusTable<J>>,
     condvar: Condvar,  // Notified when idle worker should wake up
 }
 
-impl<J: Job> Pool<J> {
+impl<J: Job> Pool<J> where J::ErrorType: Debug {
     fn new() -> Self {
         Pool {
             job_table: Mutex::new(JobStatusTable::<J> {
@@ -78,17 +83,21 @@ impl<J: Job> Pool<J> {
                 // Run job without holding lock
                 drop(job_table);
                 let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                    job.run();
+                    job.run()
                 }));
                 job_table = self.job_table.lock().unwrap();
 
                 // Update job status
                 match result {
-                    Ok(()) => {
+                    Ok(Ok(())) => {
                         job_table.jobs[id].1 = JobStatus::Ready;
                     },
+                    Ok(Err(e)) => {
+                        job_table.jobs[id].1 = JobStatus::Stuck(JobError::Error(e));
+                        println!("Job errored, thread is ok.");
+                    },
                     Err(e) => {
-                        job_table.jobs[id].1 = JobStatus::Stuck;
+                        job_table.jobs[id].1 = JobStatus::Stuck(JobError::Panic(e));
                         println!("Job panicked, thread is ok.");
                     },
                 }
@@ -127,11 +136,14 @@ mod tests {
     }
 
     impl Job for PrintJob {
-        fn run(&self) {
+        type ErrorType = String;
+
+        fn run(&self) -> Result<(), String> {
             if self.to_print == "pls panic" {
                 panic!("AAA");
             }
             println!("{}", self.to_print);
+            Ok(())
         }
     }
 
