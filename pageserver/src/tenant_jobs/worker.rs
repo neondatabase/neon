@@ -42,6 +42,7 @@ impl<J: Job> Pool<J> {
 
                 // Run job without holding lock
                 drop(job_table);
+                // TODO don't run job if previous iteration is still running
                 let result = panic::catch_unwind(AssertUnwindSafe(|| {
                     job.run();
                 }));
