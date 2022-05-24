@@ -4,7 +4,7 @@ use crate::{repository::Repository, tenant_mgr::{self, TenantState}};
 
 use super::worker::{Job, Pool};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcJob {
     pub tenant: ZTenantId,
 }
