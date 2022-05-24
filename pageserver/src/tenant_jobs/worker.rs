@@ -97,7 +97,7 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
         loop {
             if let Some(Deadline {job, ..}) = job_table.pop_due() {
                 job_table.set_status(&job, JobStatus::Running {
-                    worker_name,
+                    worker_name: worker_name.clone(),
                     started_at: Instant::now(),
                 });
 
