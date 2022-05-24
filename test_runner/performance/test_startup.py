@@ -1,9 +1,11 @@
+import pytest
 from contextlib import closing
-
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.benchmark_fixture import ZenithBenchmarker
 
 
+# This test sometimes runs for longer than the global 5 minute timeout.
+@pytest.mark.timeout(600)
 def test_startup(zenith_env_builder: ZenithEnvBuilder, zenbenchmark: ZenithBenchmarker):
     zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()

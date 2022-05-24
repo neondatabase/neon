@@ -1,9 +1,12 @@
 import os
-
+import pytest
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
 
+# The pg_regress tests run for a long time, especially in debug mode,
+# so use a larger-than-default timeout.
+@pytest.mark.timeout(1800)
 def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, capsys):
     env = zenith_simple_env
 

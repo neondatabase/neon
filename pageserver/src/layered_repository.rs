@@ -1357,7 +1357,9 @@ impl LayeredTimeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+        // For debugging purposes, collect the path of layers that we traversed
+        // through. It's included in the error message if we fail to find the key.
+        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1387,32 +1389,24 @@ impl LayeredTimeline {
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
-
-                        // For debugging purposes, print the path of layers that we traversed
-                        // through.
-                        for (r, c, l) in path {
-                            error!(
-                                "PATH: result {:?}, cont_lsn {}, layer: {}",
-                                r,
-                                c,
-                                l.filename().display()
-                            );
-                        }
-                        bail!("could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                          key,
-                          Lsn(cont_lsn.0 - 1),
-                              request_lsn,
-                        timeline.ancestor_lsn)
+                        return layer_traversal_error(format!(
+                            "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                            key,
+                            Lsn(cont_lsn.0 - 1),
+                            request_lsn,
+                            timeline.ancestor_lsn
+                        ), traversal_path);
                     }
                     prev_lsn = cont_lsn;
                 }
                 ValueReconstructResult::Missing => {
-                    bail!(
-                        "could not find data for key {} at LSN {}, for request at LSN {}",
-                        key,
-                        cont_lsn,
-                        request_lsn
-                    )
+                    return layer_traversal_error(
+                        format!(
+                            "could not find data for key {} at LSN {}, for request at LSN {}",
+                            key, cont_lsn, request_lsn
+                        ),
+                        traversal_path,
+                    );
                 }
             }
 
@@ -1447,7 +1441,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    path.push((result, cont_lsn, open_layer.clone()));
+                    traversal_path.push((result, cont_lsn, open_layer.clone()));
                     continue;
                 }
             }
@@ -1462,7 +1456,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    path.push((result, cont_lsn, frozen_layer.clone()));
+                    traversal_path.push((result, cont_lsn, frozen_layer.clone()));
                     continue 'outer;
                 }
             }
@@ -1477,7 +1471,7 @@ impl LayeredTimeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                path.push((result, cont_lsn, layer));
+                traversal_path.push((result, cont_lsn, layer));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -1952,41 +1946,87 @@ impl LayeredTimeline {
         Ok(new_path)
     }
 
+    ///
+    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
+    /// as Level 1 files.
+    ///
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.read().unwrap();
-
-        let level0_deltas = layers.get_level0_deltas()?;
-
-        // We compact or "shuffle" the level-0 delta layers when they've
-        // accumulated over the compaction threshold.
-        if level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(());
-        }
+        let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
-        // FIXME: this function probably won't work correctly if there's overlap
-        // in the deltas.
-        let lsn_range = level0_deltas
-            .iter()
-            .map(|l| l.get_lsn_range())
-            .reduce(|a, b| min(a.start, b.start)..max(a.end, b.end))
-            .unwrap();
+        // Only compact if enough layers have accumulated.
+        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
+            return Ok(());
+        }
 
-        let all_values_iter = level0_deltas.iter().map(|l| l.iter()).kmerge_by(|a, b| {
-            if let Ok((a_key, a_lsn, _)) = a {
-                if let Ok((b_key, b_lsn, _)) = b {
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
+        // Gather the files to compact in this iteration.
+        //
+        // Start with the oldest Level 0 delta file, and collect any other
+        // level 0 files that form a contiguous sequence, such that the end
+        // LSN of previous file matches the start LSN of the next file.
+        //
+        // Note that if the files don't form such a sequence, we might
+        // "compact" just a single file. That's a bit pointless, but it allows
+        // us to get rid of the level 0 file, and compact the other files on
+        // the next iteration. This could probably made smarter, but such
+        // "gaps" in the sequence of level 0 files should only happen in case
+        // of a crash, partial download from cloud storage, or something like
+        // that, so it's not a big deal in practice.
+        level0_deltas.sort_by_key(|l| l.get_lsn_range().start);
+        let mut level0_deltas_iter = level0_deltas.iter();
+
+        let first_level0_delta = level0_deltas_iter.next().unwrap();
+        let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
+        let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
+        for l in level0_deltas_iter {
+            let lsn_range = l.get_lsn_range();
+
+            if lsn_range.start != prev_lsn_end {
+                break;
+            }
+            deltas_to_compact.push(Arc::clone(l));
+            prev_lsn_end = lsn_range.end;
+        }
+        let lsn_range = Range {
+            start: deltas_to_compact.first().unwrap().get_lsn_range().start,
+            end: deltas_to_compact.last().unwrap().get_lsn_range().end,
+        };
+
+        info!(
+            "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
+            lsn_range.start,
+            lsn_range.end,
+            deltas_to_compact.len(),
+            level0_deltas.len()
+        );
+        for l in deltas_to_compact.iter() {
+            info!("compact includes {}", l.filename().display());
+        }
+        // We don't need the original list of layers anymore. Drop it so that
+        // we don't accidentally use it later in the function.
+        drop(level0_deltas);
+
+        // This iterator walks through all key-value pairs from all the layers
+        // we're compacting, in key, LSN order.
+        let all_values_iter = deltas_to_compact
+            .iter()
+            .map(|l| l.iter())
+            .kmerge_by(|a, b| {
+                if let Ok((a_key, a_lsn, _)) = a {
+                    if let Ok((b_key, b_lsn, _)) = b {
+                        match a_key.cmp(b_key) {
+                            Ordering::Less => true,
+                            Ordering::Equal => a_lsn <= b_lsn,
+                            Ordering::Greater => false,
+                        }
+                    } else {
+                        false
                     }
                 } else {
-                    false
+                    true
                 }
-            } else {
-                true
-            }
-        });
+            });
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -2052,8 +2092,8 @@ impl LayeredTimeline {
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_do_delete = HashSet::with_capacity(level0_deltas.len());
-        for l in level0_deltas {
+        let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
+        for l in deltas_to_compact {
             l.delete()?;
             if let Some(path) = l.local_path() {
                 layer_paths_do_delete.insert(path);
@@ -2125,7 +2165,7 @@ impl LayeredTimeline {
 
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
-        let cutoff = gc_info.cutoff;
+        let cutoff = min(gc_info.cutoff, disk_consistent_lsn);
         let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
@@ -2254,12 +2294,20 @@ impl LayeredTimeline {
             // is 102, then it might not have been fully flushed to disk
             // before crash.
             //
-            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
-            if !layers.newer_image_layer_exists(
-                &l.get_key_range(),
-                l.get_lsn_range().end,
-                disk_consistent_lsn + 1,
-            )? {
+            // For example, imagine that the following layers exist:
+            //
+            // 1000      - image (A)
+            // 1000-2000 - delta (B)
+            // 2000      - image (C)
+            // 2000-3000 - delta (D)
+            // 3000      - image (E)
+            //
+            // If GC horizon is at 2500, we can remove layers A and B, but
+            // we cannot remove C, even though it's older than 2500, because
+            // the delta layer 2000-3000 depends on it.
+            if !layers
+                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+            {
                 debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
@@ -2373,6 +2421,32 @@ impl LayeredTimeline {
             }
         }
     }
+}
+
+/// Helper function for get_reconstruct_data() to add the path of layers traversed
+/// to an error, as anyhow context information.
+fn layer_traversal_error(
+    msg: String,
+    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+) -> anyhow::Result<()> {
+    // We want the original 'msg' to be the outermost context. The outermost context
+    // is the most high-level information, which also gets propagated to the client.
+    let mut msg_iter = path
+        .iter()
+        .map(|(r, c, l)| {
+            format!(
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                r,
+                c,
+                l.filename().display()
+            )
+        })
+        .chain(std::iter::once(msg));
+    // Construct initial message from the first traversed layer
+    let err = anyhow!(msg_iter.next().unwrap());
+
+    // Append all subsequent traversals, and the error message 'msg', as contexts.
+    Err(msg_iter.fold(err, |err, msg| err.context(msg)))
 }
 
 struct LayeredTimelineWriter<'a> {
