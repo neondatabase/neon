@@ -21,7 +21,7 @@ pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
-pub mod jobs;
+pub mod tenant_jobs;
 
 use lazy_static::lazy_static;
 use tracing::info;
