@@ -151,8 +151,8 @@ pub fn shutdown_all_tenants() {
     drop(m);
 
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollectionWorker), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::CompactionWorker), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.

@@ -92,7 +92,8 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
         }
     }
 
-    fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
+    // TODO listen for shutdown request?
+    pub fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
         let mut job_table = self.job_table.lock().unwrap();
         loop {
             if let Some(Deadline {job, ..}) = job_table.pop_due() {

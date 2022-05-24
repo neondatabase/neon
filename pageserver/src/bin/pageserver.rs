@@ -9,12 +9,7 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use fail::FailScenario;
-use pageserver::{
-    config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling, tenant_mgr, thread_mgr,
-    thread_mgr::ThreadKind,
-    timelines, virtual_file, LOG_FILE_NAME,
-};
+use pageserver::{LOG_FILE_NAME, config::{defaults::*, PageServerConf}, http, page_cache, page_service, profiling, tenant_jobs::gc::GC_POOL, tenant_mgr, thread_mgr, thread_mgr::ThreadKind, timelines, virtual_file};
 use utils::{
     auth::JwtAuth,
     http::endpoint,
@@ -304,6 +299,36 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         true,
         move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
     )?;
+
+    // Spawn GC workers
+    for i in 0..3 {
+        let name = format!("gc_worker_{}", i);
+        thread_mgr::spawn(
+            ThreadKind::GarbageCollectionWorker,
+            None,
+            None,
+            &name.clone(),
+            true,
+            move || {
+                GC_POOL.get().unwrap().worker_main(name.clone())
+            },
+        ).unwrap();
+    }
+
+    // Spawn compaction workers
+    for i in 0..3 {
+        let name = format!("compaction_worker_{}", i);
+        thread_mgr::spawn(
+            ThreadKind::CompactionWorker,
+            None,
+            None,
+            &name.clone(),
+            true,
+            move || {
+                GC_POOL.get().unwrap().worker_main(name.clone())
+            },
+        ).unwrap();
+    }
 
     signals.handle(|signal| match signal {
         Signal::Quit => {

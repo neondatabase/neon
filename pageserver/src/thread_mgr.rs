@@ -94,11 +94,11 @@ pub enum ThreadKind {
     // Thread that connects to a safekeeper to fetch WAL for one timeline.
     WalReceiver,
 
-    // Thread that handles compaction of all timelines for a tenant.
-    Compactor,
+    // Worker that does compaction jobs
+    CompactionWorker,
 
-    // Thread that handles GC of a tenant
-    GarbageCollector,
+    // Worker that does GC jobs
+    GarbageCollectionWorker,
 
     // Thread that flushes frozen in-memory layers to disk
     LayerFlushThread,
