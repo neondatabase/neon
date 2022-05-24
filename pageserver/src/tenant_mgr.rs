@@ -8,6 +8,8 @@ use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_jobs::compaction::{COMPACTION_POOL, CompactionJob};
+use crate::tenant_jobs::gc::{GC_POOL, GcJob};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
@@ -238,33 +240,18 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
         // If the tenant is already active, nothing to do.
         TenantState::Active => {}
 
-        // If it's Idle, launch the compactor and GC threads
+        // If it's Idle, launch the compactor and GC jobs
         TenantState::Idle => {
-            thread_mgr::spawn(
-                ThreadKind::Compactor,
-                Some(tenant_id),
-                None,
-                "Compactor thread",
-                false,
-                move || crate::tenant_threads::compact_loop(tenant_id),
-            )?;
-
-            let gc_spawn_result = thread_mgr::spawn(
-                ThreadKind::GarbageCollector,
-                Some(tenant_id),
-                None,
-                "GC thread",
-                false,
-                move || crate::tenant_threads::gc_loop(tenant_id),
-            )
-            .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
-
-            if let Err(e) = &gc_spawn_result {
-                error!("Failed to start GC thread for tenant {tenant_id}, stopping its checkpointer thread: {e:?}");
-                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
-                return gc_spawn_result;
-            }
+            // Important to activate before scheduling jobs
             tenant.state = TenantState::Active;
+
+            GC_POOL.get().unwrap().queue_job(GcJob {
+                tenant: tenant_id,
+            });
+
+            COMPACTION_POOL.get().unwrap().queue_job(CompactionJob {
+                tenant: tenant_id,
+            });
         }
 
         TenantState::Stopping => {

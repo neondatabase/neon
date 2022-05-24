@@ -145,7 +145,7 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
         }
     }
 
-    fn queue_job(&self, job: J) {
+    pub fn queue_job(&self, job: J) {
         let mut job_table = self.job_table.lock().unwrap();
         let scheduled_for = Instant::now();
         job_table.status.insert(job.clone(), JobStatus::Ready {
