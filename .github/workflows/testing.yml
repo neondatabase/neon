@@ -1,8 +1,10 @@
 name: Build and Test
 
 on:
-  pull_request:
   push:
+    branches:
+    - main
+  pull_request:
 
 jobs:
   regression-check:
