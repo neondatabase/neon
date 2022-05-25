@@ -231,10 +231,7 @@ pub fn create_tenant_repository(
     }
 }
 
-pub fn update_tenant_config(
-    tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
-) -> anyhow::Result<()> {
+pub fn update_tenant_config(tenant_conf: TenantConfOpt, tenant_id: TenantId) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     let repo = get_repository_for_tenant(tenant_id)?;
 
