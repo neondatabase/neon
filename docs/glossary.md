@@ -21,7 +21,7 @@ NOTE:It has nothing to do with PostgreSQL pg_basebackup.
 
 ### Branch
 
-We can create branch at certain LSN using `zenith timeline branch` command.
+We can create branch at certain LSN using `neon_local timeline branch` command.
 Each Branch lives in a corresponding timeline[] and has an ancestor[].
 
 
@@ -91,7 +91,7 @@ The layer map tracks what layers exist in a timeline.
 
 ### Layered repository
 
-Zenith repository implementation that keeps data in layers.
+Neon repository implementation that keeps data in layers.
 ### LSN
 
 The Log Sequence Number (LSN) is a unique identifier of the WAL record[] in the WAL log.
@@ -101,7 +101,7 @@ It is printed as two hexadecimal numbers of up to 8 digits each, separated by a 
 Check also [PostgreSQL doc about pg_lsn type](https://www.postgresql.org/docs/devel/datatype-pg-lsn.html)
 Values can be compared to calculate the volume of WAL data that separates them, so they are used to measure the progress of replication and recovery.
 
-In postgres and Zenith lsns are used to describe certain points in WAL handling.
+In Postgres and Neon LSNs are used to describe certain points in WAL handling.
 
 PostgreSQL LSNs and functions to monitor them:
 * `pg_current_wal_insert_lsn()` - Returns the current write-ahead log insert location.
@@ -111,13 +111,13 @@ PostgreSQL LSNs and functions to monitor them:
 * `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically.
 [source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
 
-Zenith safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
+Neon safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
 * `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
 
-Zenith pageserver LSNs:
+Neon pageserver LSNs:
 * `last_record_lsn` - the end of last processed WAL record.
 * `disk_consistent_lsn` - data is known to be fully flushed and fsync'd to local disk on pageserver up to this LSN.
 * `remote_consistent_lsn` - The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash.
@@ -132,7 +132,7 @@ This is the unit of data exchange between compute node and pageserver.
 
 ### Pageserver
 
-Zenith storage engine: repositories + wal receiver + page service + wal redo.
+Neon storage engine: repositories + wal receiver + page service + wal redo.
 
 ### Page service
 
@@ -184,10 +184,10 @@ relation exceeds that size, it is split into multiple segments.
 SLRUs include pg_clog, pg_multixact/members, and
 pg_multixact/offsets. There are other SLRUs in PostgreSQL, but
 they don't need to be stored permanently (e.g. pg_subtrans),
-or we do not support them in zenith yet (pg_commit_ts).
+or we do not support them in neon yet (pg_commit_ts).
 
 ### Tenant (Multitenancy)
-Tenant represents a single customer, interacting with Zenith.
+Tenant represents a single customer, interacting with Neon.
 Wal redo[] activity, timelines[], layers[] are managed for each tenant independently.
 One pageserver[] can serve multiple tenants at once.
 One safekeeper

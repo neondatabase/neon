@@ -930,13 +930,18 @@ where
     /// offloading.
     /// While it is safe to use inmem values for determining horizon,
     /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self) -> XLogSegNo {
+    pub fn get_horizon_segno(&self, s3_offload_enabled: bool) -> XLogSegNo {
+        let s3_offload_horizon = if s3_offload_enabled {
+            self.state.s3_wal_lsn
+        } else {
+            Lsn(u64::MAX)
+        };
         let horizon_lsn = min(
             min(
                 self.state.remote_consistent_lsn,
                 self.state.peer_horizon_lsn,
             ),
-            self.state.s3_wal_lsn,
+            s3_offload_horizon,
         );
         horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }

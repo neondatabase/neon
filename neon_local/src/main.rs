@@ -1,10 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches};
 use control_plane::compute::ComputeControlPlane;
-use control_plane::local_env;
-use control_plane::local_env::LocalEnv;
+use control_plane::local_env::{EtcdBroker, LocalEnv};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage::PageServerNode;
+use control_plane::{etcd, local_env};
 use pageserver::config::defaults::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
     DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
@@ -14,14 +14,15 @@ use safekeeper::defaults::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use utils::{
     auth::{Claims, Scope},
     lsn::Lsn,
     postgres_backend::AuthType,
+    project_git_version,
     zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
-    GIT_VERSION,
 };
 
 use pageserver::timelines::TimelineInfo;
@@ -30,29 +31,29 @@ use pageserver::timelines::TimelineInfo;
 const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
 const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
+project_git_version!(GIT_VERSION);
 
-fn default_conf() -> String {
+fn default_conf(etcd_binary_path: &Path) -> String {
     format!(
         r#"
 # Default built-in configuration, defined in main.rs
+[etcd_broker]
+broker_endpoints = ['http://localhost:2379']
+etcd_binary_path = '{etcd_binary_path}'
+
 [pageserver]
-id = {pageserver_id}
-listen_pg_addr = '{pageserver_pg_addr}'
-listen_http_addr = '{pageserver_http_addr}'
+id = {DEFAULT_PAGESERVER_ID}
+listen_pg_addr = '{DEFAULT_PAGESERVER_PG_ADDR}'
+listen_http_addr = '{DEFAULT_PAGESERVER_HTTP_ADDR}'
 auth_type = '{pageserver_auth_type}'
 
 [[safekeepers]]
-id = {safekeeper_id}
-pg_port = {safekeeper_pg_port}
-http_port = {safekeeper_http_port}
+id = {DEFAULT_SAFEKEEPER_ID}
+pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
+http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 "#,
-        pageserver_id = DEFAULT_PAGESERVER_ID,
-        pageserver_pg_addr = DEFAULT_PAGESERVER_PG_ADDR,
-        pageserver_http_addr = DEFAULT_PAGESERVER_HTTP_ADDR,
+        etcd_binary_path = etcd_binary_path.display(),
         pageserver_auth_type = AuthType::Trust,
-        safekeeper_id = DEFAULT_SAFEKEEPER_ID,
-        safekeeper_pg_port = DEFAULT_SAFEKEEPER_PG_PORT,
-        safekeeper_http_port = DEFAULT_SAFEKEEPER_HTTP_PORT,
     )
 }
 
@@ -166,12 +167,12 @@ fn main() -> Result<()> {
             .subcommand(App::new("create")
                 .arg(tenant_id_arg.clone())
                 .arg(timeline_id_arg.clone().help("Use a specific timeline id when creating a tenant and its initial timeline"))
-				.arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
-				)
+                .arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
+                )
             .subcommand(App::new("config")
                 .arg(tenant_id_arg.clone())
-				.arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
-				)
+                .arg(Arg::new("config").short('c').takes_value(true).multiple_occurrences(true).required(false))
+                )
         )
         .subcommand(
             App::new("pageserver")
@@ -274,7 +275,7 @@ fn main() -> Result<()> {
             "pageserver" => handle_pageserver(sub_args, &env),
             "pg" => handle_pg(sub_args, &env),
             "safekeeper" => handle_safekeeper(sub_args, &env),
-            _ => bail!("unexpected subcommand {}", sub_name),
+            _ => bail!("unexpected subcommand {sub_name}"),
         };
 
         if original_env != env {
@@ -288,7 +289,7 @@ fn main() -> Result<()> {
         Ok(Some(updated_env)) => updated_env.persist_config(&updated_env.base_data_dir)?,
         Ok(None) => (),
         Err(e) => {
-            eprintln!("command failed: {:?}", e);
+            eprintln!("command failed: {e:?}");
             exit(1);
         }
     }
@@ -467,21 +468,21 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<ZTimelineI
         .context("Failed to parse timeline id from the argument string")
 }
 
-fn handle_init(init_match: &ArgMatches) -> Result<LocalEnv> {
+fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let initial_timeline_id_arg = parse_timeline_id(init_match)?;
 
     // Create config file
     let toml_file: String = if let Some(config_path) = init_match.value_of("config") {
         // load and parse the file
         std::fs::read_to_string(std::path::Path::new(config_path))
-            .with_context(|| format!("Could not read configuration file \"{}\"", config_path))?
+            .with_context(|| format!("Could not read configuration file '{config_path}'"))?
     } else {
         // Built-in default config
-        default_conf()
+        default_conf(&EtcdBroker::locate_etcd()?)
     };
 
     let mut env =
-        LocalEnv::create_config(&toml_file).context("Failed to create neon configuration")?;
+        LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
     env.init().context("Failed to initialize neon repository")?;
 
     // default_tenantid was generated by the `env.init()` call above
@@ -496,7 +497,7 @@ fn handle_init(init_match: &ArgMatches) -> Result<LocalEnv> {
             &pageserver_config_overrides(init_match),
         )
         .unwrap_or_else(|e| {
-            eprintln!("pageserver init failed: {}", e);
+            eprintln!("pageserver init failed: {e}");
             exit(1);
         });
 
@@ -539,6 +540,29 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             println!(
                 "tenant {} successfully created on the pageserver",
                 new_tenant_id
+            );
+
+            // Create an initial timeline for the new tenant
+            let new_timeline_id = parse_timeline_id(create_match)?;
+            let timeline = pageserver
+                .timeline_create(new_tenant_id, new_timeline_id, None, None)?
+                .context(format!(
+                    "Failed to create initial timeline for tenant {new_tenant_id}"
+                ))?;
+            let new_timeline_id = timeline.timeline_id;
+            let last_record_lsn = timeline
+                .local
+                .context(format!("Failed to get last record LSN: no local timeline info for timeline {new_timeline_id}"))?
+                .last_record_lsn;
+
+            env.register_branch_mapping(
+                DEFAULT_BRANCH_NAME.to_string(),
+                new_tenant_id,
+                new_timeline_id,
+            )?;
+
+            println!(
+                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {new_tenant_id}",
             );
         }
         Some(("config", create_match)) => {
@@ -896,20 +920,23 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
+    etcd::start_etcd_process(env)?;
     let pageserver = PageServerNode::from_env(env);
 
     // Postgres nodes are not started automatically
 
     if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
-        eprintln!("pageserver start failed: {}", e);
+        eprintln!("pageserver start failed: {e}");
+        try_stop_etcd_process(env);
         exit(1);
     }
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start() {
-            eprintln!("safekeeper '{}' start failed: {}", safekeeper.id, e);
+            eprintln!("safekeeper '{}' start failed: {e}", safekeeper.id);
+            try_stop_etcd_process(env);
             exit(1);
         }
     }
@@ -939,5 +966,14 @@ fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<
             eprintln!("safekeeper '{}' stop failed: {}", safekeeper.id, e);
         }
     }
+
+    try_stop_etcd_process(env);
+
     Ok(())
+}
+
+fn try_stop_etcd_process(env: &local_env::LocalEnv) {
+    if let Err(e) = etcd::stop_etcd_process(env) {
+        eprintln!("etcd stop failed: {e}");
+    }
 }

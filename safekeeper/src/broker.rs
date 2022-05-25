@@ -34,19 +34,19 @@ pub fn thread_main(conf: SafeKeeperConf) {
 
 /// Key to per timeline per safekeeper data.
 fn timeline_safekeeper_path(
-    broker_prefix: String,
+    broker_etcd_prefix: String,
     zttid: ZTenantTimelineId,
     sk_id: ZNodeId,
 ) -> String {
     format!(
         "{}/{sk_id}",
-        SkTimelineSubscriptionKind::timeline(broker_prefix, zttid).watch_key()
+        SkTimelineSubscriptionKind::timeline(broker_etcd_prefix, zttid).watch_key()
     )
 }
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
-    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
     // Get and maintain lease to automatically delete obsolete data
     let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
@@ -60,7 +60,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // lock is held.
         for zttid in GlobalTimelines::get_active_timelines() {
             if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                let sk_info = tli.get_public_info()?;
+                let sk_info = tli.get_public_info(&conf)?;
                 let put_opts = PutOptions::new().with_lease(lease.id());
                 client
                     .put(
@@ -91,7 +91,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
-    let mut client = Client::connect(&conf.broker_endpoints.as_ref().unwrap(), None).await?;
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
     let mut subscription = etcd_broker::subscribe_to_safekeeper_timeline_updates(
         &mut client,
@@ -99,7 +99,6 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     )
     .await
     .context("failed to subscribe for safekeeper info")?;
-
     loop {
         match subscription.fetch_data().await {
             Some(new_info) => {

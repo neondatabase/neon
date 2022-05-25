@@ -37,11 +37,8 @@ use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use tracing::*;
-// avoid binding to Write (conflicts with std::io::Write)
-// while being able to use std::fmt::Write's methods
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
@@ -49,6 +46,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tracing::*;
 
 use utils::{
     bin_ser::BeSer,
@@ -254,6 +252,9 @@ impl Layer for DeltaLayer {
                     return false;
                 }
                 let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                if entry_lsn < lsn_range.start {
+                    return false;
+                }
                 offsets.push((entry_lsn, blob_ref.pos()));
 
                 !blob_ref.will_init()
@@ -362,6 +363,28 @@ impl Layer for DeltaLayer {
         tree_reader.dump()?;
 
         let mut cursor = file.block_cursor();
+
+        // A subroutine to dump a single blob
+        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
+            let buf = cursor.read_blob(blob_ref.pos())?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        };
+
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
@@ -370,34 +393,10 @@ impl Layer for DeltaLayer {
                 let key = DeltaKey::extract_key_from_buf(delta_key);
                 let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
 
-                let mut desc = String::new();
-                match cursor.read_blob(blob_ref.pos()) {
-                    Ok(buf) => {
-                        let val = Value::des(&buf);
-                        match val {
-                            Ok(Value::Image(img)) => {
-                                write!(&mut desc, " img {} bytes", img.len()).unwrap();
-                            }
-                            Ok(Value::WalRecord(rec)) => {
-                                let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
-                                write!(
-                                    &mut desc,
-                                    " rec {} bytes will_init: {} {}",
-                                    buf.len(),
-                                    rec.will_init(),
-                                    wal_desc
-                                )
-                                .unwrap();
-                            }
-                            Err(err) => {
-                                write!(&mut desc, " DESERIALIZATION ERROR: {}", err).unwrap();
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        write!(&mut desc, " READ ERROR: {}", err).unwrap();
-                    }
-                }
+                let desc = match dump_blob(blob_ref) {
+                    Ok(desc) => desc,
+                    Err(err) => format!("ERROR: {}", err),
+                };
                 println!("  key {} at {}: {}", key, lsn, desc);
                 true
             },
@@ -420,6 +419,28 @@ impl DeltaLayer {
                 .timeline_path(&timelineid, &tenantid)
                 .join(fname.to_string()),
         }
+    }
+
+    fn temp_path_for(
+        conf: &PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        key_start: Key,
+        lsn_range: &Range<Lsn>,
+    ) -> PathBuf {
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+
+        conf.timeline_path(&timelineid, &tenantid).join(format!(
+            "{}-XXX__{:016X}-{:016X}.{}.temp",
+            key_start,
+            u64::from(lsn_range.start),
+            u64::from(lsn_range.end),
+            rand_string
+        ))
     }
 
     ///
@@ -609,12 +630,8 @@ impl DeltaLayerWriter {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
-            "{}-XXX__{:016X}-{:016X}.temp",
-            key_start,
-            u64::from(lsn_range.start),
-            u64::from(lsn_range.end)
-        ));
+        let path = DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, &lsn_range);
+
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
@@ -707,6 +724,8 @@ impl DeltaLayerWriter {
             }),
         };
 
+        // fsync the file
+        file.sync_all()?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.

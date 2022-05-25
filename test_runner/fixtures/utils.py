@@ -1,8 +1,9 @@
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
-from typing import Any, List
+from typing import Any, List, Optional
 from fixtures.log_helper import log
 
 
@@ -75,13 +76,17 @@ def lsn_from_hex(lsn_hex: str) -> int:
 def print_gc_result(row):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
-        "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
+        "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
+        " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
         .format_map(row))
 
 
-# path to etcd binary or None if not present.
-def etcd_path():
-    return shutil.which("etcd")
+def etcd_path() -> Path:
+    path_output = shutil.which("etcd")
+    if path_output is None:
+        raise RuntimeError('etcd not found in PATH')
+    else:
+        return Path(path_output)
 
 
 # Traverse directory to get total size.

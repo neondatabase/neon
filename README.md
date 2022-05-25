@@ -23,29 +23,70 @@ Pageserver consists of:
 
 ## Running local installation
 
+
+#### building on Ubuntu/ Debian (Linux)
 1. Install build dependencies and other useful packages
 
 On Ubuntu or Debian this set of packages should be sufficient to build the code:
 ```text
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev
+libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 ```
 
-[Rust] 1.58 or later is also required.
+2. [Install Rust](https://www.rust-lang.org/tools/install)
+```
+# recommended approach from https://www.rust-lang.org/tools/install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
+3. Install PostgreSQL Client
+```
+apt install postgresql-client
+```
 
-To run the integration tests or Python scripts (not required to use the code), install
-Python (3.7 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
-
-2. Build neon and patched postgres
+4. Build neon and patched postgres
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 make -j5
 ```
 
-3. Start pageserver and postgres on top of it (should be called from repo root):
+#### building on OSX (12.3.1)
+1. Install XCode and dependencies
+```
+xcode-select --install
+brew install protobuf etcd
+```
+
+2. [Install Rust](https://www.rust-lang.org/tools/install)
+```
+# recommended approach from https://www.rust-lang.org/tools/install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+3. Install PostgreSQL Client
+```
+# from https://stackoverflow.com/questions/44654216/correct-way-to-install-psql-without-full-postgres-on-macos
+brew install libpq
+brew link --force libpq
+```
+
+4. Build neon and patched postgres
+```sh
+git clone --recursive https://github.com/neondatabase/neon.git
+cd neon
+make -j5
+```
+
+#### dependency installation notes
+To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
+
+To run the integration tests or Python scripts (not required to use the code), install
+Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
+
+
+#### running neon database
+1. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
 # Create repository in .zenith with proper paths to binaries and data
 # Later that would be responsibility of a package install script
@@ -75,7 +116,7 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=po
  main  127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main         0/16B5BA8  running
 ```
 
-4. Now it is possible to connect to postgres and run some queries:
+2. Now it is possible to connect to postgres and run some queries:
 ```text
 > psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
@@ -89,7 +130,7 @@ postgres=# select * from t;
 (1 row)
 ```
 
-5. And create branches and run postgres on them:
+3. And create branches and run postgres on them:
 ```sh
 # create branch named migration_check
 > ./target/debug/neon_local timeline branch --branch-name migration_check
@@ -133,7 +174,7 @@ postgres=# select * from t;
 (1 row)
 ```
 
-6. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
+4. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
    you have just started. You can stop them all with one command:
 ```sh
 > ./target/debug/neon_local stop

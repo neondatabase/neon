@@ -45,7 +45,7 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_live_connections_count",
+        "pageserver_live_connections",
         "Number of live network connections",
         &["pageserver_connection_kind"]
     )

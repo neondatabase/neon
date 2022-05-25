@@ -30,7 +30,7 @@ def test_bulk_tenant_create(
     for i in range(tenants_count):
         start = timeit.default_timer()
 
-        tenant = env.zenith_cli.create_tenant()
+        tenant, _ = env.zenith_cli.create_tenant()
         env.zenith_cli.create_timeline(
             f'test_bulk_tenant_create_{tenants_count}_{i}_{use_safekeepers}', tenant_id=tenant)
 

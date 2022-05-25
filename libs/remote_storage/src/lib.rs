@@ -87,7 +87,8 @@ pub trait RemoteStorage: Send + Sync {
     async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()>;
 }
 
-/// TODO kb
+/// Every storage, currently supported.
+/// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
 pub enum GenericRemoteStorage {
     Local(LocalFs),
     S3(S3Bucket),

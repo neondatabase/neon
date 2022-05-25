@@ -45,6 +45,8 @@ pub struct LocalTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
     #[serde_as(as = "DisplayFromStr")]
+    pub latest_gc_cutoff_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
@@ -68,6 +70,7 @@ impl LocalTimelineInfo {
             disk_consistent_lsn: datadir_tline.tline.get_disk_consistent_lsn(),
             last_record_lsn,
             prev_record_lsn: Some(datadir_tline.tline.get_prev_record_lsn()),
+            latest_gc_cutoff_lsn: *datadir_tline.tline.get_latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Loaded,
             current_logical_size: Some(datadir_tline.get_current_logical_size()),
             current_logical_size_non_incremental: if include_non_incremental_logical_size {
@@ -91,6 +94,7 @@ impl LocalTimelineInfo {
             disk_consistent_lsn: metadata.disk_consistent_lsn(),
             last_record_lsn: metadata.disk_consistent_lsn(),
             prev_record_lsn: metadata.prev_record_lsn(),
+            latest_gc_cutoff_lsn: metadata.latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Unloaded,
             current_logical_size: None,
             current_logical_size_non_incremental: None,

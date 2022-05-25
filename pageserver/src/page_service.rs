@@ -19,7 +19,6 @@ use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
-use std::time::Duration;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
@@ -326,7 +325,7 @@ const TIME_BUCKETS: &[f64] = &[
 
 lazy_static! {
     static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_smgr_query_time",
+        "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
         TIME_BUCKETS.into()
@@ -731,7 +730,18 @@ impl postgres_backend::Handler for PageServerHandler {
             for failpoint in failpoints.split(';') {
                 if let Some((name, actions)) = failpoint.split_once('=') {
                     info!("cfg failpoint: {} {}", name, actions);
-                    fail::cfg(name, actions).unwrap();
+
+                    // We recognize one extra "action" that's not natively recognized
+                    // by the failpoints crate: exit, to immediately kill the process
+                    if actions == "exit" {
+                        fail::cfg_callback(name, || {
+                            info!("Exit requested by failpoint");
+                            std::process::exit(1);
+                        })
+                        .unwrap();
+                    } else {
+                        fail::cfg(name, actions).unwrap();
+                    }
                 } else {
                     bail!("Invalid failpoints format");
                 }
@@ -796,7 +806,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            let result = repo.gc_iteration(Some(timelineid), gc_horizon, Duration::ZERO, true)?;
+            // Use tenant's pitr setting
+            let pitr = repo.get_pitr_interval();
+            let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"layers_total"),
                 RowDescriptor::int8_col(b"layers_needed_by_cutoff"),

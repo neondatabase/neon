@@ -3,7 +3,6 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use lazy_static::lazy_static;
-use once_cell::race::OnceBox;
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_gauge, Gauge};
 pub use prometheus::{register_gauge_vec, GaugeVec};
@@ -27,48 +26,15 @@ pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     prometheus::gather()
 }
 
-static COMMON_METRICS_PREFIX: OnceBox<&str> = OnceBox::new();
-
-/// Sets a prefix which will be used for all common metrics, typically a service
-/// name like 'pageserver'. Should be executed exactly once in the beginning of
-/// any executable which uses common metrics.
-pub fn set_common_metrics_prefix(prefix: &'static str) {
-    // Not unwrap() because metrics may be initialized after multiple threads have been started.
-    COMMON_METRICS_PREFIX
-        .set(prefix.into())
-        .unwrap_or_else(|_| {
-            eprintln!(
-                "set_common_metrics_prefix() was called second time with '{}', exiting",
-                prefix
-            );
-            std::process::exit(1);
-        });
-}
-
-/// Prepends a prefix to a common metric name so they are distinguished between
-/// different services, see <https://github.com/zenithdb/zenith/pull/681>
-/// A call to set_common_metrics_prefix() is necessary prior to calling this.
-pub fn new_common_metric_name(unprefixed_metric_name: &str) -> String {
-    // Not unwrap() because metrics may be initialized after multiple threads have been started.
-    format!(
-        "{}_{}",
-        COMMON_METRICS_PREFIX.get().unwrap_or_else(|| {
-            eprintln!("set_common_metrics_prefix() was not called, but metrics are used, exiting");
-            std::process::exit(1);
-        }),
-        unprefixed_metric_name
-    )
-}
-
 lazy_static! {
     static ref DISK_IO_BYTES: IntGaugeVec = register_int_gauge_vec!(
-        new_common_metric_name("disk_io_bytes"),
+        "libmetrics_disk_io_bytes_total",
         "Bytes written and read from disk, grouped by the operation (read|write)",
         &["io_operation"]
     )
     .expect("Failed to register disk i/o bytes int gauge vec");
     static ref MAXRSS_KB: IntGauge = register_int_gauge!(
-        new_common_metric_name("maxrss_kb"),
+        "libmetrics_maxrss_kb",
         "Memory usage (Maximum Resident Set Size)"
     )
     .expect("Failed to register maxrss_kb int gauge");

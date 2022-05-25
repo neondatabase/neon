@@ -151,7 +151,7 @@ It is assumed that in case of loosing local data by some safekeepers, it should 
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
 * `NodeID`: pair (term,UUID)
-* `Pager`: Zenith component restoring pages from WAL stream
+* `Pager`: Neon component restoring pages from WAL stream
 * `Replica`: read-only computatio node
 * `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
 

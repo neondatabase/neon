@@ -16,7 +16,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}'''
 
     env = zenith_env_builder.init_start()
     """Test per tenant configuration"""
-    tenant = env.zenith_cli.create_tenant(conf={
+    tenant, _ = env.zenith_cli.create_tenant(conf={
         'checkpoint_distance': '20000',
         'gc_period': '30sec',
     })

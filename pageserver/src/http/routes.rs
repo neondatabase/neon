@@ -224,6 +224,30 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::OK, timeline_info)
 }
 
+async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let wal_receiver = tokio::task::spawn_blocking(move || {
+        let _enter =
+            info_span!("wal_receiver_get", tenant = %tenant_id, timeline = %timeline_id).entered();
+
+        crate::walreceiver::get_wal_receiver_entry(tenant_id, timeline_id)
+    })
+    .await
+    .map_err(ApiError::from_err)?
+    .ok_or_else(|| {
+        ApiError::NotFound(format!(
+            "WAL receiver not found for tenant {} and timeline {}",
+            tenant_id, timeline_id
+        ))
+    })?;
+
+    json_response(StatusCode::OK, wal_receiver)
+}
+
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -484,6 +508,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
+            wal_receiver_get_handler,
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",

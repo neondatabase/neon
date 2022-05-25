@@ -19,6 +19,10 @@ use utils::{
     zid::{ZNodeId, ZTenantId, ZTenantTimelineId},
 };
 
+/// Default value to use for prefixing to all etcd keys with.
+/// This way allows isolating safekeeper/pageserver groups in the same etcd cluster.
+pub const DEFAULT_NEON_BROKER_ETCD_PREFIX: &str = "neon";
+
 #[derive(Debug, Deserialize, Serialize)]
 struct SafekeeperTimeline {
     safekeeper_id: ZNodeId,
@@ -51,7 +55,7 @@ pub struct SkTimelineInfo {
     #[serde(default)]
     pub peer_horizon_lsn: Option<Lsn>,
     #[serde(default)]
-    pub wal_stream_connection_string: Option<String>,
+    pub safekeeper_connection_string: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,28 +108,28 @@ impl SkTimelineSubscription {
 /// The subscription kind to the timeline updates from safekeeper.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SkTimelineSubscriptionKind {
-    broker_prefix: String,
+    broker_etcd_prefix: String,
     kind: SubscriptionKind,
 }
 
 impl SkTimelineSubscriptionKind {
-    pub fn all(broker_prefix: String) -> Self {
+    pub fn all(broker_etcd_prefix: String) -> Self {
         Self {
-            broker_prefix,
+            broker_etcd_prefix,
             kind: SubscriptionKind::All,
         }
     }
 
-    pub fn tenant(broker_prefix: String, tenant: ZTenantId) -> Self {
+    pub fn tenant(broker_etcd_prefix: String, tenant: ZTenantId) -> Self {
         Self {
-            broker_prefix,
+            broker_etcd_prefix,
             kind: SubscriptionKind::Tenant(tenant),
         }
     }
 
-    pub fn timeline(broker_prefix: String, timeline: ZTenantTimelineId) -> Self {
+    pub fn timeline(broker_etcd_prefix: String, timeline: ZTenantTimelineId) -> Self {
         Self {
-            broker_prefix,
+            broker_etcd_prefix,
             kind: SubscriptionKind::Timeline(timeline),
         }
     }
@@ -134,12 +138,12 @@ impl SkTimelineSubscriptionKind {
         match self.kind {
             SubscriptionKind::All => Regex::new(&format!(
                 r"^{}/([[:xdigit:]]+)/([[:xdigit:]]+)/safekeeper/([[:digit:]])$",
-                self.broker_prefix
+                self.broker_etcd_prefix
             ))
             .expect("wrong regex for 'everything' subscription"),
             SubscriptionKind::Tenant(tenant_id) => Regex::new(&format!(
                 r"^{}/{tenant_id}/([[:xdigit:]]+)/safekeeper/([[:digit:]])$",
-                self.broker_prefix
+                self.broker_etcd_prefix
             ))
             .expect("wrong regex for 'tenant' subscription"),
             SubscriptionKind::Timeline(ZTenantTimelineId {
@@ -147,7 +151,7 @@ impl SkTimelineSubscriptionKind {
                 timeline_id,
             }) => Regex::new(&format!(
                 r"^{}/{tenant_id}/{timeline_id}/safekeeper/([[:digit:]])$",
-                self.broker_prefix
+                self.broker_etcd_prefix
             ))
             .expect("wrong regex for 'timeline' subscription"),
         }
@@ -156,16 +160,16 @@ impl SkTimelineSubscriptionKind {
     /// Etcd key to use for watching a certain timeline updates from safekeepers.
     pub fn watch_key(&self) -> String {
         match self.kind {
-            SubscriptionKind::All => self.broker_prefix.to_string(),
+            SubscriptionKind::All => self.broker_etcd_prefix.to_string(),
             SubscriptionKind::Tenant(tenant_id) => {
-                format!("{}/{tenant_id}/safekeeper", self.broker_prefix)
+                format!("{}/{tenant_id}/safekeeper", self.broker_etcd_prefix)
             }
             SubscriptionKind::Timeline(ZTenantTimelineId {
                 tenant_id,
                 timeline_id,
             }) => format!(
                 "{}/{tenant_id}/{timeline_id}/safekeeper",
-                self.broker_prefix
+                self.broker_etcd_prefix
             ),
         }
     }
@@ -217,16 +221,22 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                 break;
             }
 
-            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>> =
-                HashMap::new();
+            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>> = HashMap::new();
+            // Keep track that the timeline data updates from etcd arrive in the right order.
+            // https://etcd.io/docs/v3.5/learning/api_guarantees/#isolation-level-and-consistency-of-replicas
+            // > etcd does not ensure linearizability for watch operations. Users are expected to verify the revision of watch responses to ensure correct ordering.
+            let mut timeline_etcd_versions: HashMap<ZTenantTimelineId, i64> = HashMap::new();
+
 
             let events = resp.events();
             debug!("Processing {} events", events.len());
 
             for event in events {
                 if EventType::Put == event.event_type() {
-                    if let Some(kv) = event.kv() {
-                        match parse_etcd_key_value(subscription_kind, &regex, kv) {
+                    if let Some(new_etcd_kv) = event.kv() {
+                        let new_kv_version = new_etcd_kv.version();
+
+                        match parse_etcd_key_value(subscription_kind, &regex, new_etcd_kv) {
                             Ok(Some((zttid, timeline))) => {
                                 match timeline_updates
                                     .entry(zttid)
@@ -234,12 +244,15 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                     .entry(timeline.safekeeper_id)
                                 {
                                     hash_map::Entry::Occupied(mut o) => {
-                                        if o.get().flush_lsn < timeline.info.flush_lsn {
+                                        let old_etcd_kv_version = timeline_etcd_versions.get(&zttid).copied().unwrap_or(i64::MIN);
+                                        if old_etcd_kv_version < new_kv_version {
                                             o.insert(timeline.info);
+                                            timeline_etcd_versions.insert(zttid,new_kv_version);
                                         }
                                     }
                                     hash_map::Entry::Vacant(v) => {
                                         v.insert(timeline.info);
+                                        timeline_etcd_versions.insert(zttid,new_kv_version);
                                     }
                                 }
                             }

@@ -26,24 +26,24 @@ use utils::{
     http::endpoint,
     logging,
     postgres_backend::AuthType,
+    project_git_version,
     shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
     zid::{ZTenantId, ZTimelineId},
-    GIT_VERSION,
 };
+
+project_git_version!(GIT_VERSION);
 
 fn version() -> String {
     format!(
-        "{} profiling:{} failpoints:{}",
-        GIT_VERSION,
+        "{GIT_VERSION} profiling:{} failpoints:{}",
         cfg!(feature = "profiling"),
         fail::has_failpoints()
     )
 }
 
 fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
@@ -103,6 +103,8 @@ fn main() -> anyhow::Result<()> {
         let features: &[&str] = &[
             #[cfg(feature = "failpoints")]
             "failpoints",
+            #[cfg(feature = "profiling")]
+            "profiling",
         ];
         println!("{{\"features\": {features:?} }}");
         return Ok(());
@@ -188,13 +190,8 @@ fn main() -> anyhow::Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-    // If failpoints are used, terminate the whole pageserver process if they are hit.
+    // Initialize up failpoints support
     let scenario = FailScenario::setup();
-    if fail::has_failpoints() {
-        std::panic::set_hook(Box::new(|_| {
-            std::process::exit(1);
-        }));
-    }
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
@@ -223,7 +220,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -263,7 +260,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(err) => error!(%err, "could not daemonize"),
+            Err(err) => bail!("{err}. could not daemonize. bailing."),
         }
     }
 

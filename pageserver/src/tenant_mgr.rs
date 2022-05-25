@@ -80,6 +80,9 @@ pub enum TenantState {
     // The local disk might have some newer files that don't exist in cloud storage yet.
     // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
     Stopping,
+
+    // Something went wrong loading the tenant state
+    Broken,
 }
 
 impl fmt::Display for TenantState {
@@ -88,6 +91,7 @@ impl fmt::Display for TenantState {
             TenantState::Active => f.write_str("Active"),
             TenantState::Idle => f.write_str("Idle"),
             TenantState::Stopping => f.write_str("Stopping"),
+            TenantState::Broken => f.write_str("Broken"),
         }
     }
 }
@@ -101,7 +105,22 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
         local_timeline_init_statuses,
     } = storage_sync::start_local_timeline_sync(conf)
         .context("Failed to set up local files sync with external storage")?;
-    init_local_repositories(conf, local_timeline_init_statuses, &remote_index)?;
+
+    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
+        if let Err(err) =
+            init_local_repository(conf, tenant_id, local_timeline_init_statuses, &remote_index)
+        {
+            // Report the error, but continue with the startup for other tenants. An error
+            // loading a tenant is serious, but it's better to complete the startup and
+            // serve other tenants, than fail completely.
+            error!("Failed to initialize local tenant {tenant_id}: {:?}", err);
+            let mut m = tenants_state::write_tenants();
+            if let Some(tenant) = m.get_mut(&tenant_id) {
+                tenant.state = TenantState::Broken;
+            }
+        }
+    }
+
     Ok(remote_index)
 }
 
@@ -145,8 +164,13 @@ pub fn shutdown_all_tenants() {
     let mut m = tenants_state::write_tenants();
     let mut tenantids = Vec::new();
     for (tenantid, tenant) in m.iter_mut() {
-        tenant.state = TenantState::Stopping;
-        tenantids.push(*tenantid)
+        match tenant.state {
+            TenantState::Active | TenantState::Idle | TenantState::Stopping => {
+                tenant.state = TenantState::Stopping;
+                tenantids.push(*tenantid)
+            }
+            TenantState::Broken => {}
+        }
     }
     drop(m);
 
@@ -259,6 +283,10 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
         TenantState::Stopping => {
             // don't re-activate it if it's being stopped
         }
+
+        TenantState::Broken => {
+            // cannot activate
+        }
     }
     Ok(())
 }
@@ -359,38 +387,37 @@ pub fn list_tenants() -> Vec<TenantInfo> {
         .collect()
 }
 
-fn init_local_repositories(
+fn init_local_repository(
     conf: &'static PageServerConf,
-    local_timeline_init_statuses: HashMap<ZTenantId, HashMap<ZTimelineId, LocalTimelineInitStatus>>,
+    tenant_id: ZTenantId,
+    local_timeline_init_statuses: HashMap<ZTimelineId, LocalTimelineInitStatus>,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<(), anyhow::Error> {
-    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
-        // initialize local tenant
-        let repo = load_local_repo(conf, tenant_id, remote_index)
-            .with_context(|| format!("Failed to load repo for tenant {tenant_id}"))?;
+    // initialize local tenant
+    let repo = load_local_repo(conf, tenant_id, remote_index)
+        .with_context(|| format!("Failed to load repo for tenant {tenant_id}"))?;
 
-        let mut status_updates = HashMap::with_capacity(local_timeline_init_statuses.len());
-        for (timeline_id, init_status) in local_timeline_init_statuses {
-            match init_status {
-                LocalTimelineInitStatus::LocallyComplete => {
-                    debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
-                    status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
-                }
-                LocalTimelineInitStatus::NeedsSync => {
-                    debug!(
-                        "timeline {tenant_id} for tenant {timeline_id} needs sync, \
-                         so skipped for adding into repository until sync is finished"
-                    );
-                }
+    let mut status_updates = HashMap::with_capacity(local_timeline_init_statuses.len());
+    for (timeline_id, init_status) in local_timeline_init_statuses {
+        match init_status {
+            LocalTimelineInitStatus::LocallyComplete => {
+                debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
+                status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
+            }
+            LocalTimelineInitStatus::NeedsSync => {
+                debug!(
+                    "timeline {tenant_id} for tenant {timeline_id} needs sync, \
+                     so skipped for adding into repository until sync is finished"
+                );
             }
         }
-
-        // Lets fail here loudly to be on the safe side.
-        // XXX: It may be a better api to actually distinguish between repository startup
-        //   and processing of newly downloaded timelines.
-        apply_timeline_remote_sync_status_updates(&repo, status_updates)
-            .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?
     }
+
+    // Lets fail here loudly to be on the safe side.
+    // XXX: It may be a better api to actually distinguish between repository startup
+    //   and processing of newly downloaded timelines.
+    apply_timeline_remote_sync_status_updates(&repo, status_updates)
+        .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?;
     Ok(())
 }
 

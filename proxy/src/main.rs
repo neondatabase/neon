@@ -25,7 +25,9 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::{future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
-use utils::GIT_VERSION;
+use utils::project_git_version;
+
+project_git_version!(GIT_VERSION);
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
@@ -36,7 +38,6 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(
@@ -124,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
     }));
 
-    println!("Version: {}", GIT_VERSION);
+    println!("Version: {GIT_VERSION}");
 
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", http_address);

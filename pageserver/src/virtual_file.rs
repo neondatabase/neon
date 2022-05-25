@@ -34,7 +34,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 
 lazy_static! {
     static ref STORAGE_IO_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_io_time",
+        "pageserver_io_operations_seconds",
         "Time spent in IO operations",
         &["operation", "tenant_id", "timeline_id"],
         STORAGE_IO_TIME_BUCKETS.into()
@@ -43,8 +43,8 @@ lazy_static! {
 }
 lazy_static! {
     static ref STORAGE_IO_SIZE: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_io_size",
-        "Amount of bytes",
+        "pageserver_io_operations_bytes_total",
+        "Total amount of bytes read/written in IO operations",
         &["operation", "tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");

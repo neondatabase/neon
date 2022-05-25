@@ -9,7 +9,7 @@
 //!
 //! * public API via to interact with the external world:
 //!     * [`start_local_timeline_sync`] to launch a background async loop to handle the synchronization
-//!     * [`schedule_timeline_checkpoint_upload`] and [`schedule_timeline_download`] to enqueue a new upload and download tasks,
+//!     * [`schedule_layer_upload`], [`schedule_layer_download`], and[`schedule_layer_delete`] to enqueue a new task
 //!       to be processed by the async loop
 //!
 //! Here's a schematic overview of all interactions backup and the rest of the pageserver perform:
@@ -44,8 +44,8 @@
 //! query their downloads later if they are accessed.
 //!
 //! Some time later, during pageserver checkpoints, in-memory data is flushed onto disk along with its metadata.
-//! If the storage sync loop was successfully started before, pageserver schedules the new checkpoint file uploads after every checkpoint.
-//! The checkpoint uploads are disabled, if no remote storage configuration is provided (no sync loop is started this way either).
+//! If the storage sync loop was successfully started before, pageserver schedules the layer files and the updated metadata file for upload, every time a layer is flushed to disk.
+//! The uploads are disabled, if no remote storage configuration is provided (no sync loop is started this way either).
 //! See [`crate::layered_repository`] for the upload calls and the adjacent logic.
 //!
 //! Synchronization logic is able to communicate back with updated timeline sync states, [`crate::repository::TimelineSyncStatusUpdate`],
@@ -54,7 +54,7 @@
 //! * once after the sync loop startup, to signal pageserver which timelines will be synchronized in the near future
 //! * after every loop step, in case a timeline needs to be reloaded or evicted from pageserver's memory
 //!
-//! When the pageserver terminates, the sync loop finishes a current sync task (if any) and exits.
+//! When the pageserver terminates, the sync loop finishes current sync task (if any) and exits.
 //!
 //! The storage logic considers `image` as a set of local files (layers), fully representing a certain timeline at given moment (identified with `disk_consistent_lsn` from the corresponding `metadata` file).
 //! Timeline can change its state, by adding more files on disk and advancing its `disk_consistent_lsn`: this happens after pageserver checkpointing and is followed
@@ -66,13 +66,13 @@
 //! when the newer image is downloaded
 //!
 //! Pageserver maintains similar to the local file structure remotely: all layer files are uploaded with the same names under the same directory structure.
-//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexShard`], containing the list of remote files.
+//! Yet instead of keeping the `metadata` file remotely, we wrap it with more data in [`IndexPart`], containing the list of remote files.
 //! This file gets read to populate the cache, if the remote timeline data is missing from it and gets updated after every successful download.
 //! This way, we optimize S3 storage access by not running the `S3 list` command that could be expencive and slow: knowing both [`ZTenantId`] and [`ZTimelineId`],
 //! we can always reconstruct the path to the timeline, use this to get the same path on the remote storage and retrive its shard contents, if needed, same as any layer files.
 //!
 //! By default, pageserver reads the remote storage index data only for timelines located locally, to synchronize those, if needed.
-//! Bulk index data download happens only initially, on pageserer startup. The rest of the remote storage stays unknown to pageserver and loaded on demand only,
+//! Bulk index data download happens only initially, on pageserver startup. The rest of the remote storage stays unknown to pageserver and loaded on demand only,
 //! when a new timeline is scheduled for the download.
 //!
 //! NOTES:
@@ -89,13 +89,12 @@
 //! Synchronization is done with the queue being emptied via separate thread asynchronously,
 //! attempting to fully store pageserver's local data on the remote storage in a custom format, beneficial for storing.
 //!
-//! A queue is implemented in the [`sync_queue`] module as a pair of sender and receiver channels, to block on zero tasks instead of checking the queue.
-//! The pair's shared buffer of a fixed size serves as an implicit queue, holding [`SyncTask`] for local files upload/download operations.
+//! A queue is implemented in the [`sync_queue`] module as a VecDeque to hold the tasks, and a condition variable for blocking when the queue is empty.
 //!
 //! The queue gets emptied by a single thread with the loop, that polls the tasks in batches of deduplicated tasks.
 //! A task from the batch corresponds to a single timeline, with its files to sync merged together: given that only one task sync loop step is active at a time,
 //! timeline uploads and downloads can happen concurrently, in no particular order due to incremental nature of the timeline layers.
-//! Deletion happens only after a successful upload only, otherwise the compation output might make the timeline inconsistent until both tasks are fully processed without errors.
+//! Deletion happens only after a successful upload only, otherwise the compaction output might make the timeline inconsistent until both tasks are fully processed without errors.
 //! Upload and download update the remote data (inmemory index and S3 json index part file) only after every layer is successfully synchronized, while the deletion task
 //! does otherwise: it requires to have the remote data updated first succesfully: blob files will be invisible to pageserver this way.
 //!
@@ -138,8 +137,6 @@
 //! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
 //!
 //! After the whole timeline is downloaded, [`crate::tenant_mgr::apply_timeline_sync_status_updates`] function is used to update pageserver memory stage for the timeline processed.
-//!
-//! When pageserver signals shutdown, current sync task gets finished and the loop exists.
 
 mod delete;
 mod download;
@@ -153,10 +150,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{Arc, Condvar, Mutex},
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -167,7 +161,6 @@ use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::{
     fs,
     runtime::Runtime,
-    sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender},
     time::{Duration, Instant},
 };
 use tracing::*;
@@ -208,12 +201,12 @@ lazy_static! {
     )
     .expect("failed to register pageserver remote storage remaining sync items int gauge");
     static ref FATAL_TASK_FAILURES: IntCounter = register_int_counter!(
-        "pageserver_remote_storage_fatal_task_failures",
+        "pageserver_remote_storage_fatal_task_failures_total",
         "Number of critically failed tasks"
     )
     .expect("failed to register pageserver remote storage remaining sync items int gauge");
     static ref IMAGE_SYNC_TIME: HistogramVec = register_histogram_vec!(
-        "pageserver_remote_storage_image_sync_time",
+        "pageserver_remote_storage_image_sync_seconds",
         "Time took to synchronize (download or upload) a whole pageserver image. \
         Grouped by `operation_kind` (upload|download) and `status` (success|failure)",
         &["operation_kind", "status"],
@@ -428,6 +421,14 @@ fn collect_timeline_files(
                         entry_path.display()
                     )
                 })?;
+            } else if entry_path.extension().and_then(OsStr::to_str) == Some("temp") {
+                info!("removing temp layer file at {}", entry_path.display());
+                std::fs::remove_file(&entry_path).with_context(|| {
+                    format!(
+                        "failed to remove temp layer file at {}",
+                        entry_path.display()
+                    )
+                })?;
             } else {
                 timeline_files.insert(entry_path);
             }
@@ -453,96 +454,76 @@ fn collect_timeline_files(
     Ok((timeline_id, metadata, timeline_files))
 }
 
-/// Wraps mpsc channel bits around into a queue interface.
-/// mpsc approach was picked to allow blocking the sync loop if no tasks are present, to avoid meaningless spinning.
+/// Global queue of sync tasks.
+///
+/// 'queue' is protected by a mutex, and 'condvar' is used to wait for tasks to arrive.
 struct SyncQueue {
-    len: AtomicUsize,
     max_timelines_per_batch: NonZeroUsize,
-    sender: UnboundedSender<(ZTenantTimelineId, SyncTask)>,
+
+    queue: Mutex<VecDeque<(ZTenantTimelineId, SyncTask)>>,
+    condvar: Condvar,
 }
 
 impl SyncQueue {
-    fn new(
-        max_timelines_per_batch: NonZeroUsize,
-    ) -> (Self, UnboundedReceiver<(ZTenantTimelineId, SyncTask)>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        (
-            Self {
-                len: AtomicUsize::new(0),
-                max_timelines_per_batch,
-                sender,
-            },
-            receiver,
-        )
+    fn new(max_timelines_per_batch: NonZeroUsize) -> Self {
+        Self {
+            max_timelines_per_batch,
+            queue: Mutex::new(VecDeque::new()),
+            condvar: Condvar::new(),
+        }
     }
 
+    /// Queue a new task
     fn push(&self, sync_id: ZTenantTimelineId, new_task: SyncTask) {
-        match self.sender.send((sync_id, new_task)) {
-            Ok(()) => {
-                self.len.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(e) => {
-                error!("failed to push sync task to queue: {e}");
-            }
+        let mut q = self.queue.lock().unwrap();
+
+        q.push_back((sync_id, new_task));
+        if q.len() <= 1 {
+            self.condvar.notify_one();
         }
     }
 
     /// Fetches a task batch, getting every existing entry from the queue, grouping by timelines and merging the tasks for every timeline.
-    /// A timeline has to care to not to delete cetain layers from the remote storage before the corresponding uploads happen.
-    /// Otherwise, due to "immutable" nature of the layers, the order of their deletion/uploading/downloading does not matter.
+    /// A timeline has to care to not to delete certain layers from the remote storage before the corresponding uploads happen.
+    /// Other than that, due to "immutable" nature of the layers, the order of their deletion/uploading/downloading does not matter.
     /// Hence, we merge the layers together into single task per timeline and run those concurrently (with the deletion happening only after successful uploading).
-    async fn next_task_batch(
-        &self,
-        // The queue is based on two ends of a channel and has to be accessible statically without blocking for submissions from the sync code.
-        // Its receiver needs &mut, so we cannot place it in the same container with the other end and get both static and non-blocking access.
-        // Hence toss this around to use it from the sync loop directly as &mut.
-        sync_queue_receiver: &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
-    ) -> HashMap<ZTenantTimelineId, SyncTaskBatch> {
-        // request the first task in blocking fashion to do less meaningless work
-        let (first_sync_id, first_task) = if let Some(first_task) = sync_queue_receiver.recv().await
-        {
-            self.len.fetch_sub(1, Ordering::Relaxed);
-            first_task
-        } else {
-            info!("Queue sender part was dropped, aborting");
-            return HashMap::new();
-        };
+    fn next_task_batch(&self) -> (HashMap<ZTenantTimelineId, SyncTaskBatch>, usize) {
+        // Wait for the first task in blocking fashion
+        let mut q = self.queue.lock().unwrap();
+        while q.is_empty() {
+            q = self
+                .condvar
+                .wait_timeout(q, Duration::from_millis(1000))
+                .unwrap()
+                .0;
+
+            if thread_mgr::is_shutdown_requested() {
+                return (HashMap::new(), q.len());
+            }
+        }
+        let (first_sync_id, first_task) = q.pop_front().unwrap();
+
         let mut timelines_left_to_batch = self.max_timelines_per_batch.get() - 1;
-        let mut tasks_to_process = self.len();
+        let tasks_to_process = q.len();
 
         let mut batches = HashMap::with_capacity(tasks_to_process);
         batches.insert(first_sync_id, SyncTaskBatch::new(first_task));
 
         let mut tasks_to_reenqueue = Vec::with_capacity(tasks_to_process);
 
-        // Pull the queue channel until we get all tasks that were there at the beginning of the batch construction.
+        // Greedily grab as many other tasks that we can.
         // Yet do not put all timelines in the batch, but only the first ones that fit the timeline limit.
-        // Still merge the rest of the pulled tasks and reenqueue those for later.
-        while tasks_to_process > 0 {
-            match sync_queue_receiver.try_recv() {
-                Ok((sync_id, new_task)) => {
-                    self.len.fetch_sub(1, Ordering::Relaxed);
-                    tasks_to_process -= 1;
-
-                    match batches.entry(sync_id) {
-                        hash_map::Entry::Occupied(mut v) => v.get_mut().add(new_task),
-                        hash_map::Entry::Vacant(v) => {
-                            timelines_left_to_batch = timelines_left_to_batch.saturating_sub(1);
-                            if timelines_left_to_batch == 0 {
-                                tasks_to_reenqueue.push((sync_id, new_task));
-                            } else {
-                                v.insert(SyncTaskBatch::new(new_task));
-                            }
-                        }
+        // Re-enqueue the tasks that don't fit in this batch.
+        while let Some((sync_id, new_task)) = q.pop_front() {
+            match batches.entry(sync_id) {
+                hash_map::Entry::Occupied(mut v) => v.get_mut().add(new_task),
+                hash_map::Entry::Vacant(v) => {
+                    timelines_left_to_batch = timelines_left_to_batch.saturating_sub(1);
+                    if timelines_left_to_batch == 0 {
+                        tasks_to_reenqueue.push((sync_id, new_task));
+                    } else {
+                        v.insert(SyncTaskBatch::new(new_task));
                     }
-                }
-                Err(TryRecvError::Disconnected) => {
-                    debug!("Sender disconnected, batch collection aborted");
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    debug!("No more data in the sync queue, task batch is not full");
-                    break;
                 }
             }
         }
@@ -553,14 +534,15 @@ impl SyncQueue {
             tasks_to_reenqueue.len()
         );
         for (id, task) in tasks_to_reenqueue {
-            self.push(id, task);
+            q.push_back((id, task));
         }
 
-        batches
+        (batches, q.len())
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
+        self.queue.lock().unwrap().len()
     }
 }
 
@@ -823,7 +805,7 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
     debug!("Download task for tenant {tenant_id}, timeline {timeline_id} sent")
 }
 
-/// Uses a remote storage given to start the storage sync loop.
+/// Launch a thread to perform remote storage sync tasks.
 /// See module docs for loop step description.
 pub(super) fn spawn_storage_sync_thread<P, S>(
     conf: &'static PageServerConf,
@@ -836,7 +818,7 @@ where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
-    let (sync_queue, sync_queue_receiver) = SyncQueue::new(max_concurrent_timelines_sync);
+    let sync_queue = SyncQueue::new(max_concurrent_timelines_sync);
     SYNC_QUEUE
         .set(sync_queue)
         .map_err(|_queue| anyhow!("Could not initialize sync queue"))?;
@@ -864,7 +846,7 @@ where
         local_timeline_files,
     );
 
-    let loop_index = remote_index.clone();
+    let remote_index_clone = remote_index.clone();
     thread_mgr::spawn(
         ThreadKind::StorageSync,
         None,
@@ -875,12 +857,7 @@ where
             storage_sync_loop(
                 runtime,
                 conf,
-                (
-                    Arc::new(storage),
-                    loop_index,
-                    sync_queue,
-                    sync_queue_receiver,
-                ),
+                (Arc::new(storage), remote_index_clone, sync_queue),
                 max_sync_errors,
             );
             Ok(())
@@ -896,12 +873,7 @@ where
 fn storage_sync_loop<P, S>(
     runtime: Runtime,
     conf: &'static PageServerConf,
-    (storage, index, sync_queue, mut sync_queue_receiver): (
-        Arc<S>,
-        RemoteIndex,
-        &SyncQueue,
-        UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
-    ),
+    (storage, index, sync_queue): (Arc<S>, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
 ) where
     P: Debug + Send + Sync + 'static,
@@ -909,16 +881,35 @@ fn storage_sync_loop<P, S>(
 {
     info!("Starting remote storage sync loop");
     loop {
-        let loop_index = index.clone();
         let loop_storage = Arc::clone(&storage);
+
+        let (batched_tasks, remaining_queue_length) = sync_queue.next_task_batch();
+
+        if thread_mgr::is_shutdown_requested() {
+            info!("Shutdown requested, stopping");
+            break;
+        }
+
+        REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
+        if remaining_queue_length > 0 || !batched_tasks.is_empty() {
+            info!("Processing tasks for {} timelines in batch, more tasks left to process: {remaining_queue_length}", batched_tasks.len());
+        } else {
+            debug!("No tasks to process");
+            continue;
+        }
+
+        // Concurrently perform all the tasks in the batch
         let loop_step = runtime.block_on(async {
             tokio::select! {
-                step = loop_step(
+                step = process_batches(
                     conf,
-                    (loop_storage, loop_index, sync_queue, &mut sync_queue_receiver),
                     max_sync_errors,
+                    loop_storage,
+                    &index,
+                    batched_tasks,
+                    sync_queue,
                 )
-                .instrument(info_span!("storage_sync_loop_step")) => step,
+                    .instrument(info_span!("storage_sync_loop_step")) => ControlFlow::Continue(step),
                 _ = thread_mgr::shutdown_watcher() => ControlFlow::Break(()),
             }
         });
@@ -944,31 +935,18 @@ fn storage_sync_loop<P, S>(
     }
 }
 
-async fn loop_step<P, S>(
+async fn process_batches<P, S>(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue, sync_queue_receiver): (
-        Arc<S>,
-        RemoteIndex,
-        &SyncQueue,
-        &mut UnboundedReceiver<(ZTenantTimelineId, SyncTask)>,
-    ),
     max_sync_errors: NonZeroU32,
-) -> ControlFlow<(), HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>>
+    storage: Arc<S>,
+    index: &RemoteIndex,
+    batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
+    sync_queue: &SyncQueue,
+) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
-    let batched_tasks = sync_queue.next_task_batch(sync_queue_receiver).await;
-
-    let remaining_queue_length = sync_queue.len();
-    REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
-    if remaining_queue_length > 0 || !batched_tasks.is_empty() {
-        info!("Processing tasks for {} timelines in batch, more tasks left to process: {remaining_queue_length}", batched_tasks.len());
-    } else {
-        debug!("No tasks to process");
-        return ControlFlow::Continue(HashMap::new());
-    }
-
     let mut sync_results = batched_tasks
         .into_iter()
         .map(|(sync_id, batch)| {
@@ -993,6 +971,7 @@ where
         ZTenantId,
         HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
     > = HashMap::new();
+
     while let Some((sync_id, state_update)) = sync_results.next().await {
         debug!("Finished storage sync task for sync id {sync_id}");
         if let Some(state_update) = state_update {
@@ -1003,7 +982,7 @@ where
         }
     }
 
-    ControlFlow::Continue(new_timeline_states)
+    new_timeline_states
 }
 
 async fn process_sync_task_batch<P, S>(
@@ -1376,7 +1355,6 @@ where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
-    info!("Updating remote index for the timeline");
     let updated_remote_timeline = {
         let mut index_accessor = index.write().await;
 
@@ -1443,7 +1421,7 @@ where
         IndexPart::from_remote_timeline(&timeline_path, updated_remote_timeline)
             .context("Failed to create an index part from the updated remote timeline")?;
 
-    info!("Uploading remote data for the timeline");
+    info!("Uploading remote index for the timeline");
     upload_index_part(conf, storage, sync_id, new_index_part)
         .await
         .context("Failed to upload new index part")
@@ -1685,7 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn separate_task_ids_batch() {
-        let (sync_queue, mut sync_queue_receiver) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         assert_eq!(sync_queue.len(), 0);
 
         let sync_id_2 = ZTenantTimelineId {
@@ -1720,7 +1698,7 @@ mod tests {
 
         let submitted_tasks_count = sync_queue.len();
         assert_eq!(submitted_tasks_count, 3);
-        let mut batch = sync_queue.next_task_batch(&mut sync_queue_receiver).await;
+        let (mut batch, _) = sync_queue.next_task_batch();
         assert_eq!(
             batch.len(),
             submitted_tasks_count,
@@ -1746,7 +1724,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_task_id_separate_tasks_batch() {
-        let (sync_queue, mut sync_queue_receiver) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         assert_eq!(sync_queue.len(), 0);
 
         let download = LayersDownload {
@@ -1769,7 +1747,7 @@ mod tests {
 
         let submitted_tasks_count = sync_queue.len();
         assert_eq!(submitted_tasks_count, 3);
-        let mut batch = sync_queue.next_task_batch(&mut sync_queue_receiver).await;
+        let (mut batch, _) = sync_queue.next_task_batch();
         assert_eq!(
             batch.len(),
             1,
@@ -1801,7 +1779,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_task_id_same_tasks_batch() {
-        let (sync_queue, mut sync_queue_receiver) = SyncQueue::new(NonZeroUsize::new(1).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(1).unwrap());
         let download_1 = LayersDownload {
             layers_to_skip: HashSet::from([PathBuf::from("sk1")]),
         };
@@ -1823,11 +1801,11 @@ mod tests {
 
         sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_1.clone()));
         sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_2.clone()));
-        sync_queue.push(sync_id_2, SyncTask::download(download_3.clone()));
+        sync_queue.push(sync_id_2, SyncTask::download(download_3));
         sync_queue.push(TEST_SYNC_ID, SyncTask::download(download_4.clone()));
         assert_eq!(sync_queue.len(), 4);
 
-        let mut smallest_batch = sync_queue.next_task_batch(&mut sync_queue_receiver).await;
+        let (mut smallest_batch, _) = sync_queue.next_task_batch();
         assert_eq!(
             smallest_batch.len(),
             1,

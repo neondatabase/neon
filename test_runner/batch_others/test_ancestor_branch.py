@@ -10,18 +10,11 @@ from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserv
 # Create ancestor branches off the main branch.
 #
 def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
-
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/zenithdb/zenith/issues/1068
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
-    tenant = env.zenith_cli.create_tenant(
+    tenant, _ = env.zenith_cli.create_tenant(
         conf={
             'gc_period': '10 m',
             'gc_horizon': '1048576',
@@ -35,7 +28,6 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
             pscur.execute("failpoints flush-frozen=sleep(10000)")
 
-    env.zenith_cli.create_timeline(f'main', tenant_id=tenant)
     pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
     branch0_cur.execute("SHOW zenith.zenith_timeline")

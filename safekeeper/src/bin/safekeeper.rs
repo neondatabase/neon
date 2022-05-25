@@ -17,19 +17,21 @@ use url::{ParseError, Url};
 use safekeeper::control_file::{self};
 use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
 use safekeeper::remove_wal;
+use safekeeper::timeline::GlobalTimelines;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, callmemaybe};
 use safekeeper::{http, s3_offload};
 use utils::{
-    http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
+    http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
+    zid::ZNodeId,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
+project_git_version!(GIT_VERSION);
 
-fn main() -> Result<()> {
-    metrics::set_common_metrics_prefix("safekeeper");
+fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
@@ -115,6 +117,14 @@ fn main() -> Result<()> {
             .takes_value(true)
             .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
         )
+        .arg(
+            Arg::new("enable-s3-offload")
+                .long("enable-s3-offload")
+                .takes_value(true)
+                .default_value("true")
+                .default_missing_value("true")
+                .help("Enable/disable s3 offloading. When disabled, safekeeper removes WAL ignoring s3 WAL horizon."),
+        )
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
@@ -166,11 +176,18 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("broker-endpoints") {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
-        conf.broker_endpoints = Some(collected_ep?);
+        conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
     }
     if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
         conf.broker_etcd_prefix = prefix.to_string();
     }
+
+    // Seems like there is no better way to accept bool values explicitly in clap.
+    conf.s3_offload_enabled = arg_matches
+        .value_of("enable-s3-offload")
+        .unwrap()
+        .parse()
+        .context("failed to parse bool enable-s3-offload bool")?;
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
@@ -178,7 +195,7 @@ fn main() -> Result<()> {
 fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
@@ -228,12 +245,14 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(err) => bail!("Error: {err}. could not daemonize. bailing."),
         }
     }
 
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
+    let (callmemaybe_tx, callmemaybe_rx) = mpsc::unbounded_channel();
+    GlobalTimelines::set_callmemaybe_tx(callmemaybe_tx);
 
     let conf_ = conf.clone();
     threads.push(
@@ -262,13 +281,12 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         );
     }
 
-    let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
         .name("Safekeeper thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = wal_service::thread_main(conf_cloned, pg_listener, tx);
+            let thread_result = wal_service::thread_main(conf_cloned, pg_listener);
             if let Err(e) = thread_result {
                 info!("safekeeper thread terminated: {}", e);
             }
@@ -282,7 +300,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         .name("callmemaybe thread".into())
         .spawn(|| {
             // thread code
-            let thread_result = callmemaybe::thread_main(conf_cloned, rx);
+            let thread_result = callmemaybe::thread_main(conf_cloned, callmemaybe_rx);
             if let Err(e) = thread_result {
                 error!("callmemaybe thread terminated: {}", e);
             }
@@ -290,7 +308,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         .unwrap();
     threads.push(callmemaybe_thread);
 
-    if conf.broker_endpoints.is_some() {
+    if !conf.broker_endpoints.is_empty() {
         let conf_ = conf.clone();
         threads.push(
             thread::Builder::new()
@@ -299,6 +317,8 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
                     broker::thread_main(conf_);
                 })?,
         );
+    } else {
+        warn!("No broker endpoints providing, starting without node sync")
     }
 
     let conf_ = conf.clone();

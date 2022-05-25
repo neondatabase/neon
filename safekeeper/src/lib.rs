@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::zid::{ZNodeId, ZTenantTimelineId};
+use utils::zid::{ZNodeId, ZTenantId, ZTenantTimelineId};
 
 pub mod broker;
 pub mod callmemaybe;
@@ -27,11 +27,10 @@ pub mod defaults {
 
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 5454;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-    pub const DEFAULT_NEON_BROKER_PREFIX: &str = "neon";
 
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 7676;
     pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
-    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(1);
+    pub const DEFAULT_RECALL_PERIOD: Duration = Duration::from_secs(10);
 }
 
 #[derive(Debug, Clone)]
@@ -51,14 +50,18 @@ pub struct SafeKeeperConf {
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
     pub my_id: ZNodeId,
-    pub broker_endpoints: Option<Vec<Url>>,
+    pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
+    pub s3_offload_enabled: bool,
 }
 
 impl SafeKeeperConf {
+    pub fn tenant_dir(&self, tenant_id: &ZTenantId) -> PathBuf {
+        self.workdir.join(tenant_id.to_string())
+    }
+
     pub fn timeline_dir(&self, zttid: &ZTenantTimelineId) -> PathBuf {
-        self.workdir
-            .join(zttid.tenant_id.to_string())
+        self.tenant_dir(&zttid.tenant_id)
             .join(zttid.timeline_id.to_string())
     }
 }
@@ -77,8 +80,9 @@ impl Default for SafeKeeperConf {
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
             my_id: ZNodeId(0),
-            broker_endpoints: None,
-            broker_etcd_prefix: defaults::DEFAULT_NEON_BROKER_PREFIX.to_string(),
+            broker_endpoints: Vec::new(),
+            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
+            s3_offload_enabled: true,
         }
     }
 }

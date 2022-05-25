@@ -166,7 +166,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "libc",
- "miniz_oxide",
+ "miniz_oxide 0.4.4",
  "object",
  "rustc-demangle",
 ]
@@ -869,6 +869,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "279fb028e20b3c4c320317955b77c5e0c9701f05a1d309905d6fc702cdc5053e"
 
 [[package]]
+name = "flate2"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39522e96686d38f4bc984b9198e3a0613264abaebaff2c5c918bfa6b6da09af"
+dependencies = [
+ "cfg-if",
+ "crc32fast",
+ "libc",
+ "miniz_oxide 0.5.1",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1528,6 +1540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "miniz_oxide"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2b29bd4bc3f33391105ebee3589c19197c4271e3e5a9ec9bfe8127eeff8f082"
+dependencies = [
+ "adler",
+]
+
+[[package]]
 name = "mio"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1582,6 +1603,7 @@ dependencies = [
  "clap 3.0.14",
  "comfy-table",
  "control_plane",
+ "git-version",
  "pageserver",
  "postgres",
  "postgres_ffi",
@@ -1771,8 +1793,10 @@ dependencies = [
  "crc32c",
  "crossbeam-utils",
  "daemonize",
+ "etcd_broker",
  "fail",
  "futures",
+ "git-version",
  "hex",
  "hex-literal",
  "humantime",
@@ -2023,15 +2047,18 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32c",
+ "env_logger",
  "hex",
  "lazy_static",
  "log",
  "memoffset",
+ "postgres",
  "rand",
  "regex",
  "serde",
  "thiserror",
  "utils",
+ "wal_generate",
  "workspace_hack",
 ]
 
@@ -2086,6 +2113,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95e344cafeaeefe487300c361654bcfc85db3ac53619eeccced29f5ea18c4c70"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "flate2",
+ "hex",
+ "lazy_static",
+ "libc",
+]
+
+[[package]]
 name = "prometheus"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2094,8 +2135,10 @@ dependencies = [
  "cfg-if",
  "fnv",
  "lazy_static",
+ "libc",
  "memchr",
  "parking_lot 0.11.2",
+ "procfs",
  "thiserror",
 ]
 
@@ -2164,6 +2207,7 @@ dependencies = [
  "bytes",
  "clap 3.0.14",
  "futures",
+ "git-version",
  "hashbrown",
  "hex",
  "hmac 0.12.1",
@@ -2616,6 +2660,7 @@ dependencies = [
  "daemonize",
  "etcd_broker",
  "fs2",
+ "git-version",
  "hex",
  "humantime",
  "hyper",
@@ -3584,6 +3629,18 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "wal_generate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 3.0.14",
+ "env_logger",
+ "log",
+ "postgres",
+ "tempfile",
+]
 
 [[package]]
 name = "walkdir"

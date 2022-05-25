@@ -264,13 +264,13 @@ impl ReplicationConn {
             } else {
                 let pageserver_connstr = pageserver_connstr.expect("there should be a pageserver connection string since this is not a wal_proposer_recovery");
                 let zttid = spg.timeline.get().zttid;
-                let tx_clone = spg.tx.clone();
+                let tx_clone = spg.timeline.get().callmemaybe_tx.clone();
                 let subscription_key = SubscriptionStateKey::new(
                     zttid.tenant_id,
                     zttid.timeline_id,
                     pageserver_connstr.clone(),
                 );
-                spg.tx
+                tx_clone
                     .send(CallmeEvent::Pause(subscription_key))
                     .unwrap_or_else(|e| {
                         error!("failed to send Pause request to callmemaybe thread {}", e);
@@ -315,7 +315,7 @@ impl ReplicationConn {
                 } else {
                     // TODO: also check once in a while whether we are walsender
                     // to right pageserver.
-                    if spg.timeline.get().check_deactivate(replica_id, &spg.tx)? {
+                    if spg.timeline.get().check_deactivate(replica_id)? {
                         // Shut down, timeline is suspended.
                         // TODO create proper error type for this
                         bail!("end streaming to {:?}", spg.appname);
