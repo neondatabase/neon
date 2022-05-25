@@ -30,7 +30,7 @@ jobs:
     environment:
       BUILD_TYPE: << parameters.build_type >>
     steps:
-        # Checkout the git repo (circleci doesn't have a flag to enable submodules here)
+      # Checkout the git repo (circleci doesn't have a flag to enable submodules here)
       - checkout
 
         # Grab the postgres git revision to build a cache key.
@@ -39,8 +39,8 @@ jobs:
       - run:
           name: Get postgres cache key
           command: |
-              git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
-              cat Makefile >> /tmp/cache-key-postgres
+            git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
+            cat Makefile >> /tmp/cache-key-postgres
 
       - restore_cache:
           name: Restore postgres cache
@@ -77,7 +77,7 @@ jobs:
     environment:
       BUILD_TYPE: << parameters.build_type >>
     steps:
-        # Checkout the git repo (without submodules)
+      # Checkout the git repo (without submodules)
       - checkout
 
         # Grab the postgres git revision to build a cache key.
@@ -88,7 +88,6 @@ jobs:
           command: |
             git rev-parse HEAD:vendor/postgres > /tmp/cache-key-postgres
             cat Makefile >> /tmp/cache-key-postgres
-
 
       - restore_cache:
           name: Restore postgres cache
@@ -226,8 +225,8 @@ jobs:
           name: Print versions
           when: always
           command: |
-              poetry run python --version
-              poetry show
+            poetry run python --version
+            poetry show
       - run:
           name: Run yapf to ensure code format
           when: always
@@ -293,7 +292,7 @@ jobs:
           # `Too long with no output` error, if a test is running for a long time.
           # In that case, tests should have internal timeouts that are less than
           # no_output_timeout, specified here.
-          no_output_timeout: 10m
+          no_output_timeout: 30m
           environment:
             - ZENITH_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
