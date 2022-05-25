@@ -18,7 +18,7 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
@@ -65,7 +65,7 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct SafekeeperNode {
-    pub id: ZNodeId,
+    pub id: NodeId,
 
     pub conf: SafekeeperConf,
 
@@ -100,7 +100,7 @@ impl SafekeeperNode {
             .unwrap()
     }
 
-    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: ZNodeId) -> PathBuf {
+    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
         env.safekeeper_data_dir(format!("sk{}", sk_id).as_ref())
     }
 
@@ -286,7 +286,7 @@ impl SafekeeperNode {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<()> {
         Ok(self
             .http_request(

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::{
     lsn::Lsn,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 #[serde_as]
@@ -42,7 +42,7 @@ pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub ZTenantId
 
 #[derive(Serialize)]
 pub struct StatusResponse {
-    pub id: ZNodeId,
+    pub id: NodeId,
 }
 
 impl TenantCreateRequest {

@@ -1893,7 +1893,11 @@ class Etcd:
                 f"--data-dir={self.datadir}",
                 f"--listen-client-urls={client_url}",
                 f"--advertise-client-urls={client_url}",
-                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}"
+                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}",
+                # Set --quota-backend-bytes to keep the etcd virtual memory
+                # size smaller. Our test etcd clusters are very small.
+                # See https://github.com/etcd-io/etcd/issues/7910
+                f"--quota-backend-bytes=100000000"
             ]
             self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
 
