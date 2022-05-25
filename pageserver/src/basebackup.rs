@@ -10,8 +10,9 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
+use fail::fail_point;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
@@ -30,11 +31,16 @@ use utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a> {
-    ar: Builder<&'a mut dyn Write>,
+pub struct Basebackup<'a, W>
+where
+    W: Write,
+{
+    ar: Builder<AbortableWrite<W>>,
     timeline: &'a Arc<DatadirTimelineImpl>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
+
+    finished: bool,
 }
 
 // Create basebackup with non-rel data in it. Omit relational data.
@@ -44,12 +50,15 @@ pub struct Basebackup<'a> {
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a> Basebackup<'a> {
+impl<'a, W> Basebackup<'a, W>
+where
+    W: Write,
+{
     pub fn new(
-        write: &'a mut dyn Write,
+        write: W,
         timeline: &'a Arc<DatadirTimelineImpl>,
         req_lsn: Option<Lsn>,
-    ) -> Result<Basebackup<'a>> {
+    ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -90,14 +99,15 @@ impl<'a> Basebackup<'a> {
         );
 
         Ok(Basebackup {
-            ar: Builder::new(write),
+            ar: Builder::new(AbortableWrite::new(write)),
             timeline,
             lsn: backup_lsn,
             prev_record_lsn: backup_prev,
+            finished: false,
         })
     }
 
-    pub fn send_tarball(&mut self) -> anyhow::Result<()> {
+    pub fn send_tarball(mut self) -> anyhow::Result<()> {
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
@@ -135,9 +145,14 @@ impl<'a> Basebackup<'a> {
             self.add_twophase_file(xid)?;
         }
 
+        fail_point!("basebackup-before-control-file", |_| {
+            bail!("failpoint basebackup-before-control-file")
+        });
+
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
+        self.finished = true;
         debug!("all tarred up!");
         Ok(())
     }
@@ -331,6 +346,19 @@ impl<'a> Basebackup<'a> {
     }
 }
 
+impl<'a, W> Drop for Basebackup<'a, W>
+where
+    W: Write,
+{
+    /// If the basebackup was not finished, prevent the Archive::drop() from
+    /// writing the end-of-archive marker.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.ar.get_mut().abort();
+        }
+    }
+}
+
 //
 // Create new tarball entry header
 //
@@ -365,4 +393,50 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
     );
     header.set_cksum();
     Ok(header)
+}
+
+/// A wrapper that passes through all data to the underlying Write,
+/// until abort() is called.
+///
+/// tar::Builder has an annoying habit of finishing the archive with
+/// a valid tar end-of-archive marker (two 512-byte sectors of zeros),
+/// even if an error occurs and we don't finish building the archive.
+/// We'd rather abort writing the tarball immediately than construct
+/// a seemingly valid but incomplete archive. This wrapper allows us
+/// to swallow the end-of-archive marker that Builder::drop() emits,
+/// without writing it to the underlying sink.
+///
+struct AbortableWrite<W> {
+    w: W,
+    aborted: bool,
+}
+
+impl<W> AbortableWrite<W> {
+    pub fn new(w: W) -> Self {
+        AbortableWrite { w, aborted: false }
+    }
+
+    pub fn abort(&mut self) {
+        self.aborted = true;
+    }
+}
+
+impl<W> Write for AbortableWrite<W>
+where
+    W: Write,
+{
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.aborted {
+            Ok(data.len())
+        } else {
+            self.w.write(data)
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.aborted {
+            Ok(())
+        } else {
+            self.w.flush()
+        }
+    }
 }
