@@ -1,3 +1,4 @@
+import pytest
 import time
 from contextlib import closing
 from fixtures.zenith_fixtures import ZenithEnvBuilder
@@ -57,6 +58,7 @@ def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
 
 # Test that repeatedly kills and restarts the page server, while the
 # safekeeper and compute node keep running.
+@pytest.mark.timeout(18000)
 def test_pageserver_chaos(zenith_env_builder: ZenithEnvBuilder):
     env = zenith_env_builder.init_start()
 
