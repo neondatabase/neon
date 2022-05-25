@@ -22,7 +22,7 @@ In addition to the WAL safekeeper nodes, the WAL is archived in
 S3. WAL that has been archived to S3 can be removed from the
 safekeepers, so the safekeepers don't need a lot of disk space.
 
-
+```
                                 +----------------+
                         +-----> | WAL safekeeper |
                         |       +----------------+
@@ -42,23 +42,23 @@ safekeepers, so the safekeepers don't need a lot of disk space.
                   \
                    \
                     \
-                     \      +--------+
-					  \		|        |
-					   +-->	|   S3   |
-							|        |
-                            +--------+
+                     \          +--------+
+                      \         |        |
+                       +------> |   S3   |
+                                |        |
+                                +--------+
 
-
+```
 Every WAL safekeeper holds a section of WAL, and a VCL value.
 The WAL can be divided into three portions:
 
-
+```
                                     VCL                   LSN
                                      |                     |
                                      V                     V
 .................ccccccccccccccccccccXXXXXXXXXXXXXXXXXXXXXXX
 Archived WAL       Completed WAL          In-flight WAL
-
+```
 
 Note that all this WAL kept in a safekeeper is a contiguous section.
 This is different from Aurora: In Aurora, there can be holes in the

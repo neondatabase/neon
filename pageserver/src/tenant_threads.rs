@@ -1,34 +1,43 @@
 //! This module contains functions to serve per-tenant background processes,
-//! such as checkpointer and GC
-use crate::config::PageServerConf;
+//! such as compaction and GC
+use crate::repository::Repository;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
-use crate::CheckpointConfig;
 use anyhow::Result;
 use std::time::Duration;
 use tracing::*;
-use zenith_utils::zid::ZTenantId;
+use utils::zid::ZTenantId;
 
 ///
-/// Checkpointer thread's main loop
+/// Compaction thread's main loop
 ///
-pub fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+pub fn compact_loop(tenantid: ZTenantId) -> Result<()> {
+    if let Err(err) = compact_loop_ext(tenantid) {
+        error!("compact loop terminated with error: {:?}", err);
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
         }
-
-        std::thread::sleep(conf.checkpoint_period);
-        trace!("checkpointer thread for tenant {} waking up", tenantid);
-
-        // checkpoint timelines that have accumulated more than CHECKPOINT_DISTANCE
-        // bytes of WAL since last checkpoint.
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        repo.checkpoint_iteration(CheckpointConfig::Distance(conf.checkpoint_distance))?;
+        let compaction_period = repo.get_compaction_period();
+
+        std::thread::sleep(compaction_period);
+        trace!("compaction thread for tenant {} waking up", tenantid);
+
+        // Compact timelines
+        let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+        repo.compaction_iteration()?;
     }
 
     trace!(
-        "checkpointer thread stopped for tenant {} state is {:?}",
+        "compaction thread stopped for tenant {} state is {:?}",
         tenantid,
         tenant_mgr::get_tenant_state(tenantid)
     );
@@ -38,23 +47,23 @@ pub fn checkpoint_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Re
 ///
 /// GC thread's main loop
 ///
-pub fn gc_loop(tenantid: ZTenantId, conf: &'static PageServerConf) -> Result<()> {
+pub fn gc_loop(tenantid: ZTenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
         }
 
         trace!("gc thread for tenant {} waking up", tenantid);
-
+        let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+        let gc_horizon = repo.get_gc_horizon();
         // Garbage collect old files that are not needed for PITR anymore
-        if conf.gc_horizon > 0 {
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            repo.gc_iteration(None, conf.gc_horizon, false).unwrap();
+        if gc_horizon > 0 {
+            repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
         }
 
         // TODO Write it in more adequate way using
         // condvar.wait_timeout() or something
-        let mut sleep_time = conf.gc_period.as_secs();
+        let mut sleep_time = repo.get_gc_period().as_secs();
         while sleep_time > 0 && tenant_mgr::get_tenant_state(tenantid) == Some(TenantState::Active)
         {
             sleep_time -= 1;

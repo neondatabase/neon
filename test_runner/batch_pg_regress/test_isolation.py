@@ -1,9 +1,12 @@
 import os
-
+import pytest
 from fixtures.utils import mkdir_if_needed
 from fixtures.zenith_fixtures import ZenithEnv, base_dir, pg_distrib_dir
 
 
+# The isolation tests run for a long time, especially in debug mode,
+# so use a larger-than-default timeout.
+@pytest.mark.timeout(1800)
 def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
     env = zenith_simple_env
 
@@ -35,9 +38,9 @@ def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys
     ]
 
     env_vars = {
-        'PGPORT': str(pg.port),
-        'PGUSER': pg.username,
-        'PGHOST': pg.host,
+        'PGPORT': str(pg.default_options['port']),
+        'PGUSER': pg.default_options['user'],
+        'PGHOST': pg.default_options['host'],
     }
 
     # Run the command.

@@ -1,11 +1,4 @@
-import pytest
-import random
-import time
-
-from contextlib import closing
-from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import ZenithEnvBuilder
-from fixtures.log_helper import log
 
 
 # Test safekeeper sync and pageserver catch up
@@ -17,7 +10,9 @@ def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuil
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_pageserver_catchup_while_compute_down')
-    pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down')
+    # Make shared_buffers large to ensure we won't query pageserver while it is down.
+    pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down',
+                                   config_lines=['shared_buffers=512MB'])
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()

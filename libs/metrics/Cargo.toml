@@ -1,0 +1,11 @@
+[package]
+name = "metrics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
+libc = "0.2"
+lazy_static = "1.4"
+once_cell = "1.8.0"
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -28,12 +28,7 @@ The pageserver has a few different duties:
 - Receive WAL from the WAL service and decode it.
 - Replay WAL that's applicable to the chunks that the Page Server maintains
 
-For more detailed info, see `/pageserver/README`
-
-`/postgres_ffi`:
-
-Utility functions for interacting with PostgreSQL file formats.
-Misc constants, copied from PostgreSQL headers.
+For more detailed info, see [/pageserver/README](/pageserver/README.md)
 
 `/proxy`:
 
@@ -57,28 +52,37 @@ PostgreSQL extension that implements storage manager API and network communicati
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
-`/walkeeper`:
+`/safekeeper`:
 
 The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
-For more detailed info, see `/walkeeper/README`
+For more detailed info, see [/safekeeper/README](/safekeeper/README.md)
 
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.
+
+We use [cargo-hakari](https://crates.io/crates/cargo-hakari) for automation.
 
 `/zenith`
 
 Main entry point for the 'zenith' CLI utility.
 TODO: Doesn't it belong to control_plane?
 
-`/zenith_metrics`:
+`/libs`:
+Unites granular neon helper crates under the hood.
 
+`/libs/postgres_ffi`:
+
+Utility functions for interacting with PostgreSQL file formats.
+Misc constants, copied from PostgreSQL headers.
+
+`/libs/utils`:
+Generic helpers that are shared between other crates in this repository.
+A subject for future modularization.
+
+`/libs/metrics`:
 Helpers for exposing Prometheus metrics from the server.
-
-`/zenith_utils`:
-
-Helpers that are shared between other crates in this repository.
 
 ## Using Python
 Note that Debian/Ubuntu Python packages are stale, as it commonly happens,
@@ -87,18 +91,22 @@ so manual installation of dependencies is not recommended.
 A single virtual environment with all dependencies is described in the single `Pipfile`.
 
 ### Prerequisites
-- Install Python 3.7 (the minimal supported version) or greater.
+- Install Python 3.9 (the minimal supported version) or greater.
     - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesnt work as expected.
-    - If you have some trouble with other version you can resolve it by installing Python 3.7 separately, via pyenv or via system package manager e.g.:
+    - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via [pyenv](https://github.com/pyenv/pyenv) or via system package manager e.g.:
       ```bash
       # In Ubuntu
       sudo add-apt-repository ppa:deadsnakes/ppa
       sudo apt update
-      sudo apt install python3.7
+      sudo apt install python3.9
       ```
 - Install `poetry`
     - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation)`.
-- Install dependencies via `./scripts/pysync`. Note that CI uses Python 3.7 so if you have different version some linting tools can yield different result locally vs in the CI.
+- Install dependencies via `./scripts/pysync`.
+    - Note that CI uses specific Python version (look for `PYTHON_VERSION` [here](https://github.com/neondatabase/docker-images/blob/main/rust/Dockerfile))
+      so if you have different version some linting tools can yield different result locally vs in the CI.
+    - You can explicitly specify which Python to use by running `poetry env use /path/to/python`, e.g. `poetry env use python3.9`.
+      This may also disable the `The currently activated Python version X.Y.Z is not supported by the project` warning.
 
 Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.

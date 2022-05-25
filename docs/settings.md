@@ -6,7 +6,6 @@ If there's no such file during `init` phase of the server, it creates the file i
 There's a possibility to pass an arbitrary config value to the pageserver binary as an argument: such values override
 the values in the config file, if any are specified for the same key and get into the final config during init phase.
 
-
 ### Config example
 
 ```toml
@@ -26,18 +25,22 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zenith_admin'
 
+broker_etcd_prefix = 'neon'
+broker_endpoints = ['some://etcd']
+
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings.
+The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user, 
+see the corresponding section below.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
 
 Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#table) in TOML specification and
 
-* either has to be placed in the config after the table-less values such as `initial_superuser_name = 'zenith_admin'`
+- either has to be placed in the config after the table-less values such as `initial_superuser_name = 'zenith_admin'`
 
-* or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
+- or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
 
 ### Config values
 
@@ -46,6 +49,17 @@ All values can be passed as an argument to the pageserver binary, using the `-c`
 Example: `${PAGESERVER_BIN} -c "checkpoint_period = '100 s'" -c "remote_storage={local_path='/some/local/path/'}"`
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
+
+#### broker_endpoints
+
+A list of endpoints (etcd currently) to connect and pull the information from.
+Mandatory, does not have a default, since requires etcd to be started as a separate process,
+and its connection url should be specified separately. 
+
+#### broker_etcd_prefix
+
+A prefix to add for every etcd key used, to separate one group of related instances from another, in the same cluster.
+Default is `neon`.
 
 #### checkpoint_distance
 
@@ -57,7 +71,7 @@ but it will trigger a checkpoint operation to get it back below the
 limit.
 
 `checkpoint_distance` also determines how much WAL needs to be kept
-durable in the safekeeper.  The safekeeper must have capacity to hold
+durable in the safekeeper. The safekeeper must have capacity to hold
 this much WAL, with some headroom, otherwise you can get stuck in a
 situation where the safekeeper is full and stops accepting new WAL,
 but the pageserver is not flushing out and releasing the space in the
@@ -68,11 +82,15 @@ S3.
 
 The unit is # of bytes.
 
-#### checkpoint_period
+#### compaction_period
 
-The pageserver checks whether `checkpoint_distance` has been reached
-every `checkpoint_period` seconds. Default is 1 s, which should be
-fine.
+Every `compaction_period` seconds, the page server checks if
+maintenance operations, like compaction, are needed on the layer
+files. Default is 1 s, which should be fine.
+
+#### compaction_target_size
+
+File sizes for L0 delta and L1 image layers. Default is 128MB.
 
 #### gc_horizon
 
@@ -84,6 +102,14 @@ away.
 #### gc_period
 
 Interval at which garbage collection is triggered. Default is 100 s.
+
+#### image_creation_threshold
+
+L0 delta layer threshold for L1 iamge layer creation. Default is 3.
+
+#### pitr_interval
+
+WAL retention duration for PITR branching. Default is 30 days.
 
 #### initial_superuser_name
 
@@ -151,12 +177,11 @@ bucket_region = 'eu-north-1'
 # Optional, pageserver uses entire bucket if the prefix is not specified.
 prefix_in_bucket = '/some/prefix/'
 
-# Access key to connect to the bucket ("login" part of the credentials)
-access_key_id = 'SOMEKEYAAAAASADSAH*#'
-
-# Secret access key to connect to the bucket ("password" part of the credentials)
-secret_access_key = 'SOMEsEcReTsd292v'
+# S3 API query limit to avoid getting errors/throttling from AWS.
+concurrency_limit = 100
 ```
+
+If no IAM bucket access is used during the remote storage usage, use the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables to set the access credentials.
 
 ###### General remote storage configuration
 
@@ -167,13 +192,12 @@ Besides, there are parameters common for all types of remote storage that can be
 
 ```toml
 [remote_storage]
-# Max number of concurrent connections to open for uploading to or downloading from the remote storage.
-max_concurrent_sync = 100
+# Max number of concurrent timeline synchronized (layers uploaded or downloaded) with the remote storage at the same time.
+max_concurrent_syncs = 50
 
 # Max number of errors a single task can have before it's considered failed and not attempted to run anymore.
 max_sync_errors = 10
 ```
-
 
 ## safekeeper
 

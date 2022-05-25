@@ -43,11 +43,13 @@ use std::thread::JoinHandle;
 
 use tokio::sync::watch;
 
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use lazy_static::lazy_static;
 
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{ZTenantId, ZTimelineId};
+
+use crate::shutdown_pageserver;
 
 lazy_static! {
     /// Each thread that we track is associated with a "thread ID". It's just
@@ -92,13 +94,16 @@ pub enum ThreadKind {
     // Thread that connects to a safekeeper to fetch WAL for one timeline.
     WalReceiver,
 
-    // Thread that handles checkpointing of all timelines for a tenant.
-    Checkpointer,
+    // Thread that handles compaction of all timelines for a tenant.
+    Compactor,
 
     // Thread that handles GC of a tenant
     GarbageCollector,
 
-    // Thread for synchronizing pageserver relish data with the remote storage.
+    // Thread that flushes frozen in-memory layers to disk
+    LayerFlushThread,
+
+    // Thread for synchronizing pageserver layer files with the remote storage.
     // Shared by all tenants.
     StorageSync,
 }
@@ -125,15 +130,18 @@ struct PageServerThread {
 }
 
 /// Launch a new thread
-pub fn spawn<F, E>(
+/// Note: if shutdown_process_on_error is set to true failure
+///   of the thread will lead to shutdown of entire process
+pub fn spawn<F>(
     kind: ThreadKind,
     tenant_id: Option<ZTenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
+    shutdown_process_on_error: bool,
     f: F,
-) -> std::io::Result<()>
+) -> std::io::Result<u64>
 where
-    F: FnOnce() -> Result<(), E> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
@@ -160,12 +168,22 @@ where
         .insert(thread_id, Arc::clone(&thread_rc));
 
     let thread_rc2 = Arc::clone(&thread_rc);
+    let thread_name = name.to_string();
     let join_handle = match thread::Builder::new()
         .name(name.to_string())
-        .spawn(move || thread_wrapper(thread_id, thread_rc2, shutdown_rx, f))
-    {
+        .spawn(move || {
+            thread_wrapper(
+                thread_name,
+                thread_id,
+                thread_rc2,
+                shutdown_rx,
+                shutdown_process_on_error,
+                f,
+            )
+        }) {
         Ok(handle) => handle,
         Err(err) => {
+            error!("Failed to spawn thread '{}': {}", name, err);
             // Could not spawn the thread. Remove the entry
             THREADS.lock().unwrap().remove(&thread_id);
             return Err(err);
@@ -175,18 +193,20 @@ where
     drop(jh_guard);
 
     // The thread is now running. Nothing more to do here
-    Ok(())
+    Ok(thread_id)
 }
 
 /// This wrapper function runs in a newly-spawned thread. It initializes the
 /// thread-local variables and calls the payload function
-fn thread_wrapper<F, E>(
+fn thread_wrapper<F>(
+    thread_name: String,
     thread_id: u64,
     thread: Arc<PageServerThread>,
     shutdown_rx: watch::Receiver<()>,
+    shutdown_process_on_error: bool,
     f: F,
 ) where
-    F: FnOnce() -> Result<(), E> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     SHUTDOWN_RX.with(|rx| {
         *rx.borrow_mut() = Some(shutdown_rx);
@@ -195,17 +215,50 @@ fn thread_wrapper<F, E>(
         *ct.borrow_mut() = Some(thread);
     });
 
+    debug!("Starting thread '{}'", thread_name);
+
     // We use AssertUnwindSafe here so that the payload function
     // doesn't need to be UnwindSafe. We don't do anything after the
     // unwinding that would expose us to unwind-unsafe behavior.
     let result = panic::catch_unwind(AssertUnwindSafe(f));
 
     // Remove our entry from the global hashmap.
-    THREADS.lock().unwrap().remove(&thread_id);
+    let thread = THREADS
+        .lock()
+        .unwrap()
+        .remove(&thread_id)
+        .expect("no thread in registry");
 
-    // If the thread payload panic'd, exit with the panic.
-    if let Err(err) = result {
-        panic::resume_unwind(err);
+    match result {
+        Ok(Ok(())) => debug!("Thread '{}' exited normally", thread_name),
+        Ok(Err(err)) => {
+            if shutdown_process_on_error {
+                error!(
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+                shutdown_pageserver(1);
+            } else {
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+            }
+        }
+        Err(err) => {
+            if shutdown_process_on_error {
+                error!(
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+                shutdown_pageserver(1);
+            } else {
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread.tenant_id, thread.timeline_id, err
+                );
+            }
+        }
     }
 }
 
@@ -250,7 +303,7 @@ pub fn shutdown_threads(
             let _ = join_handle.join();
         } else {
             // The thread had not even fully started yet. Or it was shut down
-            // concurrently and alrady exited
+            // concurrently and already exited
         }
     }
 }

@@ -12,7 +12,7 @@ Init empty pageserver using `initdb` in temporary directory.
 
 `--storage_dest=FILE_PREFIX | S3_PREFIX |...` option defines object storage type, all other parameters are passed via env variables. Inspired by WAL-G style naming : https://wal-g.readthedocs.io/STORAGES/.
 
-Save`storage_dest` and other parameters in config. 
+Save`storage_dest` and other parameters in config.
 Push snapshots to `storage_dest` in background.
 
 ```
@@ -21,7 +21,7 @@ zenith start
 ```
 
 #### 2. Restart pageserver (manually or crash-recovery).
-Take `storage_dest` from pageserver config, start pageserver from latest snapshot in `storage_dest`. 
+Take `storage_dest` from pageserver config, start pageserver from latest snapshot in `storage_dest`.
 Push snapshots to `storage_dest` in background.
 
 ```
@@ -32,7 +32,7 @@ zenith start
 Start pageserver from existing snapshot.
 Path to snapshot provided via `--snapshot_path=FILE_PREFIX | S3_PREFIX | ...`
 Do not save `snapshot_path` and `snapshot_format` in config, as it is a one-time operation.
-Save`storage_dest` parameters in config. 
+Save`storage_dest` parameters in config.
 Push snapshots to `storage_dest` in background.
 ```
 //I.e. we want to start zenith on top of existing $PGDATA and use s3 as a persistent storage.
@@ -42,14 +42,14 @@ zenith start
 How to pass credentials needed for `snapshot_path`?
 
 #### 4. Export.
-Manually push snapshot to `snapshot_path` which differs from `storage_dest` 
+Manually push snapshot to `snapshot_path` which differs from `storage_dest`
 Optionally set `snapshot_format`, which can be plain pgdata format or zenith format.
 ```
 zenith export --snapshot_path=FILE_PREFIX --snapshot_format=pgdata
 ```
 
 #### Notes and questions
-- walkeeper s3_offload should use same (similar) syntax for storage. How to set it in UI?
+- safekeeper s3_offload should use same (similar) syntax for storage. How to set it in UI?
 - Why do we need `zenith init` as a separate command? Can't we init everything at first start?
 - We can think of better names for all options.
 - Export to plain postgres format will be useless, if we are not 100% compatible on page level.

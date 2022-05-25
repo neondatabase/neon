@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio_postgres::{CancelToken, NoTls};
-use zenith_utils::pq_proto::CancelKeyData;
+use utils::pq_proto::CancelKeyData;
 
 /// Enables serving `CancelRequest`s.
 #[derive(Default)]

@@ -17,7 +17,7 @@ import warnings
 from contextlib import contextmanager
 
 # Type-related stuff
-from typing import Iterator
+from typing import Iterator, Optional
 """
 This file contains fixtures for micro-benchmarks.
 
@@ -51,17 +51,12 @@ in the test initialization, or measure disk usage after the test query.
 
 @dataclasses.dataclass
 class PgBenchRunResult:
-    scale: int
     number_of_clients: int
     number_of_threads: int
     number_of_transactions_actually_processed: int
     latency_average: float
-    latency_stddev: float
-    tps_including_connection_time: float
-    tps_excluding_connection_time: float
-    init_duration: float
-    init_start_timestamp: int
-    init_end_timestamp: int
+    latency_stddev: Optional[float]
+    tps: float
     run_duration: float
     run_start_timestamp: int
     run_end_timestamp: int
@@ -69,56 +64,67 @@ class PgBenchRunResult:
     # TODO progress
 
     @classmethod
-    def parse_from_output(
+    def parse_from_stdout(
         cls,
-        out: 'subprocess.CompletedProcess[str]',
-        init_duration: float,
-        init_start_timestamp: int,
-        init_end_timestamp: int,
+        stdout: str,
         run_duration: float,
         run_start_timestamp: int,
         run_end_timestamp: int,
     ):
-        stdout_lines = out.stdout.splitlines()
+        stdout_lines = stdout.splitlines()
+
+        latency_stddev = None
+
         # we know significant parts of these values from test input
         # but to be precise take them from output
-        # scaling factor: 5
-        assert "scaling factor" in stdout_lines[1]
-        scale = int(stdout_lines[1].split()[-1])
-        # number of clients: 1
-        assert "number of clients" in stdout_lines[3]
-        number_of_clients = int(stdout_lines[3].split()[-1])
-        # number of threads: 1
-        assert "number of threads" in stdout_lines[4]
-        number_of_threads = int(stdout_lines[4].split()[-1])
-        # number of transactions actually processed: 1000/1000
-        assert "number of transactions actually processed" in stdout_lines[6]
-        number_of_transactions_actually_processed = int(stdout_lines[6].split("/")[1])
-        # latency average = 19.894 ms
-        assert "latency average" in stdout_lines[7]
-        latency_average = stdout_lines[7].split()[-2]
-        # latency stddev = 3.387 ms
-        assert "latency stddev" in stdout_lines[8]
-        latency_stddev = stdout_lines[8].split()[-2]
-        # tps = 50.219689 (including connections establishing)
-        assert "(including connections establishing)" in stdout_lines[9]
-        tps_including_connection_time = stdout_lines[9].split()[2]
-        # tps = 50.264435 (excluding connections establishing)
-        assert "(excluding connections establishing)" in stdout_lines[10]
-        tps_excluding_connection_time = stdout_lines[10].split()[2]
+        for line in stdout.splitlines():
+            # scaling factor: 5
+            if line.startswith("scaling factor:"):
+                scale = int(line.split()[-1])
+            # number of clients: 1
+            if line.startswith("number of clients: "):
+                number_of_clients = int(line.split()[-1])
+            # number of threads: 1
+            if line.startswith("number of threads: "):
+                number_of_threads = int(line.split()[-1])
+            # number of transactions actually processed: 1000/1000
+            # OR
+            # number of transactions actually processed: 1000
+            if line.startswith("number of transactions actually processed"):
+                if "/" in line:
+                    number_of_transactions_actually_processed = int(line.split("/")[1])
+                else:
+                    number_of_transactions_actually_processed = int(line.split()[-1])
+            # latency average = 19.894 ms
+            if line.startswith("latency average"):
+                latency_average = float(line.split()[-2])
+            # latency stddev = 3.387 ms
+            # (only printed with some options)
+            if line.startswith("latency stddev"):
+                latency_stddev = float(line.split()[-2])
+
+            # Get the TPS without initial connection time. The format
+            # of the tps lines changed in pgbench v14, but we accept
+            # either format:
+            #
+            # pgbench v13 and below:
+            # tps = 50.219689 (including connections establishing)
+            # tps = 50.264435 (excluding connections establishing)
+            #
+            # pgbench v14:
+            # initial connection time = 3.858 ms
+            # tps = 309.281539 (without initial connection time)
+            if (line.startswith("tps = ") and ("(excluding connections establishing)" in line
+                                               or "(without initial connection time)")):
+                tps = float(line.split()[2])
 
         return cls(
-            scale=scale,
             number_of_clients=number_of_clients,
             number_of_threads=number_of_threads,
             number_of_transactions_actually_processed=number_of_transactions_actually_processed,
-            latency_average=float(latency_average),
-            latency_stddev=float(latency_stddev),
-            tps_including_connection_time=float(tps_including_connection_time),
-            tps_excluding_connection_time=float(tps_excluding_connection_time),
-            init_duration=init_duration,
-            init_start_timestamp=init_start_timestamp,
-            init_end_timestamp=init_end_timestamp,
+            latency_average=latency_average,
+            latency_stddev=latency_stddev,
+            tps=tps,
             run_duration=run_duration,
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
@@ -187,60 +193,41 @@ class ZenithBenchmarker:
             report=MetricReport.LOWER_IS_BETTER,
         )
 
-    def record_pg_bench_result(self, pg_bench_result: PgBenchRunResult):
-        self.record("scale", pg_bench_result.scale, '', MetricReport.TEST_PARAM)
-        self.record("number_of_clients",
+    def record_pg_bench_result(self, prefix: str, pg_bench_result: PgBenchRunResult):
+        self.record(f"{prefix}.number_of_clients",
                     pg_bench_result.number_of_clients,
                     '',
                     MetricReport.TEST_PARAM)
-        self.record("number_of_threads",
+        self.record(f"{prefix}.number_of_threads",
                     pg_bench_result.number_of_threads,
                     '',
                     MetricReport.TEST_PARAM)
         self.record(
-            "number_of_transactions_actually_processed",
+            f"{prefix}.number_of_transactions_actually_processed",
             pg_bench_result.number_of_transactions_actually_processed,
             '',
             # thats because this is predefined by test matrix and doesnt change across runs
             report=MetricReport.TEST_PARAM,
         )
-        self.record("latency_average",
+        self.record(f"{prefix}.latency_average",
                     pg_bench_result.latency_average,
                     unit="ms",
                     report=MetricReport.LOWER_IS_BETTER)
-        self.record("latency_stddev",
-                    pg_bench_result.latency_stddev,
-                    unit="ms",
-                    report=MetricReport.LOWER_IS_BETTER)
-        self.record("tps_including_connection_time",
-                    pg_bench_result.tps_including_connection_time,
-                    '',
-                    report=MetricReport.HIGHER_IS_BETTER)
-        self.record("tps_excluding_connection_time",
-                    pg_bench_result.tps_excluding_connection_time,
-                    '',
-                    report=MetricReport.HIGHER_IS_BETTER)
-        self.record("init_duration",
-                    pg_bench_result.init_duration,
-                    unit="s",
-                    report=MetricReport.LOWER_IS_BETTER)
-        self.record("init_start_timestamp",
-                    pg_bench_result.init_start_timestamp,
-                    '',
-                    MetricReport.TEST_PARAM)
-        self.record("init_end_timestamp",
-                    pg_bench_result.init_end_timestamp,
-                    '',
-                    MetricReport.TEST_PARAM)
-        self.record("run_duration",
+        if pg_bench_result.latency_stddev is not None:
+            self.record(f"{prefix}.latency_stddev",
+                        pg_bench_result.latency_stddev,
+                        unit="ms",
+                        report=MetricReport.LOWER_IS_BETTER)
+        self.record(f"{prefix}.tps", pg_bench_result.tps, '', report=MetricReport.HIGHER_IS_BETTER)
+        self.record(f"{prefix}.run_duration",
                     pg_bench_result.run_duration,
                     unit="s",
                     report=MetricReport.LOWER_IS_BETTER)
-        self.record("run_start_timestamp",
+        self.record(f"{prefix}.run_start_timestamp",
                     pg_bench_result.run_start_timestamp,
                     '',
                     MetricReport.TEST_PARAM)
-        self.record("run_end_timestamp",
+        self.record(f"{prefix}.run_end_timestamp",
                     pg_bench_result.run_end_timestamp,
                     '',
                     MetricReport.TEST_PARAM)
@@ -249,10 +236,18 @@ class ZenithBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        # Fetch all the exposed prometheus metrics from page server
-        all_metrics = pageserver.http_client().get_metrics()
-        # Use a regular expression to extract the one we're interested in
-        #
+        metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
+        return self.get_int_counter_value(pageserver, metric_name)
+
+    def get_peak_mem(self, pageserver) -> int:
+        """
+        Fetch the "maxrss" metric from the pageserver
+        """
+        metric_name = r'libmetrics_maxrss_kb'
+        return self.get_int_counter_value(pageserver, metric_name)
+
+    def get_int_counter_value(self, pageserver, metric_name) -> int:
+        """Fetch the value of given int counter from pageserver metrics."""
         # TODO: If we start to collect more of the prometheus metrics in the
         # performance test suite like this, we should refactor this to load and
         # parse all the metrics into a more convenient structure in one go.
@@ -260,20 +255,8 @@ class ZenithBenchmarker:
         # The metric should be an integer, as it's a number of bytes. But in general
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
-        matches = re.search(r'^pageserver_disk_io_bytes{io_operation="write"} (\S+)$',
-                            all_metrics,
-                            re.MULTILINE)
-        assert matches
-        return int(round(float(matches.group(1))))
-
-    def get_peak_mem(self, pageserver) -> int:
-        """
-        Fetch the "maxrss" metric from the pageserver
-        """
-        # Fetch all the exposed prometheus metrics from page server
         all_metrics = pageserver.http_client().get_metrics()
-        # See comment in get_io_writes()
-        matches = re.search(r'^pageserver_maxrss_kb (\S+)$', all_metrics, re.MULTILINE)
+        matches = re.search(fr'^{metric_name} (\S+)$', all_metrics, re.MULTILINE)
         assert matches
         return int(round(float(matches.group(1))))
 

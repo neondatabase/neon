@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
-use log::*;
 use nix::poll::*;
 use serde::Serialize;
 use std::fs;
@@ -35,15 +34,15 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
-use zenith_metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
-use zenith_utils::bin_ser::BeSer;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::nonblock::set_nonblock;
-use zenith_utils::zid::ZTenantId;
+use tracing::*;
+use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
 
 use crate::config::PageServerConf;
-use crate::relish::*;
-use crate::repository::ZenithWalRecord;
+use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
+use crate::reltag::{RelTag, SlruKind};
+use crate::repository::Key;
+use crate::walrecord::ZenithWalRecord;
+use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
@@ -75,8 +74,7 @@ pub trait WalRedoManager: Send + Sync {
     /// the reords.
     fn request_redo(
         &self,
-        rel: RelishTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
@@ -92,8 +90,7 @@ pub struct DummyRedoManager {}
 impl crate::walredo::WalRedoManager for DummyRedoManager {
     fn request_redo(
         &self,
-        _rel: RelishTag,
-        _blknum: u32,
+        _key: Key,
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<(Lsn, ZenithWalRecord)>,
@@ -109,16 +106,16 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
 // each tenant.
 lazy_static! {
     static ref WAL_REDO_TIME: Histogram =
-        register_histogram!("pageserver_wal_redo_time", "Time spent on WAL redo")
+        register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
             .expect("failed to define a metric");
     static ref WAL_REDO_WAIT_TIME: Histogram = register_histogram!(
-        "pageserver_wal_redo_wait_time",
+        "pageserver_wal_redo_wait_seconds",
         "Time spent waiting for access to the WAL redo process"
     )
     .expect("failed to define a metric");
     static ref WAL_REDO_RECORD_COUNTER: IntCounter = register_int_counter!(
-        "pageserver_wal_records_replayed",
-        "Number of WAL records replayed"
+        "pageserver_replayed_wal_records_total",
+        "Number of WAL records replayed in WAL redo process"
     )
     .unwrap();
 }
@@ -152,28 +149,6 @@ fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
     }
 }
 
-fn check_forknum(rel: &RelishTag, expected_forknum: u8) -> bool {
-    if let RelishTag::Relation(RelTag {
-        forknum,
-        spcnode: _,
-        dbnode: _,
-        relnode: _,
-    }) = rel
-    {
-        *forknum == expected_forknum
-    } else {
-        false
-    }
-}
-
-fn check_slru_segno(rel: &RelishTag, expected_slru: SlruKind, expected_segno: u32) -> bool {
-    if let RelishTag::Slru { slru, segno } = rel {
-        *slru == expected_slru && *segno == expected_segno
-    } else {
-        false
-    }
-}
-
 /// An error happened in WAL redo
 #[derive(Debug, thiserror::Error)]
 pub enum WalRedoError {
@@ -184,6 +159,8 @@ pub enum WalRedoError {
     InvalidState,
     #[error("cannot perform WAL redo for this request")]
     InvalidRequest,
+    #[error("cannot perform WAL redo for this record")]
+    InvalidRecord,
 }
 
 ///
@@ -198,8 +175,7 @@ impl WalRedoManager for PostgresRedoManager {
     ///
     fn request_redo(
         &self,
-        rel: RelishTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
@@ -217,11 +193,10 @@ impl WalRedoManager for PostgresRedoManager {
 
             if rec_zenith != batch_zenith {
                 let result = if batch_zenith {
-                    self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..i])
+                    self.apply_batch_zenith(key, lsn, img, &records[batch_start..i])
                 } else {
                     self.apply_batch_postgres(
-                        rel,
-                        blknum,
+                        key,
                         lsn,
                         img,
                         &records[batch_start..i],
@@ -236,11 +211,10 @@ impl WalRedoManager for PostgresRedoManager {
         }
         // last batch
         if batch_zenith {
-            self.apply_batch_zenith(rel, blknum, lsn, img, &records[batch_start..])
+            self.apply_batch_zenith(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
-                rel,
-                blknum,
+                key,
                 lsn,
                 img,
                 &records[batch_start..],
@@ -268,16 +242,15 @@ impl PostgresRedoManager {
     ///
     fn apply_batch_postgres(
         &self,
-        rel: RelishTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
     ) -> Result<Bytes, WalRedoError> {
-        let start_time = Instant::now();
+        let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
-        let apply_result: Result<Bytes, Error>;
+        let start_time = Instant::now();
 
         let mut process_guard = self.process.lock().unwrap();
         let lock_time = Instant::now();
@@ -291,16 +264,11 @@ impl PostgresRedoManager {
 
         WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
 
-        let result = if let RelishTag::Relation(rel) = rel {
-            // Relational WAL records are applied using wal-redo-postgres
-            let buf_tag = BufferTag { rel, blknum };
-            apply_result = process.apply_wal_records(buf_tag, base_img, records, wal_redo_timeout);
-
-            apply_result.map_err(WalRedoError::IoError)
-        } else {
-            error!("unexpected non-relation relish: {:?}", rel);
-            Err(WalRedoError::InvalidRequest)
-        };
+        // Relational WAL records are applied using wal-redo-postgres
+        let buf_tag = BufferTag { rel, blknum };
+        let result = process
+            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
+            .map_err(WalRedoError::IoError);
 
         let end_time = Instant::now();
         let duration = end_time.duration_since(lock_time);
@@ -315,6 +283,11 @@ impl PostgresRedoManager {
         // If something went wrong, don't try to reuse the process. Kill it, and
         // next request will launch a new one.
         if result.is_err() {
+            error!(
+                "error applying {} WAL records to reconstruct page image at LSN {}",
+                records.len(),
+                lsn
+            );
             let process = process_guard.take().unwrap();
             process.kill();
         }
@@ -326,8 +299,7 @@ impl PostgresRedoManager {
     ///
     fn apply_batch_zenith(
         &self,
-        rel: RelishTag,
-        blknum: u32,
+        key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
@@ -346,7 +318,7 @@ impl PostgresRedoManager {
 
         // Apply all the WAL records in the batch
         for (record_lsn, record) in records.iter() {
-            self.apply_record_zenith(rel, blknum, &mut page, *record_lsn, record)?;
+            self.apply_record_zenith(key, &mut page, *record_lsn, record)?;
         }
         // Success!
         let end_time = Instant::now();
@@ -365,8 +337,7 @@ impl PostgresRedoManager {
 
     fn apply_record_zenith(
         &self,
-        rel: RelishTag,
-        blknum: u32,
+        key: Key,
         page: &mut BytesMut,
         _record_lsn: Lsn,
         record: &ZenithWalRecord,
@@ -375,16 +346,20 @@ impl PostgresRedoManager {
             ZenithWalRecord::Postgres {
                 will_init: _,
                 rec: _,
-            } => panic!("tried to pass postgres wal record to zenith WAL redo"),
+            } => {
+                error!("tried to pass postgres wal record to zenith WAL redo");
+                return Err(WalRedoError::InvalidRequest);
+            }
             ZenithWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,
                 flags,
             } => {
-                // sanity check that this is modifying the correct relish
+                // sanity check that this is modifying the correct relation
+                let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
-                    check_forknum(&rel, pg_constants::VISIBILITYMAP_FORKNUM),
-                    "ClearVisibilityMapFlags record on unexpected rel {:?}",
+                    rel.forknum == pg_constants::VISIBILITYMAP_FORKNUM,
+                    "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
                 if let Some(heap_blkno) = *new_heap_blkno {
@@ -417,7 +392,15 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids } => {
+            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::Clog,
+                    "ClogSetCommitted record with unexpected key {}",
+                    key
+                );
                 for &xid in xids {
                     let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -425,12 +408,17 @@ impl PostgresRedoManager {
 
                     // Check that we're modifying the correct CLOG block.
                     assert!(
-                        check_slru_segno(&rel, SlruKind::Clog, expected_segno),
-                        "ClogSetCommitted record for XID {} with unexpected rel {:?}",
+                        segno == expected_segno,
+                        "ClogSetCommitted record for XID {} with unexpected key {}",
                         xid,
-                        rel
+                        key
                     );
-                    assert!(blknum == expected_blknum);
+                    assert!(
+                        blknum == expected_blknum,
+                        "ClogSetCommitted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
 
                     transaction_id_set_status(
                         xid,
@@ -438,8 +426,31 @@ impl PostgresRedoManager {
                         page,
                     );
                 }
+
+                // Append the timestamp
+                if page.len() == pg_constants::BLCKSZ as usize + 8 {
+                    page.truncate(pg_constants::BLCKSZ as usize);
+                }
+                if page.len() == pg_constants::BLCKSZ as usize {
+                    page.extend_from_slice(&timestamp.to_be_bytes());
+                } else {
+                    warn!(
+                        "CLOG blk {} in seg {} has invalid size {}",
+                        blknum,
+                        segno,
+                        page.len()
+                    );
+                }
             }
             ZenithWalRecord::ClogSetAborted { xids } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::Clog,
+                    "ClogSetAborted record with unexpected key {}",
+                    key
+                );
                 for &xid in xids {
                     let pageno = xid as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -447,17 +458,30 @@ impl PostgresRedoManager {
 
                     // Check that we're modifying the correct CLOG block.
                     assert!(
-                        check_slru_segno(&rel, SlruKind::Clog, expected_segno),
-                        "ClogSetCommitted record for XID {} with unexpected rel {:?}",
+                        segno == expected_segno,
+                        "ClogSetAborted record for XID {} with unexpected key {}",
                         xid,
-                        rel
+                        key
                     );
-                    assert!(blknum == expected_blknum);
+                    assert!(
+                        blknum == expected_blknum,
+                        "ClogSetAborted record for XID {} with unexpected key {}",
+                        xid,
+                        key
+                    );
 
                     transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
                 }
             }
             ZenithWalRecord::MultixactOffsetCreate { mid, moff } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::MultiXactOffsets,
+                    "MultixactOffsetCreate record with unexpected key {}",
+                    key
+                );
                 // Compute the block and offset to modify.
                 // See RecordNewMultiXact in PostgreSQL sources.
                 let pageno = mid / pg_constants::MULTIXACT_OFFSETS_PER_PAGE as u32;
@@ -468,16 +492,29 @@ impl PostgresRedoManager {
                 let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 assert!(
-                    check_slru_segno(&rel, SlruKind::MultiXactOffsets, expected_segno),
-                    "MultiXactOffsetsCreate record for multi-xid {} with unexpected rel {:?}",
+                    segno == expected_segno,
+                    "MultiXactOffsetsCreate record for multi-xid {} with unexpected key {}",
                     mid,
-                    rel
+                    key
                 );
-                assert!(blknum == expected_blknum);
+                assert!(
+                    blknum == expected_blknum,
+                    "MultiXactOffsetsCreate record for multi-xid {} with unexpected key {}",
+                    mid,
+                    key
+                );
 
                 LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
             }
             ZenithWalRecord::MultixactMembersCreate { moff, members } => {
+                let (slru_kind, segno, blknum) =
+                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                assert_eq!(
+                    slru_kind,
+                    SlruKind::MultiXactMembers,
+                    "MultixactMembersCreate record with unexpected key {}",
+                    key
+                );
                 for (i, member) in members.iter().enumerate() {
                     let offset = moff + i as u32;
 
@@ -492,12 +529,17 @@ impl PostgresRedoManager {
                     let expected_segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     assert!(
-                        check_slru_segno(&rel, SlruKind::MultiXactMembers, expected_segno),
-                        "MultiXactMembersCreate record at offset {} with unexpected rel {:?}",
+                        segno == expected_segno,
+                        "MultiXactMembersCreate record for offset {} with unexpected key {}",
                         moff,
-                        rel
+                        key
                     );
-                    assert!(blknum == expected_blknum);
+                    assert!(
+                        blknum == expected_blknum,
+                        "MultiXactMembersCreate record for offset {} with unexpected key {}",
+                        moff,
+                        key
+                    );
 
                     let mut flagsval = LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);
                     flagsval &= !(((1 << pg_constants::MXACT_MEMBER_BITS_PER_XACT) - 1) << bshift);
@@ -541,20 +583,23 @@ impl PostgresRedoProcess {
         }
         info!("running initdb in {:?}", datadir.display());
         let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
-            .args(&["-D", datadir.to_str().unwrap()])
+            .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .output()
-            .expect("failed to execute initdb");
+            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {}", e)))?;
 
         if !initdb.status.success() {
-            panic!(
-                "initdb failed: {}\nstderr:\n{}",
-                std::str::from_utf8(&initdb.stdout).unwrap(),
-                std::str::from_utf8(&initdb.stderr).unwrap()
-            );
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "initdb failed\nstdout: {}\nstderr:\n{}",
+                    String::from_utf8_lossy(&initdb.stdout),
+                    String::from_utf8_lossy(&initdb.stderr)
+                ),
+            ));
         } else {
             // Limit shared cache for wal-redo-postres
             let mut config = OpenOptions::new()
@@ -572,11 +617,16 @@ impl PostgresRedoProcess {
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("PGDATA", &datadir)
             .spawn()
-            .expect("postgres --wal-redo command failed to start");
+            .map_err(|e| {
+                Error::new(
+                    e.kind(),
+                    format!("postgres --wal-redo command failed to start: {}", e),
+                )
+            })?;
 
         info!(
             "launched WAL redo postgres process on {:?}",
@@ -636,7 +686,10 @@ impl PostgresRedoProcess {
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
-                panic!("tried to pass zenith wal record to postgres WAL redo");
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "tried to pass zenith wal record to postgres WAL redo",
+                ));
             }
         }
         build_get_page_msg(tag, &mut writebuf);
@@ -667,7 +720,12 @@ impl PostgresRedoProcess {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };
-            let n = nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32)?;
+            let n = loop {
+                match nix::poll::poll(&mut pollfds[0..nfds], wal_redo_timeout.as_millis() as i32) {
+                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    res => break res,
+                }
+            }?;
 
             if n == 0 {
                 return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));

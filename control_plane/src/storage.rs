@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -9,21 +10,23 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
-use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::postgres_backend::AuthType;
-use zenith_utils::zid::{ZTenantId, ZTimelineId};
+use utils::{
+    connstring::connection_address,
+    http::error::HttpErrorBody,
+    lsn::Lsn,
+    postgres_backend::AuthType,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::local_env::LocalEnv;
 use crate::{fill_rust_env_vars, read_pidfile};
 use pageserver::tenant_mgr::TenantInfo;
-use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -118,6 +121,16 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let broker_endpoints_param = format!(
+            "broker_endpoints=[{}]",
+            self.env
+                .etcd_broker
+                .broker_endpoints
+                .iter()
+                .map(|url| format!("'{url}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let mut args = Vec::with_capacity(20);
 
         args.push("--init");
@@ -126,7 +139,18 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &broker_endpoints_param]);
         args.extend(["-c", &id]);
+
+        let broker_etcd_prefix_param = self
+            .env
+            .etcd_broker
+            .broker_etcd_prefix
+            .as_ref()
+            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
+            args.extend(["-c", broker_etcd_prefix_param]);
+        }
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
@@ -148,13 +172,24 @@ impl PageServerNode {
         let initial_timeline_id_string = initial_timeline_id.to_string();
         args.extend(["--initial-timeline-id", &initial_timeline_id_string]);
 
-        let init_output = fill_rust_env_vars(cmd.args(args))
+        let cmd_with_args = cmd.args(args);
+        let init_output = fill_rust_env_vars(cmd_with_args)
             .output()
-            .context("pageserver init failed")?;
+            .with_context(|| {
+                format!("failed to init pageserver with command {:?}", cmd_with_args)
+            })?;
 
         if !init_output.status.success() {
-            bail!("pageserver init failed");
+            bail!(
+                "init invocation failed, {}\nStdout: {}\nStderr: {}",
+                init_output.status,
+                String::from_utf8_lossy(&init_output.stdout),
+                String::from_utf8_lossy(&init_output.stderr)
+            );
         }
+
+        // echo the captured output of the init command
+        println!("{}", String::from_utf8_lossy(&init_output.stdout));
 
         Ok(initial_timeline_id)
     }
@@ -175,8 +210,6 @@ impl PageServerNode {
         );
         io::stdout().flush().unwrap();
 
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
-
         let repo_path = self.repo_path();
         let mut args = vec!["-D", repo_path.to_str().unwrap()];
 
@@ -184,9 +217,11 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
-        fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        let mut cmd = Command::new(self.env.pageserver_bin()?);
+        let mut filled_cmd = fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        filled_cmd = fill_aws_secrets_vars(filled_cmd);
 
-        if !cmd.status()?.success() {
+        if !filled_cmd.status()?.success() {
             bail!(
                 "Pageserver failed to start. See '{}' for details.",
                 self.repo_path().join("pageserver.log").display()
@@ -246,12 +281,13 @@ impl PageServerNode {
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
         let sig = if immediate {
-            println!("Stop pageserver immediately");
+            print!("Stopping pageserver immediately..");
             Signal::SIGQUIT
         } else {
-            println!("Stop pageserver gracefully");
+            print!("Stopping pageserver gracefully..");
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -273,25 +309,36 @@ impl PageServerNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if pageserver checkpoints a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Pageserver stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Pageserver status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Pageserver status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nPageserver connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Pageserver still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+
+                match self.check_status() {
+                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nPageserver status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -334,10 +381,36 @@ impl PageServerNode {
     pub fn tenant_create(
         &self,
         new_tenant_id: Option<ZTenantId>,
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<Option<ZTenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
-            .json(&TenantCreateRequest { new_tenant_id })
+            .json(&TenantCreateRequest {
+                new_tenant_id,
+                checkpoint_distance: settings
+                    .get("checkpoint_distance")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                compaction_target_size: settings
+                    .get("compaction_target_size")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_threshold: settings
+                    .get("compaction_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
+                gc_horizon: settings
+                    .get("gc_horizon")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
+                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+            })
             .send()?
             .error_from_body()?
             .json::<Option<String>>()?;
@@ -352,6 +425,35 @@ impl PageServerNode {
                 })
             })
             .transpose()
+    }
+
+    pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
+            .json(&TenantConfigRequest {
+                tenant_id,
+                checkpoint_distance: settings
+                    .get("checkpoint_distance")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                compaction_target_size: settings
+                    .get("compaction_target_size")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_threshold: settings
+                    .get("compaction_threshold")
+                    .map(|x| x.parse::<usize>().unwrap()),
+                gc_horizon: settings
+                    .get("gc_horizon")
+                    .map(|x| x.parse::<u64>().unwrap()),
+                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>().unwrap()),
+                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+            })
+            .send()?
+            .error_from_body()?;
+
+        Ok(())
     }
 
     pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
@@ -390,4 +492,13 @@ impl PageServerNode {
 
         Ok(timeline_info_response)
     }
+}
+
+fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+    for env_key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
+        if let Ok(value) = std::env::var(env_key) {
+            cmd = cmd.env(env_key, value);
+        }
+    }
+    cmd
 }

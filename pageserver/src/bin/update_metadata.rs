@@ -6,8 +6,9 @@ use clap::{App, Arg};
 use pageserver::layered_repository::metadata::TimelineMetadata;
 use std::path::PathBuf;
 use std::str::FromStr;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::GIT_VERSION;
+use utils::{lsn::Lsn, project_git_version};
+
+project_git_version!(GIT_VERSION);
 
 fn main() -> Result<()> {
     let arg_matches = App::new("Zenith update metadata utility")

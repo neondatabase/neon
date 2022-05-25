@@ -27,20 +27,26 @@ from dataclasses import dataclass
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
+from psycopg2.extensions import make_dsn, parse_dsn
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
 import requests
 import backoff  # type: ignore
 
-from .utils import (get_self_dir, lsn_from_hex, mkdir_if_needed, subprocess_capture)
+from .utils import (etcd_path,
+                    get_self_dir,
+                    mkdir_if_needed,
+                    subprocess_capture,
+                    lsn_from_hex,
+                    lsn_to_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
 
-A fixture is created with the decorator @zenfixture, which is a wrapper around
-the standard pytest.fixture with some extra behavior.
+A fixture is created with the decorator @pytest.fixture decorator.
+See docs: https://docs.pytest.org/en/6.2.x/fixture.html
 
 There are several environment variables that can control the running of tests:
 ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
@@ -60,7 +66,7 @@ DEFAULT_POSTGRES_DIR = 'tmp_install'
 DEFAULT_BRANCH_NAME = 'main'
 
 BASE_PORT = 15000
-WORKER_PORT_NUM = 100
+WORKER_PORT_NUM = 1000
 
 
 def pytest_addoption(parser):
@@ -122,6 +128,22 @@ def pytest_configure(config):
         top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
     mkdir_if_needed(top_output_dir)
 
+    # Find the postgres installation.
+    global pg_distrib_dir
+    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
+    if env_postgres_bin:
+        pg_distrib_dir = env_postgres_bin
+    else:
+        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
+    log.info(f'pg_distrib_dir is {pg_distrib_dir}')
+    if os.getenv("REMOTE_ENV"):
+        # When testing against a remote server, we only need the client binary.
+        if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/psql')):
+            raise Exception('psql not found at "{}"'.format(pg_distrib_dir))
+    else:
+        if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
+            raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
+
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have zenith binaries locally
         # this is the case for benchmarks run on self-hosted runner
@@ -137,37 +159,31 @@ def pytest_configure(config):
     if not os.path.exists(os.path.join(zenith_binpath, 'pageserver')):
         raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
 
-    # Find the postgres installation.
-    global pg_distrib_dir
-    env_postgres_bin = os.environ.get('POSTGRES_DISTRIB_DIR')
-    if env_postgres_bin:
-        pg_distrib_dir = env_postgres_bin
-    else:
-        pg_distrib_dir = os.path.normpath(os.path.join(base_dir, DEFAULT_POSTGRES_DIR))
-    log.info(f'pg_distrib_dir is {pg_distrib_dir}')
-    if not os.path.exists(os.path.join(pg_distrib_dir, 'bin/postgres')):
-        raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
 
-
-def zenfixture(func: Fn) -> Fn:
+def profiling_supported():
+    """Return True if the pageserver was compiled with the 'profiling' feature
     """
-    This is a python decorator for fixtures with a flexible scope.
+    bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+    res = subprocess.run([bin_pageserver, '--version'],
+                         check=True,
+                         universal_newlines=True,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    return "profiling:true" in res.stdout
 
-    By default every test function will set up and tear down a new
-    database. In pytest, this is called fixtures "function" scope.
 
-    If the environment variable TEST_SHARED_FIXTURES is set, then all
-    tests will share the same database. State, logs, etc. will be
-    stored in a directory called "shared".
+def shareable_scope(fixture_name, config) -> Literal["session", "function"]:
+    """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
+
+    This function can be used as a scope like this:
+    @pytest.fixture(scope=shareable_scope)
+    def myfixture(...)
+       ...
     """
-
-    scope: Literal['session', 'function'] = \
-        'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
-
-    return pytest.fixture(func, scope=scope)
+    return 'function' if os.environ.get('TEST_SHARED_FIXTURES') is None else 'session'
 
 
-@zenfixture
+@pytest.fixture(scope='session')
 def worker_seq_no(worker_id: str):
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -178,7 +194,7 @@ def worker_seq_no(worker_id: str):
     return int(worker_id[2:])
 
 
-@zenfixture
+@pytest.fixture(scope='session')
 def worker_base_port(worker_seq_no: int):
     # so we divide ports in ranges of 100 ports
     # so workers have disjoint set of ports for services
@@ -231,97 +247,95 @@ class PortDistributor:
                 'port range configured for test is exhausted, consider enlarging the range')
 
 
-@zenfixture
+@pytest.fixture(scope='session')
 def port_distributor(worker_base_port):
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
+@pytest.fixture(scope='session')
+def default_broker(request: Any, port_distributor: PortDistributor):
+    client_port = port_distributor.get_port()
+    # multiple pytest sessions could get launched in parallel, get them different datadirs
+    etcd_datadir = os.path.join(get_test_output_dir(request), f"etcd_datadir_{client_port}")
+    pathlib.Path(etcd_datadir).mkdir(exist_ok=True, parents=True)
+
+    broker = Etcd(datadir=etcd_datadir, port=client_port, peer_port=port_distributor.get_port())
+    yield broker
+    broker.stop()
+
+
+@pytest.fixture(scope='session')
+def mock_s3_server(port_distributor: PortDistributor):
+    mock_s3_server = MockS3Server(port_distributor.get_port())
+    yield mock_s3_server
+    mock_s3_server.kill()
+
+
 class PgProtocol:
     """ Reusable connection logic """
-    def __init__(self,
-                 host: str,
-                 port: int,
-                 username: Optional[str] = None,
-                 password: Optional[str] = None,
-                 dbname: Optional[str] = None,
-                 schema: Optional[str] = None):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.dbname = dbname
-        self.schema = schema
+    def __init__(self, **kwargs):
+        self.default_options = kwargs
 
-    def connstr(self,
-                *,
-                dbname: Optional[str] = None,
-                schema: Optional[str] = None,
-                username: Optional[str] = None,
-                password: Optional[str] = None) -> str:
+    def connstr(self, **kwargs) -> str:
         """
         Build a libpq connection string for the Postgres instance.
         """
+        return str(make_dsn(**self.conn_options(**kwargs)))
 
-        username = username or self.username
-        password = password or self.password
-        dbname = dbname or self.dbname or "postgres"
-        schema = schema or self.schema
-        res = f'host={self.host} port={self.port} dbname={dbname}'
+    def conn_options(self, **kwargs):
+        conn_options = self.default_options.copy()
+        if 'dsn' in kwargs:
+            conn_options.update(parse_dsn(kwargs['dsn']))
+        conn_options.update(kwargs)
 
-        if username:
-            res = f'{res} user={username}'
-
-        if password:
-            res = f'{res} password={password}'
-
-        if schema:
-            res = f"{res} options='-c search_path={schema}'"
-
-        return res
+        # Individual statement timeout in seconds. 2 minutes should be
+        # enough for our tests, but if you need a longer, you can
+        # change it by calling "SET statement_timeout" after
+        # connecting.
+        if 'options' in conn_options:
+            conn_options['options'] = f"-cstatement_timeout=120s " + conn_options['options']
+        else:
+            conn_options['options'] = "-cstatement_timeout=120s"
+        return conn_options
 
     # autocommit=True here by default because that's what we need most of the time
-    def connect(self,
-                *,
-                autocommit=True,
-                dbname: Optional[str] = None,
-                schema: Optional[str] = None,
-                username: Optional[str] = None,
-                password: Optional[str] = None) -> PgConnection:
+    def connect(self, autocommit=True, **kwargs) -> PgConnection:
         """
         Connect to the node.
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
+        conn = psycopg2.connect(**self.conn_options(**kwargs))
 
-        conn = psycopg2.connect(
-            self.connstr(
-                dbname=dbname,
-                schema=schema,
-                username=username,
-                password=password,
-            ))
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
 
-    async def connect_async(self,
-                            *,
-                            dbname: str = 'postgres',
-                            username: Optional[str] = None,
-                            password: Optional[str] = None) -> asyncpg.Connection:
+    async def connect_async(self, **kwargs) -> asyncpg.Connection:
         """
         Connect to the node from async python.
         Returns asyncpg's connection object.
         """
 
-        conn = await asyncpg.connect(
-            host=self.host,
-            port=self.port,
-            database=dbname,
-            user=username or self.username,
-            password=password,
-        )
-        return conn
+        # asyncpg takes slightly different options than psycopg2. Try
+        # to convert the defaults from the psycopg2 format.
+
+        # The psycopg2 option 'dbname' is called 'database' is asyncpg
+        conn_options = self.conn_options(**kwargs)
+        if 'dbname' in conn_options:
+            conn_options['database'] = conn_options.pop('dbname')
+
+        # Convert options='-c<key>=<val>' to server_settings
+        if 'options' in conn_options:
+            options = conn_options.pop('options')
+            for match in re.finditer('-c(\w*)=(\w*)', options):
+                key = match.group(1)
+                val = match.group(2)
+                if 'server_options' in conn_options:
+                    conn_options['server_settings'].update({key: val})
+                else:
+                    conn_options['server_settings'] = {key: val}
+        return await asyncpg.connect(**conn_options)
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
         """
@@ -379,7 +393,10 @@ class MockS3Server:
     ):
         self.port = port
 
-        self.subprocess = subprocess.Popen([f'poetry run moto_server s3 -p{port}'], shell=True)
+        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
+        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
+        # if a process is started from the shell process.
+        self.subprocess = subprocess.Popen(['poetry', 'run', 'moto_server', 's3', f'-p{port}'])
         error = None
         try:
             return_code = self.subprocess.poll()
@@ -389,7 +406,7 @@ class MockS3Server:
             error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
         if error is not None:
             log.error(error)
-            self.subprocess.kill()
+            self.kill()
             raise RuntimeError("failed to start s3 mock server")
 
     def endpoint(self) -> str:
@@ -420,28 +437,25 @@ class ZenithEnvBuilder:
     def __init__(self,
                  repo_dir: Path,
                  port_distributor: PortDistributor,
-                 pageserver_remote_storage: Optional[RemoteStorage] = None,
+                 broker: Etcd,
+                 mock_s3_server: MockS3Server,
+                 remote_storage: Optional[RemoteStorage] = None,
                  pageserver_config_override: Optional[str] = None,
-                 num_safekeepers: int = 0,
+                 num_safekeepers: int = 1,
                  pageserver_auth_enabled: bool = False,
                  rust_log_override: Optional[str] = None,
                  default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
-        self.pageserver_remote_storage = pageserver_remote_storage
+        self.remote_storage = remote_storage
+        self.broker = broker
+        self.mock_s3_server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[ZenithEnv] = None
-
-        self.s3_mock_server: Optional[MockS3Server] = None
-
-        if os.getenv('FORCE_MOCK_S3') is not None:
-            bucket_name = f'{repo_dir.name}_bucket'
-            log.warning(f'Unconditionally initializing mock S3 server for bucket {bucket_name}')
-            self.enable_s3_mock_remote_storage(bucket_name)
 
     def init(self) -> ZenithEnv:
         # Cannot create more than one environment from one builder
@@ -463,9 +477,8 @@ class ZenithEnvBuilder:
     """
 
     def enable_local_fs_remote_storage(self, force_enable=True):
-        assert force_enable or self.pageserver_remote_storage is None, "remote storage is enabled already"
-        self.pageserver_remote_storage = LocalFsStorage(
-            Path(self.repo_dir / 'local_fs_remote_storage'))
+        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
+        self.remote_storage = LocalFsStorage(Path(self.repo_dir / 'local_fs_remote_storage'))
 
     """
     Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
@@ -474,26 +487,19 @@ class ZenithEnvBuilder:
     """
 
     def enable_s3_mock_remote_storage(self, bucket_name: str, force_enable=True):
-        assert force_enable or self.pageserver_remote_storage is None, "remote storage is enabled already"
-        if not self.s3_mock_server:
-            self.s3_mock_server = MockS3Server(self.port_distributor.get_port())
-
-        mock_endpoint = self.s3_mock_server.endpoint()
-        mock_region = self.s3_mock_server.region()
-        mock_access_key = self.s3_mock_server.access_key()
-        mock_secret_key = self.s3_mock_server.secret_key()
+        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
+        mock_endpoint = self.mock_s3_server.endpoint()
+        mock_region = self.mock_s3_server.region()
         boto3.client(
             's3',
             endpoint_url=mock_endpoint,
             region_name=mock_region,
-            aws_access_key_id=mock_access_key,
-            aws_secret_access_key=mock_secret_key,
+            aws_access_key_id=self.mock_s3_server.access_key(),
+            aws_secret_access_key=self.mock_s3_server.secret_key(),
         ).create_bucket(Bucket=bucket_name)
-        self.pageserver_remote_storage = S3Storage(bucket=bucket_name,
-                                                   endpoint=mock_endpoint,
-                                                   region=mock_region,
-                                                   access_key=mock_access_key,
-                                                   secret_key=mock_secret_key)
+        self.remote_storage = S3Storage(bucket=bucket_name,
+                                        endpoint=mock_endpoint,
+                                        region=mock_region)
 
     def __enter__(self):
         return self
@@ -507,8 +513,6 @@ class ZenithEnvBuilder:
             for sk in self.env.safekeepers:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
-            if self.s3_mock_server:
-                self.s3_mock_server.kill()
 
 
 class ZenithEnv:
@@ -547,10 +551,12 @@ class ZenithEnv:
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
-        self.s3_mock_server = config.s3_mock_server
+        self.s3_mock_server = config.mock_s3_server
         self.zenith_cli = ZenithCli(env=self)
         self.postgres = PostgresFactory(self)
         self.safekeepers: List[Safekeeper] = []
+        self.broker = config.broker
+        self.remote_storage = config.remote_storage
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -559,6 +565,12 @@ class ZenithEnv:
         # Create a config file corresponding to the options
         toml = textwrap.dedent(f"""
             default_tenant_id = '{self.initial_tenant.hex}'
+        """)
+
+        toml += textwrap.dedent(f"""
+            [etcd_broker]
+            broker_endpoints = ['{self.broker.client_url()}']
+            etcd_binary_path = '{self.broker.binary_path}'
         """)
 
         # Create config for pageserver
@@ -579,7 +591,6 @@ class ZenithEnv:
         # Create a corresponding ZenithPageserver object
         self.pageserver = ZenithPageserver(self,
                                            port=pageserver_port,
-                                           remote_storage=config.pageserver_remote_storage,
                                            config_override=config.pageserver_config_override)
 
         # Create config and a Safekeeper object for each safekeeper
@@ -603,14 +614,15 @@ class ZenithEnv:
         self.zenith_cli.init(toml)
 
     def start(self):
-        # Start up the page server and all the safekeepers
+        # Start up broker, pageserver and all safekeepers
+        self.broker.try_start()
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
             safekeeper.start()
 
     def get_safekeeper_connstrs(self) -> str:
-        """ Get list of safekeeper endpoints suitable for wal_acceptors GUC  """
+        """ Get list of safekeeper endpoints suitable for safekeepers GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
     @cached_property
@@ -620,8 +632,11 @@ class ZenithEnv:
         return AuthKeys(pub=pub, priv=priv)
 
 
-@zenfixture
-def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
+@pytest.fixture(scope=shareable_scope)
+def _shared_simple_env(request: Any,
+                       port_distributor: PortDistributor,
+                       mock_s3_server: MockS3Server,
+                       default_broker: Etcd) -> Iterator[ZenithEnv]:
     """
     Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
     is set, this is shared by all tests using `zenith_simple_env`.
@@ -635,7 +650,8 @@ def _shared_simple_env(request: Any, port_distributor) -> Iterator[ZenithEnv]:
         repo_dir = os.path.join(str(top_output_dir), "shared_repo")
         shutil.rmtree(repo_dir, ignore_errors=True)
 
-    with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
+    with ZenithEnvBuilder(Path(repo_dir), port_distributor, default_broker,
+                          mock_s3_server) as builder:
         env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
@@ -657,12 +673,13 @@ def zenith_simple_env(_shared_simple_env: ZenithEnv) -> Iterator[ZenithEnv]:
     yield _shared_simple_env
 
     _shared_simple_env.postgres.stop_all()
-    if _shared_simple_env.s3_mock_server:
-        _shared_simple_env.s3_mock_server.kill()
 
 
 @pytest.fixture(scope='function')
-def zenith_env_builder(test_output_dir, port_distributor) -> Iterator[ZenithEnvBuilder]:
+def zenith_env_builder(test_output_dir,
+                       port_distributor: PortDistributor,
+                       mock_s3_server: MockS3Server,
+                       default_broker: Etcd) -> Iterator[ZenithEnvBuilder]:
     """
     Fixture to create a Zenith environment for test.
 
@@ -680,7 +697,8 @@ def zenith_env_builder(test_output_dir, port_distributor) -> Iterator[ZenithEnvB
     repo_dir = os.path.join(test_output_dir, "repo")
 
     # Return the builder to the caller
-    with ZenithEnvBuilder(Path(repo_dir), port_distributor) as builder:
+    with ZenithEnvBuilder(Path(repo_dir), port_distributor, default_broker,
+                          mock_s3_server) as builder:
         yield builder
 
 
@@ -783,6 +801,15 @@ class ZenithPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def wal_receiver_get(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/wal_receiver"
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
@@ -804,8 +831,6 @@ class LocalFsStorage:
 class S3Storage:
     bucket: str
     region: str
-    access_key: Optional[str]
-    secret_key: Optional[str]
     endpoint: Optional[str]
 
 
@@ -828,15 +853,39 @@ class ZenithCli:
         self.env = env
         pass
 
-    def create_tenant(self, tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def create_tenant(self,
+                      tenant_id: Optional[uuid.UUID] = None,
+                      timeline_id: Optional[uuid.UUID] = None,
+                      conf: Optional[Dict[str, str]] = None) -> Tuple[uuid.UUID, uuid.UUID]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
             tenant_id = uuid.uuid4()
-        res = self.raw_cli(['tenant', 'create', '--tenant-id', tenant_id.hex])
+        if timeline_id is None:
+            timeline_id = uuid.uuid4()
+        if conf is None:
+            res = self.raw_cli([
+                'tenant', 'create', '--tenant-id', tenant_id.hex, '--timeline-id', timeline_id.hex
+            ])
+        else:
+            res = self.raw_cli([
+                'tenant', 'create', '--tenant-id', tenant_id.hex, '--timeline-id', timeline_id.hex
+            ] + sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
         res.check_returncode()
-        return tenant_id
+        return tenant_id, timeline_id
+
+    def config_tenant(self, tenant_id: uuid.UUID, conf: Dict[str, str]):
+        """
+        Update tenant config.
+        """
+        if conf is None:
+            res = self.raw_cli(['tenant', 'config', '--tenant-id', tenant_id.hex])
+        else:
+            res = self.raw_cli(
+                ['tenant', 'config', '--tenant-id', tenant_id.hex] +
+                sum(list(map(lambda kv: (['-c', kv[0] + ':' + kv[1]]), conf.items())), []))
+        res.check_returncode()
 
     def list_tenants(self) -> 'subprocess.CompletedProcess[str]':
         res = self.raw_cli(['tenant', 'list'])
@@ -946,20 +995,42 @@ class ZenithCli:
             cmd = ['init', f'--config={tmp.name}']
             if initial_timeline_id:
                 cmd.extend(['--timeline-id', initial_timeline_id.hex])
-            append_pageserver_param_overrides(cmd,
-                                              self.env.pageserver.remote_storage,
-                                              self.env.pageserver.config_override)
+            append_pageserver_param_overrides(
+                params_to_update=cmd,
+                remote_storage=self.env.remote_storage,
+                pageserver_config_override=self.env.pageserver.config_override)
 
             res = self.raw_cli(cmd)
             res.check_returncode()
             return res
 
+    def pageserver_enabled_features(self) -> Any:
+        bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+        args = [bin_pageserver, '--enabled-features']
+        log.info('Running command "{}"'.format(' '.join(args)))
+
+        res = subprocess.run(args,
+                             check=True,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        log.info(f"pageserver_enabled_features success: {res.stdout}")
+        return json.loads(res.stdout)
+
     def pageserver_start(self, overrides=()) -> 'subprocess.CompletedProcess[str]':
         start_args = ['pageserver', 'start', *overrides]
-        append_pageserver_param_overrides(start_args,
-                                          self.env.pageserver.remote_storage,
-                                          self.env.pageserver.config_override)
-        return self.raw_cli(start_args)
+        append_pageserver_param_overrides(
+            params_to_update=start_args,
+            remote_storage=self.env.remote_storage,
+            pageserver_config_override=self.env.pageserver.config_override)
+
+        s3_env_vars = None
+        if self.env.s3_mock_server:
+            s3_env_vars = {
+                'AWS_ACCESS_KEY_ID': self.env.s3_mock_server.access_key(),
+                'AWS_SECRET_ACCESS_KEY': self.env.s3_mock_server.secret_key(),
+            }
+        return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
         cmd = ['pageserver', 'stop']
@@ -1054,6 +1125,7 @@ class ZenithCli:
 
     def raw_cli(self,
                 arguments: List[str],
+                extra_env_vars: Optional[Dict[str, str]] = None,
                 check_return_code=True) -> 'subprocess.CompletedProcess[str]':
         """
         Run "zenith" with the specified arguments.
@@ -1069,7 +1141,7 @@ class ZenithCli:
 
         assert type(arguments) == list
 
-        bin_zenith = os.path.join(str(zenith_binpath), 'zenith')
+        bin_zenith = os.path.join(str(zenith_binpath), 'neon_local')
 
         args = [bin_zenith] + arguments
         log.info('Running command "{}"'.format(' '.join(args)))
@@ -1078,9 +1150,10 @@ class ZenithCli:
         env_vars = os.environ.copy()
         env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override
+        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+            env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
         var = 'LLVM_PROFILE_FILE'
@@ -1119,16 +1192,11 @@ class ZenithPageserver(PgProtocol):
 
     Initializes the repository via `zenith init`.
     """
-    def __init__(self,
-                 env: ZenithEnv,
-                 port: PageserverPort,
-                 remote_storage: Optional[RemoteStorage] = None,
-                 config_override: Optional[str] = None):
-        super().__init__(host='localhost', port=port.pg, username='zenith_admin')
+    def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
+        super().__init__(host='localhost', port=port.pg, user='zenith_admin')
         self.env = env
         self.running = False
-        self.service_port = port  # do not shadow PgProtocol.port which is just int
-        self.remote_storage = remote_storage
+        self.service_port = port
         self.config_override = config_override
 
     def start(self, overrides=()) -> 'ZenithPageserver':
@@ -1168,25 +1236,21 @@ class ZenithPageserver(PgProtocol):
 
 def append_pageserver_param_overrides(
     params_to_update: List[str],
-    pageserver_remote_storage: Optional[RemoteStorage],
+    remote_storage: Optional[RemoteStorage],
     pageserver_config_override: Optional[str] = None,
 ):
-    if pageserver_remote_storage is not None:
-        if isinstance(pageserver_remote_storage, LocalFsStorage):
-            pageserver_storage_override = f"local_path='{pageserver_remote_storage.root}'"
-        elif isinstance(pageserver_remote_storage, S3Storage):
-            pageserver_storage_override = f"bucket_name='{pageserver_remote_storage.bucket}',\
-                bucket_region='{pageserver_remote_storage.region}'"
+    if remote_storage is not None:
+        if isinstance(remote_storage, LocalFsStorage):
+            pageserver_storage_override = f"local_path='{remote_storage.root}'"
+        elif isinstance(remote_storage, S3Storage):
+            pageserver_storage_override = f"bucket_name='{remote_storage.bucket}',\
+                bucket_region='{remote_storage.region}'"
 
-            if pageserver_remote_storage.access_key is not None:
-                pageserver_storage_override += f",access_key_id='{pageserver_remote_storage.access_key}'"
-            if pageserver_remote_storage.secret_key is not None:
-                pageserver_storage_override += f",secret_access_key='{pageserver_remote_storage.secret_key}'"
-            if pageserver_remote_storage.endpoint is not None:
-                pageserver_storage_override += f",endpoint='{pageserver_remote_storage.endpoint}'"
+            if remote_storage.endpoint is not None:
+                pageserver_storage_override += f",endpoint='{remote_storage.endpoint}'"
 
         else:
-            raise Exception(f'Unknown storage configuration {pageserver_remote_storage}')
+            raise Exception(f'Unknown storage configuration {remote_storage}')
         params_to_update.append(
             f'--pageserver-config-override=remote_storage={{{pageserver_storage_override}}}')
 
@@ -1266,7 +1330,7 @@ def pg_bin(test_output_dir: str) -> PgBin:
 
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
-        super().__init__(host='localhost', port=port)
+        super().__init__(host='localhost', port=port, dbname='postgres')
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
@@ -1276,12 +1340,16 @@ class VanillaPostgres(PgProtocol):
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
-            conf_file.writelines(options)
+            conf_file.write("\n".join(options))
 
-    def start(self):
+    def start(self, log_path: Optional[str] = None):
         assert not self.running
         self.running = True
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'start'])
+
+        if log_path is None:
+            log_path = os.path.join(self.pgdatadir, "pg.log")
+
+        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
@@ -1308,10 +1376,57 @@ def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
         yield vanilla_pg
 
 
+class RemotePostgres(PgProtocol):
+    def __init__(self, pg_bin: PgBin, remote_connstr: str):
+        super().__init__(**parse_dsn(remote_connstr))
+        self.pg_bin = pg_bin
+        # The remote server is assumed to be running already
+        self.running = True
+
+    def configure(self, options: List[str]):
+        raise Exception('cannot change configuration of remote Posgres instance')
+
+    def start(self):
+        raise Exception('cannot start a remote Postgres instance')
+
+    def stop(self):
+        raise Exception('cannot stop a remote Postgres instance')
+
+    def get_subdir_size(self, subdir) -> int:
+        # TODO: Could use the server's Generic File Acccess functions if superuser.
+        # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
+        raise Exception('cannot get size of a Postgres instance')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # do nothing
+        pass
+
+
+@pytest.fixture(scope='function')
+def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
+    pg_bin = PgBin(test_output_dir)
+
+    connstr = os.getenv("BENCHMARK_CONNSTR")
+    if connstr is None:
+        raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
+
+    with RemotePostgres(pg_bin, connstr) as remote_pg:
+        yield remote_pg
+
+
 class ZenithProxy(PgProtocol):
     def __init__(self, port: int):
-        super().__init__(host="127.0.0.1", username="pytest", password="pytest", port=port)
+        super().__init__(host="127.0.0.1",
+                         user="proxy_user",
+                         password="pytest2",
+                         port=port,
+                         dbname='postgres')
         self.http_port = 7001
+        self.host = "127.0.0.1"
+        self.port = port
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start_static(self, addr="127.0.0.1:5432") -> None:
@@ -1322,8 +1437,8 @@ class ZenithProxy(PgProtocol):
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
-        args.extend(["--auth-method", "password"])
-        args.extend(["--static-router", addr])
+        args.extend(["--auth-backend", "postgres"])
+        args.extend(["--auth-endpoint", "postgres://proxy_auth:pytest1@localhost:5432/postgres"])
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1345,7 +1460,8 @@ class ZenithProxy(PgProtocol):
 def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
     """Zenith proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user pytest with password 'pytest';")
+    vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
+    vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
     with ZenithProxy(4432) as proxy:
         proxy.start_static()
@@ -1355,13 +1471,13 @@ def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
-        super().__init__(host='localhost', port=port, username='zenith_admin')
-
+        super().__init__(host='localhost', port=port, user='zenith_admin', dbname='postgres')
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
+        self.port = port
         # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
@@ -1435,7 +1551,7 @@ class Postgres(PgProtocol):
         """ Path to postgresql.conf """
         return os.path.join(self.pg_data_dir_path(), 'postgresql.conf')
 
-    def adjust_for_wal_acceptors(self, wal_acceptors: str) -> 'Postgres':
+    def adjust_for_safekeepers(self, safekeepers: str) -> 'Postgres':
         """
         Adjust instance config for working with wal acceptors instead of
         pageserver (pre-configured by CLI) directly.
@@ -1450,12 +1566,12 @@ class Postgres(PgProtocol):
                 if ("synchronous_standby_names" in cfg_line or
                         # don't ask pageserver to fetch WAL from compute
                         "callmemaybe_connstring" in cfg_line or
-                        # don't repeat wal_acceptors multiple times
+                        # don't repeat safekeepers/wal_acceptors multiple times
                         "wal_acceptors" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(wal_acceptors))
+            f.write("wal_acceptors = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -1494,6 +1610,7 @@ class Postgres(PgProtocol):
         assert self.node_name is not None
         self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
+        self.running = False
 
         return self
 
@@ -1661,11 +1778,16 @@ class Safekeeper:
     def http_client(self) -> SafekeeperHttpClient:
         return SafekeeperHttpClient(port=self.port.http)
 
+    def data_dir(self) -> str:
+        return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
+
 
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
+    remote_consistent_lsn: str
+    timeline_start_lsn: str
 
 
 @dataclass
@@ -1689,12 +1811,38 @@ class SafekeeperHttpClient(requests.Session):
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
-                                        flush_lsn=resj['flush_lsn'])
+                                        flush_lsn=resj['flush_lsn'],
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'],
+                                        timeline_start_lsn=resj['timeline_start_lsn'])
 
-    def get_metrics(self) -> SafekeeperMetrics:
+    def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
+            json=body)
+        res.raise_for_status()
+
+    def timeline_delete_force(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def tenant_delete_force(self, tenant_id: str) -> Dict[Any, Any]:
+        res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def get_metrics_str(self) -> str:
         request_result = self.get(f"http://localhost:{self.port}/metrics")
         request_result.raise_for_status()
-        all_metrics_text = request_result.text
+        return request_result.text
+
+    def get_metrics(self) -> SafekeeperMetrics:
+        all_metrics_text = self.get_metrics_str()
 
         metrics = SafekeeperMetrics()
         for match in re.finditer(
@@ -1708,6 +1856,64 @@ class SafekeeperHttpClient(requests.Session):
                 re.MULTILINE):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
+
+
+@dataclass
+class Etcd:
+    """ An object managing etcd instance """
+    datadir: str
+    port: int
+    peer_port: int
+    binary_path: Path = etcd_path()
+    handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def client_url(self):
+        return f'http://127.0.0.1:{self.port}'
+
+    def check_status(self):
+        s = requests.Session()
+        s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
+        s.get(f"{self.client_url()}/health").raise_for_status()
+
+    def try_start(self):
+        if self.handle is not None:
+            log.debug(f'etcd is already running on port {self.port}')
+            return
+
+        pathlib.Path(self.datadir).mkdir(exist_ok=True)
+
+        if not self.binary_path.is_file():
+            raise RuntimeError(f"etcd broker binary '{self.binary_path}' is not a file")
+
+        client_url = self.client_url()
+        log.info(f'Starting etcd to listen incoming connections at "{client_url}"')
+        with open(os.path.join(self.datadir, "etcd.log"), "wb") as log_file:
+            args = [
+                self.binary_path,
+                f"--data-dir={self.datadir}",
+                f"--listen-client-urls={client_url}",
+                f"--advertise-client-urls={client_url}",
+                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}"
+            ]
+            self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
+
+        # wait for start
+        started_at = time.time()
+        while True:
+            try:
+                self.check_status()
+            except Exception as e:
+                elapsed = time.time() - started_at
+                if elapsed > 5:
+                    raise RuntimeError(f"timed out waiting {elapsed:.0f}s for etcd start: {e}")
+                time.sleep(0.5)
+            else:
+                break  # success
+
+    def stop(self):
+        if self.handle is not None:
+            self.handle.terminate()
+            self.handle.wait()
 
 
 def get_test_output_dir(request: Any) -> str:
@@ -1739,7 +1945,12 @@ def test_output_dir(request: Any) -> str:
     return test_dir
 
 
-SKIP_DIRS = frozenset(('pg_wal', 'pg_stat', 'pg_stat_tmp', 'pg_subtrans', 'pg_logical'))
+SKIP_DIRS = frozenset(('pg_wal',
+                       'pg_stat',
+                       'pg_stat_tmp',
+                       'pg_subtrans',
+                       'pg_logical',
+                       'pg_replslot/wal_proposer_slot'))
 
 SKIP_FILES = frozenset(('pg_internal.init',
                         'pg.log',
@@ -1865,7 +2076,11 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     assert (mismatch, error) == ([], [])
 
 
-def wait_for(number_of_iterations: int, interval: int, func):
+def wait_until(number_of_iterations: int, interval: int, func):
+    """
+    Wait until 'func' returns successfully, without exception. Returns the last return value
+    from the the function.
+    """
     last_exception = None
     for i in range(number_of_iterations):
         try:
@@ -1892,9 +2107,15 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail['remote']['remote_consistent_lsn']
-    assert isinstance(lsn_str, str)
-    return lsn_from_hex(lsn_str)
+    if detail['remote'] is None:
+        # No remote information at all. This happens right after creating
+        # a timeline, before any part of it it has been uploaded to remote
+        # storage yet.
+        return 0
+    else:
+        lsn_str = detail['remote']['remote_consistent_lsn']
+        assert isinstance(lsn_str, str)
+        return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
@@ -1902,8 +2123,15 @@ def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
                     timeline: uuid.UUID,
                     lsn: int):
     """waits for local timeline upload up to specified lsn"""
-
-    wait_for(10, 1, lambda: remote_consistent_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+    for i in range(10):
+        current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
+        if current_lsn >= lsn:
+            return
+        log.info("waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        time.sleep(1)
+    raise Exception("timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
+        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
 
 
 def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
@@ -1921,5 +2149,12 @@ def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
                              timeline: uuid.UUID,
                              lsn: int):
     """waits for pageserver to catch up to a certain lsn"""
-
-    wait_for(10, 1, lambda: last_record_lsn(pageserver_http_client, tenant, timeline) >= lsn)
+    for i in range(10):
+        current_lsn = last_record_lsn(pageserver_http_client, tenant, timeline)
+        if current_lsn >= lsn:
+            return
+        log.info("waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        time.sleep(1)
+    raise Exception("timed out while waiting for last_record_lsn to reach {}, was {}".format(
+        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))

@@ -10,6 +10,8 @@ Prerequisites:
       below to run from other directories.
 - The zenith git repo, including the postgres submodule
   (for some tests, e.g. `pg_regress`)
+- Some tests (involving storage nodes coordination) require etcd installed. Follow
+  [`the guide`](https://etcd.io/docs/v3.5/install/) to obtain it.
 
 ### Test Organization
 
@@ -49,7 +51,6 @@ Useful environment variables:
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
-`FORCE_MOCK_S3`: inits every test's pageserver with a mock S3 used as a remote storage.
 `--pageserver-config-override=${value}` parameter values when zenith cli is invoked
 `RUST_LOG`: logging configuration to pass into Zenith CLI
 

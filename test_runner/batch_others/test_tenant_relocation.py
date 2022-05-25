@@ -3,19 +3,18 @@ import os
 import pathlib
 import subprocess
 import threading
-from typing import Dict
+import typing
 from uuid import UUID
 from fixtures.log_helper import log
-import time
+from typing import Optional
 import signal
 import pytest
 
-from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
+from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, Etcd, ZenithPageserverHttpClient, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
 from fixtures.utils import lsn_from_hex
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
-    print("!" * 100, abs(a - b) / a)
     assert abs(a - b) / a < margin_ratio, abs(a - b) / a
 
 
@@ -24,7 +23,8 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
                           pageserver_bin: pathlib.Path,
                           remote_storage_mock_path: pathlib.Path,
                           pg_port: int,
-                          http_port: int):
+                          http_port: int,
+                          broker: Optional[Etcd]):
     """
     cannot use ZenithPageserver yet because it depends on zenith cli
     which currently lacks support for multiple pageservers
@@ -40,6 +40,9 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
+
+    if broker is not None:
+        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
 
     subprocess.check_output(cmd, text=True)
 
@@ -98,11 +101,14 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
+@pytest.mark.skip(
+    reason=
+    "needs to replace callmemaybe call with better idea how to migrate timelines between pageservers"
+)
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                            port_distributor: PortDistributor,
                            with_load: str):
-    zenith_env_builder.num_safekeepers = 1
     zenith_env_builder.enable_local_fs_remote_storage()
 
     env = zenith_env_builder.init_start()
@@ -110,12 +116,13 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant, _ = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
-    env.zenith_cli.create_root_branch('main', tenant_id=tenant)
-    env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
-    tenant_pg = env.postgres.create_start(branch_name='main',
+    # attach does not download ancestor branches (should it?), just use root branch for now
+    env.zenith_cli.create_root_branch('test_tenant_relocation', tenant_id=tenant)
+
+    tenant_pg = env.postgres.create_start(branch_name='test_tenant_relocation',
                                           node_name='test_tenant_relocation',
                                           tenant_id=tenant)
 
@@ -178,12 +185,13 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
                                pageserver_bin,
                                remote_storage_mock_path,
                                new_pageserver_pg_port,
-                               new_pageserver_http_port):
+                               new_pageserver_http_port,
+                               zenith_env_builder.broker):
 
         # call to attach timeline to new pageserver
         new_pageserver_http.timeline_attach(tenant, timeline)
         # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
-        new_timeline_detail = wait_for(
+        new_timeline_detail = wait_until(
             number_of_iterations=5,
             interval=1,
             func=lambda: assert_local(new_pageserver_http, tenant, timeline))
@@ -220,6 +228,13 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         tenant_pg.start()
 
+        timeline_to_detach_local_path = env.repo_dir / 'tenants' / tenant.hex / 'timelines' / timeline.hex
+        files_before_detach = os.listdir(timeline_to_detach_local_path)
+        assert 'metadata' in files_before_detach, f'Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
+             but got: {files_before_detach}'
+        assert len(files_before_detach) > 2, f'Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
+             but got {files_before_detach}'
+
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
         # is no longer involved, and if it is, we will see the errors
@@ -235,11 +250,13 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             assert cur.fetchone() == (2001000, )
 
         if with_load == 'with_load':
-            assert load_ok_event.wait(1)
+            assert load_ok_event.wait(3)
             log.info('stopping load thread')
             load_stop_event.set()
-            load_thread.join()
+            load_thread.join(timeout=10)
             log.info('load thread stopped')
+
+        assert not os.path.exists(timeline_to_detach_local_path), f'After detach, local timeline dir {timeline_to_detach_local_path} should be removed'
 
         # bring old pageserver back for clean shutdown via zenith cli
         # new pageserver will be shut down by the context manager

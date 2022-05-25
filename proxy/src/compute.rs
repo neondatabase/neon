@@ -1,6 +1,6 @@
+use crate::auth_backend::console::DatabaseInfo;
 use crate::cancellation::CancelClosure;
 use crate::error::UserFacingError;
-use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -23,24 +23,24 @@ pub enum ConnectionError {
 
 impl UserFacingError for ConnectionError {}
 
-/// Compute node connection params.
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct DatabaseInfo {
-    pub host: String,
-    pub port: u16,
-    pub dbname: String,
-    pub user: String,
-    pub password: Option<String>,
-}
-
 /// PostgreSQL version as [`String`].
 pub type Version = String;
 
-impl DatabaseInfo {
+/// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
+pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
+
+/// Compute node connection params.
+pub struct NodeInfo {
+    pub db_info: DatabaseInfo,
+    pub scram_keys: Option<ScramKeys>,
+}
+
+impl NodeInfo {
     async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
-        let host_port = format!("{}:{}", self.host, self.port);
+        let host_port = format!("{}:{}", self.db_info.host, self.db_info.port);
         let socket = TcpStream::connect(host_port).await?;
         let socket_addr = socket.peer_addr()?;
+        socket2::SockRef::from(&socket).set_keepalive(true)?;
 
         Ok((socket_addr, socket))
     }
@@ -52,11 +52,13 @@ impl DatabaseInfo {
             .await
             .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
 
-        // TODO: establish a secure connection to the DB
-        let (client, conn) = tokio_postgres::Config::from(self)
-            .connect_raw(&mut socket, NoTls)
-            .await?;
+        let mut config = tokio_postgres::Config::from(self.db_info);
+        if let Some(scram_keys) = self.scram_keys {
+            config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(scram_keys));
+        }
 
+        // TODO: establish a secure connection to the DB
+        let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
         let version = conn
             .parameter("server_version")
             .ok_or(ConnectionError::FailedToFetchPgVersion)?
@@ -65,23 +67,5 @@ impl DatabaseInfo {
         let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
 
         Ok((socket, version, cancel_closure))
-    }
-}
-
-impl From<DatabaseInfo> for tokio_postgres::Config {
-    fn from(db_info: DatabaseInfo) -> Self {
-        let mut config = tokio_postgres::Config::new();
-
-        config
-            .host(&db_info.host)
-            .port(db_info.port)
-            .dbname(&db_info.dbname)
-            .user(&db_info.user);
-
-        if let Some(password) = db_info.password {
-            config.password(password);
-        }
-
-        config
     }
 }

@@ -1,0 +1,42 @@
+[package]
+name = "safekeeper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1.4.5"
+bytes = "1.0.1"
+byteorder = "1.4.3"
+hyper = "0.14"
+fs2 = "0.4.3"
+lazy_static = "1.4.0"
+serde_json = "1"
+tracing = "0.1.27"
+clap = "3.0"
+daemonize = "0.4.1"
+tokio = { version = "1.17", features = ["macros", "fs"] }
+postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+anyhow = "1.0"
+crc32c = "0.6.0"
+humantime = "2.1.0"
+walkdir = "2"
+url = "2.2.2"
+signal-hook = "0.3.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "1.12.0"
+hex = "0.4.3"
+const_format = "0.2.21"
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+tokio-util = { version = "0.7", features = ["io"] }
+git-version = "0.3.5"
+
+postgres_ffi = { path = "../libs/postgres_ffi" }
+metrics = { path = "../libs/metrics" }
+utils = { path = "../libs/utils" }
+etcd_broker = { path = "../libs/etcd_broker" }
+remote_storage = { path = "../libs/remote_storage" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }
+
+[dev-dependencies]
+tempfile = "3.2"

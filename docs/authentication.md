@@ -27,4 +27,4 @@ management_token = jwt.encode({"scope": "pageserverapi"}, auth_keys.priv, algori
 tenant_token = jwt.encode({"scope": "tenant", "tenant_id": ps.initial_tenant}, auth_keys.priv, algorithm="RS256")
 ```
 
-Utility functions to work with jwts in rust are located in zenith_utils/src/auth.rs
+Utility functions to work with jwts in rust are located in libs/utils/src/auth.rs

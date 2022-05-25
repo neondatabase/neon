@@ -1,10 +1,7 @@
-from contextlib import closing
-
 import asyncio
-import asyncpg
 import random
 
-from fixtures.zenith_fixtures import ZenithEnv, Postgres, Safekeeper
+from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres
 from fixtures.log_helper import log
 
 # Test configuration
@@ -53,9 +50,12 @@ async def update_and_gc(env: ZenithEnv, pg: Postgres, timeline: str):
 #
 # (repro for https://github.com/zenithdb/zenith/issues/1047)
 #
-def test_gc_aggressive(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_gc_aggressive", "empty")
+def test_gc_aggressive(zenith_env_builder: ZenithEnvBuilder):
+
+    # Disable pitr, because here we want to test branch creation after GC
+    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
+    env = zenith_env_builder.init_start()
+    env.zenith_cli.create_branch("test_gc_aggressive", "main")
     pg = env.postgres.create_start('test_gc_aggressive')
     log.info('postgres is running on test_gc_aggressive branch')
 
@@ -76,5 +76,5 @@ def test_gc_aggressive(zenith_simple_env: ZenithEnv):
 
     asyncio.run(update_and_gc(env, pg, timeline))
 
-    row = cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
+    cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
     assert cur.fetchone() == (num_rows, updates_to_perform)

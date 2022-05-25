@@ -13,15 +13,15 @@ from fixtures.zenith_fixtures import ZenithEnvBuilder
 
 
 @pytest.mark.parametrize('tenants_count', [1, 5, 10])
-@pytest.mark.parametrize('use_wal_acceptors', ['with_wa', 'without_wa'])
+@pytest.mark.parametrize('use_safekeepers', ['with_wa', 'without_wa'])
 def test_bulk_tenant_create(
     zenith_env_builder: ZenithEnvBuilder,
-    use_wal_acceptors: str,
+    use_safekeepers: str,
     tenants_count: int,
     zenbenchmark,
 ):
     """Measure tenant creation time (with and without wal acceptors)"""
-    if use_wal_acceptors == 'with_wa':
+    if use_safekeepers == 'with_wa':
         zenith_env_builder.num_safekeepers = 3
     env = zenith_env_builder.init_start()
 
@@ -30,16 +30,16 @@ def test_bulk_tenant_create(
     for i in range(tenants_count):
         start = timeit.default_timer()
 
-        tenant = env.zenith_cli.create_tenant()
+        tenant, _ = env.zenith_cli.create_tenant()
         env.zenith_cli.create_timeline(
-            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}', tenant_id=tenant)
+            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_safekeepers}', tenant_id=tenant)
 
         # FIXME: We used to start new safekeepers here. Did that make sense? Should we do it now?
-        #if use_wal_acceptors == 'with_wa':
+        #if use_safekeepers == 'with_sa':
         #    wa_factory.start_n_new(3)
 
         pg_tenant = env.postgres.create_start(
-            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_wal_acceptors}', tenant_id=tenant)
+            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_safekeepers}', tenant_id=tenant)
 
         end = timeit.default_timer()
         time_slices.append(end - start)

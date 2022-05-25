@@ -1,6 +1,7 @@
 //!
 //! Functions for parsing WAL records.
 //!
+use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::pg_constants;
 use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
@@ -9,8 +10,52 @@ use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use tracing::*;
+use utils::bin_ser::DeserializeError;
 
-use crate::repository::ZenithWalRecord;
+/// Each update to a page is represented by a ZenithWalRecord. It can be a wrapper
+/// around a PostgreSQL WAL record, or a custom zenith-specific "record".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ZenithWalRecord {
+    /// Native PostgreSQL WAL record
+    Postgres { will_init: bool, rec: Bytes },
+
+    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
+    ClearVisibilityMapFlags {
+        new_heap_blkno: Option<u32>,
+        old_heap_blkno: Option<u32>,
+        flags: u8,
+    },
+    /// Mark transaction IDs as committed on a CLOG page
+    ClogSetCommitted {
+        xids: Vec<TransactionId>,
+        timestamp: TimestampTz,
+    },
+    /// Mark transaction IDs as aborted on a CLOG page
+    ClogSetAborted { xids: Vec<TransactionId> },
+    /// Extend multixact offsets SLRU
+    MultixactOffsetCreate {
+        mid: MultiXactId,
+        moff: MultiXactOffset,
+    },
+    /// Extend multixact members SLRU.
+    MultixactMembersCreate {
+        moff: MultiXactOffset,
+        members: Vec<MultiXactMember>,
+    },
+}
+
+impl ZenithWalRecord {
+    /// Does replaying this WAL record initialize the page from scratch, or does
+    /// it need to be applied over the previous image of the page?
+    pub fn will_init(&self) -> bool {
+        match self {
+            ZenithWalRecord::Postgres { will_init, rec: _ } => *will_init,
+
+            // None of the special zenith record types currently initialize the page
+            _ => false,
+        }
+    }
+}
 
 /// DecodedBkpBlock represents per-page data contained in a WAL record.
 #[derive(Default)]
@@ -83,6 +128,28 @@ impl XlRelmapUpdate {
             dbid: buf.get_u32_le(),
             tsid: buf.get_u32_le(),
             nbytes: buf.get_i32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlSmgrCreate {
+    pub rnode: RelFileNode,
+    // FIXME: This is ForkNumber in storage_xlog.h. That's an enum. Does it have
+    // well-defined size?
+    pub forknum: u8,
+}
+
+impl XlSmgrCreate {
+    pub fn decode(buf: &mut Bytes) -> XlSmgrCreate {
+        XlSmgrCreate {
+            rnode: RelFileNode {
+                spcnode: buf.get_u32_le(), /* tablespace */
+                dbnode: buf.get_u32_le(),  /* database */
+                relnode: buf.get_u32_le(), /* relation */
+            },
+            forknum: buf.get_u32_le() as u8,
         }
     }
 }
@@ -438,7 +505,7 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
+pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeError> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -449,7 +516,7 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     trace!(
         "decode_wal_record xl_rmid = {} xl_info = {}",
@@ -677,34 +744,32 @@ pub fn decode_wal_record(record: Bytes) -> DecodedWALRecord {
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    DecodedWALRecord {
+    Ok(DecodedWALRecord {
         xl_xid: xlogrec.xl_xid,
         xl_info: xlogrec.xl_info,
         xl_rmid: xlogrec.xl_rmid,
         record,
         blocks,
         main_data_offset,
-    }
+    })
 }
 
 ///
 /// Build a human-readable string to describe a WAL record
 ///
 /// For debugging purposes
-pub fn describe_wal_record(rec: &ZenithWalRecord) -> String {
+pub fn describe_wal_record(rec: &ZenithWalRecord) -> Result<String, DeserializeError> {
     match rec {
-        ZenithWalRecord::Postgres { will_init, rec } => {
-            format!(
-                "will_init: {}, {}",
-                will_init,
-                describe_postgres_wal_record(rec)
-            )
-        }
-        _ => format!("{:?}", rec),
+        ZenithWalRecord::Postgres { will_init, rec } => Ok(format!(
+            "will_init: {}, {}",
+            will_init,
+            describe_postgres_wal_record(rec)?
+        )),
+        _ => Ok(format!("{:?}", rec)),
     }
 }
 
-fn describe_postgres_wal_record(record: &Bytes) -> String {
+fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeError> {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,
@@ -717,7 +782,7 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
     // 1. Parse XLogRecord struct
 
     // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf);
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
 
     let unknown_str: String;
 
@@ -765,5 +830,5 @@ fn describe_postgres_wal_record(record: &Bytes) -> String {
         }
     };
 
-    String::from(result)
+    Ok(String::from(result))
 }

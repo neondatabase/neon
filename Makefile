@@ -12,15 +12,21 @@ endif
 #
 BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
-	PG_CONFIGURE_OPTS = --enable-debug
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
-	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
-$(error Bad build type `$(BUILD_TYPE)', see Makefile for options)
+	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
+endif
+
+# macOS with brew-installed openssl requires explicit paths
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    PG_CONFIGURE_OPTS += --with-includes=/usr/local/opt/openssl/include --with-libraries=/usr/local/opt/openssl/lib
 endif
 
 # Choose whether we should be silent or verbose
@@ -78,6 +84,11 @@ postgres: postgres-configure \
 	$(MAKE) -C tmp_install/build/contrib/zenith install
 	+@echo "Compiling contrib/zenith_test_utils"
 	$(MAKE) -C tmp_install/build/contrib/zenith_test_utils install
+	+@echo "Compiling pg_buffercache"
+	$(MAKE) -C tmp_install/build/contrib/pg_buffercache install
+	+@echo "Compiling pageinspect"
+	$(MAKE) -C tmp_install/build/contrib/pageinspect install
+
 
 .PHONY: postgres-clean
 postgres-clean:

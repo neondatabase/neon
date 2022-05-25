@@ -2,7 +2,7 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use postgres_ffi::ControlFileData;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -14,15 +14,19 @@ use std::{
 };
 use tracing::*;
 
-use zenith_utils::lsn::Lsn;
-use zenith_utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
-use zenith_utils::{crashsafe_dir, logging};
+use utils::{
+    crashsafe_dir, logging,
+    lsn::Lsn,
+    zid::{ZTenantId, ZTimelineId},
+};
 
 use crate::{
     config::PageServerConf,
     layered_repository::metadata::TimelineMetadata,
-    remote_storage::RemoteTimelineIndex,
     repository::{LocalTimelineState, Repository},
+    storage_sync::index::RemoteIndex,
+    tenant_config::TenantConfOpt,
+    DatadirTimeline, RepositoryImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
@@ -41,6 +45,8 @@ pub struct LocalTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
     #[serde_as(as = "DisplayFromStr")]
+    pub latest_gc_cutoff_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
@@ -48,26 +54,27 @@ pub struct LocalTimelineInfo {
 }
 
 impl LocalTimelineInfo {
-    pub fn from_loaded_timeline(
-        timeline: &dyn Timeline,
+    pub fn from_loaded_timeline<R: Repository>(
+        datadir_tline: &DatadirTimeline<R>,
         include_non_incremental_logical_size: bool,
     ) -> anyhow::Result<Self> {
-        let last_record_lsn = timeline.get_last_record_lsn();
+        let last_record_lsn = datadir_tline.tline.get_last_record_lsn();
         let info = LocalTimelineInfo {
-            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_timeline_id: datadir_tline.tline.get_ancestor_timeline_id(),
             ancestor_lsn: {
-                match timeline.get_ancestor_lsn() {
+                match datadir_tline.tline.get_ancestor_lsn() {
                     Lsn(0) => None,
                     lsn @ Lsn(_) => Some(lsn),
                 }
             },
-            disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
+            disk_consistent_lsn: datadir_tline.tline.get_disk_consistent_lsn(),
             last_record_lsn,
-            prev_record_lsn: Some(timeline.get_prev_record_lsn()),
+            prev_record_lsn: Some(datadir_tline.tline.get_prev_record_lsn()),
+            latest_gc_cutoff_lsn: *datadir_tline.tline.get_latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Loaded,
-            current_logical_size: Some(timeline.get_current_logical_size()),
+            current_logical_size: Some(datadir_tline.get_current_logical_size()),
             current_logical_size_non_incremental: if include_non_incremental_logical_size {
-                Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
+                Some(datadir_tline.get_current_logical_size_non_incremental(last_record_lsn)?)
             } else {
                 None
             },
@@ -87,23 +94,26 @@ impl LocalTimelineInfo {
             disk_consistent_lsn: metadata.disk_consistent_lsn(),
             last_record_lsn: metadata.disk_consistent_lsn(),
             prev_record_lsn: metadata.prev_record_lsn(),
+            latest_gc_cutoff_lsn: metadata.latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Unloaded,
             current_logical_size: None,
             current_logical_size_non_incremental: None,
         }
     }
 
-    pub fn from_repo_timeline(
-        repo_timeline: RepositoryTimeline,
+    pub fn from_repo_timeline<T>(
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        repo_timeline: &RepositoryTimeline<T>,
         include_non_incremental_logical_size: bool,
     ) -> anyhow::Result<Self> {
         match repo_timeline {
-            RepositoryTimeline::Loaded(timeline) => {
-                Self::from_loaded_timeline(timeline.as_ref(), include_non_incremental_logical_size)
+            RepositoryTimeline::Loaded(_) => {
+                let datadir_tline =
+                    tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
+                Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
             }
-            RepositoryTimeline::Unloaded { metadata } => {
-                Ok(Self::from_unloaded_timeline(&metadata))
-            }
+            RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
         }
     }
 }
@@ -111,8 +121,8 @@ impl LocalTimelineInfo {
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
     pub awaits_download: bool,
 }
 
@@ -125,22 +135,6 @@ pub struct TimelineInfo {
     pub timeline_id: ZTimelineId,
     pub local: Option<LocalTimelineInfo>,
     pub remote: Option<RemoteTimelineInfo>,
-}
-
-pub fn extract_remote_timeline_info(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-    remote_index: &RemoteTimelineIndex,
-) -> Option<RemoteTimelineInfo> {
-    remote_index
-        .timeline_entry(&ZTenantTimelineId {
-            tenant_id,
-            timeline_id,
-        })
-        .map(|remote_entry| RemoteTimelineInfo {
-            remote_consistent_lsn: remote_entry.disk_consistent_lsn(),
-            awaits_download: remote_entry.get_awaits_download(),
-        })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -162,8 +156,8 @@ pub fn init_pageserver(
 
     if let Some(tenant_id) = create_tenant {
         println!("initializing tenantid {}", tenant_id);
-        let repo =
-            create_repo(conf, tenant_id, CreateRepo::Dummy).context("failed to create repo")?;
+        let repo = create_repo(conf, TenantConfOpt::default(), tenant_id, CreateRepo::Dummy)
+            .context("failed to create repo")?;
         let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
         bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
             .context("failed to create initial timeline")?;
@@ -179,16 +173,17 @@ pub fn init_pageserver(
 pub enum CreateRepo {
     Real {
         wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-        remote_index: Arc<tokio::sync::RwLock<RemoteTimelineIndex>>,
+        remote_index: RemoteIndex,
     },
     Dummy,
 }
 
 pub fn create_repo(
     conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
     create_repo: CreateRepo,
-) -> Result<Arc<dyn Repository>> {
+) -> Result<Arc<RepositoryImpl>> {
     let (wal_redo_manager, remote_index) = match create_repo {
         CreateRepo::Real {
             wal_redo_manager,
@@ -207,15 +202,16 @@ pub fn create_repo(
             // anymore, but I think that could still happen.
             let wal_redo_manager = Arc::new(crate::walredo::DummyRedoManager {});
 
-            let remote_index = Arc::new(tokio::sync::RwLock::new(RemoteTimelineIndex::empty()));
-            (wal_redo_manager as _, remote_index)
+            (wal_redo_manager as _, RemoteIndex::empty())
         }
     };
 
     let repo_dir = conf.tenant_path(&tenant_id);
-    if repo_dir.exists() {
-        bail!("tenant {} directory already exists", tenant_id);
-    }
+    ensure!(
+        !repo_dir.exists(),
+        "cannot create new tenant repo: '{}' directory already exists",
+        tenant_id
+    );
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&repo_dir)
@@ -223,8 +219,12 @@ pub fn create_repo(
     crashsafe_dir::create_dir(conf.timelines_path(&tenant_id))?;
     info!("created directory structure in {}", repo_dir.display());
 
+    // Save tenant's config
+    LayeredRepository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+
     Ok(Arc::new(LayeredRepository::new(
         conf,
+        tenant_conf,
         wal_redo_manager,
         tenant_id,
         remote_index,
@@ -250,7 +250,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 
     let initdb_path = conf.pg_bin_dir().join("initdb");
     let initdb_output = Command::new(initdb_path)
-        .args(&["-D", initdbpath.to_str().unwrap()])
+        .args(&["-D", &initdbpath.to_string_lossy()])
         .args(&["-U", &conf.superuser])
         .args(&["-E", "utf8"])
         .arg("--no-instructions")
@@ -258,8 +258,8 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
-        .env("LD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
-        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir().to_str().unwrap())
+        .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+        .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
         .stdout(Stdio::null())
         .output()
         .context("failed to execute initdb")?;
@@ -277,12 +277,12 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
 //
-fn bootstrap_timeline(
+fn bootstrap_timeline<R: Repository>(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
-    repo: &dyn Repository,
-) -> Result<Arc<dyn Timeline>> {
+    repo: &R,
+) -> Result<()> {
     let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
 
     let initdb_path = conf.tenant_path(&tenantid).join("tmp");
@@ -298,23 +298,20 @@ fn bootstrap_timeline(
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    import_datadir::import_timeline_from_postgres_datadir(
-        &pgdata_path,
-        timeline.writer().as_ref(),
-        lsn,
-    )?;
-    timeline.checkpoint(CheckpointConfig::Forced)?;
+    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
+    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
+    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
     println!(
         "created initial timeline {} timeline.lsn {}",
         tli,
-        timeline.get_last_record_lsn()
+        page_tline.tline.get_last_record_lsn()
     );
 
     // Remove temp dir. We don't need it anymore
     fs::remove_dir_all(pgdata_path)?;
 
-    Ok(timeline)
+    Ok(())
 }
 
 pub(crate) fn get_local_timelines(
@@ -330,7 +327,9 @@ pub(crate) fn get_local_timelines(
         local_timeline_info.push((
             timeline_id,
             LocalTimelineInfo::from_repo_timeline(
-                repository_timeline,
+                tenant_id,
+                timeline_id,
+                &repository_timeline,
                 include_non_incremental_logical_size,
             )?,
         ))
@@ -389,13 +388,17 @@ pub(crate) fn create_timeline(
             }
             repo.branch_timeline(ancestor_timeline_id, new_timeline_id, start_lsn)?;
             // load the timeline into memory
-            let loaded_timeline = repo.get_timeline_load(new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(loaded_timeline.as_ref(), false)
+            let loaded_timeline =
+                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
+            LocalTimelineInfo::from_loaded_timeline(&loaded_timeline, false)
                 .context("cannot fill timeline info")?
         }
         None => {
-            let new_timeline = bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
-            LocalTimelineInfo::from_loaded_timeline(new_timeline.as_ref(), false)
+            bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
+            // load the timeline into memory
+            let new_timeline =
+                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
+            LocalTimelineInfo::from_loaded_timeline(&new_timeline, false)
                 .context("cannot fill timeline info")?
         }
     };

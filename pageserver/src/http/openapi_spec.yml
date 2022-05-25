@@ -18,7 +18,7 @@ paths:
               schema:
                 type: object
                 required:
-                - id
+                  - id
                 properties:
                   id:
                     type: integer
@@ -122,6 +122,157 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/wal_receiver:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get wal receiver's data attached to the timeline
+      responses:
+        "200":
+          description: WalReceiverEntry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalReceiverEntry"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Error when no wal receiver is running or found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Attach remote timeline
+      responses:
+        "200":
+          description: Timeline attaching scheduled
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Timeline download is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Detach local timeline
+      responses:
+        "200":
+          description: Timeline detached
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
       - name: tenant_id
@@ -179,7 +330,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AlreadyExistsError"
+                $ref: "#/components/schemas/ConflictError"
         "500":
           description: Generic operation error
           content:
@@ -224,11 +375,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                new_tenant_id:
-                  type: string
-                  format: hex
+              $ref: "#/components/schemas/TenantCreateInfo"
       responses:
         "201":
           description: New tenant created successfully
@@ -260,14 +407,55 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AlreadyExistsError"
+                $ref: "#/components/schemas/ConflictError"
         "500":
           description: Generic operation error
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
+  /v1/tenant/config:
+    put:
+      description: |
+        Update tenant's config.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantConfigInfo"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TenantInfo"
+        "400":
+          description: Malformed tenant config request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     JWT:
@@ -284,6 +472,45 @@ components:
         id:
           type: string
         state:
+          type: string
+    TenantCreateInfo:
+      type: object
+      properties:
+        new_tenant_id:
+          type: string
+          format: hex
+        tenant_id:
+          type: string
+          format: hex
+        gc_period:
+          type: string
+        gc_horizon:
+          type: integer
+        pitr_interval:
+          type: string
+        checkpoint_distance:
+          type: integer
+        compaction_period:
+          type: string
+        compaction_threshold:
+          type: string
+    TenantConfigInfo:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: hex
+        gc_period:
+          type: string
+        gc_horizon:
+          type: integer
+        pitr_interval:
+          type: string
+        checkpoint_distance:
+          type: integer
+        compaction_period:
+          type: string
+        compaction_threshold:
           type: string
     TimelineInfo:
       type: object
@@ -305,6 +532,7 @@ components:
       type: object
       required:
         - awaits_download
+        - remote_consistent_lsn
       properties:
         awaits_download:
           type: boolean
@@ -339,6 +567,21 @@ components:
           type: integer
         current_logical_size_non_incremental:
           type: integer
+    WalReceiverEntry:
+      type: object
+      required:
+        - thread_id
+        - wal_producer_connstr
+      properties:
+        thread_id:
+          type: integer
+        wal_producer_connstr:
+          type: string
+        last_received_msg_lsn:
+          type: string
+          format: hex
+        last_received_msg_ts:
+          type: integer
 
     Error:
       type: object
@@ -354,14 +597,21 @@ components:
       properties:
         msg:
           type: string
-    AlreadyExistsError:
+    ForbiddenError:
       type: object
       required:
         - msg
       properties:
         msg:
           type: string
-    ForbiddenError:
+    NotFoundError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ConflictError:
       type: object
       required:
         - msg

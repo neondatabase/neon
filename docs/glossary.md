@@ -21,7 +21,7 @@ NOTE:It has nothing to do with PostgreSQL pg_basebackup.
 
 ### Branch
 
-We can create branch at certain LSN using `zenith branch` command.
+We can create branch at certain LSN using `neon_local timeline branch` command.
 Each Branch lives in a corresponding timeline[] and has an ancestor[].
 
 
@@ -29,24 +29,32 @@ Each Branch lives in a corresponding timeline[] and has an ancestor[].
 
 NOTE: This is an overloaded term.
 
-A checkpoint record in the WAL marks a point in the WAL sequence at which it is guaranteed that all data files have been updated with all information from shared memory modified before that checkpoint; 
+A checkpoint record in the WAL marks a point in the WAL sequence at which it is guaranteed that all data files have been updated with all information from shared memory modified before that checkpoint;
 
 ### Checkpoint (Layered repository)
 
 NOTE: This is an overloaded term.
 
 Whenever enough WAL has been accumulated in memory, the page server []
-writes out the changes from in-memory layers into new layer files[]. This process
-is called "checkpointing". The page server only creates layer files for
-relations that have been modified since the last checkpoint. 
+writes out the changes from the in-memory layer into a new delta layer file. This process
+is called "checkpointing".
 
 Configuration parameter `checkpoint_distance` defines the distance
 from current LSN to perform checkpoint of in-memory layers.
 Default is `DEFAULT_CHECKPOINT_DISTANCE`.
-Set this parameter to `0` to force checkpoint of every layer.
 
-Configuration parameter `checkpoint_period` defines the interval between checkpoint iterations.
-Default is `DEFAULT_CHECKPOINT_PERIOD`.
+### Compaction
+
+A background operation on layer files. Compaction takes a number of L0
+layer files, each of which covers the whole key space and a range of
+LSN, and reshuffles the data in them into L1 files so that each file
+covers the whole LSN range, but only part of the key space.
+
+Compaction should also opportunistically leave obsolete page versions
+from the L1 files, and materialize other page versions for faster
+access. That hasn't been implemented as of this writing, though.
+
+
 ### Compute node
 
 Stateless Postgres node that stores data in pageserver.
@@ -54,10 +62,10 @@ Stateless Postgres node that stores data in pageserver.
 ### Garbage collection
 
 The process of removing old on-disk layers that are not needed by any timeline anymore.
+
 ### Fork
 
 Each of the separate segmented file sets in which a relation is stored. The main fork is where the actual data resides. There also exist two secondary forks for metadata: the free space map and the visibility map.
-Each PostgreSQL fork is considered a separate relish.
 
 ### Layer
 
@@ -72,18 +80,18 @@ are immutable. See pageserver/src/layered_repository/README.md for more.
 ### Layer file (on-disk layer)
 
 Layered repository on-disk format is based on immutable files.  The
-files are called "layer files". Each file corresponds to one RELISH_SEG_SIZE
-segment of a PostgreSQL relation fork. There are two kinds of layer
-files: image files and delta files. An image file contains a
-"snapshot" of the segment at a particular LSN, and a delta file
-contains WAL records applicable to the segment, in a range of LSNs.
+files are called "layer files". There are two kinds of layer files:
+image files and delta files. An image file contains a "snapshot" of a
+range of keys at a particular LSN, and a delta file contains WAL
+records applicable to a range of keys, in a range of LSNs.
 
 ### Layer map
 
-The layer map tracks what layers exist for all the relishes in a timeline.
+The layer map tracks what layers exist in a timeline.
+
 ### Layered repository
 
-Zenith repository implementation that keeps data in layers.
+Neon repository implementation that keeps data in layers.
 ### LSN
 
 The Log Sequence Number (LSN) is a unique identifier of the WAL record[] in the WAL log.
@@ -93,23 +101,23 @@ It is printed as two hexadecimal numbers of up to 8 digits each, separated by a 
 Check also [PostgreSQL doc about pg_lsn type](https://www.postgresql.org/docs/devel/datatype-pg-lsn.html)
 Values can be compared to calculate the volume of WAL data that separates them, so they are used to measure the progress of replication and recovery.
 
-In postgres and Zenith lsns are used to describe certain points in WAL handling.
+In Postgres and Neon LSNs are used to describe certain points in WAL handling.
 
 PostgreSQL LSNs and functions to monitor them:
 * `pg_current_wal_insert_lsn()` - Returns the current write-ahead log insert location.
 * `pg_current_wal_lsn()` - Returns the current write-ahead log write location.
 * `pg_current_wal_flush_lsn()` - Returns the current write-ahead log flush location.
 * `pg_last_wal_receive_lsn()` - Returns the last write-ahead log location that has been received and synced to disk by streaming replication. While streaming replication is in progress this will increase monotonically.
-* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically. 
+* `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically.
 [source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
 
-Zenith safekeeper LSNs. For more check [walkeeper/README_PROTO.md](/walkeeper/README_PROTO.md)
+Neon safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
 * `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
 
-Zenith pageserver LSNs:
+Neon pageserver LSNs:
 * `last_record_lsn` - the end of last processed WAL record.
 * `disk_consistent_lsn` - data is known to be fully flushed and fsync'd to local disk on pageserver up to this LSN.
 * `remote_consistent_lsn` - The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash.
@@ -124,7 +132,7 @@ This is the unit of data exchange between compute node and pageserver.
 
 ### Pageserver
 
-Zenith storage engine: repositories + wal receiver + page service + wal redo.
+Neon storage engine: repositories + wal receiver + page service + wal redo.
 
 ### Page service
 
@@ -149,14 +157,6 @@ and create new databases and accounts (control plane API in our case).
 
 The generic term in PostgreSQL for all objects in a database that have a name and a list of attributes defined in a specific order.
 
-### Relish
-
-We call each relation and other file that is stored in the
-repository a "relish". It comes from "rel"-ish, as in "kind of a
-rel", because it covers relations as well as other things that are
-not relations, but are treated similarly for the purposes of the
-storage layer.
-
 ### Replication slot
 
 
@@ -173,33 +173,24 @@ One repository corresponds to one Tenant.
 
 How much history do we need to keep around for PITR and read-only nodes?
 
-### Segment (PostgreSQL)
-
-NOTE: This is an overloaded term.
+### Segment
 
 A physical file that stores data for a given relation. File segments are
 limited in size by a compile-time setting (1 gigabyte by default), so if a
 relation exceeds that size, it is split into multiple segments.
-
-### Segment (Layered Repository)
-
-NOTE: This is an overloaded term.
-
-Segment is a RELISH_SEG_SIZE slice of relish (identified by a SegmentTag).
 
 ### SLRU
 
 SLRUs include pg_clog, pg_multixact/members, and
 pg_multixact/offsets. There are other SLRUs in PostgreSQL, but
 they don't need to be stored permanently (e.g. pg_subtrans),
-or we do not support them in zenith yet (pg_commit_ts).
-Each SLRU segment is considered a separate relish[].
+or we do not support them in neon yet (pg_commit_ts).
 
 ### Tenant (Multitenancy)
-Tenant represents a single customer, interacting with Zenith.
+Tenant represents a single customer, interacting with Neon.
 Wal redo[] activity, timelines[], layers[] are managed for each tenant independently.
 One pageserver[] can serve multiple tenants at once.
-One safekeeper 
+One safekeeper
 
 See `docs/multitenancy.md` for more.
 

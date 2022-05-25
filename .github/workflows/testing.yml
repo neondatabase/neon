@@ -1,6 +1,8 @@
 name: Build and Test
 
-on: push
+on:
+  pull_request:
+  push:
 
 jobs:
   regression-check:
@@ -36,8 +38,7 @@ jobs:
 
       - name: Install macOs postgres dependencies
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install flex bison
+        run: brew install flex bison
 
       - name: Set pg revision for caching
         id: pg_ver
@@ -53,8 +54,7 @@ jobs:
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: |
-          make postgres
+        run: make postgres
 
       - name: Cache cargo deps
         id: cache_cargo
@@ -64,13 +64,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
 
-      # Use `env CARGO_INCREMENTAL=0` to mitigate https://github.com/rust-lang/rust/issues/91696 for rustc 1.57.0
-      - name: Run cargo build
-        run: |
-          env CARGO_INCREMENTAL=0 cargo build --workspace --bins --examples --tests
+      - name: Run cargo clippy
+        run: ./run_clippy.sh
 
       - name: Run cargo test
-        run: |
-          env CARGO_INCREMENTAL=0 cargo test -- --nocapture --test-threads=1
+        run: cargo test --all --all-targets

@@ -13,15 +13,17 @@ use nix::unistd::Pid;
 use postgres::Config;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
+use safekeeper::http::models::TimelineCreateRequest;
 use thiserror::Error;
-use walkeeper::http::models::TimelineCreateRequest;
-use zenith_utils::http::error::HttpErrorBody;
-use zenith_utils::zid::{ZNodeId, ZTenantId, ZTimelineId};
+use utils::{
+    connstring::connection_address,
+    http::error::HttpErrorBody,
+    zid::{ZNodeId, ZTenantId, ZTimelineId},
+};
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
 use crate::{fill_rust_env_vars, read_pidfile};
-use zenith_utils::connstring::connection_address;
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -50,7 +52,7 @@ impl ResponseErrorMessageExt for Response {
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
                 Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+                Err(_) => format!("Http error ({}) at {url}.", status.as_u16()),
             },
         ))
     }
@@ -78,8 +80,6 @@ pub struct SafekeeperNode {
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
         let pageserver = Arc::new(PageServerNode::from_env(env));
-
-        println!("initializing for sk {} for {}", conf.id, conf.http_port);
 
         SafekeeperNode {
             id: conf.id,
@@ -134,6 +134,14 @@ impl SafekeeperNode {
         );
         if !self.conf.sync {
             cmd.arg("--no-sync");
+        }
+
+        let comma_separated_endpoints = self.env.etcd_broker.comma_separated_endpoints();
+        if !comma_separated_endpoints.is_empty() {
+            cmd.args(&["--broker-endpoints", &comma_separated_endpoints]);
+        }
+        if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
+            cmd.args(&["--broker-etcd-prefix", prefix]);
         }
 
         if !cmd.status()?.success() {
@@ -197,12 +205,13 @@ impl SafekeeperNode {
         let pid = Pid::from_raw(pid);
 
         let sig = if immediate {
-            println!("Stop safekeeper immediately");
+            print!("Stopping safekeeper {} immediately..", self.id);
             Signal::SIGQUIT
         } else {
-            println!("Stop safekeeper gracefully");
+            print!("Stopping safekeeper {} gracefully..", self.id);
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -224,25 +233,35 @@ impl SafekeeperNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if safekeeper flushes a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Safekeeper stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Safekeeper status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Safekeeper status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nSafekeeper connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Safekeeper still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+                match self.check_status() {
+                    Err(SafekeeperHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nSafekeeper status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop safekeeper with pid {}", pid);

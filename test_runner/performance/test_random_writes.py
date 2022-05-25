@@ -8,7 +8,6 @@ from fixtures.log_helper import log
 import psycopg2.extras
 import random
 import time
-from fixtures.utils import print_gc_result
 
 
 # This is a clear-box test that demonstrates the worst case scenario for the
@@ -49,7 +48,15 @@ def test_random_writes(zenith_with_baseline: PgCompare):
                         count integer default 0
                     );
                 """)
-                cur.execute(f"INSERT INTO Big (pk) values (generate_series(1,{n_rows}))")
+
+                # Insert n_rows in batches to avoid query timeouts
+                rows_inserted = 0
+                while rows_inserted < n_rows:
+                    rows_to_insert = min(1000 * 1000, n_rows - rows_inserted)
+                    low = rows_inserted + 1
+                    high = rows_inserted + rows_to_insert
+                    cur.execute(f"INSERT INTO Big (pk) values (generate_series({low},{high}))")
+                    rows_inserted += rows_to_insert
 
             # Get table size (can't be predicted because padding and alignment)
             cur.execute("SELECT pg_relation_size('Big');")

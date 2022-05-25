@@ -1,9 +1,3 @@
-import pytest
-import random
-import time
-
-from contextlib import closing
-from multiprocessing import Process, Value
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 from fixtures.log_helper import log
 
@@ -11,8 +5,6 @@ from fixtures.log_helper import log
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
-    # One safekeeper is enough for this test.
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     env.zenith_cli.create_branch('test_pageserver_restart')

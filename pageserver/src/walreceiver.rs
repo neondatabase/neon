@@ -6,6 +6,7 @@
 //! We keep one WAL receiver active per timeline.
 
 use crate::config::PageServerConf;
+use crate::repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -17,6 +18,8 @@ use lazy_static::lazy_static;
 use postgres_ffi::waldecoder::*;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -28,17 +31,25 @@ use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryRow};
 use tokio_stream::StreamExt;
 use tracing::*;
-use zenith_utils::lsn::Lsn;
-use zenith_utils::pq_proto::ZenithFeedback;
-use zenith_utils::zid::ZTenantId;
-use zenith_utils::zid::ZTenantTimelineId;
-use zenith_utils::zid::ZTimelineId;
+use utils::{
+    lsn::Lsn,
+    pq_proto::ZenithFeedback,
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
-//
-// We keep one WAL Receiver active per timeline.
-//
-struct WalReceiverEntry {
+///
+/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
+/// We keep one WAL receiver active per timeline.
+///
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WalReceiverEntry {
+    thread_id: u64,
     wal_producer_connstr: String,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    last_received_msg_lsn: Option<Lsn>,
+    /// the timestamp (in microseconds) of the last received message
+    last_received_msg_ts: Option<u128>,
 }
 
 lazy_static! {
@@ -69,57 +80,67 @@ pub fn launch_wal_receiver(
 
     match receivers.get_mut(&(tenantid, timelineid)) {
         Some(receiver) => {
-            info!("wal receiver already running, updating connection string");
+            debug!("wal receiver already running, updating connection string");
             receiver.wal_producer_connstr = wal_producer_connstr.into();
         }
         None => {
-            thread_mgr::spawn(
+            let thread_id = thread_mgr::spawn(
                 ThreadKind::WalReceiver,
                 Some(tenantid),
                 Some(timelineid),
                 "WAL receiver thread",
+                false,
                 move || {
                     IS_WAL_RECEIVER.with(|c| c.set(true));
-                    thread_main(conf, tenantid, timelineid)
+                    thread_main(conf, tenantid, timelineid);
+                    Ok(())
                 },
             )?;
 
             let receiver = WalReceiverEntry {
+                thread_id,
                 wal_producer_connstr: wal_producer_connstr.into(),
+                last_received_msg_lsn: None,
+                last_received_msg_ts: None,
             };
             receivers.insert((tenantid, timelineid), receiver);
 
             // Update tenant state and start tenant threads, if they are not running yet.
-            tenant_mgr::activate_tenant(conf, tenantid)?;
+            tenant_mgr::activate_tenant(tenantid)?;
         }
     };
     Ok(())
 }
 
-// Look up current WAL producer connection string in the hash table
-fn get_wal_producer_connstr(tenantid: ZTenantId, timelineid: ZTimelineId) -> String {
+/// Look up a WAL receiver's data in the global `WAL_RECEIVERS`
+pub fn get_wal_receiver_entry(
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> Option<WalReceiverEntry> {
     let receivers = WAL_RECEIVERS.lock().unwrap();
-
-    receivers
-        .get(&(tenantid, timelineid))
-        .unwrap()
-        .wal_producer_connstr
-        .clone()
+    receivers.get(&(tenant_id, timeline_id)).cloned()
 }
 
 //
 // This is the entry point for the WAL receiver thread.
 //
-fn thread_main(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> Result<()> {
+fn thread_main(conf: &'static PageServerConf, tenant_id: ZTenantId, timeline_id: ZTimelineId) {
     let _enter = info_span!("WAL receiver", timeline = %timeline_id, tenant = %tenant_id).entered();
     info!("WAL receiver thread started");
 
     // Look up the current WAL producer address
-    let wal_producer_connstr = get_wal_producer_connstr(tenant_id, timeline_id);
+    let wal_producer_connstr = {
+        match get_wal_receiver_entry(tenant_id, timeline_id) {
+            Some(e) => e.wal_producer_connstr,
+            None => {
+                info!(
+                    "Unable to create the WAL receiver thread: no WAL receiver entry found for tenant {} and timeline {}",
+                    tenant_id, timeline_id
+                );
+                return;
+            }
+        }
+    };
 
     // Make a connection to the WAL safekeeper, or directly to the primary PostgreSQL server,
     // and start streaming WAL from it.
@@ -138,7 +159,6 @@ fn thread_main(
     // Drop it from list of active WAL_RECEIVERS
     // so that next callmemaybe request launched a new thread
     drop_wal_receiver(tenant_id, timeline_id);
-    Ok(())
 }
 
 fn walreceiver_main(
@@ -146,7 +166,7 @@ fn walreceiver_main(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
     wal_producer_connstr: &str,
-) -> Result<(), Error> {
+) -> anyhow::Result<(), Error> {
     // Connect to the database in replication mode.
     info!("connecting to {:?}", wal_producer_connstr);
     let connect_cfg = format!(
@@ -185,13 +205,13 @@ fn walreceiver_main(
 
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("no repository found for tenant {}", tenant_id))?;
-    let timeline = repo.get_timeline_load(timeline_id).with_context(|| {
-        format!(
-            "local timeline {} not found for tenant {}",
-            timeline_id, tenant_id
-        )
-    })?;
-
+    let timeline =
+        tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id).with_context(|| {
+            format!(
+                "local timeline {} not found for tenant {}",
+                timeline_id, tenant_id
+            )
+        })?;
     let remote_index = repo.get_remote_index();
 
     //
@@ -254,11 +274,10 @@ fn walreceiver_main(
 
                     // It is important to deal with the aligned records as lsn in getPage@LSN is
                     // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hittind a deadlock.
-                    assert!(lsn.is_aligned());
+                    // at risk of hitting a deadlock.
+                    anyhow::ensure!(lsn.is_aligned());
 
-                    let writer = timeline.writer();
-                    walingest.ingest_record(writer.as_ref(), recdata, lsn)?;
+                    walingest.ingest_record(&timeline, recdata, lsn)?;
 
                     fail_point!("walreceiver-after-ingest");
 
@@ -269,6 +288,8 @@ fn walreceiver_main(
                     info!("caught up at LSN {}", endlsn);
                     caught_up = true;
                 }
+
+                timeline.tline.check_checkpoint_distance()?;
 
                 Some(endlsn)
             }
@@ -306,18 +327,40 @@ fn walreceiver_main(
                         tenant_id,
                         timeline_id,
                     })
-                    .and_then(|e| e.disk_consistent_lsn())
+                    .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
                     .unwrap_or(Lsn(0)) // no checkpoint was uploaded
             });
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
+
+            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
+            {
+                let mut receivers = WAL_RECEIVERS.lock().unwrap();
+                let entry = match receivers.get_mut(&(tenant_id, timeline_id)) {
+                    Some(e) => e,
+                    None => {
+                        anyhow::bail!(
+                            "no WAL receiver entry found for tenant {} and timeline {}",
+                            tenant_id,
+                            timeline_id
+                        );
+                    }
+                };
+
+                entry.last_received_msg_lsn = Some(last_lsn);
+                entry.last_received_msg_ts = Some(
+                    ts.duration_since(SystemTime::UNIX_EPOCH)
+                        .expect("Received message time should be before UNIX EPOCH!")
+                        .as_micros(),
+                );
+            }
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.

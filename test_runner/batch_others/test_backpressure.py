@@ -1,6 +1,7 @@
 from contextlib import closing, contextmanager
 import psycopg2.extras
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+import pytest
+from fixtures.zenith_fixtures import PgProtocol, ZenithEnvBuilder
 from fixtures.log_helper import log
 import os
 import time
@@ -91,8 +92,8 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
 # If backpressure is enabled and tuned properly, insertion will be throttled, but the query will not timeout.
 
 
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/1587")
 def test_backpressure_received_lsn_lag(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
     # Create a branch for us
     env.zenith_cli.create_branch('test_backpressure')
