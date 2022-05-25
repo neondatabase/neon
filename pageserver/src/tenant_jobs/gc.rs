@@ -31,5 +31,3 @@ impl Job for GcJob {
 }
 
 pub static GC_POOL: OnceCell<Pool<GcJob>> = OnceCell::new();
-
-// TODO spawn 20 worker threads

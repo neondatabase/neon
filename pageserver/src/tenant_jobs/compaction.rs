@@ -31,5 +31,3 @@ impl Job for CompactionJob {
 }
 
 pub static COMPACTION_POOL: OnceCell<Pool<CompactionJob>> = OnceCell::new();
-
-// TODO spawn 20 worker threads

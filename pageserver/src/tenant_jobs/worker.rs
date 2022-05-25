@@ -1,4 +1,15 @@
 use std::{any::Any, collections::{BinaryHeap, HashMap}, fmt::Debug, hash::Hash, ops::Add, panic::{self, AssertUnwindSafe}, sync::{Condvar, Mutex}, time::{Duration, Instant}};
+use lazy_static::lazy_static;
+use metrics::{register_gauge_vec, GaugeVec};
+
+lazy_static! {
+    static ref POOL_UTILIZATION_GAUGE: GaugeVec = register_gauge_vec!(
+        "pageserver_pool_utilization",
+        "Number of bysy workers",
+        &["pool_name"]
+    )
+    .expect("Failed to register safekeeper_commit_lsn gauge vec");
+}
 
 pub trait Job: std::fmt::Debug + Send + Clone + PartialOrd + Ord + Hash + 'static {
     type ErrorType;
@@ -104,9 +115,11 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
 
                 // Run job without holding lock
                 drop(job_table);
+                POOL_UTILIZATION_GAUGE.with_label_values(&["todo_put_pool_name_here"]).inc();
                 let result = panic::catch_unwind(AssertUnwindSafe(|| {
                     job.run()
                 }));
+                POOL_UTILIZATION_GAUGE.with_label_values(&["todo_put_pool_name_here"]).dec();
                 job_table = self.job_table.lock().unwrap();
 
                 // Update job status
@@ -118,7 +131,7 @@ impl<J: Job> Pool<J> where J::ErrorType: Debug {
                         job_table.queue.push(Deadline {
                             job: job.clone(),
                             start_by: reschedule_for,
-                        })
+                        });
                     },
                     Ok(Ok(None)) => {
                         job_table.status.remove(&job);
