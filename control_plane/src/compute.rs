@@ -274,6 +274,8 @@ impl PostgresNode {
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
         conf.append("wal_keep_size", "0");
+        // walproposer panics when basebackup is invalid, it is pointless to restart in this case.
+        conf.append("restart_after_crash", "off");
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
