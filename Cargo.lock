@@ -2394,6 +2394,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "metrics",
+ "once_cell",
  "rusoto_core",
  "rusoto_s3",
  "serde",
