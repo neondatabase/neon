@@ -5,10 +5,9 @@ use std::{
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
     hash::Hash,
-    ops::Add,
     panic::{self, AssertUnwindSafe},
     sync::{Condvar, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 lazy_static! {
@@ -85,7 +84,7 @@ where
 
 impl<J: Job> Eq for Deadline<J> where J::ErrorType: Debug {}
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct JobStatusTable<J: Job>
 where
     J::ErrorType: Debug,
@@ -116,7 +115,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Pool<J: Job>
 where
     J::ErrorType: Debug,
@@ -210,7 +209,7 @@ where
             .status
             .insert(job.clone(), JobStatus::Ready { scheduled_for });
         job_table.queue.push(Deadline {
-            job: job.clone(),
+            job,
             start_by: scheduled_for,
         });
 
@@ -220,7 +219,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{ops::Add, time::Duration};
 
     use once_cell::sync::OnceCell;
 
@@ -251,7 +250,7 @@ mod tests {
         TEST_POOL.set(Pool::<PrintJob>::new()).unwrap();
 
         thread_mgr::spawn(
-            ThreadKind::GarbageCollector, // change this
+            ThreadKind::GarbageCollectionWorker,
             None,
             None,
             "test_worker_1",
@@ -261,7 +260,7 @@ mod tests {
         .unwrap();
 
         thread_mgr::spawn(
-            ThreadKind::GarbageCollector, // change this
+            ThreadKind::GarbageCollectionWorker,
             None,
             None,
             "test_worker_2",

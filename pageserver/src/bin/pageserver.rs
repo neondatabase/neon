@@ -318,7 +318,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             None,
             &name.clone(),
             true,
-            move || GC_POOL.get().unwrap().worker_main(name.clone()),
+            move || GC_POOL.get().unwrap().worker_main(name),
         )
         .unwrap();
     }
@@ -333,7 +333,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             None,
             &name.clone(),
             true,
-            move || GC_POOL.get().unwrap().worker_main(name.clone()),
+            move || GC_POOL.get().unwrap().worker_main(name),
         )
         .unwrap();
     }
