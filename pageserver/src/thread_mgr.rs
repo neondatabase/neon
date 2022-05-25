@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::panic;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -59,6 +59,17 @@ lazy_static! {
 
     /// Global registry of threads
     static ref THREADS: Mutex<HashMap<u64, Arc<PageServerThread>>> = Mutex::new(HashMap::new());
+
+    // TODO make these per thread?
+    /// Condvars to notify after shutdown request
+    static ref SHUTDOWN_CONDVARS: Mutex<Vec<Arc<Condvar>>> = Mutex::new(Vec::new());
+}
+
+/// Return a condvar which will receive a notify_all() call when shutdown is requested
+pub fn get_shutdown_aware_condvar() -> Arc<Condvar> {
+    let mut condvars = SHUTDOWN_CONDVARS.lock().unwrap();
+    condvars.push(Arc::new(Condvar::new()));
+    condvars.last().unwrap().clone()
 }
 
 // There is a Tokio watch channel for each thread, which can be used to signal the
@@ -296,6 +307,10 @@ pub fn shutdown_threads(
         }
     }
     drop(threads);
+
+    for condvar in SHUTDOWN_CONDVARS.lock().unwrap().iter() {
+        condvar.notify_all();
+    }
 
     for thread in victim_threads {
         info!("waiting for {} to shut down", thread.name);

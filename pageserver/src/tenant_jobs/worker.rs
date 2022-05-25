@@ -6,9 +6,11 @@ use std::{
     fmt::Debug,
     hash::Hash,
     panic::{self, AssertUnwindSafe},
-    sync::{Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex},
     time::Instant,
 };
+
+use crate::thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested};
 
 lazy_static! {
     static ref POOL_UTILIZATION_GAUGE: GaugeVec = register_gauge_vec!(
@@ -119,13 +121,13 @@ where
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Pool<J: Job>
 where
     J::ErrorType: Debug,
 {
     job_table: Mutex<JobStatusTable<J>>,
-    condvar: Condvar, // Notified when idle worker should wake up
+    condvar: Arc<Condvar>, // Notified when idle worker should wake up
 }
 
 impl<J: Job> Pool<J>
@@ -138,14 +140,13 @@ where
                 status: HashMap::<J, JobStatus<J>>::new(),
                 queue: BinaryHeap::<Deadline<J>>::new(),
             }),
-            condvar: Condvar::new(),
+            condvar: get_shutdown_aware_condvar(),
         }
     }
 
-    // TODO listen for shutdown request?
     pub fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
         let mut job_table = self.job_table.lock().unwrap();
-        loop {
+        while !is_shutdown_requested() {
             if let Some(Deadline { job, .. }) = job_table.pop_due() {
                 job_table.set_status(
                     &job,
@@ -204,6 +205,8 @@ where
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn queue_job(&self, job: J) {
