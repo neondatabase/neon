@@ -48,6 +48,10 @@ pub fn start_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
             format!("--data-dir={}", etcd_data_dir.display()),
             format!("--listen-client-urls={client_urls}"),
             format!("--advertise-client-urls={client_urls}"),
+            // Set --quota-backend-bytes to keep the etcd virtual memory
+            // size smaller. Our test etcd clusters are very small.
+            // See https://github.com/etcd-io/etcd/issues/7910
+            "--quota-backend-bytes=100000000".to_string(),
         ])
         .stdout(Stdio::from(etcd_stdout_file))
         .stderr(Stdio::from(etcd_stderr_file))
