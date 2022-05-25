@@ -8,8 +8,8 @@ use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
-use crate::tenant_jobs::compaction::{COMPACTION_POOL, CompactionJob};
-use crate::tenant_jobs::gc::{GC_POOL, GcJob};
+use crate::tenant_jobs::compaction::{CompactionJob, COMPACTION_POOL};
+use crate::tenant_jobs::gc::{GcJob, GC_POOL};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
@@ -245,13 +245,15 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
             // Important to activate before scheduling jobs
             tenant.state = TenantState::Active;
 
-            GC_POOL.get().unwrap().queue_job(GcJob {
-                tenant: tenant_id,
-            });
+            GC_POOL
+                .get()
+                .unwrap()
+                .queue_job(GcJob { tenant: tenant_id });
 
-            COMPACTION_POOL.get().unwrap().queue_job(CompactionJob {
-                tenant: tenant_id,
-            });
+            COMPACTION_POOL
+                .get()
+                .unwrap()
+                .queue_job(CompactionJob { tenant: tenant_id });
         }
 
         TenantState::Stopping => {

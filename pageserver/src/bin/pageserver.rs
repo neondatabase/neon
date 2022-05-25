@@ -9,7 +9,18 @@ use clap::{App, Arg};
 use daemonize::Daemonize;
 
 use fail::FailScenario;
-use pageserver::{LOG_FILE_NAME, config::{defaults::*, PageServerConf}, http, page_cache, page_service, profiling, tenant_jobs::{compaction::{COMPACTION_POOL, CompactionJob}, gc::{GC_POOL, GcJob}, worker::Pool}, tenant_mgr, thread_mgr, thread_mgr::ThreadKind, timelines, virtual_file};
+use pageserver::{
+    config::{defaults::*, PageServerConf},
+    http, page_cache, page_service, profiling,
+    tenant_jobs::{
+        compaction::{CompactionJob, COMPACTION_POOL},
+        gc::{GcJob, GC_POOL},
+        worker::Pool,
+    },
+    tenant_mgr, thread_mgr,
+    thread_mgr::ThreadKind,
+    timelines, virtual_file, LOG_FILE_NAME,
+};
 use utils::{
     auth::JwtAuth,
     http::endpoint,
@@ -310,10 +321,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             None,
             &name.clone(),
             true,
-            move || {
-                GC_POOL.get().unwrap().worker_main(name.clone())
-            },
-        ).unwrap();
+            move || GC_POOL.get().unwrap().worker_main(name.clone()),
+        )
+        .unwrap();
     }
 
     // Spawn compaction workers
@@ -326,10 +336,9 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             None,
             &name.clone(),
             true,
-            move || {
-                GC_POOL.get().unwrap().worker_main(name.clone())
-            },
-        ).unwrap();
+            move || GC_POOL.get().unwrap().worker_main(name.clone()),
+        )
+        .unwrap();
     }
 
     signals.handle(|signal| match signal {

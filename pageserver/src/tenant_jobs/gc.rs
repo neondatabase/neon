@@ -1,8 +1,11 @@
 use std::{ops::Add, time::Instant};
 
+use crate::{
+    repository::Repository,
+    tenant_mgr::{self, TenantState},
+};
 use once_cell::sync::OnceCell;
 use utils::zid::ZTenantId;
-use crate::{repository::Repository, tenant_mgr::{self, TenantState}};
 
 use super::worker::{Job, Pool};
 
@@ -16,7 +19,10 @@ impl Job for GcJob {
 
     fn run(&self) -> Result<Option<Instant>, Self::ErrorType> {
         // Don't reschedule job if tenant isn't active
-        if !matches!(tenant_mgr::get_tenant_state(self.tenant), Some(TenantState::Active)) {
+        if !matches!(
+            tenant_mgr::get_tenant_state(self.tenant),
+            Some(TenantState::Active)
+        ) {
             return Ok(None);
         }
 

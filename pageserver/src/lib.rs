@@ -12,6 +12,7 @@ pub mod reltag;
 pub mod repository;
 pub mod storage_sync;
 pub mod tenant_config;
+pub mod tenant_jobs;
 pub mod tenant_mgr;
 pub mod thread_mgr;
 pub mod timelines;
@@ -20,7 +21,6 @@ pub mod walingest;
 pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
-pub mod tenant_jobs;
 
 use lazy_static::lazy_static;
 use tracing::info;
