@@ -685,7 +685,7 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://neondatabase.github.io/helm-charts
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
