@@ -25,12 +25,16 @@ jobs:
           submodules: true
           fetch-depth: 2
 
-      - name: install rust toolchain ${{ matrix.rust_toolchain }}
+      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: ${{ matrix.rust_toolchain }}
+          components: rustfmt, clippy
           override: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Install Ubuntu postgres dependencies
         if: matrix.os == 'ubuntu-latest'

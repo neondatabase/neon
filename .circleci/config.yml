@@ -11,15 +11,6 @@ executors:
       - image: zimg/rust:1.58
 
 jobs:
-  check-codestyle-rust:
-    executor: neon-xlarge-executor
-    steps:
-      - checkout
-      - run:
-          name: rustfmt
-          when: always
-          command: cargo fmt --all -- --check
-
   # A job to build postgres
   build-postgres:
     executor: neon-xlarge-executor
@@ -740,7 +731,6 @@ jobs:
 workflows:
   build_and_test:
     jobs:
-      - check-codestyle-rust
       - check-codestyle-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
