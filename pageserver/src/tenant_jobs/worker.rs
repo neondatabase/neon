@@ -130,6 +130,15 @@ where
     condvar: Arc<Condvar>, // Notified when idle worker should wake up
 }
 
+impl<J: Job> Default for Pool<J>
+where
+    J::ErrorType: Debug,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<J: Job> Pool<J>
 where
     J::ErrorType: Debug,

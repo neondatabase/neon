@@ -60,7 +60,7 @@ lazy_static! {
     /// Global registry of threads
     static ref THREADS: Mutex<HashMap<u64, Arc<PageServerThread>>> = Mutex::new(HashMap::new());
 
-    // TODO make these per thread?
+    // TODO make these per thread for targetted shutdown, also for cleanup.
     /// Condvars to notify after shutdown request
     static ref SHUTDOWN_CONDVARS: Mutex<Vec<Arc<Condvar>>> = Mutex::new(Vec::new());
 }
