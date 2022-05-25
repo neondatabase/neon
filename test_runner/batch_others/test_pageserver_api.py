@@ -93,13 +93,10 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
         if res["last_received_msg_lsn"] is None:
             raise Exception("the last received message's LSN is empty")
 
-
         last_msg_lsn = lsn_from_hex(res["last_received_msg_lsn"])
         if prev_msg_lsn is not None and prev_msg_lsn >= last_msg_lsn:
-            raise Exception(
-                f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-                compared to the previous message's LSN {prev_msg_lsn}"
-            )
+            raise Exception(f"the last received message's LSN {last_msg_lsn} hasn't been updated \
+                compared to the previous message's LSN {prev_msg_lsn}")
 
         return last_msg_lsn
 
