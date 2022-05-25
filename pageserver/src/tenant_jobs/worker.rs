@@ -36,10 +36,14 @@ where
     J::ErrorType: Debug,
 {
     Ready {
+        #[allow(dead_code)]
         scheduled_for: Instant,
     },
     Running {
+        #[allow(dead_code)]
         worker_name: String,
+
+        #[allow(dead_code)]
         started_at: Instant,
     },
     Stuck(JobError<J>),
