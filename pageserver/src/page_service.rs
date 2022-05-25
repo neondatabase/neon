@@ -593,7 +593,8 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+
+            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }

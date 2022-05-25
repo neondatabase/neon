@@ -231,8 +231,13 @@ impl PostgresNode {
             .context("page server 'basebackup' command failed")?;
 
         // Read the archive directly from the `CopyOutReader`
-        tar::Archive::new(copyreader)
-            .unpack(&self.pgdata())
+        //
+        // Set `ignore_zeros` so that unpack() reads all the Copy data and
+        // doesn't stop at the end-of-archive marker. Otherwise, if the server
+        // sends an Error after finishing the tarball, we will not notice it.
+        let mut ar = tar::Archive::new(copyreader);
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.pgdata())
             .context("extracting base backup failed")?;
 
         Ok(())
