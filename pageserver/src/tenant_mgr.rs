@@ -8,6 +8,8 @@ use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_jobs::compaction::{CompactionJob, COMPACTION_POOL};
+use crate::tenant_jobs::gc::{GcJob, GC_POOL};
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines;
@@ -173,8 +175,8 @@ pub fn shutdown_all_tenants() {
     drop(m);
 
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollectionWorker), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::CompactionWorker), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -262,34 +264,20 @@ pub fn activate_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
         // If the tenant is already active, nothing to do.
         TenantState::Active => {}
 
-        // If it's Idle, launch the compactor and GC threads
+        // If it's Idle, launch the compactor and GC jobs
         TenantState::Idle => {
-            thread_mgr::spawn(
-                ThreadKind::Compactor,
-                Some(tenant_id),
-                None,
-                "Compactor thread",
-                false,
-                move || crate::tenant_threads::compact_loop(tenant_id),
-            )?;
-
-            let gc_spawn_result = thread_mgr::spawn(
-                ThreadKind::GarbageCollector,
-                Some(tenant_id),
-                None,
-                "GC thread",
-                false,
-                move || crate::tenant_threads::gc_loop(tenant_id),
-            )
-            .map(|_thread_id| ()) // update the `Result::Ok` type to match the outer function's return signature
-            .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
-
-            if let Err(e) = &gc_spawn_result {
-                error!("Failed to start GC thread for tenant {tenant_id}, stopping its checkpointer thread: {e:?}");
-                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
-                return gc_spawn_result;
-            }
+            // Important to activate before scheduling jobs
             tenant.state = TenantState::Active;
+
+            GC_POOL
+                .get()
+                .unwrap()
+                .queue_job(GcJob { tenant: tenant_id });
+
+            COMPACTION_POOL
+                .get()
+                .unwrap()
+                .queue_job(CompactionJob { tenant: tenant_id });
         }
 
         TenantState::Stopping => {
