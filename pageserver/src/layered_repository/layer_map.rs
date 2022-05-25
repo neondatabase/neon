@@ -201,18 +201,14 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Is there a newer image layer for given key-range?
+    /// Is there a newer image layer for given key- and LSN-range?
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    /// We ignore layers newer than disk_consistent_lsn because they will be removed at restart
-    /// We also only look at historic layers
-    //#[allow(dead_code)]
-    pub fn newer_image_layer_exists(
+    pub fn image_layer_exists(
         &self,
         key_range: &Range<Key>,
-        lsn: Lsn,
-        disk_consistent_lsn: Lsn,
+        lsn_range: &Range<Lsn>,
     ) -> Result<bool> {
         let mut range_remain = key_range.clone();
 
@@ -225,8 +221,7 @@ impl LayerMap {
                 let img_lsn = l.get_lsn_range().start;
                 if !l.is_incremental()
                     && l.get_key_range().contains(&range_remain.start)
-                    && img_lsn > lsn
-                    && img_lsn < disk_consistent_lsn
+                    && lsn_range.contains(&img_lsn)
                 {
                     made_progress = true;
                     let img_key_end = l.get_key_range().end;

@@ -21,7 +21,7 @@ use tracing::*;
 use utils::{
     lsn::Lsn,
     pq_proto::ZenithFeedback,
-    zid::{ZNodeId, TenantId, ZTenantTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId},
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
@@ -99,7 +99,7 @@ impl SharedState {
     fn create(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
@@ -448,7 +448,7 @@ impl Timeline {
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&self, sk_info: &SkTimelineInfo, _sk_id: ZNodeId) -> Result<()> {
+    pub fn record_safekeeper_info(&self, sk_info: &SkTimelineInfo, _sk_id: NodeId) -> Result<()> {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.sk.record_safekeeper_info(sk_info)?;
         self.notify_wal_senders(&mut shared_state);
@@ -551,7 +551,7 @@ impl GlobalTimelines {
         mut state: MutexGuard<GlobalTimelinesState>,
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<Arc<Timeline>> {
         match state.timelines.get(&zttid) {
             Some(_) => bail!("timeline {} already exists", zttid),
@@ -576,7 +576,7 @@ impl GlobalTimelines {
     pub fn create(
         conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<Arc<Timeline>> {
         let state = TIMELINES_STATE.lock().unwrap();
         GlobalTimelines::create_internal(state, conf, zttid, peer_ids)

@@ -20,7 +20,7 @@ else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
-$(error Bad build type `$(BUILD_TYPE)', see Makefile for options)
+	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
 # macOS with brew-installed openssl requires explicit paths

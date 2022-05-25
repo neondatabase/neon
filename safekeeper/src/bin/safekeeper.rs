@@ -24,7 +24,7 @@ use safekeeper::{broker, callmemaybe};
 use safekeeper::{http, s3_offload};
 use utils::{
     http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
-    zid::ZNodeId,
+    zid::NodeId,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
@@ -167,7 +167,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut given_id = None;
     if let Some(given_id_str) = arg_matches.value_of("id") {
-        given_id = Some(ZNodeId(
+        given_id = Some(NodeId(
             given_id_str
                 .parse()
                 .context("failed to parse safekeeper id")?,
@@ -192,7 +192,7 @@ fn main() -> anyhow::Result<()> {
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
 
-fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {
+fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bool) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
     info!("version: {GIT_VERSION}");
@@ -245,7 +245,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(err) => bail!("Error: {err}. could not daemonize. bailing."),
         }
     }
 
@@ -345,14 +345,14 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
 }
 
 /// Determine safekeeper id and set it in config.
-fn set_id(conf: &mut SafeKeeperConf, given_id: Option<ZNodeId>) -> Result<()> {
+fn set_id(conf: &mut SafeKeeperConf, given_id: Option<NodeId>) -> Result<()> {
     let id_file_path = conf.workdir.join(ID_FILE_NAME);
 
-    let my_id: ZNodeId;
+    let my_id: NodeId;
     // If ID exists, read it in; otherwise set one passed
     match fs::read(&id_file_path) {
         Ok(id_serialized) => {
-            my_id = ZNodeId(
+            my_id = NodeId(
                 std::str::from_utf8(&id_serialized)
                     .context("failed to parse safekeeper id")?
                     .parse()

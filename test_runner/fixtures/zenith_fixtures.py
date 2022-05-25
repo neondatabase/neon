@@ -393,7 +393,10 @@ class MockS3Server:
     ):
         self.port = port
 
-        self.subprocess = subprocess.Popen([f'poetry run moto_server s3 -p{port}'], shell=True)
+        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
+        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
+        # if a process is started from the shell process.
+        self.subprocess = subprocess.Popen(['poetry', 'run', 'moto_server', 's3', f'-p{port}'])
         error = None
         try:
             return_code = self.subprocess.poll()
@@ -403,7 +406,7 @@ class MockS3Server:
             error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
         if error is not None:
             log.error(error)
-            self.subprocess.kill()
+            self.kill()
             raise RuntimeError("failed to start s3 mock server")
 
     def endpoint(self) -> str:
@@ -1890,7 +1893,11 @@ class Etcd:
                 f"--data-dir={self.datadir}",
                 f"--listen-client-urls={client_url}",
                 f"--advertise-client-urls={client_url}",
-                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}"
+                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}",
+                # Set --quota-backend-bytes to keep the etcd virtual memory
+                # size smaller. Our test etcd clusters are very small.
+                # See https://github.com/etcd-io/etcd/issues/7910
+                f"--quota-backend-bytes=100000000"
             ]
             self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
 

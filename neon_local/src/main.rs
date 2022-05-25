@@ -22,14 +22,14 @@ use utils::{
     lsn::Lsn,
     postgres_backend::AuthType,
     project_git_version,
-    zid::{ZNodeId, TenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use pageserver::timelines::TimelineInfo;
 
 // Default id of a safekeeper node, if not specified on the command line.
-const DEFAULT_SAFEKEEPER_ID: ZNodeId = ZNodeId(1);
-const DEFAULT_PAGESERVER_ID: ZNodeId = ZNodeId(1);
+const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
+const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
@@ -860,7 +860,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn get_safekeeper(env: &local_env::LocalEnv, id: ZNodeId) -> Result<SafekeeperNode> {
+fn get_safekeeper(env: &local_env::LocalEnv, id: NodeId) -> Result<SafekeeperNode> {
     if let Some(node) = env.safekeepers.iter().find(|node| node.id == id) {
         Ok(SafekeeperNode::from_env(env, node))
     } else {
@@ -876,7 +876,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 
     // All the commands take an optional safekeeper name argument
     let sk_id = if let Some(id_str) = sub_args.value_of("id") {
-        ZNodeId(id_str.parse().context("while parsing safekeeper id")?)
+        NodeId(id_str.parse().context("while parsing safekeeper id")?)
     } else {
         DEFAULT_SAFEKEEPER_ID
     };

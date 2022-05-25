@@ -361,7 +361,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "etcd.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
+            find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
@@ -685,7 +685,7 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://neondatabase.github.io/helm-charts
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |

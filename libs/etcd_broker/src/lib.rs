@@ -16,7 +16,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
 use utils::{
     lsn::Lsn,
-    zid::{ZNodeId, TenantId, ZTenantTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId},
 };
 
 /// Default value to use for prefixing to all etcd keys with.
@@ -25,7 +25,7 @@ pub const DEFAULT_NEON_BROKER_ETCD_PREFIX: &str = "neon";
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SafekeeperTimeline {
-    safekeeper_id: ZNodeId,
+    safekeeper_id: NodeId,
     info: SkTimelineInfo,
 }
 
@@ -71,7 +71,7 @@ pub enum BrokerError {
 /// A way to control the data retrieval from a certain subscription.
 pub struct SkTimelineSubscription {
     safekeeper_timeline_updates:
-        mpsc::UnboundedReceiver<HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>>>,
+        mpsc::UnboundedReceiver<HashMap<ZTenantTimelineId, HashMap<NodeId, SkTimelineInfo>>>,
     kind: SkTimelineSubscriptionKind,
     watcher_handle: JoinHandle<Result<(), BrokerError>>,
     watcher: Watcher,
@@ -81,7 +81,7 @@ impl SkTimelineSubscription {
     /// Asynchronously polls for more data from the subscription, suspending the current future if there's no data sent yet.
     pub async fn fetch_data(
         &mut self,
-    ) -> Option<HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>>> {
+    ) -> Option<HashMap<ZTenantTimelineId, HashMap<NodeId, SkTimelineInfo>>> {
         self.safekeeper_timeline_updates.recv().await
     }
 
@@ -221,7 +221,7 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                 break;
             }
 
-            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<ZNodeId, SkTimelineInfo>> = HashMap::new();
+            let mut timeline_updates: HashMap<ZTenantTimelineId, HashMap<NodeId, SkTimelineInfo>> = HashMap::new();
             // Keep track that the timeline data updates from etcd arrive in the right order.
             // https://etcd.io/docs/v3.5/learning/api_guarantees/#isolation-level-and-consistency-of-replicas
             // > etcd does not ensure linearizability for watch operations. Users are expected to verify the revision of watch responses to ensure correct ordering.
@@ -299,18 +299,18 @@ fn parse_etcd_key_value(
                 parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?,
                 parse_capture(&caps, 2).map_err(BrokerError::ParsingError)?,
             ),
-            ZNodeId(parse_capture(&caps, 3).map_err(BrokerError::ParsingError)?),
+            NodeId(parse_capture(&caps, 3).map_err(BrokerError::ParsingError)?),
         ),
         SubscriptionKind::Tenant(tenant_id) => (
             ZTenantTimelineId::new(
                 tenant_id,
                 parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?,
             ),
-            ZNodeId(parse_capture(&caps, 2).map_err(BrokerError::ParsingError)?),
+            NodeId(parse_capture(&caps, 2).map_err(BrokerError::ParsingError)?),
         ),
         SubscriptionKind::Timeline(zttid) => (
             zttid,
-            ZNodeId(parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?),
+            NodeId(parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?),
         ),
     };
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::zid::{ZNodeId, TenantId, ZTenantTimelineId};
+use utils::zid::{NodeId, TenantId, ZTenantTimelineId};
 
 pub mod broker;
 pub mod callmemaybe;
@@ -49,7 +49,7 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub ttl: Option<Duration>,
     pub recall_period: Duration,
-    pub my_id: ZNodeId,
+    pub my_id: NodeId,
     pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
     pub s3_offload_enabled: bool,
@@ -79,7 +79,7 @@ impl Default for SafeKeeperConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             ttl: None,
             recall_period: defaults::DEFAULT_RECALL_PERIOD,
-            my_id: ZNodeId(0),
+            my_id: NodeId(0),
             broker_endpoints: Vec::new(),
             broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             s3_offload_enabled: true,
