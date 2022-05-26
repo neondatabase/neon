@@ -48,7 +48,7 @@ async fn request_callback(
     // it is required to correctly manage callmemaybe subscriptions when more than one pageserver is involved
     // TODO it is better to use some sort of a unique id instead of connection string, see https://github.com/zenithdb/zenith/issues/1105
     let callme = format!(
-        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} TenantId={} pageserver_connstr={}'",
+        "callmemaybe {} {} host={} port={} options='-c ztimelineid={} tenantid={} pageserver_connstr={}'",
         tenantid, timelineid, host, port, timelineid, tenantid, pageserver_connstr,
     );
 
