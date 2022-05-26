@@ -2,7 +2,7 @@
 //! page server.
 
 use crate::config::PageServerConf;
-use crate::layered_repository::LayeredRepository;
+use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tracing::*;
+use utils::lsn::Lsn;
 
 use utils::zid::{ZTenantId, ZTimelineId};
 
@@ -399,6 +400,26 @@ pub fn list_tenants() -> Vec<TenantInfo> {
         .collect()
 }
 
+/// Check if a given timeline is "broken" \[1\].
+/// The function returns an error if the timeline is "broken".
+///
+/// \[1\]: it's not clear now how should we classify a timeline as broken.
+/// This function marks a timeline as broken if
+/// - failed to load the timeline's metadata
+/// - the timeline's disk consistent LSN is zero
+fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    let metadata = load_metadata(repo.conf, timeline_id, repo.tenant_id())
+        .context("failed to load metadata")?;
+
+    // A timeline with zero disk consistent LSN can happen when the page server
+    // failed to checkpoint the timeline import data when creating that timeline.
+    if metadata.disk_consistent_lsn() == Lsn(0) {
+        bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
+    }
+
+    Ok(())
+}
+
 fn init_local_repository(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
@@ -414,7 +435,13 @@ fn init_local_repository(
         match init_status {
             LocalTimelineInitStatus::LocallyComplete => {
                 debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
-                status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
+                if let Err(err) = check_broken_timeline(&repo, timeline_id) {
+                    info!(
+                        "Found a broken timeline {timeline_id} (err={err:?}), skip registering it in repository"
+                    );
+                } else {
+                    status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
+                }
             }
             LocalTimelineInitStatus::NeedsSync => {
                 debug!(
