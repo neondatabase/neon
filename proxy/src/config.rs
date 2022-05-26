@@ -61,7 +61,8 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     let config = rustls::ServerConfig::builder()
         .with_safe_default_cipher_suites()
         .with_safe_default_kx_groups()
-        .with_protocol_versions(&[&rustls::version::TLS13])?
+        // allow TLS 1.2 to be compatible with older client libraries
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
 
