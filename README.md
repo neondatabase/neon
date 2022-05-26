@@ -108,7 +108,7 @@ Safekeeper started
 > ./target/debug/neon_local pg start main
 Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
-Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
+Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
 # check list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -118,7 +118,7 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=po
 
 2. Now it is possible to connect to postgres and run some queries:
 ```text
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
 postgres=# insert into t values(1,1);
@@ -145,7 +145,7 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 > ./target/debug/neon_local pg start migration_check --branch-name migration_check
 Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
-Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=postgres'
+Starting postgres node at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
 
 # check the new list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -155,7 +155,7 @@ Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=po
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
-> psql -p55433 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55433 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -166,7 +166,7 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 
 # check that the new change doesn't affect the 'main' postgres
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------

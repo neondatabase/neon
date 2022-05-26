@@ -499,7 +499,7 @@ impl PostgresNode {
             "host={} port={} user={} dbname={}",
             self.address.ip(),
             self.address.port(),
-            "zenith_admin",
+            "cloud_admin",
             "postgres"
         )
     }

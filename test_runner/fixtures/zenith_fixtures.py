@@ -1193,7 +1193,7 @@ class ZenithPageserver(PgProtocol):
     Initializes the repository via `zenith init`.
     """
     def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
-        super().__init__(host='localhost', port=port.pg, user='zenith_admin')
+        super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
         self.running = False
         self.service_port = port
@@ -1471,7 +1471,7 @@ def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
-        super().__init__(host='localhost', port=port, user='zenith_admin', dbname='postgres')
+        super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
