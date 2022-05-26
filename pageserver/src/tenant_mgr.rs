@@ -327,8 +327,8 @@ pub fn get_local_timeline_with_load(
         return Ok(Arc::clone(page_tline));
     }
 
-    let page_tline = new_local_timeline(&tenant.repo, timeline_id)
-        .with_context(|| format!("Failed to create new local timeline for tenant {tenant_id}"))?;
+    let page_tline = load_local_timeline(&tenant.repo, timeline_id)
+        .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
     tenant
         .local_timelines
         .insert(timeline_id, Arc::clone(&page_tline));
@@ -365,7 +365,7 @@ pub fn detach_timeline(
     Ok(())
 }
 
-fn new_local_timeline(
+fn load_local_timeline(
     repo: &RepositoryImpl,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<DatadirTimeline<LayeredRepository>>> {
@@ -458,8 +458,8 @@ fn apply_timeline_remote_sync_status_updates(
                     bail!("Local timeline {timeline_id} already registered")
                 }
                 Entry::Vacant(v) => {
-                    v.insert(new_local_timeline(repo, timeline_id).with_context(|| {
-                        format!("Failed to register new local timeline for tenant {tenant_id}")
+                    v.insert(load_local_timeline(repo, timeline_id).with_context(|| {
+                        format!("Failed to register add local timeline for tenant {tenant_id}")
                     })?);
                 }
             },

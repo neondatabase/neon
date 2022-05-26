@@ -302,8 +302,8 @@ fn bootstrap_timeline<R: Repository>(
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
     page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
-    println!(
-        "created initial timeline {} timeline.lsn {}",
+    info!(
+        "created root timeline {} timeline.lsn {}",
         tli,
         page_tline.tline.get_last_record_lsn()
     );
