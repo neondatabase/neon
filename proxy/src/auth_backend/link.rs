@@ -6,7 +6,7 @@ fn hello_message(redirect_uri: &str, session_id: &str) -> String {
     format!(
         concat![
             "Welcome to Neon!\n",
-            "Open the following link authenticate:\n\n",
+            "Click the following link to register/authenticate:\n\n",
             "    {redirect_uri}{session_id}\n\n",
         ],
         redirect_uri = redirect_uri,
