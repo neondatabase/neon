@@ -10,6 +10,7 @@ mod channel_binding;
 mod messages;
 mod stream;
 
+use crate::error::UserFacingError;
 use std::io;
 use thiserror::Error;
 
@@ -34,6 +35,20 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+impl UserFacingError for Error {
+    fn to_string_client(&self) -> String {
+        use Error::*;
+        match self {
+            // This constructor contains the reason why auth has failed.
+            AuthenticationFailed(s) => s.to_string(),
+            // TODO: add support for channel binding
+            ChannelBindingFailed(_) => "channel binding is not supported yet".to_string(),
+            ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
+            _ => "authentication protocol violation".to_string(),
+        }
+    }
 }
 
 /// A convenient result type for SASL exchange.
