@@ -26,7 +26,7 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-                cur.execute("SHOW neon.timelineid")
+                cur.execute("SHOW neon.timeline_id")
                 timeline_id = cur.fetchone()[0]
         pg.stop()
         tenant_timelines.append((tenant_id, timeline_id, pg))

@@ -19,7 +19,7 @@ def test_wal_restore(zenith_env_builder: ZenithEnvBuilder,
     env.zenith_cli.create_branch("test_wal_restore")
     pg = env.postgres.create_start('test_wal_restore')
     pg.safe_psql("create table t as select generate_series(1,300000)")
-    tenant_id = pg.safe_psql("show neon.tenantid")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     env.zenith_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = os.path.join(test_output_dir, 'pgsql.restored')

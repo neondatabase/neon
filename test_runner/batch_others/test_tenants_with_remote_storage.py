@@ -21,8 +21,8 @@ async def tenant_workload(env: ZenithEnv, pg: Postgres):
 
     pg_conn = await pg.connect_async()
 
-    tenant_id = await pg_conn.fetchval("show neon.tenantid")
-    timeline_id = await pg_conn.fetchval("show neon.timelineid")
+    tenant_id = await pg_conn.fetchval("show neon.tenant_id")
+    timeline_id = await pg_conn.fetchval("show neon.timeline_id")
 
     await pg_conn.execute("CREATE TABLE t(key int primary key, value text)")
     for i in range(1, 100):
@@ -82,9 +82,9 @@ def test_tenants_many(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
     for tenant, pg in tenants_pgs:
         with closing(pg.connect()) as conn:
             with conn.cursor() as cur:
-                cur.execute("show neon.tenantid")
+                cur.execute("show neon.tenant_id")
                 tenant_id = cur.fetchone()[0]
-                cur.execute("show neon.timelineid")
+                cur.execute("show neon.timeline_id")
                 timeline_id = cur.fetchone()[0]
                 cur.execute("SELECT pg_current_wal_flush_lsn()")
                 current_lsn = lsn_from_hex(cur.fetchone()[0])

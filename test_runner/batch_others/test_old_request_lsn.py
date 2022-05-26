@@ -26,7 +26,7 @@ def test_old_request_lsn(zenith_env_builder: ZenithEnvBuilder):
     cur = pg_conn.cursor()
 
     # Get the timeline ID of our branch. We need it for the 'do_gc' command
-    cur.execute("SHOW neon.timelineid")
+    cur.execute("SHOW neon.timeline_id")
     timeline = cur.fetchone()[0]
 
     psconn = env.pageserver.connect()
