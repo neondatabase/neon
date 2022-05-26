@@ -285,7 +285,9 @@ fn bootstrap_timeline<R: Repository>(
 ) -> Result<()> {
     let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
 
-    let initdb_path = conf.tenant_path(&tenantid).join("tmp");
+    let initdb_path = conf
+        .tenant_path(&tenantid)
+        .join(format!("tmp-timeline-{}", tli));
 
     // Init temporarily repo to get bootstrap data
     run_initdb(conf, &initdb_path)?;
