@@ -404,7 +404,7 @@ pub fn list_tenants() -> Vec<TenantInfo> {
 /// The function returns an error if the timeline is "broken".
 ///
 /// \[1\]: it's not clear now how should we classify a timeline as broken.
-/// This function marks a timeline as broken if
+/// A timeline is categorized as broken when any of following conditions is true:
 /// - failed to load the timeline's metadata
 /// - the timeline's disk consistent LSN is zero
 fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> anyhow::Result<()> {

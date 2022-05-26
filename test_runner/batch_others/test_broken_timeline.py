@@ -103,13 +103,13 @@ def test_fix_broken_timelines_on_startup(zenith_simple_env: ZenithEnv):
 
     # Introduce failpoint when creating a new timeline
     env.pageserver.safe_psql(f"failpoints before-checkpoint-new-timeline=return")
-
     with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
         _ = env.zenith_cli.create_timeline("test_fix_broken_timelines", tenant_id)
 
+    # Restart the page server
     env.zenith_cli.pageserver_stop(immediate=True)
     env.zenith_cli.pageserver_start()
 
-    # Check the "broken" timeline is not loaded
+    # Check that the "broken" timeline is not loaded
     timelines = env.zenith_cli.list_timelines(tenant_id)
     assert len(timelines) == 1
