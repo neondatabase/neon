@@ -473,7 +473,7 @@ class ProposerPostgres(PgProtocol):
                  tenant_id: uuid.UUID,
                  listen_addr: str,
                  port: int):
-        super().__init__(host=listen_addr, port=port, user='zenith_admin', dbname='postgres')
+        super().__init__(host=listen_addr, port=port, user='cloud_admin', dbname='postgres')
 
         self.pgdata_dir: str = pgdata_dir
         self.pg_bin: PgBin = pg_bin
@@ -529,7 +529,7 @@ class ProposerPostgres(PgProtocol):
     def initdb(self):
         """ Run initdb """
 
-        args = ["initdb", "-U", "zenith_admin", "-D", self.pg_data_dir_path()]
+        args = ["initdb", "-U", "cloud_admin", "-D", self.pg_data_dir_path()]
         self.pg_bin.run(args)
 
     def start(self):

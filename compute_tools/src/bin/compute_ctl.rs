@@ -21,7 +21,7 @@
 //! Usage example:
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
-//!             -C 'postgresql://zenith_admin@localhost/postgres' \
+//!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres
 //! ```

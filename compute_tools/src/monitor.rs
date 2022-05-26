@@ -43,7 +43,7 @@ fn watch_compute_activity(compute: &Arc<ComputeNode>) {
                          FROM pg_stat_activity
                          WHERE backend_type = 'client backend'
                             AND pid != pg_backend_pid()
-                            AND usename != 'zenith_admin';", // XXX: find a better way to filter other monitors?
+                            AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
                         &[],
                     );
                 let mut last_active = compute.state.read().unwrap().last_active;

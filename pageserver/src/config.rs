@@ -34,7 +34,7 @@ pub mod defaults {
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
-    pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
+    pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -499,7 +499,7 @@ impl PageServerConf {
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            superuser: "zenith_admin".to_string(),
+            superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: PathBuf::new(),
             auth_type: AuthType::Trust,
