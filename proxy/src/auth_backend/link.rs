@@ -5,12 +5,9 @@ use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 fn hello_message(redirect_uri: &str, session_id: &str) -> String {
     format!(
         concat![
-            "☀️  Welcome to Neon!\n",
-            "To proceed with database creation, open the following link:\n\n",
+            "Welcome to Neon!\n",
+            "Authenticate by visiting:\n",
             "    {redirect_uri}{session_id}\n\n",
-            "It needs to be done once and we will send you '.pgpass' file,\n",
-            "which will allow you to access or create ",
-            "databases without opening your web browser."
         ],
         redirect_uri = redirect_uri,
         session_id = session_id,
