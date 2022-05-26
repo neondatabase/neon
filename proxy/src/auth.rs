@@ -75,6 +75,7 @@ impl UserFacingError for AuthError {
         match self.0.as_ref() {
             Console(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
+            Sasl(e) => e.to_string_client(),
             MalformedPassword => self.to_string(),
             _ => "Internal error".to_string(),
         }

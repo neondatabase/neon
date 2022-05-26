@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     println!("Version: {GIT_VERSION}");
+    println!("Authentication backend: {:?}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", http_address);
