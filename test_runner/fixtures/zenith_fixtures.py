@@ -2013,7 +2013,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.timelineid")
+            cur.execute("SHOW neon.timeline_id")
             timeline = cur.fetchone()[0]
 
     # stop postgres to ensure that files won't change

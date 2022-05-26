@@ -21,7 +21,7 @@ def test_timeline_size(zenith_simple_env: ZenithEnv):
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.timelineid")
+            cur.execute("SHOW neon.timeline_id")
 
             # Create table, and insert the first 100 rows
             cur.execute("CREATE TABLE foo (t text)")

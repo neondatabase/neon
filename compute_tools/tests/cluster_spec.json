@@ -150,7 +150,7 @@
                 "vartype": "integer"
             },
             {
-                "name": "neon.tenantid",
+                "name": "neon.tenant_id",
                 "value": "b0554b632bd4d547a63b86c3630317e8",
                 "vartype": "string"
             },
@@ -160,7 +160,7 @@
                 "vartype": "integer"
             },
             {
-                "name": "neon.timelineid",
+                "name": "neon.timeline_id",
                 "value": "2414a61ffc94e428f14b5758fe308e13",
                 "vartype": "string"
             },

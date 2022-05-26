@@ -31,7 +31,7 @@ def test_branch_behind(zenith_env_builder: ZenithEnvBuilder):
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 
-    main_cur.execute("SHOW neon.timelineid")
+    main_cur.execute("SHOW neon.timeline_id")
     timeline = main_cur.fetchone()[0]
 
     # Create table, and insert the first 100 rows

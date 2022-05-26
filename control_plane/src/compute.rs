@@ -148,8 +148,8 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timeline_id: ZTimelineId = conf.parse_field("neon.timelineid", &context)?;
-        let tenant_id: ZTenantId = conf.parse_field("neon.tenantid", &context)?;
+        let timeline_id: ZTimelineId = conf.parse_field("neon.timeline_id", &context)?;
+        let tenant_id: ZTenantId = conf.parse_field("neon.tenant_id", &context)?;
         let uses_wal_proposer = conf.get("safekeepers").is_some();
 
         // parse recovery_target_lsn, if any
@@ -306,8 +306,8 @@ impl PostgresNode {
         conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
-        conf.append("neon.tenantid", &self.tenant_id.to_string());
-        conf.append("neon.timelineid", &self.timeline_id.to_string());
+        conf.append("neon.tenant_id", &self.tenant_id.to_string());
+        conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }

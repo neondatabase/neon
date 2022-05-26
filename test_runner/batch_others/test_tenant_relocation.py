@@ -130,7 +130,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     with closing(tenant_pg.connect()) as conn:
         with conn.cursor() as cur:
             # save timeline for later gc call
-            cur.execute("SHOW neon.timelineid")
+            cur.execute("SHOW neon.timeline_id")
             timeline = UUID(cur.fetchone()[0])
             log.info("timeline to relocate %s", timeline.hex)
 

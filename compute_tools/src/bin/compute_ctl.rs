@@ -121,12 +121,12 @@ fn main() -> Result<()> {
     let tenant = spec
         .cluster
         .settings
-        .find("neon.tenantid")
+        .find("neon.tenant_id")
         .expect("tenant id should be provided");
     let timeline = spec
         .cluster
         .settings
-        .find("neon.timelineid")
+        .find("neon.timeline_id")
         .expect("tenant id should be provided");
 
     let compute_state = ComputeNode {
