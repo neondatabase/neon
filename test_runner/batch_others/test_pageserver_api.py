@@ -76,13 +76,10 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
     tenant_id, timeline_id = env.zenith_cli.create_tenant()
     pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
-    def try_get_updated_msg_lsn(prev_msg_lsn: Optional[int]) -> int:
-        """Try to get the updated message's LSN from the WAL receiver.
-
-        This function raises an exception if the latest message's LSN is not found
-        or it hasn't been updated compared to the previous message's LSN.
-        """
+    def expect_updated_msg_lsn(prev_msg_lsn: Optional[int]) -> int:
         res = client.wal_receiver_get(tenant_id, timeline_id)
+
+        # a successful `wal_receiver_get` response must contain the below fields
         assert list(res.keys()) == [
             "thread_id",
             "wal_producer_connstr",
@@ -90,25 +87,24 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
             "last_received_msg_ts",
         ]
 
-        if res["last_received_msg_lsn"] is None:
-            raise Exception("the last received message's LSN is empty")
+        assert res["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
 
         last_msg_lsn = lsn_from_hex(res["last_received_msg_lsn"])
-        if prev_msg_lsn is not None and prev_msg_lsn >= last_msg_lsn:
-            raise Exception(f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-                compared to the previous message's LSN {prev_msg_lsn}")
+        assert prev_msg_lsn is not None and prev_msg_lsn >= last_msg_lsn, \
+            f"the last received message's LSN {last_msg_lsn} hasn't been updated \
+            compared to the previous message's LSN {prev_msg_lsn}"
 
         return last_msg_lsn
 
     # Wait to make sure that we get a latest WAL receiver data.
     # We need to wait here because it's possible that we don't have access to
-    # the latest WAL during the time the `get_wal_receiver` API is called.
+    # the latest WAL during the time the `wal_receiver_get` API is called.
     # See: https://github.com/neondatabase/neon/issues/1768.
-    lsn = wait_until(number_of_iterations=5, interval=1, func=lambda: try_get_updated_msg_lsn(None))
+    lsn = wait_until(number_of_iterations=5, interval=1, func=lambda: expect_updated_msg_lsn(None))
 
     # Make a DB modification then expect getting a new WAL receiver's data.
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
-    wait_until(number_of_iterations=5, interval=1, func=lambda: try_get_updated_msg_lsn(lsn))
+    wait_until(number_of_iterations=5, interval=1, func=lambda: expect_updated_msg_lsn(lsn))
 
 
 def test_pageserver_http_api_client(zenith_simple_env: ZenithEnv):
