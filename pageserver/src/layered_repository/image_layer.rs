@@ -221,7 +221,7 @@ impl Layer for ImageLayer {
                     })?;
 
             let uncompressed_bytes = if blob_ref.compressed() {
-                decompressor.decompress(&blob_content, blob_content.len())?
+                decompressor.decompress(&blob_content, PAGE_SZ)?
             } else {
                 blob_content
             };
@@ -539,18 +539,20 @@ impl ImageLayerWriter {
 
         // Try to compress the blob
         let compressed_bytes;
-        if let Some(ref mut compressor) = self.compressor {
-            compressed_bytes = compressor.compress(blob_content)?;
+        if blob_content.len() <= PAGE_SZ {
+            if let Some(ref mut compressor) = self.compressor {
+                compressed_bytes = compressor.compress(blob_content)?;
 
-            // If compressed version is not any smaller than the original,
-            // store it uncompressed. This not just an optimization, the
-            // the decompression assumes that too. That simplifies the
-            // decompression, because you don't need to jump through any
-            // hoops to determine how large a buffer you need to hold the
-            // decompression result.
-            if compressed_bytes.len() < blob_content.len() {
-                blob_content = &compressed_bytes;
-                compressed = true;
+                // If compressed version is not any smaller than the original,
+                // store it uncompressed. This not just an optimization, the
+                // the decompression assumes that too. That simplifies the
+                // decompression, because you don't need to jump through any
+                // hoops to determine how large a buffer you need to hold the
+                // decompression result.
+                if compressed_bytes.len() < blob_content.len() {
+                    blob_content = &compressed_bytes;
+                    compressed = true;
+                }
             }
         }
 
