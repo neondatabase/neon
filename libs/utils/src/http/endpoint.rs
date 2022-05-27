@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
 use lazy_static::lazy_static;
-use metrics::{new_common_metric_name, register_int_counter, Encoder, IntCounter, TextEncoder};
+use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
@@ -18,7 +18,7 @@ use super::error::ApiError;
 
 lazy_static! {
     static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
-        new_common_metric_name("serve_metrics_count"),
+        "libmetrics_metric_handler_requests_total",
         "Number of metric requests made"
     )
     .expect("failed to define a metric");

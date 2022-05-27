@@ -39,6 +39,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -305,6 +306,22 @@ impl ImageLayer {
         }
     }
 
+    fn temp_path_for(
+        conf: &PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        fname: &ImageFileName,
+    ) -> PathBuf {
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+
+        conf.timeline_path(&timelineid, &tenantid)
+            .join(format!("{}.{}.temp", fname, rand_string))
+    }
+
     ///
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
@@ -462,7 +479,7 @@ impl ImageLayer {
 ///
 pub struct ImageLayerWriter {
     conf: &'static PageServerConf,
-    _path: PathBuf,
+    path: PathBuf,
     timelineid: ZTimelineId,
     tenantid: ZTenantId,
     key_range: Range<Key>,
@@ -482,12 +499,10 @@ impl ImageLayerWriter {
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
-        // Create the file
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
-        let path = ImageLayer::path_for(
-            &PathOrConf::Conf(conf),
+        // Create the file initially with a temporary filename.
+        // We'll atomically rename it to the final name when we're done.
+        let path = ImageLayer::temp_path_for(
+            conf,
             timelineid,
             tenantid,
             &ImageFileName {
@@ -513,7 +528,7 @@ impl ImageLayerWriter {
 
         let writer = ImageLayerWriter {
             conf,
-            _path: path,
+            path,
             timelineid,
             tenantid,
             key_range: key_range.clone(),
@@ -611,6 +626,25 @@ impl ImageLayerWriter {
                 index_root_blk,
             }),
         };
+
+        // fsync the file
+        file.sync_all()?;
+
+        // Rename the file to its final name
+        //
+        // Note: This overwrites any existing file. There shouldn't be any.
+        // FIXME: throw an error instead?
+        let final_path = ImageLayer::path_for(
+            &PathOrConf::Conf(self.conf),
+            self.timelineid,
+            self.tenantid,
+            &ImageFileName {
+                key_range: self.key_range.clone(),
+                lsn: self.lsn,
+            },
+        );
+        std::fs::rename(self.path, &final_path)?;
+
         trace!("created image layer {}", layer.path().display());
 
         Ok(layer)

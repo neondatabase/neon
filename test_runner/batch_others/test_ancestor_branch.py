@@ -10,13 +10,6 @@ from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserv
 # Create ancestor branches off the main branch.
 #
 def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
-
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/zenithdb/zenith/issues/1068
-    zenith_env_builder.num_safekeepers = 1
     env = zenith_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.

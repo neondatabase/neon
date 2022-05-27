@@ -25,7 +25,7 @@ use utils::{
 };
 
 use crate::local_env::LocalEnv;
-use crate::{fill_rust_env_vars, read_pidfile};
+use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
 use pageserver::tenant_mgr::TenantInfo;
 
 #[derive(Error, Debug)]
@@ -121,6 +121,16 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let broker_endpoints_param = format!(
+            "broker_endpoints=[{}]",
+            self.env
+                .etcd_broker
+                .broker_endpoints
+                .iter()
+                .map(|url| format!("'{url}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let mut args = Vec::with_capacity(20);
 
         args.push("--init");
@@ -129,7 +139,18 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &broker_endpoints_param]);
         args.extend(["-c", &id]);
+
+        let broker_etcd_prefix_param = self
+            .env
+            .etcd_broker
+            .broker_etcd_prefix
+            .as_ref()
+            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
+            args.extend(["-c", broker_etcd_prefix_param]);
+        }
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
@@ -260,12 +281,13 @@ impl PageServerNode {
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
         let sig = if immediate {
-            println!("Stop pageserver immediately");
+            print!("Stopping pageserver immediately..");
             Signal::SIGQUIT
         } else {
-            println!("Stop pageserver gracefully");
+            print!("Stopping pageserver gracefully..");
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -287,25 +309,36 @@ impl PageServerNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if pageserver checkpoints a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Pageserver stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Pageserver status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Pageserver status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nPageserver connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Pageserver still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+
+                match self.check_status() {
+                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nPageserver status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -459,13 +492,4 @@ impl PageServerNode {
 
         Ok(timeline_info_response)
     }
-}
-
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
-    for env_key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
-        if let Ok(value) = std::env::var(env_key) {
-            cmd = cmd.env(env_key, value);
-        }
-    }
-    cmd
 }

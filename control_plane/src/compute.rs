@@ -231,8 +231,13 @@ impl PostgresNode {
             .context("page server 'basebackup' command failed")?;
 
         // Read the archive directly from the `CopyOutReader`
-        tar::Archive::new(copyreader)
-            .unpack(&self.pgdata())
+        //
+        // Set `ignore_zeros` so that unpack() reads all the Copy data and
+        // doesn't stop at the end-of-archive marker. Otherwise, if the server
+        // sends an Error after finishing the tarball, we will not notice it.
+        let mut ar = tar::Archive::new(copyreader);
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.pgdata())
             .context("extracting base backup failed")?;
 
         Ok(())
@@ -274,6 +279,8 @@ impl PostgresNode {
         conf.append("listen_addresses", &self.address.ip().to_string());
         conf.append("port", &self.address.port().to_string());
         conf.append("wal_keep_size", "0");
+        // walproposer panics when basebackup is invalid, it is pointless to restart in this case.
+        conf.append("restart_after_crash", "off");
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {

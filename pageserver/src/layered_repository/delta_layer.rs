@@ -56,6 +56,7 @@ use crate::virtual_file::VirtualFile;
 use crate::walrecord;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -532,6 +533,28 @@ impl DeltaLayer {
         }
     }
 
+    fn temp_path_for(
+        conf: &PageServerConf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+        key_start: Key,
+        lsn_range: &Range<Lsn>,
+    ) -> PathBuf {
+        let rand_string: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+
+        conf.timeline_path(&timelineid, &tenantid).join(format!(
+            "{}-XXX__{:016X}-{:016X}.{}.temp",
+            key_start,
+            u64::from(lsn_range.start),
+            u64::from(lsn_range.end),
+            rand_string
+        ))
+    }
+
     ///
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
@@ -746,12 +769,8 @@ impl DeltaLayerWriter {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = conf.timeline_path(&timelineid, &tenantid).join(format!(
-            "{}-XXX__{:016X}-{:016X}.temp",
-            key_start,
-            u64::from(lsn_range.start),
-            u64::from(lsn_range.end)
-        ));
+        let path = DeltaLayer::temp_path_for(conf, timelineid, tenantid, key_start, &lsn_range);
+
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
@@ -960,6 +979,8 @@ impl DeltaLayerWriter {
             }),
         };
 
+        // fsync the file
+        file.sync_all()?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.

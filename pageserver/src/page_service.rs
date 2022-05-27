@@ -305,7 +305,29 @@ fn page_service_conn_main(
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
-    pgbackend.run(&mut conn_handler)
+    match pgbackend.run(&mut conn_handler) {
+        Ok(()) => {
+            // we've been requested to shut down
+            Ok(())
+        }
+        Err(err) => {
+            let root_cause_io_err_kind = err
+                .root_cause()
+                .downcast_ref::<io::Error>()
+                .map(|e| e.kind());
+
+            // `ConnectionReset` error happens when the Postgres client closes the connection.
+            // As this disconnection happens quite often and is expected,
+            // we decided to downgrade the logging level to `INFO`.
+            // See: https://github.com/neondatabase/neon/issues/1683.
+            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
+                info!("Postgres client disconnected");
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -593,7 +615,8 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+
+            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -730,7 +753,18 @@ impl postgres_backend::Handler for PageServerHandler {
             for failpoint in failpoints.split(';') {
                 if let Some((name, actions)) = failpoint.split_once('=') {
                     info!("cfg failpoint: {} {}", name, actions);
-                    fail::cfg(name, actions).unwrap();
+
+                    // We recognize one extra "action" that's not natively recognized
+                    // by the failpoints crate: exit, to immediately kill the process
+                    if actions == "exit" {
+                        fail::cfg_callback(name, || {
+                            info!("Exit requested by failpoint");
+                            std::process::exit(1);
+                        })
+                        .unwrap();
+                    } else {
+                        fail::cfg(name, actions).unwrap();
+                    }
                 } else {
                     bail!("Invalid failpoints format");
                 }

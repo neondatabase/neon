@@ -11,15 +11,6 @@ executors:
       - image: zimg/rust:1.58
 
 jobs:
-  check-codestyle-rust:
-    executor: neon-xlarge-executor
-    steps:
-      - checkout
-      - run:
-          name: rustfmt
-          when: always
-          command: cargo fmt --all -- --check
-
   # A job to build postgres
   build-postgres:
     executor: neon-xlarge-executor
@@ -223,6 +214,12 @@ jobs:
           paths:
             - /home/circleci/.cache/pypoetry/virtualenvs
       - run:
+          name: Print versions
+          when: always
+          command: |
+              poetry run python --version
+              poetry show
+      - run:
           name: Run yapf to ensure code format
           when: always
           command: poetry run yapf --recursive --diff .
@@ -355,7 +352,7 @@ jobs:
           when: always
           command: |
             du -sh /tmp/test_output/*
-            find /tmp/test_output -type f ! -name "pg.log" ! -name "pageserver.log" ! -name "safekeeper.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" -delete
+            find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
             du -sh /tmp/test_output/*
       - store_artifacts:
           path: /tmp/test_output
@@ -587,6 +584,56 @@ jobs:
             helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
             helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
 
+  deploy-neon-stress:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Setup ansible
+          command: |
+            pip install --progress-bar off --user ansible boto3
+      - run:
+          name: Redeploy
+          command: |
+            cd "$(pwd)/.circleci/ansible"
+
+            ./get_binaries.sh
+
+            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
+            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
+            chmod 0600 ssh-key
+            ssh-add ssh-key
+            rm -f ssh-key ssh-key-cert.pub
+
+            ansible-playbook deploy.yaml -i neon-stress.hosts
+            rm -f neon_install.tar.gz .neon_current_version
+
+  deploy-neon-stress-proxy:
+    docker:
+      - image: cimg/base:2021.04
+    environment:
+      KUBECONFIG: .kubeconfig
+    steps:
+      - checkout
+      - run:
+          name: Store kubeconfig file
+          command: |
+            echo "${NEON_STRESS_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
+            chmod 0600 ${KUBECONFIG}
+      - run:
+          name: Setup helm v3
+          command: |
+            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
+      - run:
+          name: Re-deploy proxy
+          command: |
+            DOCKER_TAG=$(git log --oneline|wc -l)
+            helm upgrade neon-stress-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/neon-stress.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade neon-stress-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/neon-stress.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
+
   deploy-release:
     docker:
       - image: cimg/python:3.10
@@ -629,12 +676,13 @@ jobs:
           name: Setup helm v3
           command: |
             curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add zenithdb https://neondatabase.github.io/helm-charts
+            helm repo add neondatabase https://neondatabase.github.io/helm-charts
       - run:
           name: Re-deploy proxy
           command: |
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            helm upgrade zenith-proxy zenithdb/zenith-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
 
   # Trigger a new remote CI job
   remote-ci-trigger:
@@ -683,7 +731,6 @@ jobs:
 workflows:
   build_and_test:
     jobs:
-      - check-codestyle-rust
       - check-codestyle-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
@@ -763,6 +810,25 @@ workflows:
           requires:
             - docker-image
       - deploy-staging-proxy:
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - docker-image
+
+      - deploy-neon-stress:
+          # Context gives an ability to login
+          context: Docker Hub
+          # deploy only for commits to main
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - docker-image
+      - deploy-neon-stress-proxy:
           # deploy only for commits to main
           filters:
             branches:

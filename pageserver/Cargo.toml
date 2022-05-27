@@ -58,6 +58,7 @@ git-version = "0.3.5"
 zstd = { version = "0.11.1", features = ["experimental"] }
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
+etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
 remote_storage = { path = "../libs/remote_storage" }

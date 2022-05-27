@@ -38,7 +38,6 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("zenith_proxy");
     let arg_matches = App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(

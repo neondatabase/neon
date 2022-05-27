@@ -119,7 +119,7 @@ mod tests {
     #[tokio::test]
     async fn delete_timeline_negative() -> anyhow::Result<()> {
         let harness = RepoHarness::create("delete_timeline_negative")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(
             tempdir()?.path().to_path_buf(),
@@ -152,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn delete_timeline() -> anyhow::Result<()> {
         let harness = RepoHarness::create("delete_timeline")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "c", "d"];

@@ -4,11 +4,11 @@
 //!
 pub mod checker;
 pub mod config;
-pub mod http_api;
+pub mod http;
 #[macro_use]
 pub mod logger;
+pub mod compute;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
 pub mod spec;
-pub mod zenith;

@@ -15,4 +15,4 @@ RUN set -e \
 # Final image that only has one binary
 FROM debian:buster-slim
 
-COPY --from=rust-build /home/circleci/project/target/release/zenith_ctl /usr/local/bin/zenith_ctl
+COPY --from=rust-build /home/circleci/project/target/release/compute_ctl /usr/local/bin/compute_ctl

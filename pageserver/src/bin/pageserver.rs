@@ -38,7 +38,6 @@ fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
@@ -98,6 +97,8 @@ fn main() -> anyhow::Result<()> {
         let features: &[&str] = &[
             #[cfg(feature = "failpoints")]
             "failpoints",
+            #[cfg(feature = "profiling")]
+            "profiling",
         ];
         println!("{{\"features\": {features:?} }}");
         return Ok(());
@@ -183,13 +184,8 @@ fn main() -> anyhow::Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-    // If failpoints are used, terminate the whole pageserver process if they are hit.
+    // Initialize up failpoints support
     let scenario = FailScenario::setup();
-    if fail::has_failpoints() {
-        std::panic::set_hook(Box::new(|_| {
-            std::process::exit(1);
-        }));
-    }
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
@@ -258,7 +254,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(err) => error!(%err, "could not daemonize"),
+            Err(err) => bail!("{err}. could not daemonize. bailing."),
         }
     }
 

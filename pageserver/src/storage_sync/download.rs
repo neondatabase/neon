@@ -286,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn download_timeline() -> anyhow::Result<()> {
         let harness = RepoHarness::create("download_timeline")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn download_timeline_negatives() -> anyhow::Result<()> {
         let harness = RepoHarness::create("download_timeline_negatives")?;
-        let (sync_queue, _) = SyncQueue::new(NonZeroUsize::new(100).unwrap());
+        let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = LocalFs::new(tempdir()?.path().to_owned(), harness.conf.workdir.clone())?;
 

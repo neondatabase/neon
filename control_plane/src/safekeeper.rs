@@ -18,12 +18,12 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
-use crate::{fill_rust_env_vars, read_pidfile};
+use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -52,7 +52,7 @@ impl ResponseErrorMessageExt for Response {
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
                 Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+                Err(_) => format!("Http error ({}) at {url}.", status.as_u16()),
             },
         ))
     }
@@ -65,7 +65,7 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct SafekeeperNode {
-    pub id: ZNodeId,
+    pub id: NodeId,
 
     pub conf: SafekeeperConf,
 
@@ -75,16 +75,11 @@ pub struct SafekeeperNode {
     pub http_base_url: String,
 
     pub pageserver: Arc<PageServerNode>,
-
-    broker_endpoints: Option<String>,
-    broker_etcd_prefix: Option<String>,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
         let pageserver = Arc::new(PageServerNode::from_env(env));
-
-        println!("initializing for sk {} for {}", conf.id, conf.http_port);
 
         SafekeeperNode {
             id: conf.id,
@@ -94,8 +89,6 @@ impl SafekeeperNode {
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
             pageserver,
-            broker_endpoints: env.broker_endpoints.clone(),
-            broker_etcd_prefix: env.broker_etcd_prefix.clone(),
         }
     }
 
@@ -107,7 +100,7 @@ impl SafekeeperNode {
             .unwrap()
     }
 
-    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: ZNodeId) -> PathBuf {
+    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
         env.safekeeper_data_dir(format!("sk{}", sk_id).as_ref())
     }
 
@@ -142,12 +135,22 @@ impl SafekeeperNode {
         if !self.conf.sync {
             cmd.arg("--no-sync");
         }
-        if let Some(ref ep) = self.broker_endpoints {
-            cmd.args(&["--broker-endpoints", ep]);
+
+        let comma_separated_endpoints = self.env.etcd_broker.comma_separated_endpoints();
+        if !comma_separated_endpoints.is_empty() {
+            cmd.args(&["--broker-endpoints", &comma_separated_endpoints]);
         }
-        if let Some(prefix) = self.broker_etcd_prefix.as_deref() {
+        if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
             cmd.args(&["--broker-etcd-prefix", prefix]);
         }
+        if let Some(threads) = self.conf.backup_threads {
+            cmd.args(&["--backup-threads", threads.to_string().as_ref()]);
+        }
+        if let Some(ref remote_storage) = self.conf.remote_storage {
+            cmd.args(&["--remote-storage", remote_storage]);
+        }
+
+        fill_aws_secrets_vars(&mut cmd);
 
         if !cmd.status()?.success() {
             bail!(
@@ -210,12 +213,13 @@ impl SafekeeperNode {
         let pid = Pid::from_raw(pid);
 
         let sig = if immediate {
-            println!("Stop safekeeper immediately");
+            print!("Stopping safekeeper {} immediately..", self.id);
             Signal::SIGQUIT
         } else {
-            println!("Stop safekeeper gracefully");
+            print!("Stopping safekeeper {} gracefully..", self.id);
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -237,25 +241,35 @@ impl SafekeeperNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if safekeeper flushes a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Safekeeper stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Safekeeper status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Safekeeper status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nSafekeeper connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Safekeeper still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+                match self.check_status() {
+                    Err(SafekeeperHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nSafekeeper status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop safekeeper with pid {}", pid);
@@ -280,7 +294,7 @@ impl SafekeeperNode {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<()> {
         Ok(self
             .http_request(
