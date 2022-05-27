@@ -212,3 +212,4 @@ To get more familiar with this aspect, refer to:
 - Read `CONTRIBUTING.md` to learn about project code style and practices.
 - To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html
+
