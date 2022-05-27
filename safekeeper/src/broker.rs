@@ -83,7 +83,7 @@ impl ElectionLeader {
     }
 
     pub async fn give_up(self) {
-        // self.keep_alive.abort();
+        self.keep_alive.abort();
         // TODO: it'll be wise to resign here but it'll happen after lease expiration anyway
         // should we await for keep alive termination?
         let _ = self.keep_alive.await;
