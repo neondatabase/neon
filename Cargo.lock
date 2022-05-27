@@ -1722,9 +1722,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da32515d9f6e6e489d7bc9d84c71b060db7247dc035bbe44eac88cf87486d8d5"
+checksum = "87f3e037eac156d1775da914196f0f37741a274155e34a0b7e427c35d2a2ecb9"
 
 [[package]]
 name = "oorandom"
@@ -2394,6 +2394,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "metrics",
+ "once_cell",
  "rusoto_core",
  "rusoto_s3",
  "serde",
@@ -2401,6 +2403,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util 0.7.0",
+ "toml_edit",
  "tracing",
  "workspace_hack",
 ]
@@ -2652,6 +2655,7 @@ name = "safekeeper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "byteorder",
  "bytes",
  "clap 3.0.14",
@@ -2660,12 +2664,14 @@ dependencies = [
  "daemonize",
  "etcd_broker",
  "fs2",
+ "futures",
  "git-version",
  "hex",
  "humantime",
  "hyper",
  "lazy_static",
  "metrics",
+ "once_cell",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
@@ -2679,6 +2685,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-util 0.7.0",
+ "toml_edit",
  "tracing",
  "url",
  "utils",
