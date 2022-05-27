@@ -90,7 +90,7 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
         assert res["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
 
         last_msg_lsn = lsn_from_hex(res["last_received_msg_lsn"])
-        assert prev_msg_lsn is not None and prev_msg_lsn >= last_msg_lsn, \
+        assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, \
             f"the last received message's LSN {last_msg_lsn} hasn't been updated \
             compared to the previous message's LSN {prev_msg_lsn}"
 
