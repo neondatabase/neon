@@ -2,7 +2,7 @@
 //! page server.
 
 use crate::config::PageServerConf;
-use crate::layered_repository::LayeredRepository;
+use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tracing::*;
+use utils::lsn::Lsn;
 
 use utils::zid::{TenantId, ZTimelineId};
 
@@ -324,8 +325,8 @@ pub fn get_local_timeline_with_load(
         return Ok(Arc::clone(page_tline));
     }
 
-    let page_tline = new_local_timeline(&tenant.repo, timeline_id)
-        .with_context(|| format!("Failed to create new local timeline for tenant {tenant_id}"))?;
+    let page_tline = load_local_timeline(&tenant.repo, timeline_id)
+        .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
     tenant
         .local_timelines
         .insert(timeline_id, Arc::clone(&page_tline));
@@ -362,7 +363,7 @@ pub fn detach_timeline(
     Ok(())
 }
 
-fn new_local_timeline(
+fn load_local_timeline(
     repo: &RepositoryImpl,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<DatadirTimeline<LayeredRepository>>> {
@@ -396,6 +397,26 @@ pub fn list_tenants() -> Vec<TenantInfo> {
         .collect()
 }
 
+/// Check if a given timeline is "broken" \[1\].
+/// The function returns an error if the timeline is "broken".
+///
+/// \[1\]: it's not clear now how should we classify a timeline as broken.
+/// A timeline is categorized as broken when any of following conditions is true:
+/// - failed to load the timeline's metadata
+/// - the timeline's disk consistent LSN is zero
+fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    let metadata = load_metadata(repo.conf, timeline_id, repo.tenant_id())
+        .context("failed to load metadata")?;
+
+    // A timeline with zero disk consistent LSN can happen when the page server
+    // failed to checkpoint the timeline import data when creating that timeline.
+    if metadata.disk_consistent_lsn() == Lsn::INVALID {
+        bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
+    }
+
+    Ok(())
+}
+
 fn init_local_repository(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -411,7 +432,13 @@ fn init_local_repository(
         match init_status {
             LocalTimelineInitStatus::LocallyComplete => {
                 debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
-                status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
+                if let Err(err) = check_broken_timeline(&repo, timeline_id) {
+                    info!(
+                        "Found a broken timeline {timeline_id} (err={err:?}), skip registering it in repository"
+                    );
+                } else {
+                    status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
+                }
             }
             LocalTimelineInitStatus::NeedsSync => {
                 debug!(
@@ -455,8 +482,8 @@ fn apply_timeline_remote_sync_status_updates(
                     bail!("Local timeline {timeline_id} already registered")
                 }
                 Entry::Vacant(v) => {
-                    v.insert(new_local_timeline(repo, timeline_id).with_context(|| {
-                        format!("Failed to register new local timeline for tenant {tenant_id}")
+                    v.insert(load_local_timeline(repo, timeline_id).with_context(|| {
+                        format!("Failed to register add local timeline for tenant {tenant_id}")
                     })?);
                 }
             },

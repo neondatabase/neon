@@ -1230,7 +1230,7 @@ impl LayeredTimeline {
             }),
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
-            last_freeze_at: AtomicLsn::new(0),
+            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -2518,7 +2518,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     bail!("couldn't find an unused backup number for {:?}", path)
 }
 
-fn load_metadata(
+pub fn load_metadata(
     conf: &'static PageServerConf,
     timeline_id: ZTimelineId,
     tenant_id: TenantId,

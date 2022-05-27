@@ -70,19 +70,19 @@ struct TimelineStatus {
     timeline_id: ZTimelineId,
     acceptor_state: AcceptorStateStatus,
     #[serde(serialize_with = "display_serialize")]
+    flush_lsn: Lsn,
+    #[serde(serialize_with = "display_serialize")]
     timeline_start_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     local_start_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     commit_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
-    s3_wal_lsn: Lsn,
+    backup_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     peer_horizon_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     remote_consistent_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    flush_lsn: Lsn,
 }
 
 /// Report info about timeline.
@@ -107,13 +107,13 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         tenant_id: zttid.tenant_id,
         timeline_id: zttid.timeline_id,
         acceptor_state: acc_state,
+        flush_lsn,
         timeline_start_lsn: state.timeline_start_lsn,
         local_start_lsn: state.local_start_lsn,
         commit_lsn: inmem.commit_lsn,
-        s3_wal_lsn: inmem.s3_wal_lsn,
+        backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: inmem.remote_consistent_lsn,
-        flush_lsn,
     };
     json_response(StatusCode::OK, status)
 }
@@ -148,7 +148,9 @@ async fn timeline_delete_force_handler(
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
-        GlobalTimelines::delete_force(get_conf(&request), &zttid).map_err(ApiError::from_err)?,
+        GlobalTimelines::delete_force(get_conf(&request), &zttid)
+            .await
+            .map_err(ApiError::from_err)?,
     )
 }
 
@@ -162,6 +164,7 @@ async fn tenant_delete_force_handler(
     json_response(
         StatusCode::OK,
         GlobalTimelines::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
+            .await
             .map_err(ApiError::from_err)?
             .iter()
             .map(|(zttid, resp)| (format!("{}", zttid.timeline_id), *resp))
@@ -178,7 +181,8 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
-    tli.record_safekeeper_info(&safekeeper_info, NodeId(1))?;
+    tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
+        .await?;
 
     json_response(StatusCode::OK, ())
 }

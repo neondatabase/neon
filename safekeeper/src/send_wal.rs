@@ -315,7 +315,7 @@ impl ReplicationConn {
                 } else {
                     // TODO: also check once in a while whether we are walsender
                     // to right pageserver.
-                    if spg.timeline.get().check_deactivate(replica_id)? {
+                    if spg.timeline.get().stop_walsender(replica_id)? {
                         // Shut down, timeline is suspended.
                         // TODO create proper error type for this
                         bail!("end streaming to {:?}", spg.appname);

@@ -5,7 +5,6 @@
 //! in somewhat transparent manner (again via communication with control plane API).
 
 mod auth;
-mod auth_backend;
 mod cancellation;
 mod compute;
 mod config;
@@ -17,6 +16,7 @@ mod proxy;
 mod sasl;
 mod scram;
 mod stream;
+mod url;
 mod waiters;
 
 use anyhow::{bail, Context};
@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     println!("Version: {GIT_VERSION}");
+    println!("Authentication backend: {:?}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
     println!("Starting http on {}", http_address);

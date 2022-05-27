@@ -305,7 +305,29 @@ fn page_service_conn_main(
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
-    pgbackend.run(&mut conn_handler)
+    match pgbackend.run(&mut conn_handler) {
+        Ok(()) => {
+            // we've been requested to shut down
+            Ok(())
+        }
+        Err(err) => {
+            let root_cause_io_err_kind = err
+                .root_cause()
+                .downcast_ref::<io::Error>()
+                .map(|e| e.kind());
+
+            // `ConnectionReset` error happens when the Postgres client closes the connection.
+            // As this disconnection happens quite often and is expected,
+            // we decided to downgrade the logging level to `INFO`.
+            // See: https://github.com/neondatabase/neon/issues/1683.
+            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
+                info!("Postgres client disconnected");
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

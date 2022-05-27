@@ -8,6 +8,7 @@ use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
 use serde::Serialize;
+use tokio::sync::watch;
 
 use std::cmp::{max, min};
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use std::fs::{self};
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tracing::*;
 
 use utils::{
@@ -25,13 +26,13 @@ use utils::{
 };
 
 use crate::callmemaybe::{CallmeEvent, SubscriptionStateKey};
-
 use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState,
 };
 use crate::send_wal::HotStandbyFeedback;
+
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
@@ -81,10 +82,14 @@ struct SharedState {
     notified_commit_lsn: Lsn,
     /// State of replicas
     replicas: Vec<Option<ReplicaState>>,
-    /// Inactive clusters shouldn't occupy any resources, so timeline is
-    /// activated whenever there is a compute connection or pageserver is not
-    /// caughtup (it must have latest WAL for new compute start) and suspended
-    /// otherwise.
+    /// True when WAL backup launcher oversees the timeline, making sure WAL is
+    /// offloaded, allows to bother launcher less.
+    wal_backup_active: bool,
+    /// True whenever there is at least some pending activity on timeline: live
+    /// compute connection, pageserver is not caughtup (it must have latest WAL
+    /// for new compute start) or WAL backuping is not finished. Practically it
+    /// means safekeepers broadcast info to peers about the timeline, old WAL is
+    /// trimmed.
     ///
     /// TODO: it might be better to remove tli completely from GlobalTimelines
     /// when tli is inactive instead of having this flag.
@@ -103,6 +108,7 @@ impl SharedState {
     ) -> Result<Self> {
         let state = SafeKeeperState::new(zttid, peer_ids);
         let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
+
         let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
         let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
 
@@ -110,6 +116,7 @@ impl SharedState {
             notified_commit_lsn: Lsn(0),
             sk,
             replicas: Vec::new(),
+            wal_backup_active: false,
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
@@ -129,15 +136,62 @@ impl SharedState {
             notified_commit_lsn: Lsn(0),
             sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
             replicas: Vec::new(),
+            wal_backup_active: false,
             active: false,
             num_computes: 0,
             pageserver_connstr: None,
             last_removed_segno: 0,
         })
     }
+    fn is_active(&self) -> bool {
+        self.is_wal_backup_required()
+            // FIXME: add tracking of relevant pageservers and check them here individually,
+            // otherwise migration won't work (we suspend too early).
+            || self.sk.inmem.remote_consistent_lsn <= self.sk.inmem.commit_lsn
+    }
 
-    /// Activate the timeline: start/change walsender (via callmemaybe).
-    fn activate(
+    /// Mark timeline active/inactive and return whether s3 offloading requires
+    /// start/stop action.
+    fn update_status(&mut self) -> bool {
+        self.active = self.is_active();
+        self.is_wal_backup_action_pending()
+    }
+
+    /// Should we run s3 offloading in current state?
+    fn is_wal_backup_required(&self) -> bool {
+        let seg_size = self.get_wal_seg_size();
+        self.num_computes > 0 ||
+        // Currently only the whole segment is offloaded, so compare segment numbers.
+               (self.sk.inmem.commit_lsn.segment_number(seg_size) >
+                self.sk.inmem.backup_lsn.segment_number(seg_size))
+    }
+
+    /// Is current state of s3 offloading is not what it ought to be?
+    fn is_wal_backup_action_pending(&self) -> bool {
+        let res = self.wal_backup_active != self.is_wal_backup_required();
+        if res {
+            let action_pending = if self.is_wal_backup_required() {
+                "start"
+            } else {
+                "stop"
+            };
+            trace!(
+                "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
+                self.sk.state.timeline_id, action_pending, self.num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
+            );
+        }
+        res
+    }
+
+    /// Returns whether s3 offloading is required and sets current status as
+    /// matching.
+    fn wal_backup_attend(&mut self) -> bool {
+        self.wal_backup_active = self.is_wal_backup_required();
+        self.wal_backup_active
+    }
+
+    /// start/change walsender (via callmemaybe).
+    fn callmemaybe_sub(
         &mut self,
         zttid: &ZTenantTimelineId,
         pageserver_connstr: Option<&String>,
@@ -179,40 +233,40 @@ impl SharedState {
             );
         }
         self.pageserver_connstr = pageserver_connstr.map(|c| c.to_owned());
-        self.active = true;
         Ok(())
     }
 
     /// Deactivate the timeline: stop callmemaybe.
-    fn deactivate(
+    fn callmemaybe_unsub(
         &mut self,
         zttid: &ZTenantTimelineId,
         callmemaybe_tx: &UnboundedSender<CallmeEvent>,
     ) -> Result<()> {
-        if self.active {
-            if let Some(ref pageserver_connstr) = self.pageserver_connstr {
-                let subscription_key = SubscriptionStateKey::new(
-                    zttid.tenant_id,
-                    zttid.timeline_id,
-                    pageserver_connstr.to_owned(),
-                );
-                callmemaybe_tx
-                    .send(CallmeEvent::Unsubscribe(subscription_key))
-                    .unwrap_or_else(|e| {
-                        error!(
-                            "failed to send Unsubscribe request to callmemaybe thread {}",
-                            e
-                        );
-                    });
-                info!(
-                    "timeline {} is unsubscribed from callmemaybe to {}",
-                    zttid.timeline_id,
-                    self.pageserver_connstr.as_ref().unwrap()
-                );
-            }
-            self.active = false;
+        if let Some(ref pageserver_connstr) = self.pageserver_connstr {
+            let subscription_key = SubscriptionStateKey::new(
+                zttid.tenant_id,
+                zttid.timeline_id,
+                pageserver_connstr.to_owned(),
+            );
+            callmemaybe_tx
+                .send(CallmeEvent::Unsubscribe(subscription_key))
+                .unwrap_or_else(|e| {
+                    error!(
+                        "failed to send Unsubscribe request to callmemaybe thread {}",
+                        e
+                    );
+                });
+            info!(
+                "timeline {} is unsubscribed from callmemaybe to {}",
+                zttid.timeline_id,
+                self.pageserver_connstr.as_ref().unwrap()
+            );
         }
         Ok(())
+    }
+
+    fn get_wal_seg_size(&self) -> usize {
+        self.sk.state.server.wal_seg_size as usize
     }
 
     /// Get combined state of all alive replicas
@@ -278,6 +332,13 @@ impl SharedState {
 pub struct Timeline {
     pub zttid: ZTenantTimelineId,
     pub callmemaybe_tx: UnboundedSender<CallmeEvent>,
+    /// Sending here asks for wal backup launcher attention (start/stop
+    /// offloading). Sending zttid instead of concrete command allows to do
+    /// sending without timeline lock.
+    wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
+    commit_lsn_watch_tx: watch::Sender<Lsn>,
+    /// For breeding receivers.
+    commit_lsn_watch_rx: watch::Receiver<Lsn>,
     mutex: Mutex<SharedState>,
     /// conditional variable used to notify wal senders
     cond: Condvar,
@@ -287,11 +348,17 @@ impl Timeline {
     fn new(
         zttid: ZTenantTimelineId,
         callmemaybe_tx: UnboundedSender<CallmeEvent>,
+        wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
         shared_state: SharedState,
     ) -> Timeline {
+        let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
+            watch::channel(shared_state.sk.inmem.commit_lsn);
         Timeline {
             zttid,
             callmemaybe_tx,
+            wal_backup_launcher_tx,
+            commit_lsn_watch_tx,
+            commit_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
             cond: Condvar::new(),
         }
@@ -301,13 +368,21 @@ impl Timeline {
     /// not running yet.
     /// Can fail only if channel to a static thread got closed, which is not normal at all.
     pub fn on_compute_connect(&self, pageserver_connstr: Option<&String>) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.num_computes += 1;
-        // FIXME: currently we always adopt latest pageserver connstr, but we
-        // should have kind of generations assigned by compute to distinguish
-        // the latest one or even pass it through consensus to reliably deliver
-        // to all safekeepers.
-        shared_state.activate(&self.zttid, pageserver_connstr, &self.callmemaybe_tx)?;
+        let is_wal_backup_action_pending: bool;
+        {
+            let mut shared_state = self.mutex.lock().unwrap();
+            shared_state.num_computes += 1;
+            is_wal_backup_action_pending = shared_state.update_status();
+            // FIXME: currently we always adopt latest pageserver connstr, but we
+            // should have kind of generations assigned by compute to distinguish
+            // the latest one or even pass it through consensus to reliably deliver
+            // to all safekeepers.
+            shared_state.callmemaybe_sub(&self.zttid, pageserver_connstr, &self.callmemaybe_tx)?;
+        }
+        // Wake up wal backup launcher, if offloading not started yet.
+        if is_wal_backup_action_pending {
+            self.wal_backup_launcher_tx.blocking_send(self.zttid)?;
+        }
         Ok(())
     }
 
@@ -315,36 +390,41 @@ impl Timeline {
     /// pageserver doesn't need catchup.
     /// Can fail only if channel to a static thread got closed, which is not normal at all.
     pub fn on_compute_disconnect(&self) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.num_computes -= 1;
-        // If there is no pageserver, can suspend right away; otherwise let
-        // walsender do that.
-        if shared_state.num_computes == 0 && shared_state.pageserver_connstr.is_none() {
-            shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
+        let is_wal_backup_action_pending: bool;
+        {
+            let mut shared_state = self.mutex.lock().unwrap();
+            shared_state.num_computes -= 1;
+            is_wal_backup_action_pending = shared_state.update_status();
+        }
+        // Wake up wal backup launcher, if it is time to stop the offloading.
+        if is_wal_backup_action_pending {
+            self.wal_backup_launcher_tx.blocking_send(self.zttid)?;
         }
         Ok(())
     }
 
-    /// Deactivate tenant if there is no computes and pageserver is caughtup,
-    /// assuming the pageserver status is in replica_id.
-    /// Returns true if deactivated.
-    pub fn check_deactivate(&self, replica_id: usize) -> Result<bool> {
+    /// Whether we still need this walsender running?
+    /// TODO: check this pageserver is actually interested in this timeline.
+    pub fn stop_walsender(&self, replica_id: usize) -> Result<bool> {
         let mut shared_state = self.mutex.lock().unwrap();
-        if !shared_state.active {
-            // already suspended
-            return Ok(true);
-        }
         if shared_state.num_computes == 0 {
             let replica_state = shared_state.replicas[replica_id].unwrap();
-            let deactivate = shared_state.notified_commit_lsn == Lsn(0) || // no data at all yet
-            (replica_state.last_received_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
-             replica_state.last_received_lsn >= shared_state.sk.inmem.commit_lsn);
-            if deactivate {
-                shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
+            let stop = shared_state.notified_commit_lsn == Lsn(0) || // no data at all yet
+            (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
+             replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
+            if stop {
+                shared_state.callmemaybe_unsub(&self.zttid, &self.callmemaybe_tx)?;
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// Returns whether s3 offloading is required and sets current status as
+    /// matching it.
+    pub fn wal_backup_attend(&self) -> bool {
+        let mut shared_state = self.mutex.lock().unwrap();
+        shared_state.wal_backup_attend()
     }
 
     /// Deactivates the timeline, assuming it is being deleted.
@@ -354,10 +434,14 @@ impl Timeline {
     /// will stop by themselves eventually (possibly with errors, but no panics). There should be no
     /// compute threads (as we're deleting the timeline), actually. Some WAL may be left unsent, but
     /// we're deleting the timeline anyway.
-    pub fn deactivate_for_delete(&self) -> Result<bool> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        let was_active = shared_state.active;
-        shared_state.deactivate(&self.zttid, &self.callmemaybe_tx)?;
+    pub async fn deactivate_for_delete(&self) -> Result<bool> {
+        let was_active: bool;
+        {
+            let mut shared_state = self.mutex.lock().unwrap();
+            was_active = shared_state.active;
+            shared_state.callmemaybe_unsub(&self.zttid, &self.callmemaybe_tx)?;
+        }
+        self.wal_backup_launcher_tx.send(self.zttid).await?;
         Ok(was_active)
     }
 
@@ -391,11 +475,16 @@ impl Timeline {
     }
 
     // Notify caught-up WAL senders about new WAL data received
+    // TODO: replace-unify it with commit_lsn_watch.
     fn notify_wal_senders(&self, shared_state: &mut MutexGuard<SharedState>) {
         if shared_state.notified_commit_lsn < shared_state.sk.inmem.commit_lsn {
             shared_state.notified_commit_lsn = shared_state.sk.inmem.commit_lsn;
             self.cond.notify_all();
         }
+    }
+
+    pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
+        self.commit_lsn_watch_rx.clone()
     }
 
     /// Pass arrived message to the safekeeper.
@@ -404,6 +493,7 @@ impl Timeline {
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
         let mut rmsg: Option<AcceptorProposerMessage>;
+        let commit_lsn: Lsn;
         {
             let mut shared_state = self.mutex.lock().unwrap();
             rmsg = shared_state.sk.process_msg(msg)?;
@@ -419,13 +509,29 @@ impl Timeline {
 
             // Ping wal sender that new data might be available.
             self.notify_wal_senders(&mut shared_state);
+            commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
+        self.commit_lsn_watch_tx.send(commit_lsn)?;
         Ok(rmsg)
+    }
+
+    pub fn get_wal_seg_size(&self) -> usize {
+        self.mutex.lock().unwrap().get_wal_seg_size()
     }
 
     pub fn get_state(&self) -> (SafekeeperMemState, SafeKeeperState) {
         let shared_state = self.mutex.lock().unwrap();
         (shared_state.sk.inmem.clone(), shared_state.sk.state.clone())
+    }
+
+    pub fn get_wal_backup_lsn(&self) -> Lsn {
+        self.mutex.lock().unwrap().sk.inmem.backup_lsn
+    }
+
+    pub fn set_wal_backup_lsn(&self, backup_lsn: Lsn) {
+        self.mutex.lock().unwrap().sk.inmem.backup_lsn = backup_lsn;
+        // we should check whether to shut down offloader, but this will be done
+        // soon by peer communication anyway.
     }
 
     /// Prepare public safekeeper info for reporting.
@@ -436,7 +542,6 @@ impl Timeline {
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: Some(shared_state.sk.inmem.commit_lsn),
-            s3_wal_lsn: Some(shared_state.sk.inmem.s3_wal_lsn),
             // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: Some(max(
                 shared_state.get_replicas_state().remote_consistent_lsn,
@@ -444,14 +549,35 @@ impl Timeline {
             )),
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
             safekeeper_connection_string: Some(conf.listen_pg_addr.clone()),
+            backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
         })
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&self, sk_info: &SkTimelineInfo, _sk_id: NodeId) -> Result<()> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.sk.record_safekeeper_info(sk_info)?;
-        self.notify_wal_senders(&mut shared_state);
+    pub async fn record_safekeeper_info(
+        &self,
+        sk_info: &SkTimelineInfo,
+        _sk_id: NodeId,
+    ) -> Result<()> {
+        let is_wal_backup_action_pending: bool;
+        let commit_lsn: Lsn;
+        {
+            let mut shared_state = self.mutex.lock().unwrap();
+            // WAL seg size not initialized yet (no message from compute ever
+            // received), can't do much without it.
+            if shared_state.get_wal_seg_size() == 0 {
+                return Ok(());
+            }
+            shared_state.sk.record_safekeeper_info(sk_info)?;
+            self.notify_wal_senders(&mut shared_state);
+            is_wal_backup_action_pending = shared_state.update_status();
+            commit_lsn = shared_state.sk.inmem.commit_lsn;
+        }
+        self.commit_lsn_watch_tx.send(commit_lsn)?;
+        // Wake up wal backup launcher, if it is time to stop the offloading.
+        if is_wal_backup_action_pending {
+            self.wal_backup_launcher_tx.send(self.zttid).await?;
+        }
         Ok(())
     }
 
@@ -476,16 +602,16 @@ impl Timeline {
         shared_state.sk.wal_store.flush_lsn()
     }
 
-    pub fn remove_old_wal(&self, s3_offload_enabled: bool) -> Result<()> {
+    pub fn remove_old_wal(&self, wal_backup_enabled: bool) -> Result<()> {
         let horizon_segno: XLogSegNo;
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
             let shared_state = self.mutex.lock().unwrap();
             // WAL seg size not initialized yet, no WAL exists.
-            if shared_state.sk.state.server.wal_seg_size == 0 {
+            if shared_state.get_wal_seg_size() == 0 {
                 return Ok(());
             }
-            horizon_segno = shared_state.sk.get_horizon_segno(s3_offload_enabled);
+            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(());
@@ -522,12 +648,14 @@ impl TimelineTools for Option<Arc<Timeline>> {
 struct GlobalTimelinesState {
     timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
     callmemaybe_tx: Option<UnboundedSender<CallmeEvent>>,
+    wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
 }
 
 lazy_static! {
     static ref TIMELINES_STATE: Mutex<GlobalTimelinesState> = Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
-        callmemaybe_tx: None
+        callmemaybe_tx: None,
+        wal_backup_launcher_tx: None,
     });
 }
 
@@ -541,10 +669,15 @@ pub struct TimelineDeleteForceResult {
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
-    pub fn set_callmemaybe_tx(callmemaybe_tx: UnboundedSender<CallmeEvent>) {
+    pub fn init(
+        callmemaybe_tx: UnboundedSender<CallmeEvent>,
+        wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
+    ) {
         let mut state = TIMELINES_STATE.lock().unwrap();
         assert!(state.callmemaybe_tx.is_none());
         state.callmemaybe_tx = Some(callmemaybe_tx);
+        assert!(state.wal_backup_launcher_tx.is_none());
+        state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
     }
 
     fn create_internal(
@@ -559,12 +692,14 @@ impl GlobalTimelines {
                 // TODO: check directory existence
                 let dir = conf.timeline_dir(&zttid);
                 fs::create_dir_all(dir)?;
+
                 let shared_state = SharedState::create(conf, &zttid, peer_ids)
                     .context("failed to create shared state")?;
 
                 let new_tli = Arc::new(Timeline::new(
                     zttid,
                     state.callmemaybe_tx.as_ref().unwrap().clone(),
+                    state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
                     shared_state,
                 ));
                 state.timelines.insert(zttid, Arc::clone(&new_tli));
@@ -594,8 +729,7 @@ impl GlobalTimelines {
         match state.timelines.get(&zttid) {
             Some(result) => Ok(Arc::clone(result)),
             None => {
-                let shared_state =
-                    SharedState::restore(conf, &zttid).context("failed to restore shared state");
+                let shared_state = SharedState::restore(conf, &zttid);
 
                 let shared_state = match shared_state {
                     Ok(shared_state) => shared_state,
@@ -617,12 +751,19 @@ impl GlobalTimelines {
                 let new_tli = Arc::new(Timeline::new(
                     zttid,
                     state.callmemaybe_tx.as_ref().unwrap().clone(),
+                    state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
                     shared_state,
                 ));
                 state.timelines.insert(zttid, Arc::clone(&new_tli));
                 Ok(new_tli)
             }
         }
+    }
+
+    /// Get loaded timeline, if it exists.
+    pub fn get_loaded(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
+        let state = TIMELINES_STATE.lock().unwrap();
+        state.timelines.get(&zttid).map(Arc::clone)
     }
 
     /// Get ZTenantTimelineIDs of all active timelines.
@@ -665,22 +806,23 @@ impl GlobalTimelines {
     /// b) an HTTP GET request about the timeline is made and it's able to restore the current state, or
     /// c) an HTTP POST request for timeline creation is made after the timeline is already deleted.
     /// TODO: ensure all of the above never happens.
-    pub fn delete_force(
+    pub async fn delete_force(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
     ) -> Result<TimelineDeleteForceResult> {
         info!("deleting timeline {}", zttid);
-        let was_active = match TIMELINES_STATE.lock().unwrap().timelines.remove(zttid) {
-            None => false,
-            Some(tli) => tli.deactivate_for_delete()?,
-        };
+        let timeline = TIMELINES_STATE.lock().unwrap().timelines.remove(zttid);
+        let mut was_active = false;
+        if let Some(tli) = timeline {
+            was_active = tli.deactivate_for_delete().await?;
+        }
         GlobalTimelines::delete_force_internal(conf, zttid, was_active)
     }
 
     /// Deactivates and deletes all timelines for the tenant, see `delete()`.
     /// Returns map of all timelines which the tenant had, `true` if a timeline was active.
     /// There may be a race if new timelines are created simultaneously.
-    pub fn delete_force_all_for_tenant(
+    pub async fn delete_force_all_for_tenant(
         conf: &SafeKeeperConf,
         tenant_id: &TenantId,
     ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
@@ -691,14 +833,15 @@ impl GlobalTimelines {
             let timelines = &mut TIMELINES_STATE.lock().unwrap().timelines;
             for (&zttid, tli) in timelines.iter() {
                 if zttid.tenant_id == *tenant_id {
-                    to_delete.insert(zttid, tli.deactivate_for_delete()?);
+                    to_delete.insert(zttid, tli.clone());
                 }
             }
             // TODO: test that the correct subset of timelines is removed. It's complicated because they are implicitly created currently.
             timelines.retain(|zttid, _| !to_delete.contains_key(zttid));
         }
         let mut deleted = HashMap::new();
-        for (zttid, was_active) in to_delete {
+        for (zttid, timeline) in to_delete {
+            let was_active = timeline.deactivate_for_delete().await?;
             deleted.insert(
                 zttid,
                 GlobalTimelines::delete_force_internal(conf, &zttid, was_active)?,
