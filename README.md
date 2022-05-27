@@ -5,6 +5,9 @@ Neon is a serverless open source alternative to AWS Aurora Postgres. It separate
 The project used to be called "Zenith". Many of the commands and code comments
 still refer to "zenith", but we are in the process of renaming things.
 
+## Quick start
+[Join the waitlist](https://neon.tech/) for our free tier and connect to it with your preferred postgres client (psql, dbeaver, etc)
+
 ## Architecture overview
 
 A Neon installation consists of compute nodes and Neon storage engine.
