@@ -8,6 +8,8 @@ still refer to "zenith", but we are in the process of renaming things.
 ## Quick start
 [Join the waitlist](https://neon.tech/) for our free tier and connect to it with your preferred postgres client (psql, dbeaver, etc)
 
+Alternatively, compile and run the project [locally](https://github.com/neondatabase/postgres).
+
 ## Architecture overview
 
 A Neon installation consists of compute nodes and Neon storage engine.
