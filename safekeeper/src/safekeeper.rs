@@ -731,24 +731,36 @@ where
         {
             let mut state = self.state.clone();
 
-            // Remeber point where WAL begins globally, if not yet.
+            // Here we learn initial LSN for the first time, set fields
+            // interested in that.
+
             if state.timeline_start_lsn == Lsn(0) {
+                // Remember point where WAL begins globally.
                 state.timeline_start_lsn = msg.timeline_start_lsn;
                 info!(
                     "setting timeline_start_lsn to {:?}",
                     state.timeline_start_lsn
                 );
-            }
 
-            // Remember point where WAL begins locally, if not yet. (I doubt the
-            // second condition is ever possible)
-            if state.local_start_lsn == Lsn(0) || state.local_start_lsn >= msg.start_streaming_at {
                 state.local_start_lsn = msg.start_streaming_at;
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);
             }
+            // Initializing commit_lsn before acking first flushed record is
+            // important to let find_end_of_wal skip the whole in the beginning
+            // of the first segment.
+            //
+            // NB: on new clusters, this happens at the same time as
+            // timeline_start_lsn initialization, it is taken outside to provide
+            // upgrade.
+            self.global_commit_lsn = max(self.global_commit_lsn, state.timeline_start_lsn);
+            self.inmem.commit_lsn = max(self.inmem.commit_lsn, state.timeline_start_lsn);
+            self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
+
+            // Initalizing backup_lsn is useful to avoid making backup think it should upload 0 segment.
+            self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
-            self.state.persist(&state)?;
+            self.persist_control_file(state)?;
         }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
@@ -764,14 +776,6 @@ where
         self.inmem.commit_lsn = commit_lsn;
         self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
-        // We got our first commit_lsn, which means we should sync
-        // everything to disk, to initialize the state.
-        if self.state.commit_lsn == Lsn::INVALID && commit_lsn != Lsn::INVALID {
-            self.inmem.backup_lsn = self.inmem.commit_lsn; // initialize backup_lsn
-            self.wal_store.flush_wal()?;
-            self.persist_control_file()?;
-        }
-
         // If new commit_lsn reached epoch switch, force sync of control
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
@@ -780,15 +784,14 @@ where
         // that we receive new epoch_start_lsn, and we still need to sync
         // control file in this case.
         if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
 
         Ok(())
     }
 
-    /// Persist in-memory state to the disk.
-    fn persist_control_file(&mut self) -> Result<()> {
-        let mut state = self.state.clone();
+    /// Persist in-memory state to the disk, taking other data from state.
+    fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
         state.commit_lsn = self.inmem.commit_lsn;
         state.backup_lsn = self.inmem.backup_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
@@ -823,13 +826,6 @@ where
         // do the job
         if !msg.wal_data.is_empty() {
             self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
-
-            // If this was the first record we ever received, initialize
-            // commit_lsn to help find_end_of_wal skip the hole in the
-            // beginning.
-            if self.global_commit_lsn == Lsn(0) {
-                self.global_commit_lsn = msg.h.begin_lsn;
-            }
         }
 
         // flush wal to the disk, if required
@@ -852,7 +848,7 @@ where
         if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
             < self.inmem.peer_horizon_lsn
         {
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
 
         trace!(
@@ -920,7 +916,7 @@ where
             self.inmem.peer_horizon_lsn = new_peer_horizon_lsn;
         }
         if sync_control_file {
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
         Ok(())
     }

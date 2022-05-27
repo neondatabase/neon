@@ -71,7 +71,7 @@ async fn wal_backup_launcher_main_loop(
     mut wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
 ) {
     info!(
-        "wal backup launcher started, remote config {:?}",
+        "WAL backup launcher: started, remote config {:?}",
         conf.remote_storage
     );
 
@@ -95,7 +95,7 @@ async fn wal_backup_launcher_main_loop(
         if is_wal_backup_required != tasks.contains_key(&zttid) {
             if is_wal_backup_required {
                 // need to start the task
-                info!("starting wal backup task for {}", zttid);
+                info!("starting WAL backup task for {}", zttid);
 
                 // TODO: decide who should offload in launcher itself by simply checking current state
                 let election_name = broker::get_campaign_name(
@@ -115,7 +115,7 @@ async fn wal_backup_launcher_main_loop(
 
                 let handle = tokio::spawn(
                     backup_task_main(zttid, timeline_dir, shutdown_rx, election)
-                        .instrument(info_span!("WAL backup", zttid = %zttid)),
+                        .instrument(info_span!("WAL backup task", zttid = %zttid)),
                 );
 
                 tasks.insert(
@@ -127,7 +127,7 @@ async fn wal_backup_launcher_main_loop(
                 );
             } else {
                 // need to stop the task
-                info!("stopping wal backup task for {}", zttid);
+                info!("stopping WAL backup task for {}", zttid);
 
                 let wb_handle = tasks.remove(&zttid).unwrap();
                 // Tell the task to shutdown. Error means task exited earlier, that's ok.
@@ -236,20 +236,19 @@ impl WalBackupTask {
                 }
 
                 let commit_lsn = *self.commit_lsn_watch_rx.borrow();
-                assert!(
-                    commit_lsn >= backup_lsn,
-                    "backup lsn should never pass commit lsn"
-                );
 
+                // Note that backup_lsn can be higher than commit_lsn if we
+                // don't have much local WAL and others already uploaded
+                // segments we don't even have.
                 if backup_lsn.segment_number(self.wal_seg_size)
-                    == commit_lsn.segment_number(self.wal_seg_size)
+                    >= commit_lsn.segment_number(self.wal_seg_size)
                 {
                     continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
                 }
                 // Perhaps peers advanced the position, check shmem value.
                 backup_lsn = self.timeline.get_wal_backup_lsn();
                 if backup_lsn.segment_number(self.wal_seg_size)
-                    == commit_lsn.segment_number(self.wal_seg_size)
+                    >= commit_lsn.segment_number(self.wal_seg_size)
                 {
                     continue;
                 }
