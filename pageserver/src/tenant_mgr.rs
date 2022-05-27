@@ -413,7 +413,7 @@ fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> 
 
     // A timeline with zero disk consistent LSN can happen when the page server
     // failed to checkpoint the timeline import data when creating that timeline.
-    if metadata.disk_consistent_lsn() == Lsn(0) {
+    if metadata.disk_consistent_lsn() == Lsn::INVALID {
         bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
     }
 
