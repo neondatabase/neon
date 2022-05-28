@@ -153,7 +153,7 @@ It is assumed that in case of losing local data by some safekeepers, it should b
 * `NodeID`: pair (term,UUID)
 * `Pager`: Neon component restoring pages from WAL stream
 * `Replica`: read-only computatio node
-* `VCL`: the largerst LSN for which we can guarantee availability of all prior records.
+* `VCL`: the largest LSN for which we can guarantee availability of all prior records.
 
 ## Algorithm
 

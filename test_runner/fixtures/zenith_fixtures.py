@@ -2139,7 +2139,7 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
 
     if detail['remote'] is None:
         # No remote information at all. This happens right after creating
-        # a timeline, before any part of it it has been uploaded to remote
+        # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:
