@@ -521,7 +521,7 @@ pub struct DatadirModification<'a, R: Repository> {
 
     lsn: Lsn,
 
-    // The modifications are not applied directly to the underyling key-value store.
+    // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_updates: HashMap<Key, Value>,

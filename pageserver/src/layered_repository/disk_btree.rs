@@ -7,7 +7,7 @@
 //! - Fixed-width keys
 //! - Fixed-width values (VALUE_SZ)
 //! - The tree is created in a bulk operation. Insert/deletion after creation
-//!   is not suppported
+//!   is not supported
 //! - page-oriented
 //!
 //! TODO:

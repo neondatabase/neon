@@ -73,7 +73,7 @@ impl WalStreamDecoder {
     /// Returns one of the following:
     ///     Ok((Lsn, Bytes)): a tuple containing the LSN of next record, and the record itself
     ///     Ok(None): there is not enough data in the input buffer. Feed more by calling the `feed_bytes` function
-    ///     Err(WalDecodeError): an error occured while decoding, meaning the input was invalid.
+    ///     Err(WalDecodeError): an error occurred while decoding, meaning the input was invalid.
     ///
     pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
         let recordbuf;

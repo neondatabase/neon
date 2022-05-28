@@ -634,7 +634,7 @@ impl PageServerHandler {
             return Ok(());
         }
         // auth is some, just checked above, when auth is some
-        // then claims are always present because of checks during connetion init
+        // then claims are always present because of checks during connection init
         // so this expect won't trigger
         let claims = self
             .claims

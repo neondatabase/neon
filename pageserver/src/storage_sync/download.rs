@@ -1,4 +1,4 @@
-//! Timeline synchrnonization logic to fetch the layer files from remote storage into pageserver's local directory.
+//! Timeline synchronization logic to fetch the layer files from remote storage into pageserver's local directory.
 
 use std::{collections::HashSet, fmt::Debug, path::Path};
 

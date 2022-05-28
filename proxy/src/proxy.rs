@@ -95,7 +95,7 @@ async fn handle_client(
 
 /// Establish a (most probably, secure) connection with the client.
 /// For better testing experience, `stream` can be any object satisfying the traits.
-/// It's easier to work with owned `stream` here as we need to updgrade it to TLS;
+/// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,

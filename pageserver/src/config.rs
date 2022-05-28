@@ -114,7 +114,7 @@ pub struct PageServerConf {
     pub default_tenant_conf: TenantConf,
 
     /// A prefix to add in etcd brokers before every key.
-    /// Can be used for isolating different pageserver groups withing the same etcd cluster.
+    /// Can be used for isolating different pageserver groups within the same etcd cluster.
     pub broker_etcd_prefix: String,
 
     /// Etcd broker endpoints to connect to.

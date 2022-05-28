@@ -55,7 +55,7 @@ def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
             pscur.execute(f"compact {env.initial_tenant.hex} {timeline}")
-            # perform agressive GC. Data still should be kept because of the PITR setting.
+            # perform aggressive GC. Data still should be kept because of the PITR setting.
             pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
             row = pscur.fetchone()
             print_gc_result(row)

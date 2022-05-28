@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             Arg::new("dump-control-file")
                 .long("dump-control-file")
                 .takes_value(true)
-                .help("Dump control file at path specifed by this argument and exit"),
+                .help("Dump control file at path specified by this argument and exit"),
         )
         .arg(
             Arg::new("id").long("id").takes_value(true).help("safekeeper node id: integer")
