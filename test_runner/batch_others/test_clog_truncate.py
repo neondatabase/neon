@@ -14,7 +14,7 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
     env = zenith_simple_env
     env.zenith_cli.create_branch('test_clog_truncate', 'empty')
 
-    # set agressive autovacuum to make sure that truncation will happen
+    # set aggressive autovacuum to make sure that truncation will happen
     config = [
         'autovacuum_max_workers=10',
         'autovacuum_vacuum_threshold=0',

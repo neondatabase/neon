@@ -88,7 +88,7 @@ TypeOk ==
       \* in campaign proposer sends RequestVote and waits for acks;
       \* in leader he is elected
       /\ prop_state[p].state \in {"campaign", "leader"}
-      \* 0..max_term should be actually Nat in the unbouned model, but TLC won't
+      \* 0..max_term should be actually Nat in the unbounded model, but TLC won't
       \* swallow it
       /\ prop_state[p].term \in 0..max_term
       \* votes received

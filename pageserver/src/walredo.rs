@@ -122,7 +122,7 @@ lazy_static! {
 
 ///
 /// This is the real implementation that uses a Postgres process to
-/// perform WAL replay. Only one thread can use the processs at a time,
+/// perform WAL replay. Only one thread can use the process at a time,
 /// that is controlled by the Mutex. In the future, we might want to
 /// launch a pool of processes to allow concurrent replay of multiple
 /// records.
@@ -134,7 +134,7 @@ pub struct PostgresRedoManager {
     process: Mutex<Option<PostgresRedoProcess>>,
 }
 
-/// Can this request be served by zenith redo funcitons
+/// Can this request be served by zenith redo functions
 /// or we need to pass it to wal-redo postgres process?
 fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
     // Currently, we don't have bespoken Rust code to replay any

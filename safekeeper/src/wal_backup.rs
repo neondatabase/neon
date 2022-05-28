@@ -257,7 +257,7 @@ impl WalBackupTask {
                     // Optimization idea for later:
                     //  Avoid checking election leader every time by returning current lease grant expiration time
                     //  Re-check leadership only after expiration time,
-                    //  such approach woud reduce overhead on write-intensive workloads
+                    //  such approach would reduce overhead on write-intensive workloads
 
                     match l
                         .check_am_i(
@@ -389,7 +389,7 @@ async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
 
     let file = File::open(&source_file).await?;
 
-    // Storage is initialized by launcher at ths point.
+    // Storage is initialized by launcher at this point.
     match storage.as_ref().unwrap() {
         GenericRemoteStorage::Local(local_storage) => {
             let destination = local_storage.remote_object_id(source_file)?;

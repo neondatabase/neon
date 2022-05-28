@@ -123,7 +123,7 @@ As far as I understand Bookfile/Aversion addresses versioning and serialization 
 As for exact data that should go to snapshots I think it is the following for each snapshot:
 
 * format version number
-* set of key/values to interpret content (e.g. is page compression enabled, is that a full or incremental snapshot, previous snapshot id, is there WAL at the end on file, etc) -- it is up to a reader to decide what to do if some keys are missing or some unknow key are present. If we add something backward compatible to the file we can keep the version number.
+* set of key/values to interpret content (e.g. is page compression enabled, is that a full or incremental snapshot, previous snapshot id, is there WAL at the end on file, etc) -- it is up to a reader to decide what to do if some keys are missing or some unknown key are present. If we add something backward compatible to the file we can keep the version number.
 * array of [BuffTag, corresponding offset in file] for pages -- IIUC that is analogous to ToC in Bookfile
 * array of [(BuffTag, LSN), corresponding offset in file] for the WAL records
 * pages, one by one

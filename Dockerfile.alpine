@@ -4,7 +4,7 @@
 # We may also reuse it in CI to unify installation process and as a general binaries building
 # tool for production servers.
 #
-# Dynamic linking is used for librocksdb and libstdc++ bacause librocksdb-sys calls
+# Dynamic linking is used for librocksdb and libstdc++ because librocksdb-sys calls
 # bindgen with "dynamic" feature flag. This also prevents usage of dockerhub alpine-rust
 # images which are statically linked and have guards against any dlopen. I would rather
 # prefer all static binaries so we may change the way librocksdb-sys builds or wait until

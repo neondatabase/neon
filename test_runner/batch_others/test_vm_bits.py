@@ -28,7 +28,7 @@ def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
     cur.execute('INSERT INTO vmtest_update SELECT g FROM generate_series(1, 1000) g')
     cur.execute('VACUUM FREEZE vmtest_update')
 
-    # DELETE and UDPATE the rows.
+    # DELETE and UPDATE the rows.
     cur.execute('DELETE FROM vmtest_delete WHERE id = 1')
     cur.execute('UPDATE vmtest_update SET id = 5000 WHERE id = 1')
 

@@ -39,7 +39,7 @@ async fn request_callback(
         }
     });
 
-    // use Config parsing because SockAddr parsing doesnt allow to use host names instead of ip addresses
+    // use Config parsing because SockAddr parsing doesn't allow to use host names instead of ip addresses
     let me_connstr = format!("postgresql://no_user@{}/no_db", listen_pg_addr_str);
     let me_conf: postgres::config::Config = me_connstr.parse().unwrap();
     let (host, port) = connection_host_port(&me_conf);

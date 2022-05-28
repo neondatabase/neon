@@ -4,7 +4,7 @@ We may think about backups as snapshots in a different format (i.e plain pgdata 
 
 Even if zenith aims to maintains durability using it's own snapshots, backups will be useful for uploading data from postges to zenith.
 
-So here is an attemt to design consistent CLI for diferent usage scenarios:
+So here is an attempt to design consistent CLI for different usage scenarios:
 
 #### 1. Start empty pageserver.
 That is what we have now.

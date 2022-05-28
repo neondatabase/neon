@@ -336,7 +336,7 @@ impl VirtualFile {
         // library RwLock doesn't allow downgrading without releasing the lock,
         // and that doesn't seem worth the trouble.
         //
-        // XXX: `parking_lot::RwLock` can enable such downgrades, yet its implemenation is fair and
+        // XXX: `parking_lot::RwLock` can enable such downgrades, yet its implementation is fair and
         // may deadlock on subsequent read calls.
         // Simply replacing all `RwLock` in project causes deadlocks, so use it sparingly.
         let result = STORAGE_IO_TIME

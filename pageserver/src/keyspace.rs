@@ -15,7 +15,7 @@ pub struct KeySpace {
 impl KeySpace {
     ///
     /// Partition a key space into roughly chunks of roughly 'target_size' bytes
-    /// in each patition.
+    /// in each partition.
     ///
     pub fn partition(&self, target_size: u64) -> KeyPartitioning {
         // Assume that each value is 8k in size.

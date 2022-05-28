@@ -75,7 +75,7 @@ def pytest_addoption(parser):
         "--skip-interfering-proc-check",
         dest="skip_interfering_proc_check",
         action="store_true",
-        help="skip check for interferring processes",
+        help="skip check for interfering processes",
     )
 
 
@@ -88,7 +88,7 @@ top_output_dir = ""
 
 def check_interferring_processes(config):
     if config.getoption("skip_interfering_proc_check"):
-        warnings.warn("interferring process check is skipped")
+        warnings.warn("interfering process check is skipped")
         return
 
     # does not use -c as it is not supported on macOS
@@ -107,7 +107,7 @@ def check_interferring_processes(config):
 def pytest_configure(config):
     """
     Ensure that no unwanted daemons are running before we start testing.
-    Check that we do not owerflow available ports range.
+    Check that we do not overflow available ports range.
     """
     check_interferring_processes(config)
 
@@ -1417,7 +1417,7 @@ class RemotePostgres(PgProtocol):
         raise Exception('cannot stop a remote Postgres instance')
 
     def get_subdir_size(self, subdir) -> int:
-        # TODO: Could use the server's Generic File Acccess functions if superuser.
+        # TODO: Could use the server's Generic File Access functions if superuser.
         # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
         raise Exception('cannot get size of a Postgres instance')
 

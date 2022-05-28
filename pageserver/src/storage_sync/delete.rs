@@ -1,4 +1,4 @@
-//! Timeline synchrnonization logic to delete a bulk of timeline's remote files from the remote storage.
+//! Timeline synchronization logic to delete a bulk of timeline's remote files from the remote storage.
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};

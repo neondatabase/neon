@@ -111,13 +111,13 @@ Since we are storing page diffs of variable sizes there is no structural depende
 
 ### **Chunk metadata**
 
-Chunk metadata is a file lies in chunk directory that stores info about current snapshots and PITR regions. Chunck should always consult this data when merging SSTables and applying delete markers.
+Chunk metadata is a file lies in chunk directory that stores info about current snapshots and PITR regions. Chunk should always consult this data when merging SSTables and applying delete markers.
 
 ### **Chunk splitting**
 
 *(NB: following paragraph is about how to avoid page splitting)*
 
-When chunks hits some soft storage limit (let's say 100Gb) it should be split in half and global matadata about chunk boundaries should be updated. Here i assume that chunk split is a local operation happening on single node. Process of chink splitting should look like following:
+When chunks hits some soft storage limit (let's say 100Gb) it should be split in half and global metadata about chunk boundaries should be updated. Here i assume that chunk split is a local operation happening on single node. Process of chink splitting should look like following:
 
 1. Find separation key and spawn two new chunks with [lo, mid) [mid, hi) boundaries.
 
@@ -166,7 +166,7 @@ Multi-tenant storage makes sense even on a laptop, when you work with different 
 
 Few databases are stored in one chunk, replicated three times
 
-- When database can't fit into one storage node it can occupy lots of chunks that were split while database was growing. Chunk placement on nodes is controlled by us with some automatization, but we alway may manually move chunks around the cluster.
+- When database can't fit into one storage node it can occupy lots of chunks that were split while database was growing. Chunk placement on nodes is controlled by us with some automatization, but we always may manually move chunks around the cluster.
 
 <img width="940" alt="Screenshot_2021-02-22_at_16 49 10" src="https://user-images.githubusercontent.com/284219/108729815-fb071e00-753b-11eb-86e0-be6703e47d82.png">
 
