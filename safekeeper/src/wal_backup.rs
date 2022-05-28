@@ -204,6 +204,7 @@ impl WalBackupTask {
                 l.give_up().await;
             }
 
+            info!("acquiring leadership");
             match broker::get_leader(&self.election).await {
                 Ok(l) => {
                     self.leader = Some(l);
@@ -214,6 +215,7 @@ impl WalBackupTask {
                     continue;
                 }
             }
+            info!("acquired leadership");
 
             // offload loop
             loop {
@@ -268,7 +270,7 @@ impl WalBackupTask {
                     {
                         Ok(leader) => {
                             if !leader {
-                                info!("leader has changed");
+                                info!("lost leadership");
                                 break;
                             }
                         }
