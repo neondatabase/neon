@@ -287,7 +287,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             File::create("delete-me.txt").expect("FFFF failed creating file");
             loop {
                 File::open("delete-me.txt").expect("FFFF cannot find file");
-                sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(1));
             }
         },
     )?;
