@@ -121,7 +121,7 @@ repository, launch an instance on the same branch in both clones, and
 later try to push/pull between them? Perhaps create a new timeline
 every time you start up an instance? Then you would detect that the
 timelines have diverged. That would match with the "epoch" concept
-that we have in the WAL safekeepr
+that we have in the WAL safekeeper
 
 ### zenith checkout/commit
 

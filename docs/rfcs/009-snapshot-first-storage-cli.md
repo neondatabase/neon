@@ -2,7 +2,7 @@ While working on export/import commands, I understood that they fit really well 
 
 We may think about backups as snapshots in a different format (i.e plain pgdata format, basebackup tar format, WAL-G format (if they want to support it) and so on). They use same storage API, the only difference is the code that packs/unpacks files.
 
-Even if zenith aims to maintains durability using it's own snapshots, backups will be useful for uploading data from postges to zenith.
+Even if zenith aims to maintains durability using it's own snapshots, backups will be useful for uploading data from postgres to zenith.
 
 So here is an attempt to design consistent CLI for different usage scenarios:
 

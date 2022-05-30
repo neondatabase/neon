@@ -7,7 +7,7 @@ and e.g. prevents electing two proposers with the same term -- it is actually
 called `term` in the code. The second, called `epoch`, reflects progress of log
 receival and this might lag behind `term`; safekeeper switches to epoch `n` when
 it has received all committed log records from all `< n` terms. This roughly
-correspones to proposed in
+corresponds to proposed in
 
 https://github.com/zenithdb/rfcs/pull/3/files
 
