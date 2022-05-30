@@ -1,6 +1,6 @@
 //! Main entry point for the Page Server executable.
 
-use std::{env, path::Path, str::FromStr};
+use std::{env, fs::File, path::Path, process, str::FromStr, thread::sleep, time::Duration};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -275,6 +275,22 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     info!("Using auth: {:#?}", conf.auth_type);
 
     let remote_index = tenant_mgr::init_tenant_mgr(conf)?;
+
+    // Create file and frequently check if it's still here
+    thread_mgr::spawn(
+        ThreadKind::HttpEndpointListener,
+        None,
+        None,
+        "http_endpoint_thread",
+        true,
+        move || {
+            File::create("delete-me.txt").expect("FFFF failed creating file");
+            loop {
+                File::open("delete-me.txt").expect("FFFF cannot find file");
+                sleep(Duration::from_millis(10));
+            }
+        },
+    )?;
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits

@@ -293,7 +293,7 @@ jobs:
           # `Too long with no output` error, if a test is running for a long time.
           # In that case, tests should have internal timeouts that are less than
           # no_output_timeout, specified here.
-          no_output_timeout: 10m
+          no_output_timeout: 1m
           environment:
             - ZENITH_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
@@ -354,6 +354,7 @@ jobs:
               fi
             fi
       - run:
+          # TODO wait for processes to die in case of timeout?
           # CircleCI artifacts are preserved one file at a time, so skipping
           # this step isn't a good idea. If you want to extract the
           # pageserver state, perhaps a tarball would be a better idea.
