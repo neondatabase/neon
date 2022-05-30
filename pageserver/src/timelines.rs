@@ -283,8 +283,6 @@ fn bootstrap_timeline<R: Repository>(
     tli: ZTimelineId,
     repo: &R,
 ) -> Result<()> {
-    let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
-
     let initdb_path = conf
         .tenant_path(&tenantid)
         .join(format!("tmp-timeline-{}", tli));
