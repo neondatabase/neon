@@ -185,7 +185,7 @@ If no IAM bucket access is used during the remote storage usage, use the `AWS_AC
 
 ###### General remote storage configuration
 
-Pagesever allows only one remote storage configured concurrently and errors if parameters from multiple different remote configurations are used.
+Pageserver allows only one remote storage configured concurrently and errors if parameters from multiple different remote configurations are used.
 No default values are used for the remote storage configuration parameters.
 
 Besides, there are parameters common for all types of remote storage that can be configured, those have defaults:

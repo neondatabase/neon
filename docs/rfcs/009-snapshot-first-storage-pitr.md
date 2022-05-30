@@ -192,7 +192,7 @@ for a particular relation readily available alongside the snapshot
 files, and you don't need to track what snapshot LSNs exist
 separately.
 
-(If we wanted to minize the number of files, you could include the
+(If we wanted to minimize the number of files, you could include the
 snapshot @300 and the WAL between 200 and 300 in the same file, but I
 feel it's probably better to keep them separate)
 

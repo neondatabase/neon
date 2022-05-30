@@ -260,7 +260,7 @@ Whenever a GetPage@LSN request comes in from the compute node, the
 page server needs to reconstruct the requested page, as it was at the
 requested LSN. To do that, the page server first checks the recent
 in-memory layer; if the requested page version is found there, it can
-be returned immediatedly without looking at the files on
+be returned immediately without looking at the files on
 disk. Otherwise the page server needs to locate the layer file that
 contains the requested page version.
 

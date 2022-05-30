@@ -136,9 +136,9 @@ s3tank          80G     S3
 
 ## pg
 
-Manages postgres data directories and can start postgreses with proper configuration. An experienced user may avoid using that (except pg create) and configure/run postgres by themself.
+Manages postgres data directories and can start postgres instances with proper configuration. An experienced user may avoid using that (except pg create) and configure/run postgres by themselves.
 
-Pg is a term for a single postgres running on some data. I'm trying to avoid here separation of datadir management and postgres instance management -- both that concepts bundled here together.
+Pg is a term for a single postgres running on some data. I'm trying to avoid separation of datadir management and postgres instance management -- both that concepts bundled here together.
 
 **zenith pg create** [--no-start --snapshot --cow] -s storage-name -n pgdata
 
