@@ -4,7 +4,9 @@ import time
 
 from fixtures.zenith_fixtures import ZenithEnvBuilder
 
-def test_timeout(zenith_env_builder: ZenithEnvBuilder, test_output_dir: str):
+
+@pytest.mark.parametrize('iteration', [range(100)])
+def test_timeout(zenith_env_builder: ZenithEnvBuilder, test_output_dir: str, iteration: int):
     env = zenith_env_builder.init_start()
 
     # Sleep long enough with no output so CI step times out
