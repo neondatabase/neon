@@ -105,7 +105,7 @@ Interval at which garbage collection is triggered. Default is 100 s.
 
 #### image_creation_threshold
 
-L0 delta layer threshold for L1 iamge layer creation. Default is 3.
+L0 delta layer threshold for L1 image layer creation. Default is 3.
 
 #### pitr_interval
 

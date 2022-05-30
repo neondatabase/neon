@@ -92,7 +92,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
                     # if we recovered after failure verify that we have correct number of rows
                     log.info("recovering at %s", inserted_ctr)
                     cur.execute("SELECT count(*) FROM load")
-                    # it seems that sometimes transaction gets commited before we can acknowledge
+                    # it seems that sometimes transaction gets committed before we can acknowledge
                     # the result, so sometimes selected value is larger by one than we expect
                     assert cur.fetchone()[0] - inserted_ctr <= 1
                     log.info("successfully recovered %s", inserted_ctr)

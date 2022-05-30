@@ -75,7 +75,7 @@ safekeepers. The Paxos and crash recovery algorithm ensures that only
 one primary node can be actively streaming WAL to the quorum of
 safekeepers.
 
-See README_PROTO.md for a more detailed desription of the consensus
+See README_PROTO.md for a more detailed description of the consensus
 protocol. spec/ contains TLA+ specification of it.
 
 # Q&A

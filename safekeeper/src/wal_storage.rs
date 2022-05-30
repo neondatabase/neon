@@ -126,7 +126,7 @@ pub struct PhysicalStorage {
     conf: SafeKeeperConf,
 
     // fields below are filled upon initialization
-    /// None if unitialized, Some(usize) if storage is initialized.
+    /// None if uninitialized, Some(usize) if storage is initialized.
     wal_seg_size: Option<usize>,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.
@@ -456,7 +456,7 @@ impl Storage for PhysicalStorage {
             segno += 1;
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, wal_seg_size)?;
-            // TODO: better use fs::try_exists which is currenty avaialble only in nightly build
+            // TODO: better use fs::try_exists which is currently available only in nightly build
             if wal_file_path.exists() {
                 fs::remove_file(&wal_file_path)?;
             } else if wal_file_partial_path.exists() {

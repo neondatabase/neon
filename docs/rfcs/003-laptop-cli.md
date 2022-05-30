@@ -123,7 +123,7 @@ Show currently attached storages. For example:
 > zenith storage list
 NAME            USED    TYPE                OPTIONS          PATH
 local           5.1G    zenith-local                         /opt/zenith/store/local
-local.compr     20.4G   zenith-local        comression=on    /opt/zenith/store/local.compr
+local.compr     20.4G   zenith-local        compression=on    /opt/zenith/store/local.compr
 zcloud          60G     zenith-remote                        zenith.tech/stas/mystore
 s3tank          80G     S3
 ```

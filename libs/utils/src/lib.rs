@@ -64,7 +64,7 @@ pub mod signals;
 /// One thing to note is that .git is not available in docker (and it is bad to include it there).
 /// So everything becides docker build is covered by git_version crate, and docker uses a `GIT_VERSION` argument to get the value required.
 /// It takes variable from build process env and puts it to the rustc env. And then we can retrieve it here by using env! macro.
-/// Git version received from environment variable used as a fallback in git_version invokation.
+/// Git version received from environment variable used as a fallback in git_version invocation.
 /// And to avoid running buildscript every recompilation, we use rerun-if-env-changed option.
 /// So the build script will be run only when GIT_VERSION envvar has changed.
 ///

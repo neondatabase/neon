@@ -464,7 +464,7 @@ impl BeParameterStatusMessage<'static> {
     }
 }
 
-// One row desciption in RowDescription packet.
+// One row description in RowDescription packet.
 #[derive(Debug)]
 pub struct RowDescriptor<'a> {
     pub name: &'a [u8],
@@ -613,7 +613,7 @@ fn cstr_to_str(b: &Bytes) -> Result<&str> {
 impl<'a> BeMessage<'a> {
     /// Write message to the given buf.
     // Unlike the reading side, we use BytesMut
-    // here as msg len preceeds its body and it is handy to write it down first
+    // here as msg len precedes its body and it is handy to write it down first
     // and then fill the length. With Write we would have to either calc it
     // manually or have one more buffer.
     pub fn write(buf: &mut BytesMut, message: &BeMessage) -> io::Result<()> {
@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn test_zenithfeedback_serialization() {
         let mut zf = ZenithFeedback::empty();
-        // Fill zf wih some values
+        // Fill zf with some values
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn test_zenithfeedback_unknown_key() {
         let mut zf = ZenithFeedback::empty();
-        // Fill zf wih some values
+        // Fill zf with some values
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.

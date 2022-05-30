@@ -116,7 +116,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     assert detail['local'] is not None
     log.info("Timeline detail after attach completed: %s", detail)
-    assert lsn_from_hex(detail['local']['last_record_lsn']) >= current_lsn, 'current db Lsn should shoud not be less than the one stored on remote storage'
+    assert lsn_from_hex(detail['local']['last_record_lsn']) >= current_lsn, 'current db Lsn should should not be less than the one stored on remote storage'
     assert not detail['remote']['awaits_download']
 
     pg = env.postgres.create_start('main')

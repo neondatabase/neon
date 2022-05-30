@@ -905,8 +905,8 @@ def test_delete_force(zenith_env_builder: ZenithEnvBuilder):
 
     # Create two tenants: one will be deleted, other should be preserved.
     tenant_id = env.initial_tenant.hex
-    timeline_id_1 = env.zenith_cli.create_branch('br1').hex  # Acive, delete explicitly
-    timeline_id_2 = env.zenith_cli.create_branch('br2').hex  # Inactive, delete explictly
+    timeline_id_1 = env.zenith_cli.create_branch('br1').hex  # Active, delete explicitly
+    timeline_id_2 = env.zenith_cli.create_branch('br2').hex  # Inactive, delete explicitly
     timeline_id_3 = env.zenith_cli.create_branch('br3').hex  # Active, delete with the tenant
     timeline_id_4 = env.zenith_cli.create_branch('br4').hex  # Inactive, delete with the tenant
 

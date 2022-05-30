@@ -96,7 +96,7 @@
 //! timeline uploads and downloads can happen concurrently, in no particular order due to incremental nature of the timeline layers.
 //! Deletion happens only after a successful upload only, otherwise the compaction output might make the timeline inconsistent until both tasks are fully processed without errors.
 //! Upload and download update the remote data (inmemory index and S3 json index part file) only after every layer is successfully synchronized, while the deletion task
-//! does otherwise: it requires to have the remote data updated first succesfully: blob files will be invisible to pageserver this way.
+//! does otherwise: it requires to have the remote data updated first successfully: blob files will be invisible to pageserver this way.
 //!
 //! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via downloading and merging the index data for all timelines,
 //! present locally.
@@ -440,7 +440,7 @@ fn collect_timeline_files(
     //   initial collect will fail because there is no metadata.
     //   We either need to start download if we see empty dir after restart or attach caller should
     //   be aware of that and retry attach if awaits_download for timeline switched from true to false
-    //   but timelinne didnt appear locally.
+    //   but timelinne didn't appear locally.
     //   Check what happens with remote index in that case.
     let timeline_metadata_path = match timeline_metadata_path {
         Some(path) => path,
@@ -1005,7 +1005,7 @@ where
     // in local (implicitly, via Lsn values and related memory state) or remote (explicitly via remote layer file paths) metadata.
     // When operating in a system without tasks failing over the error threshold,
     // current batching and task processing systems aim to update the layer set and metadata files (remote and local),
-    // without "loosing" such layer files.
+    // without "losing" such layer files.
     let (upload_result, status_update) = tokio::join!(
         async {
             if let Some(upload_data) = upload_data {
@@ -1160,7 +1160,7 @@ where
                         return Some(TimelineSyncStatusUpdate::Downloaded);
                     }
                     Err(e) => {
-                        error!("Timeline {sync_id} was expected to be in the remote index after a sucessful download, but it's absent: {e:?}");
+                        error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
                     }
                 },
                 Err(e) => {
@@ -1547,10 +1547,10 @@ fn compare_local_and_remote_timeline(
     let remote_files = remote_entry.stored_files();
 
     // TODO probably here we need more sophisticated logic,
-    //   if more data is available remotely can we just download whats there?
+    //   if more data is available remotely can we just download what's there?
     //   without trying to upload something. It may be tricky, needs further investigation.
     //   For now looks strange that we can request upload
-    //   and dowload for the same timeline simultaneously.
+    //   and download for the same timeline simultaneously.
     //   (upload needs to be only for previously unsynced files, not whole timeline dir).
     //   If one of the tasks fails they will be reordered in the queue which can lead
     //   to timeline being stuck in evicted state
@@ -1563,7 +1563,7 @@ fn compare_local_and_remote_timeline(
             }),
         ));
         (LocalTimelineInitStatus::NeedsSync, true)
-        // we do not need to manupulate with remote consistent lsn here
+        // we do not need to manipulate with remote consistent lsn here
         // because it will be updated when sync will be completed
     } else {
         (LocalTimelineInitStatus::LocallyComplete, false)

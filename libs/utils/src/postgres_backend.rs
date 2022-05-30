@@ -475,7 +475,7 @@ impl PostgresBackend {
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
-                // for basebackup and it uses CopyOut which doesnt require
+                // for basebackup and it uses CopyOut which doesn't require
                 // ReadyForQuery message and backend just switches back to
                 // processing mode after sending CopyDone or ErrorResponse.
             }

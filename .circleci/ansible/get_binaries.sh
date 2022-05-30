@@ -6,7 +6,7 @@ RELEASE=${RELEASE:-false}
 
 # look at docker hub for latest tag for neon docker image
 if [ "${RELEASE}" = "true" ]; then
-    echo "search latest relase tag"
+    echo "search latest release tag"
     VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
     if [ -z "${VERSION}" ]; then
         echo "no any docker tags found, exiting..."
@@ -31,7 +31,7 @@ echo "found ${VERSION}"
 rm -rf neon_install postgres_install.tar.gz neon_install.tar.gz .neon_current_version
 mkdir neon_install
 
-# retrive binaries from docker image
+# retrieve binaries from docker image
 echo "getting binaries from docker image"
 docker pull --quiet neondatabase/neon:${TAG}
 ID=$(docker create neondatabase/neon:${TAG})

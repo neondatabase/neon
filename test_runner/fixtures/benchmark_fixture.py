@@ -206,7 +206,7 @@ class ZenithBenchmarker:
             f"{prefix}.number_of_transactions_actually_processed",
             pg_bench_result.number_of_transactions_actually_processed,
             '',
-            # thats because this is predefined by test matrix and doesnt change across runs
+            # that's because this is predefined by test matrix and doesn't change across runs
             report=MetricReport.TEST_PARAM,
         )
         self.record(f"{prefix}.latency_average",
@@ -302,7 +302,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--out-dir",
         dest="out_dir",
-        help="Directory to ouput performance tests results to.",
+        help="Directory to output performance tests results to.",
     )
 
 

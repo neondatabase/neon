@@ -19,7 +19,7 @@ use utils::{
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
 ///
-/// The Repository treates this as an opaque struct, but see the code in pgdatadir_mapping.rs
+/// The Repository treats this as an opaque struct, but see the code in pgdatadir_mapping.rs
 /// for what we actually store in these fields.
 pub struct Key {
     pub field1: u8,
@@ -210,7 +210,7 @@ pub trait Repository: Send + Sync {
     ) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
-    /// This function is idempotent. It doesnt change internal state in any way.
+    /// This function is idempotent. It doesn't change internal state in any way.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>>;
 
     /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
@@ -345,11 +345,11 @@ pub trait Timeline: Send + Sync {
 
     /// Look up given page version.
     ///
-    /// NOTE: It is considerd an error to 'get' a key that doesn't exist. The abstraction
+    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
     /// above this needs to store suitable metadata to track what data exists with
     /// what keys, in separate metadata entries. If a non-existent key is requested,
-    /// the Repository implementation may incorrectly return a value from an ancestore
-    /// branch, for exampel, or waste a lot of cycles chasing the non-existing key.
+    /// the Repository implementation may incorrectly return a value from an ancestor
+    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
 

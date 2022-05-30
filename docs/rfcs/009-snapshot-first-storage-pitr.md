@@ -3,7 +3,7 @@
 GetPage@LSN can be called with older LSNs, and the page server needs
 to be able to reconstruct older page versions. That's needed for
 having read-only replicas that lag behind the primary, or that are
-"anchored" at an older LSN, and internally in the page server whne you
+"anchored" at an older LSN, and internally in the page server when you
 branch at an older point in time. How do you do that?
 
 For now, I'm not considering incremental snapshots at all. I don't

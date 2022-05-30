@@ -115,7 +115,7 @@ Neon safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/RE
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
-* `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
+* `VCL`: the largest LSN for which we can guarantee availability of all prior records.
 
 Neon pageserver LSNs:
 * `last_record_lsn` - the end of last processed WAL record.

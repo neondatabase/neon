@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(
             upload.metadata,
             Some(metadata),
-            "Successful upload should not chage its metadata"
+            "Successful upload should not change its metadata"
         );
 
         let storage_files = storage.list().await?;

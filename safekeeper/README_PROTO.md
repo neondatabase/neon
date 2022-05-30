@@ -143,7 +143,7 @@ Restart of PostgreSQL initiates new round of voting and switching new epoch.
 ## Limitations
 Right now message queue is maintained in main memory and is not spilled to the disk.
 It can cause memory overflow in case of presence of lagging safekeepers.
-It is assumed that in case of loosing local data by some safekeepers, it should be recovered using some external mechanism.
+It is assumed that in case of losing local data by some safekeepers, it should be recovered using some external mechanism.
 
 
 ## Glossary
@@ -153,7 +153,7 @@ It is assumed that in case of loosing local data by some safekeepers, it should 
 * `NodeID`: pair (term,UUID)
 * `Pager`: Neon component restoring pages from WAL stream
 * `Replica`: read-only computatio node
-* `VCL`: the largerst LSN for which we can guarantee availablity of all prior records.
+* `VCL`: the largest LSN for which we can guarantee availability of all prior records.
 
 ## Algorithm
 

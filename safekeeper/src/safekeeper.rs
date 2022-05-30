@@ -180,7 +180,7 @@ pub struct SafeKeeperState {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfo,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
@@ -759,7 +759,7 @@ where
             self.inmem.commit_lsn = max(self.inmem.commit_lsn, state.timeline_start_lsn);
             self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
-            // Initalizing backup_lsn is useful to avoid making backup think it should upload 0 segment.
+            // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
