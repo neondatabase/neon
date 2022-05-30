@@ -1,11 +1,11 @@
 //! This module exports metrics for all active timelines.
 
-use std::time::{SystemTime, Instant};
+use std::time::{Instant, SystemTime};
 
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    IntGaugeVec, Gauge,
+    Gauge, IntGaugeVec,
 };
 use postgres_ffi::xlog_utils::XLogSegNo;
 use utils::{lsn::Lsn, zid::ZTenantTimelineId};
@@ -69,91 +69,125 @@ impl TimelineCollector {
         descs.extend(commit_lsn.desc().into_iter().cloned());
 
         let backup_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_backup_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_backup_lsn",
+                "Current backup_lsn, up to which WAL is backed up, grouped by timeline",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(backup_lsn.desc().into_iter().cloned());
 
         let flush_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_flush_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_flush_lsn",
+                "Current flush_lsn, grouped by timeline",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(flush_lsn.desc().into_iter().cloned());
 
         let epoch_start_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_epoch_start_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_epoch_start_lsn",
+                "Point since which compute generates new WAL in the current consensus term",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(epoch_start_lsn.desc().into_iter().cloned());
 
         let peer_horizon_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_peer_horizon_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_peer_horizon_lsn",
+                "LSN of the most lagging safekeeper",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(peer_horizon_lsn.desc().into_iter().cloned());
 
         let remote_consistent_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_remote_consistent_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_remote_consistent_lsn",
+                "LSN which is persisted to the remote storage in pageserver",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(remote_consistent_lsn.desc().into_iter().cloned());
 
         let feedback_ps_write_lsn = GenericGaugeVec::new(
-            Opts::new("safekeeper_feedback_ps_write_lsn", "TODO"),
+            Opts::new(
+                "safekeeper_feedback_ps_write_lsn",
+                "Last LSN received by the pageserver, acknowledged in the feedback",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(feedback_ps_write_lsn.desc().into_iter().cloned());
 
         let feedback_last_time_seconds = GenericGaugeVec::new(
-            Opts::new("safekeeper_feedback_last_time_seconds", "TODO"),
+            Opts::new(
+                "safekeeper_feedback_last_time_seconds",
+                "Timestamp of the last feedback from the pageserver",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(feedback_last_time_seconds.desc().into_iter().cloned());
 
         let timeline_active = GenericGaugeVec::new(
-            Opts::new("safekeeper_timeline_active", "TODO"),
+            Opts::new(
+                "safekeeper_timeline_active",
+                "Reports 1 for active timelines, 0 for inactive",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(timeline_active.desc().into_iter().cloned());
 
         let wal_backup_active = GenericGaugeVec::new(
-            Opts::new("safekeeper_wal_backup_active", "TODO"),
+            Opts::new(
+                "safekeeper_wal_backup_active",
+                "Reports 1 for timelines with active WAL backup, 0 otherwise",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(wal_backup_active.desc().into_iter().cloned());
 
         let connected_computes = IntGaugeVec::new(
-            Opts::new("safekeeper_connected_computes", "TODO"),
+            Opts::new(
+                "safekeeper_connected_computes",
+                "Number of active compute connections",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(connected_computes.desc().into_iter().cloned());
 
         let disk_usage = GenericGaugeVec::new(
-            Opts::new("safekeeper_disk_usage_bytes", "TODO"),
+            Opts::new(
+                "safekeeper_disk_usage_bytes",
+                "Estimated disk space used to store WAL segments",
+            ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(disk_usage.desc().into_iter().cloned());
 
         let acceptor_term = GenericGaugeVec::new(
-            Opts::new("safekeeper_acceptor_term", "TODO"),
+            Opts::new("safekeeper_acceptor_term", "Current consensus term"),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
         descs.extend(acceptor_term.desc().into_iter().cloned());
 
         let collect_timeline_metrics = Gauge::new(
-            "safekeeper_collect_timeline_metrics_seconds", "TODO",
+            "safekeeper_collect_timeline_metrics_seconds",
+            "Time spent collecting timeline metrics, including obtaining mutex lock for all timelines",
         )
         .unwrap();
         descs.extend(collect_timeline_metrics.desc().into_iter().cloned());
