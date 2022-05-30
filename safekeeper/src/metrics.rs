@@ -1,11 +1,11 @@
 //! This module exports metrics for all active timelines.
 
-use std::time::SystemTime;
+use std::time::{SystemTime, Instant};
 
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    IntGaugeVec,
+    IntGaugeVec, Gauge,
 };
 use postgres_ffi::xlog_utils::XLogSegNo;
 use utils::{lsn::Lsn, zid::ZTenantTimelineId};
@@ -45,6 +45,7 @@ pub struct TimelineCollector {
     connected_computes: IntGaugeVec,
     disk_usage: GenericGaugeVec<AtomicU64>,
     acceptor_term: GenericGaugeVec<AtomicU64>,
+    collect_timeline_metrics: Gauge,
 }
 
 impl Default for TimelineCollector {
@@ -151,6 +152,12 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(acceptor_term.desc().into_iter().cloned());
 
+        let collect_timeline_metrics = Gauge::new(
+            "safekeeper_collect_timeline_metrics_seconds", "TODO",
+        )
+        .unwrap();
+        descs.extend(collect_timeline_metrics.desc().into_iter().cloned());
+
         TimelineCollector {
             descs,
             commit_lsn,
@@ -166,6 +173,7 @@ impl TimelineCollector {
             connected_computes,
             disk_usage,
             acceptor_term,
+            collect_timeline_metrics,
         }
     }
 }
@@ -176,6 +184,8 @@ impl Collector for TimelineCollector {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
+        let start_collecting = Instant::now();
+
         // reset all metrics to clean up inactive timelines
         self.commit_lsn.reset();
         self.backup_lsn.reset();
@@ -191,7 +201,6 @@ impl Collector for TimelineCollector {
         self.disk_usage.reset();
         self.acceptor_term.reset();
 
-        // TODO: measure time it takes to collect all info
         let timelines = GlobalTimelines::active_timelines_metrics();
 
         for tli in timelines {
@@ -282,6 +291,12 @@ impl Collector for TimelineCollector {
         mfs.extend(self.connected_computes.collect());
         mfs.extend(self.disk_usage.collect());
         mfs.extend(self.acceptor_term.collect());
+
+        // report time it took to collect all info
+        let elapsed = start_collecting.elapsed().as_secs_f64();
+        self.collect_timeline_metrics.set(elapsed);
+        mfs.extend(self.collect_timeline_metrics.collect());
+
         mfs
     }
 }
