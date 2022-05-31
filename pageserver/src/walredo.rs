@@ -569,7 +569,19 @@ impl<C: CommandExt> CloseFileDescriptors for C {
     fn close_fds(&mut self) -> &mut Command {
         unsafe {
             self.pre_exec(move || {
-                // close_fds crate is safe to use in this context (see docs)
+                // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+                // which means it should be safe to execute inside a signal handler.
+                // The precise meaning depends on platform. See `man signal-safety`
+                // for the linux definition.
+                //
+                // The set_fds_cloexec_threadsafe function is documented to be
+                // async-signal-safe.
+                //
+                // Aside from this function, the rest of the code is re-entrant and
+                // doesn't make any syscalls. We're just passing constants.
+                //
+                // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+                // which is not async-signal-safe. Be careful.
                 close_fds::set_fds_cloexec_threadsafe(3, &[]);
                 Ok(())
             })
@@ -644,6 +656,18 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("PGDATA", &datadir)
+            // The redo process is not trusted, so it runs in seccomp mode
+            // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
+            // inherit any file descriptors from the pageserver that would allow
+            // an attacker to do bad things.
+            //
+            // The Rust standard library makes sure to mark any file descriptors with
+            // as close-on-exec by default, but that's not enough, since we use
+            // libraries that directly call libc open without setting that flag.
+            //
+            // One example is the pidfile of the daemonize library, which doesn't
+            // currently mark file descriptors as close-on-exec. Either way, we
+            // want to be on the safe side and prevent accidental regression.
             .close_fds()
             .spawn()
             .map_err(|e| {
