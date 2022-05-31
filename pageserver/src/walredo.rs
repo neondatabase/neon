@@ -556,6 +556,28 @@ impl PostgresRedoManager {
 }
 
 ///
+/// Command with ability not to give all file descriptors to child process
+///
+trait CloseFileDescriptors: CommandExt {
+    ///
+    /// Close file descriptors (other than stdin, stdout, stderr) in child process
+    ///
+    fn close_fds(&mut self) -> &mut Command;
+}
+
+impl<C: CommandExt> CloseFileDescriptors for C {
+    fn close_fds(&mut self) -> &mut Command {
+        unsafe {
+            self.pre_exec(move || {
+                // close_fds crate is safe to use in this context (see docs)
+                close_fds::set_fds_cloexec_threadsafe(3, &[]);
+                Ok(())
+            })
+        }
+    }
+}
+
+///
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
@@ -611,31 +633,25 @@ impl PostgresRedoProcess {
             config.write_all(b"shared_preload_libraries=neon\n")?;
             config.write_all(b"neon.wal_redo=on\n")?;
         }
+
         // Start postgres itself
-        let mut child = unsafe {
-            // unsafe is required to use pre_exec
-            Command::new(conf.pg_bin_dir().join("postgres"))
-                .arg("--wal-redo")
-                .stdin(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdout(Stdio::piped())
-                .env_clear()
-                .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-                .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
-                .env("PGDATA", &datadir)
-                .pre_exec(move || {
-                    // close_fds crate is safe to use in this context (see docs)
-                    close_fds::set_fds_cloexec_threadsafe(3, &[]);
-                    Ok(())
-                })
-                .spawn()
-                .map_err(|e| {
-                    Error::new(
-                        e.kind(),
-                        format!("postgres --wal-redo command failed to start: {}", e),
-                    )
-                })?
-        };
+        let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
+            .arg("--wal-redo")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .env_clear()
+            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .env("PGDATA", &datadir)
+            .close_fds()
+            .spawn()
+            .map_err(|e| {
+                Error::new(
+                    e.kind(),
+                    format!("postgres --wal-redo command failed to start: {}", e),
+                )
+            })?;
 
         info!(
             "launched WAL redo postgres process on {:?}",
