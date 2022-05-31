@@ -77,7 +77,7 @@ pub fn stop_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     let etcd_pid_file_path = etcd_pid_file_path(env);
     let pid = Pid::from_raw(read_pidfile(&etcd_pid_file_path).with_context(|| {
         format!(
-            "Failed to read etcd pid filea at {}",
+            "Failed to read etcd pid file at {}",
             etcd_pid_file_path.display()
         )
     })?);

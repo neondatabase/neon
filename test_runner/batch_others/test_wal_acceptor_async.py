@@ -151,8 +151,8 @@ async def run_restarts_under_load(env: ZenithEnv,
     test_timeout_at = time.monotonic() + 5 * 60
 
     pg_conn = await pg.connect_async()
-    tenant_id = await pg_conn.fetchval("show zenith.zenith_tenant")
-    timeline_id = await pg_conn.fetchval("show zenith.zenith_timeline")
+    tenant_id = await pg_conn.fetchval("show neon.tenant_id")
+    timeline_id = await pg_conn.fetchval("show neon.timeline_id")
 
     bank = BankClient(pg_conn, n_accounts=n_accounts, init_amount=init_amount)
     # create tables and initial balances

@@ -27,7 +27,7 @@ struct SafeKeeperStateV1 {
     acceptor_state: AcceptorStateV1,
     /// information about server
     server: ServerInfoV2,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
@@ -57,7 +57,7 @@ pub struct SafeKeeperStateV2 {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfoV2,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
@@ -89,7 +89,7 @@ pub struct SafeKeeperStateV3 {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfoV3,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
@@ -114,7 +114,7 @@ pub struct SafeKeeperStateV4 {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfo,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
@@ -165,7 +165,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
@@ -188,7 +188,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
@@ -211,7 +211,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
@@ -234,7 +234,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             timeline_start_lsn: Lsn(0),
             local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn::INVALID,
             peer_horizon_lsn: oldstate.peer_horizon_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),

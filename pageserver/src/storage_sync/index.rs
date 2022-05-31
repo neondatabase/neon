@@ -273,7 +273,7 @@ mod tests {
         };
 
         let index_part = IndexPart::from_remote_timeline(&timeline_path, remote_timeline.clone())
-            .expect("Correct remote timeline should be convertable to index part");
+            .expect("Correct remote timeline should be convertible to index part");
 
         assert_eq!(
             index_part.timeline_layers.iter().collect::<BTreeSet<_>>(),
@@ -305,7 +305,7 @@ mod tests {
         );
 
         let restored_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
-            .expect("Correct index part should be convertable to remote timeline");
+            .expect("Correct index part should be convertible to remote timeline");
 
         let original_metadata = &remote_timeline.metadata;
         let restored_metadata = &restored_timeline.metadata;

@@ -7,7 +7,7 @@
 //! - Fixed-width keys
 //! - Fixed-width values (VALUE_SZ)
 //! - The tree is created in a bulk operation. Insert/deletion after creation
-//!   is not suppported
+//!   is not supported
 //! - page-oriented
 //!
 //! TODO:
@@ -498,8 +498,8 @@ where
             return Ok(());
         }
 
-        // It did not fit. Try to compress, and it it succeeds to make some room
-        // on the node, try appending to it again.
+        // It did not fit. Try to compress, and if it succeeds to make
+        // some room on the node, try appending to it again.
         #[allow(clippy::collapsible_if)]
         if last.compress() {
             if last.push(key, value) {

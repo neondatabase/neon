@@ -23,7 +23,7 @@ gc_horizon = '67108864'
 max_file_descriptors = '100'
 
 # initial superuser role name to use when creating a new tenant
-initial_superuser_name = 'zenith_admin'
+initial_superuser_name = 'cloud_admin'
 
 broker_etcd_prefix = 'neon'
 broker_endpoints = ['some://etcd']
@@ -38,7 +38,7 @@ Yet, it validates the config values it can (e.g. postgres install dir) and error
 
 Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#table) in TOML specification and
 
-- either has to be placed in the config after the table-less values such as `initial_superuser_name = 'zenith_admin'`
+- either has to be placed in the config after the table-less values such as `initial_superuser_name = 'cloud_admin'`
 
 - or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
 
@@ -105,7 +105,7 @@ Interval at which garbage collection is triggered. Default is 100 s.
 
 #### image_creation_threshold
 
-L0 delta layer threshold for L1 iamge layer creation. Default is 3.
+L0 delta layer threshold for L1 image layer creation. Default is 3.
 
 #### pitr_interval
 
@@ -115,7 +115,7 @@ WAL retention duration for PITR branching. Default is 30 days.
 
 Name of the initial superuser role, passed to initdb when a new tenant
 is initialized. It doesn't affect anything after initialization. The
-default is Note: The default is 'zenith_admin', and the console
+default is Note: The default is 'cloud_admin', and the console
 depends on that, so if you change it, bad things will happen.
 
 #### page_cache_size
@@ -185,7 +185,7 @@ If no IAM bucket access is used during the remote storage usage, use the `AWS_AC
 
 ###### General remote storage configuration
 
-Pagesever allows only one remote storage configured concurrently and errors if parameters from multiple different remote configurations are used.
+Pageserver allows only one remote storage configured concurrently and errors if parameters from multiple different remote configurations are used.
 No default values are used for the remote storage configuration parameters.
 
 Besides, there are parameters common for all types of remote storage that can be configured, those have defaults:

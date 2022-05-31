@@ -30,7 +30,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
 
     pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
-    branch0_cur.execute("SHOW zenith.zenith_timeline")
+    branch0_cur.execute("SHOW neon.timeline_id")
     branch0_timeline = branch0_cur.fetchone()[0]
     log.info(f"b0 timeline {branch0_timeline}")
 
@@ -55,7 +55,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info("postgres is running on 'branch1' branch")
 
     branch1_cur = pg_branch1.connect().cursor()
-    branch1_cur.execute("SHOW zenith.zenith_timeline")
+    branch1_cur.execute("SHOW neon.timeline_id")
     branch1_timeline = branch1_cur.fetchone()[0]
     log.info(f"b1 timeline {branch1_timeline}")
 
@@ -79,7 +79,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
 
-    branch2_cur.execute("SHOW zenith.zenith_timeline")
+    branch2_cur.execute("SHOW neon.timeline_id")
     branch2_timeline = branch2_cur.fetchone()[0]
     log.info(f"b2 timeline {branch2_timeline}")
 

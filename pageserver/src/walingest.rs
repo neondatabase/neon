@@ -12,7 +12,7 @@
 //! The zenith Repository can store page versions in two formats: as
 //! page images, or a WAL records. WalIngest::ingest_record() extracts
 //! page images out of some WAL records, but most it stores as WAL
-//! records. If a WAL record modifies multple pages, WalIngest
+//! records. If a WAL record modifies multiple pages, WalIngest
 //! will call Repository::put_wal_record or put_page_image functions
 //! separately for each modified page.
 //!

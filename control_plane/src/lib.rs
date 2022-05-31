@@ -49,3 +49,12 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
         cmd
     }
 }
+
+fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+    for env_key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
+        if let Ok(value) = std::env::var(env_key) {
+            cmd = cmd.env(env_key, value);
+        }
+    }
+    cmd
+}

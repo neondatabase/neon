@@ -25,9 +25,9 @@ To make changes in the catalog you need to run compute nodes
 zenith start /home/pipedpiper/northwind:main -- starts a compute instance
 zenith start zenith://zenith.tech/northwind:main -- starts a compute instance in the cloud
 -- you can start a compute node against any hash or branch
-zenith start /home/pipedpiper/northwind:experimental --port 8008 -- start anothe compute instance (on different port)
+zenith start /home/pipedpiper/northwind:experimental --port 8008 -- start another compute instance (on different port)
 -- you can start a compute node against any hash or branch
-zenith start /home/pipedpiper/northwind:<hash> --port 8009 -- start anothe compute instance (on different port)
+zenith start /home/pipedpiper/northwind:<hash> --port 8009 -- start another compute instance (on different port)
 
 -- After running some DML you can run 
 -- zenith status and see how there are two WAL streams one on top of 

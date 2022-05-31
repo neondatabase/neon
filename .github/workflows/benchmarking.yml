@@ -19,7 +19,7 @@ jobs:
   bench:
     # this workflow runs on self hosteed runner
     # it's environment is quite different from usual guthub runner
-    # probably the most important difference is that it doesnt start from clean workspace each time
+    # probably the most important difference is that it doesn't start from clean workspace each time
     # e g if you install system packages they are not cleaned up since you install them directly in host machine
     # not a container or something
     # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners

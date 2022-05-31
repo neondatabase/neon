@@ -823,7 +823,7 @@ impl LayeredRepository {
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
-            // This is unresolved question for now, how to do gc in presense of remote timelines
+            // This is unresolved question for now, how to do gc in presence of remote timelines
             // especially when this is combined with branching.
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
@@ -1230,7 +1230,7 @@ impl LayeredTimeline {
             }),
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
-            last_freeze_at: AtomicLsn::new(0),
+            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -1831,7 +1831,7 @@ impl LayeredTimeline {
         // collect any page versions that are no longer needed because
         // of the new image layers we created in step 2.
         //
-        // TODO: This hight level strategy hasn't been implemented yet.
+        // TODO: This high level strategy hasn't been implemented yet.
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
@@ -2268,7 +2268,7 @@ impl LayeredTimeline {
             }
 
             // 3. Is it needed by a child branch?
-            // NOTE With that wee would keep data that
+            // NOTE With that we would keep data that
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
@@ -2518,7 +2518,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     bail!("couldn't find an unused backup number for {:?}", path)
 }
 
-fn load_metadata(
+pub fn load_metadata(
     conf: &'static PageServerConf,
     timeline_id: ZTimelineId,
     tenant_id: ZTenantId,
