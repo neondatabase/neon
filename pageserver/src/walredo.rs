@@ -28,6 +28,7 @@ use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::os::unix::io::AsRawFd;
+use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -611,22 +612,30 @@ impl PostgresRedoProcess {
             config.write_all(b"neon.wal_redo=on\n")?;
         }
         // Start postgres itself
-        let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
-            .arg("--wal-redo")
-            .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdout(Stdio::piped())
-            .env_clear()
-            .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
-            .env("PGDATA", &datadir)
-            .spawn()
-            .map_err(|e| {
-                Error::new(
-                    e.kind(),
-                    format!("postgres --wal-redo command failed to start: {}", e),
-                )
-            })?;
+        let mut child = unsafe {
+            // unsafe is required to use pre_exec
+            Command::new(conf.pg_bin_dir().join("postgres"))
+                .arg("--wal-redo")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped())
+                .env_clear()
+                .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
+                .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+                .env("PGDATA", &datadir)
+                .pre_exec(move || {
+                    // close_fds crate is safe to use in this context (see docs)
+                    close_fds::set_fds_cloexec_threadsafe(3, &[]);
+                    Ok(())
+                })
+                .spawn()
+                .map_err(|e| {
+                    Error::new(
+                        e.kind(),
+                        format!("postgres --wal-redo command failed to start: {}", e),
+                    )
+                })?
+        };
 
         info!(
             "launched WAL redo postgres process on {:?}",
