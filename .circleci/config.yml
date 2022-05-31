@@ -453,9 +453,6 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
-      # Build neondatabase/compute-tools:latest image and push it to Docker hub
-      # TODO: this should probably also use versioned tag, not just :latest.
-      # XXX: but should it? We build and use it only locally now.
       - run:
           name: Build and push compute-tools Docker image
           command: |
@@ -463,7 +460,10 @@ jobs:
             docker build \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/compute-tools:latest -f Dockerfile.compute-tools .
+              --tag neondatabase/compute-tools:local \
+              --tag neondatabase/compute-tools:latest \
+              -f Dockerfile.compute-tools .
+            # Only push :latest image
             docker push neondatabase/compute-tools:latest
       - run:
           name: Init postgres submodule
@@ -473,7 +473,9 @@ jobs:
           command: |
             echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build --tag neondatabase/compute-node:${DOCKER_TAG} --tag neondatabase/compute-node:latest vendor/postgres
+            docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
+              --tag neondatabase/compute-node:latest vendor/postgres \
+              --build-arg COMPUTE_TOOLS_TAG=local
             docker push neondatabase/compute-node:${DOCKER_TAG}
             docker push neondatabase/compute-node:latest
 
@@ -510,9 +512,6 @@ jobs:
       - checkout
       - setup_remote_docker:
           docker_layer_caching: true
-      # Build neondatabase/compute-tools:release image and push it to Docker hub
-      # TODO: this should probably also use versioned tag, not just :latest.
-      # XXX: but should it? We build and use it only locally now.
       - run:
           name: Build and push compute-tools Docker image
           command: |
@@ -520,7 +519,10 @@ jobs:
             docker build \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/compute-tools:release -f Dockerfile.compute-tools .
+              --tag neondatabase/compute-tools:release \
+              --tag neondatabase/compute-tools:local \
+              -f Dockerfile.compute-tools .
+            # Only push :release image
             docker push neondatabase/compute-tools:release
       - run:
           name: Init postgres submodule
@@ -530,7 +532,9 @@ jobs:
           command: |
             echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build --tag neondatabase/compute-node:${DOCKER_TAG} --tag neondatabase/compute-node:release vendor/postgres
+            docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
+              --tag neondatabase/compute-node:release vendor/postgres \
+              --build-arg COMPUTE_TOOLS_TAG=local
             docker push neondatabase/compute-node:${DOCKER_TAG}
             docker push neondatabase/compute-node:release
 
