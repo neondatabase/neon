@@ -33,6 +33,7 @@ use crate::safekeeper::{
 };
 use crate::send_wal::HotStandbyFeedback;
 
+use crate::metrics::FullTimelineInfo;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
@@ -450,6 +451,33 @@ impl Timeline {
         shared_state.active
     }
 
+    /// Returns full timeline info, required for the metrics.
+    /// If the timeline is not active, returns None instead.
+    pub fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
+        let shared_state = self.mutex.lock().unwrap();
+        if !shared_state.active {
+            return None;
+        }
+
+        Some(FullTimelineInfo {
+            zttid: self.zttid,
+            replicas: shared_state
+                .replicas
+                .iter()
+                .filter_map(|r| r.as_ref())
+                .copied()
+                .collect(),
+            wal_backup_active: shared_state.wal_backup_active,
+            timeline_is_active: shared_state.active,
+            num_computes: shared_state.num_computes,
+            last_removed_segno: shared_state.last_removed_segno,
+            epoch_start_lsn: shared_state.sk.epoch_start_lsn,
+            mem_state: shared_state.sk.inmem.clone(),
+            persisted_state: shared_state.sk.state.clone(),
+            flush_lsn: shared_state.sk.wal_store.flush_lsn(),
+        })
+    }
+
     /// Timed wait for an LSN to be committed.
     ///
     /// Returns the last committed LSN, which will be at least
@@ -774,6 +802,16 @@ impl GlobalTimelines {
             .iter()
             .filter(|&(_, tli)| tli.is_active())
             .map(|(zttid, _)| *zttid)
+            .collect()
+    }
+
+    /// Return FullTimelineInfo for all active timelines.
+    pub fn active_timelines_metrics() -> Vec<FullTimelineInfo> {
+        let state = TIMELINES_STATE.lock().unwrap();
+        state
+            .timelines
+            .iter()
+            .filter_map(|(_, tli)| tli.info_for_metrics())
             .collect()
     }
 

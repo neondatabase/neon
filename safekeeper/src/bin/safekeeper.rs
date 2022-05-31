@@ -264,6 +264,12 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         }
     }
 
+    // Register metrics collector for active timelines. It's important to do this
+    // after daemonizing, otherwise process collector will be upset.
+    let registry = metrics::default_registry();
+    let timeline_collector = safekeeper::metrics::TimelineCollector::new();
+    registry.register(Box::new(timeline_collector))?;
+
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (callmemaybe_tx, callmemaybe_rx) = mpsc::unbounded_channel();
