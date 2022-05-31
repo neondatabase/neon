@@ -26,7 +26,7 @@ endif
 # macOS with brew-installed openssl requires explicit paths
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-    PG_CONFIGURE_OPTS += --with-includes=/usr/local/opt/openssl/include --with-libraries=/usr/local/opt/openssl/lib
+    PG_CONFIGURE_OPTS += --with-includes=$(HOMEBREW_PREFIX)/opt/openssl/include --with-libraries=$(HOMEBREW_PREFIX)/opt/openssl/lib
 endif
 
 # Choose whether we should be silent or verbose
