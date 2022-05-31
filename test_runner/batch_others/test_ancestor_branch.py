@@ -24,9 +24,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
             'compaction_target_size': '4194304',
         })
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            pscur.execute("failpoints flush-frozen=sleep(10000)")
+    env.pageserver.safe_psql("failpoints flush-frozen=sleep(10000)")
 
     pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
