@@ -177,6 +177,7 @@ pub struct SafekeeperConf {
     pub sync: bool,
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
+    pub auth_enabled: bool,
 }
 
 impl Default for SafekeeperConf {
@@ -188,6 +189,7 @@ impl Default for SafekeeperConf {
             sync: true,
             remote_storage: None,
             backup_threads: None,
+            auth_enabled: false,
         }
     }
 }

@@ -149,6 +149,11 @@ impl SafekeeperNode {
         if let Some(ref remote_storage) = self.conf.remote_storage {
             cmd.args(&["--remote-storage", remote_storage]);
         }
+        if self.conf.auth_enabled {
+            cmd.arg("--auth-validation-public-key-path");
+            // PathBuf is better be passed as is, not via `String`.
+            cmd.arg(self.env.base_data_dir.join("auth_public_key.pem"));
+        }
 
         fill_aws_secrets_vars(&mut cmd);
 
