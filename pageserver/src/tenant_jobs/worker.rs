@@ -12,6 +12,8 @@ use std::{
 
 use crate::thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested};
 
+use super::deadline::Deadline;
+
 lazy_static! {
     static ref POOL_UTILIZATION_GAUGE: GaugeVec = register_gauge_vec!(
         "pageserver_pool_utilization",
@@ -50,45 +52,6 @@ where
     },
     Stuck(JobError<J>),
 }
-
-// TODO make this generic event, put in different module
-#[derive(Debug)]
-struct Deadline<J: Job>
-where
-    J::ErrorType: Debug,
-{
-    start_by: Instant,
-    job: J,
-}
-
-impl<J: Job> PartialOrd for Deadline<J>
-where
-    J::ErrorType: Debug,
-{
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        other.start_by.partial_cmp(&self.start_by)
-    }
-}
-
-impl<J: Job> Ord for Deadline<J>
-where
-    J::ErrorType: Debug,
-{
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.start_by.cmp(&self.start_by)
-    }
-}
-
-impl<J: Job> PartialEq for Deadline<J>
-where
-    J::ErrorType: Debug,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.start_by == other.start_by
-    }
-}
-
-impl<J: Job> Eq for Deadline<J> where J::ErrorType: Debug {}
 
 #[derive(Debug, Default)]
 struct JobStatusTable<J: Job>
@@ -156,7 +119,7 @@ where
     pub fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
         let mut job_table = self.job_table.lock().unwrap();
         while !is_shutdown_requested() {
-            if let Some(Deadline { job, .. }) = job_table.pop_due() {
+            if let Some(job) = job_table.pop_due() {
                 job_table.set_status(
                     &job,
                     JobStatus::Running {
@@ -186,8 +149,8 @@ where
                             },
                         );
                         job_table.queue.push(Deadline {
-                            job: job.clone(),
                             start_by: reschedule_for,
+                            inner: job.clone(),
                         });
                     }
                     Ok(Ok(None)) => {
@@ -225,8 +188,8 @@ where
             .status
             .insert(job.clone(), JobStatus::Ready { scheduled_for });
         job_table.queue.push(Deadline {
-            job,
             start_by: scheduled_for,
+            inner: job,
         });
 
         self.condvar.notify_all();
