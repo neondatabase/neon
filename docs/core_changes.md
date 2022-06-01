@@ -188,7 +188,7 @@ Not currently committed but proposed:
 3. Prefetching
 - Why?
   As far as pages in Zenith are loaded on demand, to reduce node startup time
-  and also sppedup some massive queries we need some mechanism for bulk loading to
+  and also speedup some massive queries we need some mechanism for bulk loading to
   reduce page request round-trip overhead.
 
   Currently Postgres is supporting prefetching only for bitmap scan.

@@ -77,7 +77,7 @@ Upon storage node restart recent WAL files are applied to appropriate pages and 
 
 ### **Checkpointing**
 
-No such mechanism is needed. Or we may look at the storage node as at kind of continuous chekpointer.
+No such mechanism is needed. Or we may look at the storage node as at kind of continuous checkpointer.
 
 ### **Full page writes (torn page protection)**
 
