@@ -18,13 +18,14 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use tracing::*;
 
-use std::cmp::{max, Ordering};
+use std::cmp::{max, min, Ordering};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
@@ -557,6 +558,27 @@ impl LayeredRepository {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
+    pub fn get_wal_receiver_connect_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout)
+    }
+
+    pub fn get_lagging_wal_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout)
+    }
+
+    pub fn get_max_lsn_wal_lag(&self) -> NonZeroU64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
+    }
+
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {
         let mut tenant_conf = self.tenant_conf.write().unwrap();
 
@@ -823,7 +845,7 @@ impl LayeredRepository {
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
-            // This is unresolved question for now, how to do gc in presense of remote timelines
+            // This is unresolved question for now, how to do gc in presence of remote timelines
             // especially when this is combined with branching.
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
@@ -1230,7 +1252,7 @@ impl LayeredTimeline {
             }),
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
-            last_freeze_at: AtomicLsn::new(0),
+            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -1831,7 +1853,7 @@ impl LayeredTimeline {
         // collect any page versions that are no longer needed because
         // of the new image layers we created in step 2.
         //
-        // TODO: This hight level strategy hasn't been implemented yet.
+        // TODO: This high level strategy hasn't been implemented yet.
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
@@ -2165,7 +2187,7 @@ impl LayeredTimeline {
 
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
-        let cutoff = gc_info.cutoff;
+        let cutoff = min(gc_info.cutoff, disk_consistent_lsn);
         let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
@@ -2268,7 +2290,7 @@ impl LayeredTimeline {
             }
 
             // 3. Is it needed by a child branch?
-            // NOTE With that wee would keep data that
+            // NOTE With that we would keep data that
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.
@@ -2294,12 +2316,20 @@ impl LayeredTimeline {
             // is 102, then it might not have been fully flushed to disk
             // before crash.
             //
-            // FIXME: This logic is wrong. See https://github.com/zenithdb/zenith/issues/707
-            if !layers.newer_image_layer_exists(
-                &l.get_key_range(),
-                l.get_lsn_range().end,
-                disk_consistent_lsn + 1,
-            )? {
+            // For example, imagine that the following layers exist:
+            //
+            // 1000      - image (A)
+            // 1000-2000 - delta (B)
+            // 2000      - image (C)
+            // 2000-3000 - delta (D)
+            // 3000      - image (E)
+            //
+            // If GC horizon is at 2500, we can remove layers A and B, but
+            // we cannot remove C, even though it's older than 2500, because
+            // the delta layer 2000-3000 depends on it.
+            if !layers
+                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+            {
                 debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
@@ -2510,7 +2540,7 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     bail!("couldn't find an unused backup number for {:?}", path)
 }
 
-fn load_metadata(
+pub fn load_metadata(
     conf: &'static PageServerConf,
     timeline_id: ZTimelineId,
     tenant_id: ZTenantId,

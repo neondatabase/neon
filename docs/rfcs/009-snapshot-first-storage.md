@@ -121,7 +121,7 @@ The properties of s3 that we depend on are:
 list objects
 streaming read of entire object
 read byte range from object
-streaming write new object (may use multipart upload for better relialibity)
+streaming write new object (may use multipart upload for better reliability)
 delete object (that should not disrupt an already-started read).
 
 Uploaded files, restored backups, or s3 buckets controlled by users could contain malicious content. We should always validate that objects contain the content they’re supposed to. Incorrect, Corrupt or malicious-looking contents should cause software (cloud tools, pageserver) to fail gracefully.

@@ -1,16 +1,13 @@
-use crate::{compute, stream::PqStream};
+use crate::{auth, compute, stream::PqStream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 fn hello_message(redirect_uri: &str, session_id: &str) -> String {
     format!(
         concat![
-            "☀️  Welcome to Neon!\n",
-            "To proceed with database creation, open the following link:\n\n",
+            "Welcome to Neon!\n",
+            "Authenticate by visiting:\n",
             "    {redirect_uri}{session_id}\n\n",
-            "It needs to be done once and we will send you '.pgpass' file,\n",
-            "which will allow you to access or create ",
-            "databases without opening your web browser."
         ],
         redirect_uri = redirect_uri,
         session_id = session_id,
@@ -22,13 +19,13 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub async fn handle_user(
-    redirect_uri: &str,
+    redirect_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<compute::NodeInfo, crate::auth::AuthError> {
+) -> auth::Result<compute::NodeInfo> {
     let psql_session_id = new_psql_session_id();
-    let greeting = hello_message(redirect_uri, &psql_session_id);
+    let greeting = hello_message(redirect_uri.as_str(), &psql_session_id);
 
-    let db_info = crate::auth_backend::with_waiter(psql_session_id, |waiter| async {
+    let db_info = super::with_waiter(psql_session_id, |waiter| async {
         // Give user a URL to spawn a new database
         client
             .write_message_noflush(&Be::AuthenticationOk)?
@@ -37,9 +34,7 @@ pub async fn handle_user(
             .await?;
 
         // Wait for web console response (see `mgmt`)
-        waiter
-            .await?
-            .map_err(crate::auth::AuthErrorImpl::auth_failed)
+        waiter.await?.map_err(auth::AuthErrorImpl::auth_failed)
     })
     .await?;
 

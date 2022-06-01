@@ -283,9 +283,9 @@ fn bootstrap_timeline<R: Repository>(
     tli: ZTimelineId,
     repo: &R,
 ) -> Result<()> {
-    let _enter = info_span!("bootstrapping", timeline = %tli, tenant = %tenantid).entered();
-
-    let initdb_path = conf.tenant_path(&tenantid).join("tmp");
+    let initdb_path = conf
+        .tenant_path(&tenantid)
+        .join(format!("tmp-timeline-{}", tli));
 
     // Init temporarily repo to get bootstrap data
     run_initdb(conf, &initdb_path)?;
@@ -300,10 +300,15 @@ fn bootstrap_timeline<R: Repository>(
     let timeline = repo.create_empty_timeline(tli, lsn)?;
     let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
+
+    fail::fail_point!("before-checkpoint-new-timeline", |_| {
+        bail!("failpoint before-checkpoint-new-timeline");
+    });
+
     page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
 
-    println!(
-        "created initial timeline {} timeline.lsn {}",
+    info!(
+        "created root timeline {} timeline.lsn {}",
         tli,
         page_tline.tline.get_last_record_lsn()
     );

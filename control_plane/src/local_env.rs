@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use crate::safekeeper::SafekeeperNode;
@@ -119,16 +119,24 @@ impl EtcdBroker {
     }
 
     pub fn comma_separated_endpoints(&self) -> String {
-        self.broker_endpoints.iter().map(Url::as_str).fold(
-            String::new(),
-            |mut comma_separated_urls, url| {
+        self.broker_endpoints
+            .iter()
+            .map(|url| {
+                // URL by default adds a '/' path at the end, which is not what etcd CLI wants.
+                let url_string = url.as_str();
+                if url_string.ends_with('/') {
+                    &url_string[0..url_string.len() - 1]
+                } else {
+                    url_string
+                }
+            })
+            .fold(String::new(), |mut comma_separated_urls, url| {
                 if !comma_separated_urls.is_empty() {
                     comma_separated_urls.push(',');
                 }
                 comma_separated_urls.push_str(url);
                 comma_separated_urls
-            },
-        )
+            })
     }
 }
 
@@ -136,7 +144,7 @@ impl EtcdBroker {
 #[serde(default)]
 pub struct PageServerConf {
     // node id
-    pub id: ZNodeId,
+    pub id: NodeId,
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -151,7 +159,7 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
@@ -163,19 +171,23 @@ impl Default for PageServerConf {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
-    pub id: ZNodeId,
+    pub id: NodeId,
     pub pg_port: u16,
     pub http_port: u16,
     pub sync: bool,
+    pub remote_storage: Option<String>,
+    pub backup_threads: Option<u32>,
 }
 
 impl Default for SafekeeperConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             pg_port: 0,
             http_port: 0,
             sync: true,
+            remote_storage: None,
+            backup_threads: None,
         }
     }
 }
@@ -377,6 +389,7 @@ impl LocalEnv {
             base_path != Path::new(""),
             "repository base path is missing"
         );
+
         ensure!(
             !base_path.exists(),
             "directory '{}' already exists. Perhaps already initialized?",

@@ -18,12 +18,12 @@ use thiserror::Error;
 use utils::{
     connstring::connection_address,
     http::error::HttpErrorBody,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::local_env::{LocalEnv, SafekeeperConf};
 use crate::storage::PageServerNode;
-use crate::{fill_rust_env_vars, read_pidfile};
+use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
 
 #[derive(Error, Debug)]
 pub enum SafekeeperHttpError {
@@ -65,7 +65,7 @@ impl ResponseErrorMessageExt for Response {
 //
 #[derive(Debug)]
 pub struct SafekeeperNode {
-    pub id: ZNodeId,
+    pub id: NodeId,
 
     pub conf: SafekeeperConf,
 
@@ -100,7 +100,7 @@ impl SafekeeperNode {
             .unwrap()
     }
 
-    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: ZNodeId) -> PathBuf {
+    pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
         env.safekeeper_data_dir(format!("sk{}", sk_id).as_ref())
     }
 
@@ -143,6 +143,14 @@ impl SafekeeperNode {
         if let Some(prefix) = self.env.etcd_broker.broker_etcd_prefix.as_deref() {
             cmd.args(&["--broker-etcd-prefix", prefix]);
         }
+        if let Some(threads) = self.conf.backup_threads {
+            cmd.args(&["--backup-threads", threads.to_string().as_ref()]);
+        }
+        if let Some(ref remote_storage) = self.conf.remote_storage {
+            cmd.args(&["--remote-storage", remote_storage]);
+        }
+
+        fill_aws_secrets_vars(&mut cmd);
 
         if !cmd.status()?.success() {
             bail!(
@@ -286,7 +294,7 @@ impl SafekeeperNode {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        peer_ids: Vec<ZNodeId>,
+        peer_ids: Vec<NodeId>,
     ) -> Result<()> {
         Ok(self
             .http_request(

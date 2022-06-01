@@ -1,6 +1,7 @@
 import pytest
+import concurrent.futures
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.zenith_fixtures import ZenithEnvBuilder, ZenithEnv
 from fixtures.log_helper import log
 import os
 
@@ -25,7 +26,7 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-                cur.execute("SHOW zenith.zenith_timeline")
+                cur.execute("SHOW neon.timeline_id")
                 timeline_id = cur.fetchone()[0]
         pg.stop()
         tenant_timelines.append((tenant_id, timeline_id, pg))
@@ -78,3 +79,37 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
         with pytest.raises(Exception, match="Cannot load local timeline") as err:
             pg.start()
         log.info(f'compute startup failed as expected: {err}')
+
+
+def test_create_multiple_timelines_parallel(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+
+    tenant_id, _ = env.zenith_cli.create_tenant()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(env.zenith_cli.create_timeline,
+                            f"test-create-multiple-timelines-{i}",
+                            tenant_id) for i in range(4)
+        ]
+        for future in futures:
+            future.result()
+
+
+def test_fix_broken_timelines_on_startup(zenith_simple_env: ZenithEnv):
+    env = zenith_simple_env
+
+    tenant_id, _ = env.zenith_cli.create_tenant()
+
+    # Introduce failpoint when creating a new timeline
+    env.pageserver.safe_psql(f"failpoints before-checkpoint-new-timeline=return")
+    with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
+        _ = env.zenith_cli.create_timeline("test_fix_broken_timelines", tenant_id)
+
+    # Restart the page server
+    env.zenith_cli.pageserver_stop(immediate=True)
+    env.zenith_cli.pageserver_start()
+
+    # Check that the "broken" timeline is not loaded
+    timelines = env.zenith_cli.list_timelines(tenant_id)
+    assert len(timelines) == 1

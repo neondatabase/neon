@@ -3,7 +3,7 @@
 GetPage@LSN can be called with older LSNs, and the page server needs
 to be able to reconstruct older page versions. That's needed for
 having read-only replicas that lag behind the primary, or that are
-"anchored" at an older LSN, and internally in the page server whne you
+"anchored" at an older LSN, and internally in the page server when you
 branch at an older point in time. How do you do that?
 
 For now, I'm not considering incremental snapshots at all. I don't
@@ -192,7 +192,7 @@ for a particular relation readily available alongside the snapshot
 files, and you don't need to track what snapshot LSNs exist
 separately.
 
-(If we wanted to minize the number of files, you could include the
+(If we wanted to minimize the number of files, you could include the
 snapshot @300 and the WAL between 200 and 300 in the same file, but I
 feel it's probably better to keep them separate)
 

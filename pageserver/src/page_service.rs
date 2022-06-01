@@ -7,7 +7,6 @@
 //     *status* -- show actual info about this pageserver,
 //     *pagestream* -- enter mode where smgr and pageserver talk with their
 //  custom protocol.
-//     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
 use anyhow::{bail, ensure, Context, Result};
@@ -38,7 +37,6 @@ use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::walreceiver;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
@@ -305,7 +303,29 @@ fn page_service_conn_main(
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
-    pgbackend.run(&mut conn_handler)
+    match pgbackend.run(&mut conn_handler) {
+        Ok(()) => {
+            // we've been requested to shut down
+            Ok(())
+        }
+        Err(err) => {
+            let root_cause_io_err_kind = err
+                .root_cause()
+                .downcast_ref::<io::Error>()
+                .map(|e| e.kind());
+
+            // `ConnectionReset` error happens when the Postgres client closes the connection.
+            // As this disconnection happens quite often and is expected,
+            // we decided to downgrade the logging level to `INFO`.
+            // See: https://github.com/neondatabase/neon/issues/1683.
+            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
+                info!("Postgres client disconnected");
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -593,7 +613,8 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+
+            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -611,7 +632,7 @@ impl PageServerHandler {
             return Ok(());
         }
         // auth is some, just checked above, when auth is some
-        // then claims are always present because of checks during connetion init
+        // then claims are always present because of checks during connection init
         // so this expect won't trigger
         let claims = self
             .claims
@@ -693,30 +714,6 @@ impl postgres_backend::Handler for PageServerHandler {
 
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("callmemaybe ") {
-            // callmemaybe <zenith tenantid as hex string> <zenith timelineid as hex string> <connstr>
-            // TODO lazy static
-            let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid callmemaybe: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let connstr = caps.get(3).unwrap().as_str().to_owned();
-
-            self.check_permission(Some(tenantid))?;
-
-            let _enter =
-                info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
-
-            // Check that the timeline exists
-            tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
-
-            walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
-
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

@@ -21,7 +21,7 @@
 //! Usage example:
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
-//!             -C 'postgresql://zenith_admin@localhost/postgres' \
+//!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres
 //! ```
@@ -116,17 +116,17 @@ fn main() -> Result<()> {
     let pageserver_connstr = spec
         .cluster
         .settings
-        .find("zenith.page_server_connstring")
+        .find("neon.pageserver_connstring")
         .expect("pageserver connstr should be provided");
     let tenant = spec
         .cluster
         .settings
-        .find("zenith.zenith_tenant")
+        .find("neon.tenant_id")
         .expect("tenant id should be provided");
     let timeline = spec
         .cluster
         .settings
-        .find("zenith.zenith_timeline")
+        .find("neon.timeline_id")
         .expect("tenant id should be provided");
 
     let compute_state = ComputeNode {

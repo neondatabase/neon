@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+from enum import Flag, auto
 import textwrap
 from cached_property import cached_property
 import asyncpg
@@ -74,7 +75,7 @@ def pytest_addoption(parser):
         "--skip-interfering-proc-check",
         dest="skip_interfering_proc_check",
         action="store_true",
-        help="skip check for interferring processes",
+        help="skip check for interfering processes",
     )
 
 
@@ -87,7 +88,7 @@ top_output_dir = ""
 
 def check_interferring_processes(config):
     if config.getoption("skip_interfering_proc_check"):
-        warnings.warn("interferring process check is skipped")
+        warnings.warn("interfering process check is skipped")
         return
 
     # does not use -c as it is not supported on macOS
@@ -106,7 +107,7 @@ def check_interferring_processes(config):
 def pytest_configure(config):
     """
     Ensure that no unwanted daemons are running before we start testing.
-    Check that we do not owerflow available ports range.
+    Check that we do not overflow available ports range.
     """
     check_interferring_processes(config)
 
@@ -337,18 +338,30 @@ class PgProtocol:
                     conn_options['server_settings'] = {key: val}
         return await asyncpg.connect(**conn_options)
 
-    def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
+    def safe_psql(self, query: str, **kwargs: Any) -> List[Tuple[Any, ...]]:
         """
         Execute query against the node and return all rows.
         This method passes all extra params to connstr.
         """
+        return self.safe_psql_many([query], **kwargs)[0]
 
+    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+        """
+        Execute queries against the node and return all rows.
+        This method passes all extra params to connstr.
+        """
+        result: List[List[Any]] = []
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
-                cur.execute(query)
-                if cur.description is None:
-                    return []  # query didn't return data
-                return cast(List[Any], cur.fetchall())
+                for query in queries:
+                    log.info(f"Executing query: {query}")
+                    cur.execute(query)
+
+                    if cur.description is None:
+                        result.append([])  # query didn't return data
+                    else:
+                        result.append(cast(List[Any], cur.fetchall()))
+        return result
 
 
 @dataclass
@@ -393,7 +406,10 @@ class MockS3Server:
     ):
         self.port = port
 
-        self.subprocess = subprocess.Popen([f'poetry run moto_server s3 -p{port}'], shell=True)
+        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
+        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
+        # if a process is started from the shell process.
+        self.subprocess = subprocess.Popen(['poetry', 'run', 'moto_server', 's3', f'-p{port}'])
         error = None
         try:
             return_code = self.subprocess.poll()
@@ -403,7 +419,7 @@ class MockS3Server:
             error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
         if error is not None:
             log.error(error)
-            self.subprocess.kill()
+            self.kill()
             raise RuntimeError("failed to start s3 mock server")
 
     def endpoint(self) -> str:
@@ -418,8 +434,49 @@ class MockS3Server:
     def secret_key(self) -> str:
         return 'test'
 
+    def access_env_vars(self) -> Dict[Any, Any]:
+        return {
+            'AWS_ACCESS_KEY_ID': self.access_key(),
+            'AWS_SECRET_ACCESS_KEY': self.secret_key(),
+        }
+
     def kill(self):
         self.subprocess.kill()
+
+
+@dataclass
+class LocalFsStorage:
+    local_path: Path
+
+
+@dataclass
+class S3Storage:
+    bucket_name: str
+    bucket_region: str
+    endpoint: Optional[str]
+
+
+RemoteStorage = Union[LocalFsStorage, S3Storage]
+
+
+# serialize as toml inline table
+def remote_storage_to_toml_inline_table(remote_storage):
+    if isinstance(remote_storage, LocalFsStorage):
+        res = f"local_path='{remote_storage.local_path}'"
+    elif isinstance(remote_storage, S3Storage):
+        res = f"bucket_name='{remote_storage.bucket_name}', bucket_region='{remote_storage.bucket_region}'"
+        if remote_storage.endpoint is not None:
+            res += f", endpoint='{remote_storage.endpoint}'"
+        else:
+            raise Exception(f'Unknown storage configuration {remote_storage}')
+    else:
+        raise Exception("invalid remote storage type")
+    return f"{{{res}}}"
+
+
+class RemoteStorageUsers(Flag):
+    PAGESERVER = auto()
+    SAFEKEEPER = auto()
 
 
 class ZenithEnvBuilder:
@@ -437,6 +494,7 @@ class ZenithEnvBuilder:
                  broker: Etcd,
                  mock_s3_server: MockS3Server,
                  remote_storage: Optional[RemoteStorage] = None,
+                 remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
                  pageserver_config_override: Optional[str] = None,
                  num_safekeepers: int = 1,
                  pageserver_auth_enabled: bool = False,
@@ -446,6 +504,7 @@ class ZenithEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
+        self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.mock_s3_server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
@@ -494,9 +553,9 @@ class ZenithEnvBuilder:
             aws_access_key_id=self.mock_s3_server.access_key(),
             aws_secret_access_key=self.mock_s3_server.secret_key(),
         ).create_bucket(Bucket=bucket_name)
-        self.remote_storage = S3Storage(bucket=bucket_name,
+        self.remote_storage = S3Storage(bucket_name=bucket_name,
                                         endpoint=mock_endpoint,
-                                        region=mock_region)
+                                        bucket_region=mock_region)
 
     def __enter__(self):
         return self
@@ -554,6 +613,7 @@ class ZenithEnv:
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
         self.remote_storage = config.remote_storage
+        self.remote_storage_users = config.remote_storage_users
 
         # generate initial tenant ID here instead of letting 'zenith init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -602,8 +662,12 @@ class ZenithEnv:
                 id = {id}
                 pg_port = {port.pg}
                 http_port = {port.http}
-                sync = false # Disable fsyncs to make the tests go faster
-            """)
+                sync = false # Disable fsyncs to make the tests go faster""")
+            if bool(self.remote_storage_users
+                    & RemoteStorageUsers.SAFEKEEPER) and self.remote_storage is not None:
+                toml += textwrap.dedent(f"""
+                remote_storage = "{remote_storage_to_toml_inline_table(self.remote_storage)}"
+                """)
             safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
@@ -635,7 +699,7 @@ def _shared_simple_env(request: Any,
                        mock_s3_server: MockS3Server,
                        default_broker: Etcd) -> Iterator[ZenithEnv]:
     """
-    Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
+   # Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
     is set, this is shared by all tests using `zenith_simple_env`.
     """
 
@@ -819,20 +883,6 @@ class PageserverPort:
     http: int
 
 
-@dataclass
-class LocalFsStorage:
-    root: Path
-
-
-@dataclass
-class S3Storage:
-    bucket: str
-    region: str
-    endpoint: Optional[str]
-
-
-RemoteStorage = Union[LocalFsStorage, S3Storage]
-
 CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
                                           re.MULTILINE)
 CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
@@ -995,6 +1045,7 @@ class ZenithCli:
             append_pageserver_param_overrides(
                 params_to_update=cmd,
                 remote_storage=self.env.remote_storage,
+                remote_storage_users=self.env.remote_storage_users,
                 pageserver_config_override=self.env.pageserver.config_override)
 
             res = self.raw_cli(cmd)
@@ -1019,14 +1070,10 @@ class ZenithCli:
         append_pageserver_param_overrides(
             params_to_update=start_args,
             remote_storage=self.env.remote_storage,
+            remote_storage_users=self.env.remote_storage_users,
             pageserver_config_override=self.env.pageserver.config_override)
 
-        s3_env_vars = None
-        if self.env.s3_mock_server:
-            s3_env_vars = {
-                'AWS_ACCESS_KEY_ID': self.env.s3_mock_server.access_key(),
-                'AWS_SECRET_ACCESS_KEY': self.env.s3_mock_server.secret_key(),
-            }
+        s3_env_vars = self.env.s3_mock_server.access_env_vars() if self.env.s3_mock_server else None
         return self.raw_cli(start_args, extra_env_vars=s3_env_vars)
 
     def pageserver_stop(self, immediate=False) -> 'subprocess.CompletedProcess[str]':
@@ -1038,7 +1085,8 @@ class ZenithCli:
         return self.raw_cli(cmd)
 
     def safekeeper_start(self, id: int) -> 'subprocess.CompletedProcess[str]':
-        return self.raw_cli(['safekeeper', 'start', str(id)])
+        s3_env_vars = self.env.s3_mock_server.access_env_vars() if self.env.s3_mock_server else None
+        return self.raw_cli(['safekeeper', 'start', str(id)], extra_env_vars=s3_env_vars)
 
     def safekeeper_stop(self,
                         id: Optional[int] = None,
@@ -1190,7 +1238,7 @@ class ZenithPageserver(PgProtocol):
     Initializes the repository via `zenith init`.
     """
     def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
-        super().__init__(host='localhost', port=port.pg, user='zenith_admin')
+        super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
         self.running = False
         self.service_port = port
@@ -1234,22 +1282,13 @@ class ZenithPageserver(PgProtocol):
 def append_pageserver_param_overrides(
     params_to_update: List[str],
     remote_storage: Optional[RemoteStorage],
+    remote_storage_users: RemoteStorageUsers,
     pageserver_config_override: Optional[str] = None,
 ):
-    if remote_storage is not None:
-        if isinstance(remote_storage, LocalFsStorage):
-            pageserver_storage_override = f"local_path='{remote_storage.root}'"
-        elif isinstance(remote_storage, S3Storage):
-            pageserver_storage_override = f"bucket_name='{remote_storage.bucket}',\
-                bucket_region='{remote_storage.region}'"
-
-            if remote_storage.endpoint is not None:
-                pageserver_storage_override += f",endpoint='{remote_storage.endpoint}'"
-
-        else:
-            raise Exception(f'Unknown storage configuration {remote_storage}')
+    if bool(remote_storage_users & RemoteStorageUsers.PAGESERVER) and remote_storage is not None:
+        remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
         params_to_update.append(
-            f'--pageserver-config-override=remote_storage={{{pageserver_storage_override}}}')
+            f'--pageserver-config-override=remote_storage={remote_storage_toml_table}')
 
     env_overrides = os.getenv('ZENITH_PAGESERVER_OVERRIDES')
     if env_overrides is not None:
@@ -1390,7 +1429,7 @@ class RemotePostgres(PgProtocol):
         raise Exception('cannot stop a remote Postgres instance')
 
     def get_subdir_size(self, subdir) -> int:
-        # TODO: Could use the server's Generic File Acccess functions if superuser.
+        # TODO: Could use the server's Generic File Access functions if superuser.
         # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
         raise Exception('cannot get size of a Postgres instance')
 
@@ -1468,7 +1507,7 @@ def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
-        super().__init__(host='localhost', port=port, user='zenith_admin', dbname='postgres')
+        super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
@@ -1561,14 +1600,12 @@ class Postgres(PgProtocol):
             for cfg_line in cfg_lines:
                 # walproposer uses different application_name
                 if ("synchronous_standby_names" in cfg_line or
-                        # don't ask pageserver to fetch WAL from compute
-                        "callmemaybe_connstring" in cfg_line or
                         # don't repeat safekeepers/wal_acceptors multiple times
-                        "wal_acceptors" in cfg_line):
+                        "safekeepers" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(safekeepers))
+            f.write("safekeepers = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -1783,8 +1820,9 @@ class Safekeeper:
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
     flush_lsn: str
-    remote_consistent_lsn: str
     timeline_start_lsn: str
+    backup_lsn: str
+    remote_consistent_lsn: str
 
 
 @dataclass
@@ -1809,8 +1847,9 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
                                         flush_lsn=resj['flush_lsn'],
-                                        remote_consistent_lsn=resj['remote_consistent_lsn'],
-                                        timeline_start_lsn=resj['timeline_start_lsn'])
+                                        timeline_start_lsn=resj['timeline_start_lsn'],
+                                        backup_lsn=resj['backup_lsn'],
+                                        remote_consistent_lsn=resj['remote_consistent_lsn'])
 
     def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
         res = self.post(
@@ -1890,7 +1929,11 @@ class Etcd:
                 f"--data-dir={self.datadir}",
                 f"--listen-client-urls={client_url}",
                 f"--advertise-client-urls={client_url}",
-                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}"
+                f"--listen-peer-urls=http://127.0.0.1:{self.peer_port}",
+                # Set --quota-backend-bytes to keep the etcd virtual memory
+                # size smaller. Our test etcd clusters are very small.
+                # See https://github.com/etcd-io/etcd/issues/7910
+                f"--quota-backend-bytes=100000000"
             ]
             self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
 
@@ -2006,7 +2049,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timeline_id")
             timeline = cur.fetchone()[0]
 
     # stop postgres to ensure that files won't change
@@ -2106,7 +2149,7 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
 
     if detail['remote'] is None:
         # No remote information at all. This happens right after creating
-        # a timeline, before any part of it it has been uploaded to remote
+        # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:
