@@ -26,6 +26,10 @@ pub struct ClientCredentials {
     // New console API requires SNI info to determine the cluster name.
     // Other Auth backends don't need it.
     pub sni_data: Option<String>,
+
+    // cluster_option is passed as argument from options from url.
+    // To be used to determine cluster name in case sni_data is missing.
+    pub project_option: Option<String>,
 }
 
 impl ClientCredentials {
@@ -37,10 +41,10 @@ impl ClientCredentials {
 
 #[derive(Debug, Error)]
 pub enum ProjectNameError {
-    #[error("SNI is missing, please upgrade the postgres client library")]
+    #[error("SNI info is missing. EITHER please upgrade the postgres client library OR pass the project name as a parameter: '..&options=project:<project name>..'.")]
     Missing,
 
-    #[error("SNI is malformed")]
+    #[error("SNI is malformed.")]
     Bad,
 }
 
@@ -49,10 +53,22 @@ impl UserFacingError for ProjectNameError {}
 impl ClientCredentials {
     /// Determine project name from SNI.
     pub fn project_name(&self) -> Result<&str, ProjectNameError> {
-        // Currently project name is passed as a top level domain
-        let sni = self.sni_data.as_ref().ok_or(ProjectNameError::Missing)?;
-        let (first, _) = sni.split_once('.').ok_or(ProjectNameError::Bad)?;
-        Ok(first)
+        let ret = match &self.sni_data {
+            //if sni_data exists, use it to determine project name
+            Some(sni_data) => {
+                sni_data
+                    .split_once('.')
+                    .ok_or(ProjectNameError::Bad)?
+                    .0
+            }
+            //otherwise use project_option if it was manually set thought ..&options=project:<name> parameter
+            None => self
+                .project_option
+                .as_ref()
+                .ok_or(ProjectNameError::Missing)?
+                .as_str(),
+        };
+        Ok(ret)
     }
 }
 
@@ -68,11 +84,17 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
 
         let user = get_param("user")?;
         let dbname = get_param("database")?;
+        let project = get_param("project");
+        let project_option = match project {
+            Ok(project) => Some(project),
+            Err(_) => None,
+        };
 
         Ok(Self {
             user,
             dbname,
             sni_data: None,
+            project_option,
         })
     }
 }
