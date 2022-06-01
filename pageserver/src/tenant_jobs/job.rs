@@ -24,7 +24,7 @@ pub enum JobError<J: Job> {
 }
 
 #[derive(Debug)]
-pub enum JobStatus<J: Job>
+enum JobStatus<J: Job>
 where
     J::ErrorType: Debug,
 {
@@ -48,7 +48,7 @@ where
     J::ErrorType: Debug,
 {
     /// Complete summary of current state
-    pub status: HashMap<J, JobStatus<J>>,
+    status: HashMap<J, JobStatus<J>>,
 
     /// Index over status for finding the next scheduled job
     queue: BinaryHeap<Deadline<J>>,
