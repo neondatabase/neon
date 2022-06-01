@@ -469,12 +469,9 @@ async fn timeline_wal_broker_loop_step(
             updates = broker_subscription.fetch_data() => match updates {
                 Some(mut all_timeline_updates) => {
                     if let Some(subscribed_timeline_updates) = all_timeline_updates.remove(&id) {
-                        match wal_connection_manager.select_connection_candidate(subscribed_timeline_updates) {
-                            Some(candidate) => {
-                                info!("Switching to different safekeeper {} for timeline {id}, reason: {:?}", candidate.safekeeper_id, candidate.reason);
-                                wal_connection_manager.change_connection(candidate.safekeeper_id, candidate.wal_producer_connstr).await;
-                            },
-                            None => {}
+                        if let Some(candidate) = wal_connection_manager.select_connection_candidate(subscribed_timeline_updates) {
+                            info!("Switching to different safekeeper {} for timeline {id}, reason: {:?}", candidate.safekeeper_id, candidate.reason);
+                            wal_connection_manager.change_connection(candidate.safekeeper_id, candidate.wal_producer_connstr).await;
                         }
                     }
                 },
