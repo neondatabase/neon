@@ -80,7 +80,7 @@ impl Conf {
             .arg(self.datadir.as_os_str())
             .args(&["-c", "wal_keep_size=50MB"]) // Ensure old WAL is not removed
             .args(&["-c", "logging_collector=on"]) // stderr will mess up with tests output
-            .args(&["-c", "shared_preload_libraries=zenith"]) // can only be loaded at startup
+            .args(&["-c", "shared_preload_libraries=neon"]) // can only be loaded at startup
             // Disable background processes as much as possible
             .args(&["-c", "wal_writer_delay=10s"])
             .args(&["-c", "autovacuum=off"])
@@ -178,7 +178,7 @@ fn generate_internal<C: postgres::GenericClient>(
     client: &mut C,
     f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
 ) -> Result<PgLsn> {
-    client.execute("create extension if not exists zenith_test_utils", &[])?;
+    client.execute("create extension if not exists neon_test_utils", &[])?;
 
     let wal_segment_size = client.query_one(
         "select cast(setting as bigint) as setting, unit \

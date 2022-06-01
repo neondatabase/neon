@@ -262,7 +262,30 @@ impl ComputeNode {
             .unwrap_or_else(|| "5432".to_string());
         wait_for_postgres(&mut pg, &port, pgdata_path)?;
 
-        let mut client = Client::connect(&self.connstr, NoTls)?;
+        // If connection fails,
+        // it may be the old node with `zenith_admin` superuser.
+        //
+        // In this case we need to connect with old `zenith_admin`name
+        // and create new user. We cannot simply rename connected user,
+        // but we can create a new one and grant it all privileges.
+        let mut client = match Client::connect(&self.connstr, NoTls) {
+            Err(e) => {
+                info!(
+                    "cannot connect to postgres: {}, retrying with `zenith_admin` username",
+                    e
+                );
+                let zenith_admin_connstr = self.connstr.replacen("cloud_admin", "zenith_admin", 1);
+
+                let mut client = Client::connect(&zenith_admin_connstr, NoTls)?;
+                client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
+                client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                drop(client);
+
+                // reconnect with connsting with expected name
+                Client::connect(&self.connstr, NoTls)?
+            }
+            Ok(client) => client,
+        };
 
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;

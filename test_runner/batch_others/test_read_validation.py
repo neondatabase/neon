@@ -8,7 +8,7 @@ from psycopg2.errors import IoError
 
 pytest_plugins = ("fixtures.zenith_fixtures")
 
-extensions = ["pageinspect", "zenith_test_utils", "pg_buffercache"]
+extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 
 
 #

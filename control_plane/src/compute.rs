@@ -148,9 +148,9 @@ impl PostgresNode {
         // Read a few options from the config file
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
-        let timeline_id: ZTimelineId = conf.parse_field("zenith.zenith_timeline", &context)?;
-        let tenant_id: ZTenantId = conf.parse_field("zenith.zenith_tenant", &context)?;
-        let uses_wal_proposer = conf.get("wal_acceptors").is_some();
+        let timeline_id: ZTimelineId = conf.parse_field("neon.timeline_id", &context)?;
+        let tenant_id: ZTenantId = conf.parse_field("neon.tenant_id", &context)?;
+        let uses_wal_proposer = conf.get("safekeepers").is_some();
 
         // parse recovery_target_lsn, if any
         let recovery_target_lsn: Option<Lsn> =
@@ -303,11 +303,11 @@ impl PostgresNode {
             // uses only needed variables namely host, port, user, password.
             format!("postgresql://no_user:{}@{}:{}", password, host, port)
         };
-        conf.append("shared_preload_libraries", "zenith");
+        conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
-        conf.append("zenith.page_server_connstring", &pageserver_connstr);
-        conf.append("zenith.zenith_tenant", &self.tenant_id.to_string());
-        conf.append("zenith.zenith_timeline", &self.timeline_id.to_string());
+        conf.append("neon.pageserver_connstring", &pageserver_connstr);
+        conf.append("neon.tenant_id", &self.tenant_id.to_string());
+        conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
             conf.append("recovery_target_lsn", &lsn.to_string());
         }
@@ -341,7 +341,7 @@ impl PostgresNode {
                 .map(|sk| format!("localhost:{}", sk.pg_port))
                 .collect::<Vec<String>>()
                 .join(",");
-            conf.append("wal_acceptors", &safekeepers);
+            conf.append("safekeepers", &safekeepers);
         } else {
             // We only use setup without safekeepers for tests,
             // and don't care about data durability on pageserver,
@@ -352,7 +352,6 @@ impl PostgresNode {
             // This isn't really a supported configuration, but can be useful for
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
-            conf.append("zenith.callmemaybe_connstring", &self.connstr());
         }
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
@@ -499,7 +498,7 @@ impl PostgresNode {
             "host={} port={} user={} dbname={}",
             self.address.ip(),
             self.address.port(),
-            "zenith_admin",
+            "cloud_admin",
             "postgres"
         )
     }

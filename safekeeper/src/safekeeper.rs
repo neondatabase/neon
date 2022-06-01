@@ -15,13 +15,10 @@ use std::fmt;
 use std::io::Read;
 use tracing::*;
 
-use lazy_static::lazy_static;
-
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use metrics::{register_gauge_vec, Gauge, GaugeVec};
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use utils::{
     bin_ser::LeSer,
@@ -180,7 +177,7 @@ pub struct SafeKeeperState {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfo,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
@@ -487,45 +484,16 @@ impl AcceptorProposerMessage {
     }
 }
 
-lazy_static! {
-    // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
-    // i64 is faster than f64, so update to u64 when available.
-    static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
-        "safekeeper_commit_lsn",
-        "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("Failed to register safekeeper_commit_lsn gauge vec");
-}
-
-struct SafeKeeperMetrics {
-    commit_lsn: Gauge,
-    // WAL-related metrics are in WalStorageMetrics
-}
-
-impl SafeKeeperMetrics {
-    fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-        Self {
-            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
-        }
-    }
-}
-
 /// SafeKeeper which consumes events (messages from compute) and provides
 /// replies.
 pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
-    // Cached metrics so we don't have to recompute labels on each update.
-    metrics: SafeKeeperMetrics,
-
     /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
     /// Note: be careful to set only if we are sure our WAL (term history) matches
     /// committed one.
     pub global_commit_lsn: Lsn,
     /// LSN since the proposer safekeeper currently talking to appends WAL;
     /// determines epoch switch point.
-    epoch_start_lsn: Lsn,
+    pub epoch_start_lsn: Lsn,
 
     pub inmem: SafekeeperMemState, // in memory part
     pub state: CTRL,               // persistent state storage
@@ -555,7 +523,6 @@ where
         wal_store.init_storage(&state)?;
 
         Ok(SafeKeeper {
-            metrics: SafeKeeperMetrics::new(state.tenant_id, ztli),
             global_commit_lsn: state.commit_lsn,
             epoch_start_lsn: Lsn(0),
             inmem: SafekeeperMemState {
@@ -757,9 +724,8 @@ where
             // upgrade.
             self.global_commit_lsn = max(self.global_commit_lsn, state.timeline_start_lsn);
             self.inmem.commit_lsn = max(self.inmem.commit_lsn, state.timeline_start_lsn);
-            self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
-            // Initalizing backup_lsn is useful to avoid making backup think it should upload 0 segment.
+            // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
@@ -777,7 +743,6 @@ where
         assert!(commit_lsn >= self.inmem.commit_lsn);
 
         self.inmem.commit_lsn = commit_lsn;
-        self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
         // If new commit_lsn reached epoch switch, force sync of control
         // file: walproposer in sync mode is very interested when this

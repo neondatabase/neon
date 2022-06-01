@@ -92,7 +92,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
                     # if we recovered after failure verify that we have correct number of rows
                     log.info("recovering at %s", inserted_ctr)
                     cur.execute("SELECT count(*) FROM load")
-                    # it seems that sometimes transaction gets commited before we can acknowledge
+                    # it seems that sometimes transaction gets committed before we can acknowledge
                     # the result, so sometimes selected value is larger by one than we expect
                     assert cur.fetchone()[0] - inserted_ctr <= 1
                     log.info("successfully recovered %s", inserted_ctr)
@@ -130,7 +130,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     with closing(tenant_pg.connect()) as conn:
         with conn.cursor() as cur:
             # save timeline for later gc call
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timeline_id")
             timeline = UUID(cur.fetchone()[0])
             log.info("timeline to relocate %s", timeline.hex)
 
@@ -223,7 +223,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         tenant_pg_config_file_path = pathlib.Path(tenant_pg.config_file_path())
         tenant_pg_config_file_path.open('a').write(
-            f"\nzenith.page_server_connstring = 'postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
+            f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
         )
 
         tenant_pg.start()

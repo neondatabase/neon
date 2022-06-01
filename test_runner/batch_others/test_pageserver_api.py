@@ -63,10 +63,11 @@ def test_pageserver_http_get_wal_receiver_not_found(zenith_simple_env: ZenithEnv
 
     tenant_id, timeline_id = env.zenith_cli.create_tenant()
 
-    # no PG compute node is running, so no WAL receiver is running
-    with pytest.raises(ZenithPageserverApiException) as e:
-        _ = client.wal_receiver_get(tenant_id, timeline_id)
-        assert "Not Found" in str(e.value)
+    empty_response = client.wal_receiver_get(tenant_id, timeline_id)
+
+    assert empty_response.get('wal_producer_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert empty_response.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert empty_response.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
 
 
 def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
@@ -81,7 +82,6 @@ def test_pageserver_http_get_wal_receiver_success(zenith_simple_env: ZenithEnv):
 
         # a successful `wal_receiver_get` response must contain the below fields
         assert list(res.keys()) == [
-            "thread_id",
             "wal_producer_connstr",
             "last_received_msg_lsn",
             "last_received_msg_ts",

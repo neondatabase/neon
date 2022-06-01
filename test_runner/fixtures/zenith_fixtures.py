@@ -75,7 +75,7 @@ def pytest_addoption(parser):
         "--skip-interfering-proc-check",
         dest="skip_interfering_proc_check",
         action="store_true",
-        help="skip check for interferring processes",
+        help="skip check for interfering processes",
     )
 
 
@@ -88,7 +88,7 @@ top_output_dir = ""
 
 def check_interferring_processes(config):
     if config.getoption("skip_interfering_proc_check"):
-        warnings.warn("interferring process check is skipped")
+        warnings.warn("interfering process check is skipped")
         return
 
     # does not use -c as it is not supported on macOS
@@ -107,7 +107,7 @@ def check_interferring_processes(config):
 def pytest_configure(config):
     """
     Ensure that no unwanted daemons are running before we start testing.
-    Check that we do not owerflow available ports range.
+    Check that we do not overflow available ports range.
     """
     check_interferring_processes(config)
 
@@ -338,18 +338,30 @@ class PgProtocol:
                     conn_options['server_settings'] = {key: val}
         return await asyncpg.connect(**conn_options)
 
-    def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
+    def safe_psql(self, query: str, **kwargs: Any) -> List[Tuple[Any, ...]]:
         """
         Execute query against the node and return all rows.
         This method passes all extra params to connstr.
         """
+        return self.safe_psql_many([query], **kwargs)[0]
 
+    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+        """
+        Execute queries against the node and return all rows.
+        This method passes all extra params to connstr.
+        """
+        result: List[List[Any]] = []
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
-                cur.execute(query)
-                if cur.description is None:
-                    return []  # query didn't return data
-                return cast(List[Any], cur.fetchall())
+                for query in queries:
+                    log.info(f"Executing query: {query}")
+                    cur.execute(query)
+
+                    if cur.description is None:
+                        result.append([])  # query didn't return data
+                    else:
+                        result.append(cast(List[Any], cur.fetchall()))
+        return result
 
 
 @dataclass
@@ -1226,7 +1238,7 @@ class ZenithPageserver(PgProtocol):
     Initializes the repository via `zenith init`.
     """
     def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
-        super().__init__(host='localhost', port=port.pg, user='zenith_admin')
+        super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
         self.running = False
         self.service_port = port
@@ -1417,7 +1429,7 @@ class RemotePostgres(PgProtocol):
         raise Exception('cannot stop a remote Postgres instance')
 
     def get_subdir_size(self, subdir) -> int:
-        # TODO: Could use the server's Generic File Acccess functions if superuser.
+        # TODO: Could use the server's Generic File Access functions if superuser.
         # See https://www.postgresql.org/docs/14/functions-admin.html#FUNCTIONS-ADMIN-GENFILE
         raise Exception('cannot get size of a Postgres instance')
 
@@ -1495,7 +1507,7 @@ def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
-        super().__init__(host='localhost', port=port, user='zenith_admin', dbname='postgres')
+        super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
@@ -1588,14 +1600,12 @@ class Postgres(PgProtocol):
             for cfg_line in cfg_lines:
                 # walproposer uses different application_name
                 if ("synchronous_standby_names" in cfg_line or
-                        # don't ask pageserver to fetch WAL from compute
-                        "callmemaybe_connstring" in cfg_line or
                         # don't repeat safekeepers/wal_acceptors multiple times
-                        "wal_acceptors" in cfg_line):
+                        "safekeepers" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(safekeepers))
+            f.write("safekeepers = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -2039,7 +2049,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timeline_id")
             timeline = cur.fetchone()[0]
 
     # stop postgres to ensure that files won't change
@@ -2139,7 +2149,7 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
 
     if detail['remote'] is None:
         # No remote information at all. This happens right after creating
-        # a timeline, before any part of it it has been uploaded to remote
+        # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:

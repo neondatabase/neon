@@ -229,23 +229,16 @@ async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Bod
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    let wal_receiver_entry = crate::walreceiver::get_wal_receiver_entry(tenant_id, timeline_id)
+        .instrument(info_span!("wal_receiver_get", tenant = %tenant_id, timeline = %timeline_id))
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "WAL receiver data not found for tenant {tenant_id} and timeline {timeline_id}"
+            ))
+        })?;
 
-    let wal_receiver = tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("wal_receiver_get", tenant = %tenant_id, timeline = %timeline_id).entered();
-
-        crate::walreceiver::get_wal_receiver_entry(tenant_id, timeline_id)
-    })
-    .await
-    .map_err(ApiError::from_err)?
-    .ok_or_else(|| {
-        ApiError::NotFound(format!(
-            "WAL receiver not found for tenant {} and timeline {}",
-            tenant_id, timeline_id
-        ))
-    })?;
-
-    json_response(StatusCode::OK, wal_receiver)
+    json_response(StatusCode::OK, &wal_receiver_entry)
 }
 
 async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -402,6 +395,19 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
             Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
     }
 
+    if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
+        tenant_conf.walreceiver_connect_timeout = Some(
+            humantime::parse_duration(&walreceiver_connect_timeout).map_err(ApiError::from_err)?,
+        );
+    }
+    if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
+        tenant_conf.lagging_wal_timeout =
+            Some(humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_err)?);
+    }
+    if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
+        tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+    }
+
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
@@ -448,6 +454,18 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     if let Some(pitr_interval) = request_data.pitr_interval {
         tenant_conf.pitr_interval =
             Some(humantime::parse_duration(&pitr_interval).map_err(ApiError::from_err)?);
+    }
+    if let Some(walreceiver_connect_timeout) = request_data.walreceiver_connect_timeout {
+        tenant_conf.walreceiver_connect_timeout = Some(
+            humantime::parse_duration(&walreceiver_connect_timeout).map_err(ApiError::from_err)?,
+        );
+    }
+    if let Some(lagging_wal_timeout) = request_data.lagging_wal_timeout {
+        tenant_conf.lagging_wal_timeout =
+            Some(humantime::parse_duration(&lagging_wal_timeout).map_err(ApiError::from_err)?);
+    }
+    if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
+        tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;

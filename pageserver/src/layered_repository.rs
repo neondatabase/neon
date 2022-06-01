@@ -25,6 +25,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
@@ -557,6 +558,27 @@ impl LayeredRepository {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
+    pub fn get_wal_receiver_connect_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout)
+    }
+
+    pub fn get_lagging_wal_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout)
+    }
+
+    pub fn get_max_lsn_wal_lag(&self) -> NonZeroU64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
+    }
+
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {
         let mut tenant_conf = self.tenant_conf.write().unwrap();
 
@@ -823,7 +845,7 @@ impl LayeredRepository {
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
-            // This is unresolved question for now, how to do gc in presense of remote timelines
+            // This is unresolved question for now, how to do gc in presence of remote timelines
             // especially when this is combined with branching.
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
@@ -1831,7 +1853,7 @@ impl LayeredTimeline {
         // collect any page versions that are no longer needed because
         // of the new image layers we created in step 2.
         //
-        // TODO: This hight level strategy hasn't been implemented yet.
+        // TODO: This high level strategy hasn't been implemented yet.
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
@@ -2268,7 +2290,7 @@ impl LayeredTimeline {
             }
 
             // 3. Is it needed by a child branch?
-            // NOTE With that wee would keep data that
+            // NOTE With that we would keep data that
             // might be referenced by child branches forever.
             // We can track this in child timeline GC and delete parent layers when
             // they are no longer needed. This might be complicated with long inheritance chains.

@@ -5,6 +5,11 @@ Neon is a serverless open source alternative to AWS Aurora Postgres. It separate
 The project used to be called "Zenith". Many of the commands and code comments
 still refer to "zenith", but we are in the process of renaming things.
 
+## Quick start
+[Join the waitlist](https://neon.tech/) for our free tier to receive your serverless postgres instance. Then connect to it with your preferred postgres client (psql, dbeaver, etc) or use the online SQL editor.
+
+Alternatively, compile and run the project [locally](#running-local-installation).
+
 ## Architecture overview
 
 A Neon installation consists of compute nodes and Neon storage engine.
@@ -24,13 +29,18 @@ Pageserver consists of:
 ## Running local installation
 
 
-#### building on Ubuntu/ Debian (Linux)
+#### building on Linux
 1. Install build dependencies and other useful packages
 
-On Ubuntu or Debian this set of packages should be sufficient to build the code:
-```text
+* On Ubuntu or Debian this set of packages should be sufficient to build the code:
+```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
+libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
+```
+* On Fedora these packages are needed:
+```bash
+dnf install flex bison readline-devel zlib-devel openssl-devel \
+  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -39,16 +49,11 @@ libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-3. Install PostgreSQL Client
-```
-apt install postgresql-client
-```
-
-4. Build neon and patched postgres
+3. Build neon and patched postgres
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
-make -j5
+make -j`nproc`
 ```
 
 #### building on OSX (12.3.1)
@@ -108,7 +113,7 @@ Safekeeper started
 > ./target/debug/neon_local pg start main
 Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
-Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
+Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
 # check list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -118,7 +123,7 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=po
 
 2. Now it is possible to connect to postgres and run some queries:
 ```text
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
 postgres=# insert into t values(1,1);
@@ -145,7 +150,7 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 > ./target/debug/neon_local pg start migration_check --branch-name migration_check
 Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
 Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
-Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=postgres'
+Starting postgres node at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
 
 # check the new list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -155,7 +160,7 @@ Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=po
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
-> psql -p55433 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55433 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -166,7 +171,7 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 
 # check that the new change doesn't affect the 'main' postgres
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
