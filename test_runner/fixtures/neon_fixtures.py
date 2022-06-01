@@ -500,7 +500,7 @@ class NeonEnvBuilder:
             num_safekeepers: int = 1,
             # Use non-standard SK ids to check for various parsing bugs
             safekeepers_id_start: int = 0,
-            pageserver_auth_enabled: bool = False,
+            auth_enabled: bool = False,
             rust_log_override: Optional[str] = None,
             default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
@@ -513,7 +513,7 @@ class NeonEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
-        self.pageserver_auth_enabled = pageserver_auth_enabled
+        self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
 
@@ -639,7 +639,7 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "ZenithJWT" if config.pageserver_auth_enabled else "Trust"
+        pageserver_auth_type = "ZenithJWT" if config.auth_enabled else "Trust"
 
         toml += textwrap.dedent(f"""
             [pageserver]

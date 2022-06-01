@@ -10,7 +10,7 @@ from fixtures.log_helper import log
 #
 @pytest.mark.parametrize('with_safekeepers', [False, True])
 def test_restart_compute(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
-    neon_env_builder.pageserver_auth_enabled = True
+    neon_env_builder.auth_enabled = True
     if with_safekeepers:
         neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
