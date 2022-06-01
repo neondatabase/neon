@@ -16,6 +16,7 @@ from fixtures.neon_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Sa
 from fixtures.utils import get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
+from uuid import uuid4
 
 
 @dataclass
@@ -349,10 +350,12 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
-def test_wal_removal(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize('auth_enabled', [False, True])
+def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.num_safekeepers = 2
     # to advance remote_consistent_llsn
     neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch('test_safekeepers_wal_removal')
@@ -369,7 +372,10 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder):
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
     # force checkpoint to advance remote_consistent_lsn
-    with closing(env.pageserver.connect()) as psconn:
+    pageserver_conn_options = {}
+    if auth_enabled:
+        pageserver_conn_options['password'] = env.auth_keys.generate_tenant_token(tenant_id)
+    with closing(env.pageserver.connect(**pageserver_conn_options)) as psconn:
         with psconn.cursor() as pscur:
             pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
 
@@ -380,9 +386,29 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder):
     ]
     assert all(os.path.exists(p) for p in first_segments)
 
-    http_cli = env.safekeepers[0].http_client()
+    if not auth_enabled:
+        http_cli = env.safekeepers[0].http_client()
+    else:
+        http_cli = env.safekeepers[0].http_client(
+            auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+        http_cli_other = env.safekeepers[0].http_client(
+            auth_token=env.auth_keys.generate_tenant_token(uuid4().hex))
+        http_cli_noauth = env.safekeepers[0].http_client()
+
     # Pretend WAL is offloaded to s3.
+    if auth_enabled:
+        old_backup_lsn = http_cli.timeline_status(tenant_id=tenant_id,
+                                                  timeline_id=timeline_id).backup_lsn
+        assert 'FFFFFFFF/FEFFFFFF' != old_backup_lsn
+        for cli in [http_cli_other, http_cli_noauth]:
+            with pytest.raises(cli.HTTPError, match='Forbidden|Unauthorized'):
+                cli.record_safekeeper_info(tenant_id,
+                                           timeline_id, {'backup_lsn': 'FFFFFFFF/FEFFFFFF'})
+        assert old_backup_lsn == http_cli.timeline_status(tenant_id=tenant_id,
+                                                          timeline_id=timeline_id).backup_lsn
     http_cli.record_safekeeper_info(tenant_id, timeline_id, {'backup_lsn': 'FFFFFFFF/FEFFFFFF'})
+    assert 'FFFFFFFF/FEFFFFFF' == http_cli.timeline_status(tenant_id=tenant_id,
+                                                           timeline_id=timeline_id).backup_lsn
 
     # wait till first segment is removed on all safekeepers
     started_at = time.time()
@@ -596,24 +622,41 @@ def test_sync_safekeepers(neon_env_builder: NeonEnvBuilder,
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
 
 
-def test_timeline_status(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize('auth_enabled', [False, True])
+def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
+    neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch('test_timeline_status')
     pg = env.postgres.create_start('test_timeline_status')
 
     wa = env.safekeepers[0]
-    wa_http_cli = wa.http_client()
-    wa_http_cli.check_status()
 
     # learn neon timeline from compute
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
+    if not auth_enabled:
+        wa_http_cli = wa.http_client()
+        wa_http_cli.check_status()
+    else:
+        wa_http_cli = wa.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+        wa_http_cli.check_status()
+        wa_http_cli_bad = wa.http_client(
+            auth_token=env.auth_keys.generate_tenant_token(uuid4().hex))
+        wa_http_cli_bad.check_status()
+        wa_http_cli_noauth = wa.http_client()
+        wa_http_cli_noauth.check_status()
+
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
     epoch = tli_status.acceptor_epoch
     timeline_start_lsn = tli_status.timeline_start_lsn
+
+    if auth_enabled:
+        for cli in [wa_http_cli_bad, wa_http_cli_noauth]:
+            with pytest.raises(cli.HTTPError, match='Forbidden|Unauthorized'):
+                cli.timeline_status(tenant_id, timeline_id)
 
     pg.safe_psql("create table t(i int)")
 
@@ -894,8 +937,10 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     assert wal_size_after_checkpoint < 16 * 2.5
 
 
-def test_delete_force(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize('auth_enabled', [False, True])
+def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.num_safekeepers = 1
+    neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 
     # Create two tenants: one will be deleted, other should be preserved.
@@ -921,7 +966,14 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder):
                 cur.execute('CREATE TABLE t(key int primary key)')
     sk = env.safekeepers[0]
     sk_data_dir = Path(sk.data_dir())
-    sk_http = sk.http_client()
+    if not auth_enabled:
+        sk_http = sk.http_client()
+        sk_http_other = sk_http
+    else:
+        sk_http = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+        sk_http_other = sk.http_client(
+            auth_token=env.auth_keys.generate_tenant_token(tenant_id_other))
+        sk_http_noauth = sk.http_client()
     assert (sk_data_dir / tenant_id / timeline_id_1).is_dir()
     assert (sk_data_dir / tenant_id / timeline_id_2).is_dir()
     assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
@@ -960,6 +1012,15 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder):
     assert (sk_data_dir / tenant_id / timeline_id_3).is_dir()
     assert (sk_data_dir / tenant_id / timeline_id_4).is_dir()
     assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
+
+    if auth_enabled:
+        # Ensure we cannot delete the other tenant
+        for sk_h in [sk_http, sk_http_noauth]:
+            with pytest.raises(sk_h.HTTPError, match='Forbidden|Unauthorized'):
+                assert sk_h.timeline_delete_force(tenant_id_other, timeline_id_other)
+            with pytest.raises(sk_h.HTTPError, match='Forbidden|Unauthorized'):
+                assert sk_h.tenant_delete_force(tenant_id_other)
+        assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
 
     # Remove initial tenant's br2 (inactive)
     assert sk_http.timeline_delete_force(tenant_id, timeline_id_2) == {
@@ -1001,7 +1062,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder):
     assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
 
     # Ensure the other tenant still works
-    sk_http.timeline_status(tenant_id_other, timeline_id_other)
+    sk_http_other.timeline_status(tenant_id_other, timeline_id_other)
     with closing(pg_other.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute('INSERT INTO t (key) VALUES (123)')
