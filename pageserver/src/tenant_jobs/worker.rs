@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested}};
+use crate::thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested};
 
 use super::job::{Job, JobStatusTable};
 
