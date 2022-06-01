@@ -7,7 +7,7 @@ use crate::{
 use once_cell::sync::OnceCell;
 use utils::zid::ZTenantId;
 
-use super::worker::{Job, Pool};
+use super::{job::Job, worker::Pool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GcJob {

@@ -6,7 +6,7 @@ use utils::zid::ZTenantId;
 
 use crate::tenant_mgr::{self, TenantState};
 
-use super::worker::{Job, Pool};
+use super::{job::Job, worker::Pool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CompactionJob {

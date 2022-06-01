@@ -1,18 +1,15 @@
 use lazy_static::lazy_static;
 use metrics::{register_gauge_vec, GaugeVec};
 use std::{
-    any::Any,
-    collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    hash::Hash,
     panic::{self, AssertUnwindSafe},
     sync::{Arc, Condvar, Mutex},
     time::Instant,
 };
 
-use crate::thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested};
+use crate::{tenant_jobs::job::JobError, thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested}};
 
-use super::deadline::Deadline;
+use super::job::{Job, JobStatus, JobStatusTable};
 
 lazy_static! {
     static ref POOL_UTILIZATION_GAUGE: GaugeVec = register_gauge_vec!(
@@ -21,67 +18,6 @@ lazy_static! {
         &["pool_name"]
     )
     .expect("Failed to register safekeeper_commit_lsn gauge vec");
-}
-
-pub trait Job: std::fmt::Debug + Send + Clone + PartialOrd + Ord + Hash + 'static {
-    type ErrorType;
-    fn run(&self) -> Result<Option<Instant>, Self::ErrorType>;
-}
-
-#[derive(Debug)]
-enum JobError<J: Job> {
-    Panic(Box<dyn Any + Send>),
-    Error(J::ErrorType),
-}
-
-#[derive(Debug)]
-enum JobStatus<J: Job>
-where
-    J::ErrorType: Debug,
-{
-    Ready {
-        #[allow(dead_code)]
-        scheduled_for: Instant,
-    },
-    Running {
-        #[allow(dead_code)]
-        worker_name: String,
-
-        #[allow(dead_code)]
-        started_at: Instant,
-    },
-    Stuck(JobError<J>),
-}
-
-#[derive(Debug, Default)]
-struct JobStatusTable<J: Job>
-where
-    J::ErrorType: Debug,
-{
-    /// Complete summary of current state
-    status: HashMap<J, JobStatus<J>>,
-
-    /// Index over status for finding the next scheduled job
-    queue: BinaryHeap<Deadline<J>>,
-}
-
-impl<J: Job> JobStatusTable<J>
-where
-    J::ErrorType: Debug,
-{
-    fn pop_due(&mut self) -> Option<Deadline<J>> {
-        if let Some(deadline) = self.queue.peek() {
-            if Instant::now() > deadline.start_by {
-                return self.queue.pop();
-            }
-        }
-        None
-    }
-
-    fn set_status(&mut self, job: &J, status: JobStatus<J>) {
-        let s = self.status.get_mut(job).expect("status not found");
-        *s = status;
-    }
 }
 
 #[derive(Debug)]
@@ -108,10 +44,7 @@ where
 {
     pub fn new() -> Self {
         Pool {
-            job_table: Mutex::new(JobStatusTable::<J> {
-                status: HashMap::<J, JobStatus<J>>::new(),
-                queue: BinaryHeap::<Deadline<J>>::new(),
-            }),
+            job_table: Mutex::new(JobStatusTable::<J>::new()),
             condvar: get_shutdown_aware_condvar(),
         }
     }
@@ -119,61 +52,43 @@ where
     pub fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
         let mut job_table = self.job_table.lock().unwrap();
         while !is_shutdown_requested() {
-            if let Some(job) = job_table.pop_due() {
-                job_table.set_status(
-                    &job,
-                    JobStatus::Running {
-                        worker_name: worker_name.clone(),
-                        started_at: Instant::now(),
-                    },
-                );
+            match job_table.take_job(worker_name.clone()) {
+                super::job::TakeResult::Assigned(job) => {
+                    // Run job without holding lock
+                    drop(job_table);
+                    POOL_UTILIZATION_GAUGE
+                        .with_label_values(&["todo_put_pool_name_here"])
+                        .inc();
+                    let result = panic::catch_unwind(AssertUnwindSafe(|| job.run()));
+                    POOL_UTILIZATION_GAUGE
+                        .with_label_values(&["todo_put_pool_name_here"])
+                        .dec();
+                    job_table = self.job_table.lock().unwrap();
 
-                // Run job without holding lock
-                drop(job_table);
-                POOL_UTILIZATION_GAUGE
-                    .with_label_values(&["todo_put_pool_name_here"])
-                    .inc();
-                let result = panic::catch_unwind(AssertUnwindSafe(|| job.run()));
-                POOL_UTILIZATION_GAUGE
-                    .with_label_values(&["todo_put_pool_name_here"])
-                    .dec();
-                job_table = self.job_table.lock().unwrap();
-
-                // Update job status
-                match result {
-                    Ok(Ok(Some(reschedule_for))) => {
-                        job_table.set_status(
-                            &job,
-                            JobStatus::Ready {
-                                scheduled_for: reschedule_for,
-                            },
-                        );
-                        job_table.queue.push(Deadline {
-                            start_by: reschedule_for,
-                            inner: job.clone(),
-                        });
-                    }
-                    Ok(Ok(None)) => {
-                        job_table.status.remove(&job);
-                    }
-                    Ok(Err(e)) => {
-                        job_table.set_status(&job, JobStatus::Stuck(JobError::Error(e)));
-                        println!("Job errored, thread is ok.");
-                    }
-                    Err(e) => {
-                        job_table.set_status(&job, JobStatus::Stuck(JobError::Panic(e)));
-                        println!("Job panicked, thread is ok.");
+                    // Update job status
+                    match result {
+                        Ok(Ok(Some(reschedule_for))) => {
+                            job_table.reschedule(&job, reschedule_for);
+                        }
+                        Ok(Ok(None)) => {
+                            job_table.status.remove(&job);
+                        }
+                        Ok(Err(e)) => {
+                            job_table.set_status(&job, JobStatus::Stuck(JobError::Error(e)));
+                            println!("Job errored, thread is ok.");
+                        }
+                        Err(e) => {
+                            job_table.set_status(&job, JobStatus::Stuck(JobError::Panic(e)));
+                            println!("Job panicked, thread is ok.");
+                        }
                     }
                 }
-            } else {
-                match job_table.queue.peek() {
-                    Some(deadline) => {
-                        let wait_time = deadline.start_by.duration_since(Instant::now());
-                        job_table = self.condvar.wait_timeout(job_table, wait_time).unwrap().0;
-                    }
-                    None => {
-                        job_table = self.condvar.wait(job_table).unwrap();
-                    }
+                super::job::TakeResult::WaitUntil(time) => {
+                    let wait_time = time.duration_since(Instant::now());
+                    job_table = self.condvar.wait_timeout(job_table, wait_time).unwrap().0;
+                }
+                super::job::TakeResult::WaitForJobs => {
+                    job_table = self.condvar.wait(job_table).unwrap();
                 }
             }
         }
@@ -183,15 +98,7 @@ where
 
     pub fn queue_job(&self, job: J) {
         let mut job_table = self.job_table.lock().unwrap();
-        let scheduled_for = Instant::now();
-        job_table
-            .status
-            .insert(job.clone(), JobStatus::Ready { scheduled_for });
-        job_table.queue.push(Deadline {
-            start_by: scheduled_for,
-            inner: job,
-        });
-
+        job_table.schedule(job);
         self.condvar.notify_all();
     }
 }
