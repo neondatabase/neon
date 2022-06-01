@@ -667,6 +667,10 @@ class NeonEnv:
                 pg_port = {port.pg}
                 http_port = {port.http}
                 sync = false # Disable fsyncs to make the tests go faster""")
+            if config.auth_enabled:
+                toml += textwrap.dedent(f"""
+                auth_enabled = true
+                """)
             if bool(self.remote_storage_users
                     & RemoteStorageUsers.SAFEKEEPER) and self.remote_storage is not None:
                 toml += textwrap.dedent(f"""
@@ -1757,7 +1761,6 @@ class Safekeeper:
     env: NeonEnv
     port: SafekeeperPort
     id: int
-    auth_token: Optional[str] = None
     running: bool = False
 
     def start(self) -> 'Safekeeper':
@@ -1813,8 +1816,8 @@ class Safekeeper:
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self) -> SafekeeperHttpClient:
-        return SafekeeperHttpClient(port=self.port.http)
+    def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
+        return SafekeeperHttpClient(port=self.port.http, auth_token=auth_token)
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
@@ -1838,9 +1841,15 @@ class SafekeeperMetrics:
 
 
 class SafekeeperHttpClient(requests.Session):
-    def __init__(self, port: int):
+    HTTPError = requests.HTTPError
+
+    def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
+        self.auth_token = auth_token
+
+        if auth_token is not None:
+            self.headers['Authorization'] = f'Bearer {auth_token}'
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
