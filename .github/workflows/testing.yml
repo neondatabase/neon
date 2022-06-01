@@ -12,7 +12,7 @@ jobs:
       matrix:
         # If we want to duplicate this job for different
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
-        rust_toolchain: [stable]
+        rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
     timeout-minutes: 30
     name: run regression test suite
@@ -87,7 +87,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
 
       - name: Run cargo clippy
         run: ./run_clippy.sh
