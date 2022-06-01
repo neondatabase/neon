@@ -98,7 +98,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {
-            return Err(AuthErrorImpl::auth_failed("method not supported").into());
+            return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
         let secret = self.state.0;
