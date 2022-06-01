@@ -57,7 +57,7 @@
       args:
         creates: "/storage/pageserver/data/tenants"
       environment:
-        ZENITH_REPO_DIR: "/storage/pageserver/data"
+        NEON_REPO_DIR: "/storage/pageserver/data"
         LD_LIBRARY_PATH: "/usr/local/lib"
       become: true
       tags:
@@ -131,7 +131,7 @@
       args:
         creates: "/storage/safekeeper/data/safekeeper.id"
       environment:
-        ZENITH_REPO_DIR: "/storage/safekeeper/data"
+        NEON_REPO_DIR: "/storage/safekeeper/data"
         LD_LIBRARY_PATH: "/usr/local/lib"
       become: true
       tags:

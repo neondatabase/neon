@@ -123,7 +123,7 @@ The files are called "layer files". Each layer file covers a range of keys, and
 a range of LSNs (or a single LSN, in case of image layers). You can think of it
 as a rectangle in the two-dimensional key-LSN space. The layer files for each
 timeline are stored in the timeline's subdirectory under
-`.zenith/tenants/<tenantid>/timelines`.
+`.neon/tenants/<tenantid>/timelines`.
 
 There are two kind of layer files: images, and delta layers. An image file
 contains a snapshot of all keys at a particular LSN, whereas a delta file
@@ -178,7 +178,7 @@ version, and how branching and GC works is still valid.
 The full path of a delta file looks like this:
 
 ```
-    .zenith/tenants/941ddc8604413b88b3d208bddf90396c/timelines/4af489b06af8eed9e27a841775616962/rel_1663_13990_2609_0_10_000000000169C348_0000000001702000
+    .neon/tenants/941ddc8604413b88b3d208bddf90396c/timelines/4af489b06af8eed9e27a841775616962/rel_1663_13990_2609_0_10_000000000169C348_0000000001702000
 ```
 
 For simplicity, the examples below use a simplified notation for the

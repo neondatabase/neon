@@ -93,7 +93,7 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 #### running neon database
 1. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
-# Create repository in .zenith with proper paths to binaries and data
+# Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
 initializing tenantid 9ef87a5bf0d92544f6fafeeb3239695c
@@ -103,16 +103,16 @@ pageserver init succeeded
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting pageserver at '127.0.0.1:64000' in '.zenith'
+Starting pageserver at '127.0.0.1:64000' in '.neon'
 Pageserver started
 initializing for sk 1 for 7676
-Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/sk1'
+Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'
 Safekeeper started
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main
 Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
+Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
 Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
 # check list of running postgres instances
@@ -149,7 +149,7 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 # start postgres on that branch
 > ./target/debug/neon_local pg start migration_check --branch-name migration_check
 Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
+Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
 Starting postgres node at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
 
 # check the new list of running postgres instances
