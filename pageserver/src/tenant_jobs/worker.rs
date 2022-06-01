@@ -2,14 +2,13 @@ use lazy_static::lazy_static;
 use metrics::{register_gauge_vec, GaugeVec};
 use std::{
     fmt::Debug,
-    panic::{self, AssertUnwindSafe},
     sync::{Arc, Condvar, Mutex},
     time::Instant,
 };
 
-use crate::{tenant_jobs::job::JobError, thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested}};
+use crate::{thread_mgr::{get_shutdown_aware_condvar, is_shutdown_requested}};
 
-use super::job::{Job, JobStatus, JobStatusTable};
+use super::job::{Job, JobStatusTable};
 
 lazy_static! {
     static ref POOL_UTILIZATION_GAUGE: GaugeVec = register_gauge_vec!(
@@ -59,29 +58,14 @@ where
                     POOL_UTILIZATION_GAUGE
                         .with_label_values(&["todo_put_pool_name_here"])
                         .inc();
-                    let result = panic::catch_unwind(AssertUnwindSafe(|| job.run()));
+                    let result = job.run_safe();
                     POOL_UTILIZATION_GAUGE
                         .with_label_values(&["todo_put_pool_name_here"])
                         .dec();
                     job_table = self.job_table.lock().unwrap();
 
-                    // Update job status
-                    match result {
-                        Ok(Ok(Some(reschedule_for))) => {
-                            job_table.reschedule(&job, reschedule_for);
-                        }
-                        Ok(Ok(None)) => {
-                            job_table.status.remove(&job);
-                        }
-                        Ok(Err(e)) => {
-                            job_table.set_status(&job, JobStatus::Stuck(JobError::Error(e)));
-                            println!("Job errored, thread is ok.");
-                        }
-                        Err(e) => {
-                            job_table.set_status(&job, JobStatus::Stuck(JobError::Panic(e)));
-                            println!("Job panicked, thread is ok.");
-                        }
-                    }
+                    // Reschedule or report error
+                    job_table.report(job, result);
                 }
                 super::job::TakeResult::WaitUntil(time) => {
                     let wait_time = time.duration_since(Instant::now());
