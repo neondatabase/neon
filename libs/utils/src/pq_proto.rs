@@ -269,16 +269,18 @@ impl FeStartupPacket {
                             .next()
                             .context("expected even number of params in StartupMessage")?;
                         if name == "options" {
-                            // parsing options arguments "..&options=<var>:<val>,.."
-                            // extended example and set of options:
-                            // https://github.com/neondatabase/neon/blob/main/docs/rfcs/016-connection-routing.md#connection-url
-                            for cmdopt in value.split(',') {
-                                let nameval: Vec<&str> = cmdopt.split(':').collect();
+                            // parsing options arguments "...&options=<var0>%3D<val0>+<var1>=<var1>..."
+                            // '%3D' is '=' and '+' is ' '
+
+                            // Note: we allow users that don't have SNI capabilities,
+                            // to pass a special keyword argument 'project'
+                            // to be used to determine the cluster name by the proxy.
+
+                            //TODO: write unit test for this and refactor in its own function.
+                            for cmdopt in value.split(' ') {
+                                let nameval: Vec<&str> = cmdopt.split('=').collect();
                                 if nameval.len() == 2 {
                                     params.insert(nameval[0].to_string(), nameval[1].to_string());
-                                } else {
-                                    bail!("Options argument ill-formed.")
-                                    // todo: inform user / throw error message if options format is wrong.
                                 }
                             }
                         } else {
