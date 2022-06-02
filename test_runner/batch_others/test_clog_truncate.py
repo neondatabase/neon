@@ -63,8 +63,8 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     # create new branch after clog truncation and start a compute node on it
     log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
     env.neon_cli.create_branch('test_clog_truncate_new',
-                                 'test_clog_truncate',
-                                 ancestor_start_lsn=lsn_after_truncation)
+                               'test_clog_truncate',
+                               ancestor_start_lsn=lsn_after_truncation)
     pg2 = env.postgres.create_start('test_clog_truncate_new')
     log.info('postgres is running on test_clog_truncate_new branch')
 

@@ -647,8 +647,8 @@ class NeonEnv:
 
         # Create a corresponding NeonPageserver object
         self.pageserver = NeonPageserver(self,
-                                           port=pageserver_port,
-                                           config_override=config.pageserver_config_override)
+                                         port=pageserver_port,
+                                         config_override=config.pageserver_config_override)
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -712,7 +712,7 @@ def _shared_simple_env(request: Any,
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with NeonEnvBuilder(Path(repo_dir), port_distributor, default_broker,
-                          mock_s3_server) as builder:
+                        mock_s3_server) as builder:
         env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
@@ -738,9 +738,9 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 
 @pytest.fixture(scope='function')
 def neon_env_builder(test_output_dir,
-                       port_distributor: PortDistributor,
-                       mock_s3_server: MockS3Server,
-                       default_broker: Etcd) -> Iterator[NeonEnvBuilder]:
+                     port_distributor: PortDistributor,
+                     mock_s3_server: MockS3Server,
+                     default_broker: Etcd) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
 
@@ -759,7 +759,7 @@ def neon_env_builder(test_output_dir,
 
     # Return the builder to the caller
     with NeonEnvBuilder(Path(repo_dir), port_distributor, default_broker,
-                          mock_s3_server) as builder:
+                        mock_s3_server) as builder:
         yield builder
 
 
@@ -1533,10 +1533,10 @@ class Postgres(PgProtocol):
 
         self.node_name = node_name or f'{branch_name}_pg_node'
         self.env.neon_cli.pg_create(branch_name,
-                                      node_name=self.node_name,
-                                      tenant_id=self.tenant_id,
-                                      lsn=lsn,
-                                      port=self.port)
+                                    node_name=self.node_name,
+                                    tenant_id=self.tenant_id,
+                                    lsn=lsn,
+                                    port=self.port)
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
@@ -1561,8 +1561,8 @@ class Postgres(PgProtocol):
         log.info(f"Starting postgres node {self.node_name}")
 
         run_result = self.env.neon_cli.pg_start(self.node_name,
-                                                  tenant_id=self.tenant_id,
-                                                  port=self.port)
+                                                tenant_id=self.tenant_id,
+                                                port=self.port)
         self.running = True
 
         log.info(f"stdout: {run_result.stdout}")

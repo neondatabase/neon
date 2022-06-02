@@ -67,10 +67,10 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}'''
 
     # update the config and ensure that it has changed
     env.neon_cli.config_tenant(tenant_id=tenant,
-                                 conf={
-                                     'checkpoint_distance': '15000',
-                                     'gc_period': '80sec',
-                                 })
+                               conf={
+                                   'checkpoint_distance': '15000',
+                                   'gc_period': '80sec',
+                               })
 
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:

@@ -74,13 +74,13 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
 
     # Create two branches before and after database drop.
     env.neon_cli.create_branch('test_before_dropdb',
-                                 'test_dropdb',
-                                 ancestor_start_lsn=lsn_before_drop)
+                               'test_dropdb',
+                               ancestor_start_lsn=lsn_before_drop)
     pg_before = env.postgres.create_start('test_before_dropdb')
 
     env.neon_cli.create_branch('test_after_dropdb',
-                                 'test_dropdb',
-                                 ancestor_start_lsn=lsn_after_drop)
+                               'test_dropdb',
+                               ancestor_start_lsn=lsn_after_drop)
     pg_after = env.postgres.create_start('test_after_dropdb')
 
     # Test that database exists on the branch before drop

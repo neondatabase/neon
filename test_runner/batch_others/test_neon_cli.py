@@ -37,7 +37,7 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
 
     # Create a nested branch
     nested_timeline_id = env.neon_cli.create_branch('test_cli_branch_list_nested',
-                                                      'test_cli_branch_list_main')
+                                                    'test_cli_branch_list_main')
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI

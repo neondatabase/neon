@@ -26,7 +26,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     ps.safe_psql("set FOO", password=management_token)
 
     new_timeline_id = env.neon_cli.create_branch('test_pageserver_auth',
-                                                   tenant_id=env.initial_tenant)
+                                                 tenant_id=env.initial_tenant)
 
     # tenant can create branches
     tenant_http_client.timeline_create(tenant_id=env.initial_tenant,

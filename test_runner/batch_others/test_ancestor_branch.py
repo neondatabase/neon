@@ -116,9 +116,8 @@ def test_ancestor_branch_detach(neon_simple_env: NeonEnv):
     parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_detach_parent", "empty")
 
     env.neon_cli.create_branch("test_ancestor_branch_detach_branch1",
-                                 "test_ancestor_branch_detach_parent")
+                               "test_ancestor_branch_detach_parent")
 
     ps_http = env.pageserver.http_client()
-    with pytest.raises(NeonPageserverApiException,
-                       match="Failed to detach inmem tenant timeline"):
+    with pytest.raises(NeonPageserverApiException, match="Failed to detach inmem tenant timeline"):
         ps_http.timeline_detach(env.initial_tenant, parent_timeline_id)

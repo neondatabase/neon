@@ -2,9 +2,9 @@ import os
 
 from fixtures.utils import mkdir_if_needed
 from fixtures.neon_fixtures import (NeonEnv,
-                                      check_restored_datadir_content,
-                                      base_dir,
-                                      pg_distrib_dir)
+                                    check_restored_datadir_content,
+                                    base_dir,
+                                    pg_distrib_dir)
 from fixtures.log_helper import log
 
 

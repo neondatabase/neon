@@ -2,12 +2,12 @@ import os
 import subprocess
 
 from fixtures.neon_fixtures import (NeonEnvBuilder,
-                                      VanillaPostgres,
-                                      PortDistributor,
-                                      PgBin,
-                                      base_dir,
-                                      vanilla_pg,
-                                      pg_distrib_dir)
+                                    VanillaPostgres,
+                                    PortDistributor,
+                                    PgBin,
+                                    base_dir,
+                                    vanilla_pg,
+                                    pg_distrib_dir)
 from fixtures.log_helper import log
 
 

@@ -20,9 +20,9 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers:
     tenant_2, _ = env.neon_cli.create_tenant()
 
     env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                   tenant_id=tenant_1)
+                                 tenant_id=tenant_1)
     env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                   tenant_id=tenant_2)
+                                 tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
         f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
