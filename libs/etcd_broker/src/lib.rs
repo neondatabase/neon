@@ -6,6 +6,7 @@ use std::{
     str::FromStr,
 };
 
+use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -136,29 +137,6 @@ impl SkTimelineSubscriptionKind {
         }
     }
 
-    fn watch_regex(&self) -> Regex {
-        match self.kind {
-            SubscriptionKind::All => Regex::new(&format!(
-                r"^{}/([[:xdigit:]]+)/([[:xdigit:]]+)/safekeeper/([[:digit:]])$",
-                self.broker_etcd_prefix
-            ))
-            .expect("wrong regex for 'everything' subscription"),
-            SubscriptionKind::Tenant(tenant_id) => Regex::new(&format!(
-                r"^{}/{tenant_id}/([[:xdigit:]]+)/safekeeper/([[:digit:]])$",
-                self.broker_etcd_prefix
-            ))
-            .expect("wrong regex for 'tenant' subscription"),
-            SubscriptionKind::Timeline(ZTenantTimelineId {
-                tenant_id,
-                timeline_id,
-            }) => Regex::new(&format!(
-                r"^{}/{tenant_id}/{timeline_id}/safekeeper/([[:digit:]])$",
-                self.broker_etcd_prefix
-            ))
-            .expect("wrong regex for 'timeline' subscription"),
-        }
-    }
-
     /// Etcd key to use for watching a certain timeline updates from safekeepers.
     pub fn watch_key(&self) -> String {
         match self.kind {
@@ -196,6 +174,7 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
     subscription: SkTimelineSubscriptionKind,
 ) -> Result<SkTimelineSubscription, BrokerError> {
     info!("Subscribing to timeline updates, subscription kind: {subscription:?}");
+    let kind = subscription.clone();
 
     let (watcher, mut stream) = client
         .watch(
@@ -211,12 +190,9 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
         })?;
 
     let (timeline_updates_sender, safekeeper_timeline_updates) = mpsc::unbounded_channel();
-
-    let subscription_kind = subscription.kind;
-    let regex = subscription.watch_regex();
     let watcher_handle = tokio::spawn(async move {
         while let Some(resp) = stream.message().await.map_err(|e| BrokerError::InternalError(format!(
-            "Failed to get messages from the subscription stream, kind: {subscription_kind:?}, error: {e}"
+            "Failed to get messages from the subscription stream, kind: {:?}, error: {e}", subscription.kind
         )))? {
             if resp.canceled() {
                 info!("Watch for timeline updates subscription was canceled, exiting");
@@ -237,9 +213,16 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                 if EventType::Put == event.event_type() {
                     if let Some(new_etcd_kv) = event.kv() {
                         let new_kv_version = new_etcd_kv.version();
+                        let (key_str, value_str) = match extract_key_value_str(new_etcd_kv) {
+                            Ok(strs) => strs,
+                            Err(e) => {
+                                error!("Failed to represent etcd KV {new_etcd_kv:?} as pair of str: {e}");
+                                continue;
+                            },
+                        };
 
-                        match parse_etcd_key_value(subscription_kind, &regex, new_etcd_kv) {
-                            Ok(Some((zttid, timeline))) => {
+                        match parse_etcd_key_value(&subscription,  key_str, value_str) {
+                            Ok((zttid, timeline)) => {
                                 match timeline_updates
                                     .entry(zttid)
                                     .or_default()
@@ -250,6 +233,8 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                         if old_etcd_kv_version < new_kv_version {
                                             o.insert(timeline.info);
                                             timeline_etcd_versions.insert(zttid,new_kv_version);
+                                        } else {
+                                            debug!("Skipping etcd timeline update due to older version compared to one that's already stored");
                                         }
                                     }
                                     hash_map::Entry::Vacant(v) => {
@@ -258,7 +243,6 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                     }
                                 }
                             }
-                            Ok(None) => {}
                             Err(e) => error!("Failed to parse timeline update: {e}"),
                         };
                     }
@@ -272,64 +256,72 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
         }
 
         Ok(())
-    });
+    }.instrument(info_span!("etcd_broker")));
 
     Ok(SkTimelineSubscription {
-        kind: subscription,
+        kind,
         safekeeper_timeline_updates,
         watcher_handle,
         watcher,
     })
 }
 
-fn parse_etcd_key_value(
-    subscription_kind: SubscriptionKind,
-    regex: &Regex,
-    kv: &KeyValue,
-) -> Result<Option<(ZTenantTimelineId, SafekeeperTimeline)>, BrokerError> {
-    let caps = if let Some(caps) = regex.captures(kv.key_str().map_err(|e| {
-        BrokerError::EtcdClient(e, format!("Failed to represent kv {kv:?} as key str"))
-    })?) {
-        caps
-    } else {
-        return Ok(None);
-    };
-
-    let (zttid, safekeeper_id) = match subscription_kind {
-        SubscriptionKind::All => (
-            ZTenantTimelineId::new(
-                parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?,
-                parse_capture(&caps, 2).map_err(BrokerError::ParsingError)?,
-            ),
-            NodeId(parse_capture(&caps, 3).map_err(BrokerError::ParsingError)?),
-        ),
-        SubscriptionKind::Tenant(tenant_id) => (
-            ZTenantTimelineId::new(
-                tenant_id,
-                parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?,
-            ),
-            NodeId(parse_capture(&caps, 2).map_err(BrokerError::ParsingError)?),
-        ),
-        SubscriptionKind::Timeline(zttid) => (
-            zttid,
-            NodeId(parse_capture(&caps, 1).map_err(BrokerError::ParsingError)?),
-        ),
-    };
-
-    let info_str = kv.value_str().map_err(|e| {
-        BrokerError::EtcdClient(e, format!("Failed to represent kv {kv:?} as value str"))
+fn extract_key_value_str(kv: &KeyValue) -> Result<(&str, &str), BrokerError> {
+    let key = kv.key_str().map_err(|e| {
+        BrokerError::EtcdClient(e, "Failed to extract key str out of etcd KV".to_string())
     })?;
-    Ok(Some((
+    let value = kv.value_str().map_err(|e| {
+        BrokerError::EtcdClient(e, "Failed to extract value str out of etcd KV".to_string())
+    })?;
+    Ok((key, value))
+}
+
+static SK_TIMELINE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new("/([[:xdigit:]]+)/([[:xdigit:]]+)/safekeeper/([[:digit:]]+)$")
+        .expect("wrong regex for safekeeper timeline etcd key")
+});
+
+fn parse_etcd_key_value(
+    subscription: &SkTimelineSubscriptionKind,
+    key_str: &str,
+    value_str: &str,
+) -> Result<(ZTenantTimelineId, SafekeeperTimeline), BrokerError> {
+    let broker_prefix = subscription.broker_etcd_prefix.as_str();
+    if !key_str.starts_with(broker_prefix) {
+        return Err(BrokerError::ParsingError(format!(
+            "KV has unexpected key '{key_str}' that does not start with broker prefix {broker_prefix}"
+        )));
+    }
+
+    let key_part = &key_str[broker_prefix.len()..];
+    let key_captures = match SK_TIMELINE_KEY_REGEX.captures(key_part) {
+        Some(captures) => captures,
+        None => {
+            return Err(BrokerError::ParsingError(format!(
+                "KV has unexpected key part '{key_part}' that does not match required regex {}",
+                SK_TIMELINE_KEY_REGEX.as_str()
+            )));
+        }
+    };
+    let info = serde_json::from_str(value_str).map_err(|e| {
+        BrokerError::ParsingError(format!(
+            "Failed to parse '{value_str}' as safekeeper timeline info: {e}"
+        ))
+    })?;
+
+    let zttid = ZTenantTimelineId::new(
+        parse_capture(&key_captures, 1).map_err(BrokerError::ParsingError)?,
+        parse_capture(&key_captures, 2).map_err(BrokerError::ParsingError)?,
+    );
+    let safekeeper_id = NodeId(parse_capture(&key_captures, 3).map_err(BrokerError::ParsingError)?);
+
+    Ok((
         zttid,
         SafekeeperTimeline {
             safekeeper_id,
-            info: serde_json::from_str(info_str).map_err(|e| {
-                BrokerError::ParsingError(format!(
-                    "Failed to parse '{info_str}' as safekeeper timeline info: {e}"
-                ))
-            })?,
+            info,
         },
-    )))
+    ))
 }
 
 fn parse_capture<T>(caps: &Captures, index: usize) -> Result<T, String>
@@ -347,4 +339,54 @@ where
             std::any::type_name::<T>()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use utils::zid::ZTimelineId;
+
+    use super::*;
+
+    #[test]
+    fn typical_etcd_prefix_should_be_parsed() {
+        let prefix = "neon";
+        let tenant_id = ZTenantId::generate();
+        let timeline_id = ZTimelineId::generate();
+        let all_subscription = SkTimelineSubscriptionKind {
+            broker_etcd_prefix: prefix.to_string(),
+            kind: SubscriptionKind::All,
+        };
+        let tenant_subscription = SkTimelineSubscriptionKind {
+            broker_etcd_prefix: prefix.to_string(),
+            kind: SubscriptionKind::Tenant(tenant_id),
+        };
+        let timeline_subscription = SkTimelineSubscriptionKind {
+            broker_etcd_prefix: prefix.to_string(),
+            kind: SubscriptionKind::Timeline(ZTenantTimelineId::new(tenant_id, timeline_id)),
+        };
+
+        let typical_etcd_kv_strs = [
+            (
+                format!("{prefix}/{tenant_id}/{timeline_id}/safekeeper/1"),
+                r#"{"last_log_term":231,"flush_lsn":"0/241BB70","commit_lsn":"0/241BB70","backup_lsn":"0/2000000","remote_consistent_lsn":"0/0","peer_horizon_lsn":"0/16960E8","safekeeper_connstr":"something.local:1234","pageserver_connstr":"postgresql://(null):@somethine.else.local:3456"}"#,
+            ),
+            (
+                format!("{prefix}/{tenant_id}/{timeline_id}/safekeeper/13"),
+                r#"{"last_log_term":231,"flush_lsn":"0/241BB70","commit_lsn":"0/241BB70","backup_lsn":"0/2000000","remote_consistent_lsn":"0/0","peer_horizon_lsn":"0/16960E8","safekeeper_connstr":"something.local:1234","pageserver_connstr":"postgresql://(null):@somethine.else.local:3456"}"#,
+            ),
+        ];
+
+        for (key_string, value_str) in typical_etcd_kv_strs {
+            for subscription in [
+                &all_subscription,
+                &tenant_subscription,
+                &timeline_subscription,
+            ] {
+                let (id, _timeline) =
+                    parse_etcd_key_value(subscription, &key_string, value_str)
+                        .unwrap_or_else(|e| panic!("Should be able to parse etcd key string '{key_string}' and etcd value string '{value_str}' for subscription {subscription:?}, but got: {e}"));
+                assert_eq!(id, ZTenantTimelineId::new(tenant_id, timeline_id));
+            }
+        }
+    }
 }

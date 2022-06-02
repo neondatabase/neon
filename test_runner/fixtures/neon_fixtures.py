@@ -81,7 +81,7 @@ def pytest_addoption(parser):
 
 # These are set in pytest_configure()
 base_dir = ""
-zenith_binpath = ""
+neon_binpath = ""
 pg_distrib_dir = ""
 top_output_dir = ""
 
@@ -100,7 +100,7 @@ def check_interferring_processes(config):
         # result of the test.
         # NOTE this shows as an internal pytest error, there might be a better way
         raise Exception(
-            'Found interfering processes running. Stop all Zenith pageservers, nodes, safekeepers, as well as stand-alone Postgres.'
+            'Found interfering processes running. Stop all Neon pageservers, nodes, safekeepers, as well as stand-alone Postgres.'
         )
 
 
@@ -146,25 +146,25 @@ def pytest_configure(config):
             raise Exception('postgres not found at "{}"'.format(pg_distrib_dir))
 
     if os.getenv("REMOTE_ENV"):
-        # we are in remote env and do not have zenith binaries locally
+        # we are in remote env and do not have neon binaries locally
         # this is the case for benchmarks run on self-hosted runner
         return
-    # Find the zenith binaries.
-    global zenith_binpath
-    env_zenith_bin = os.environ.get('ZENITH_BIN')
-    if env_zenith_bin:
-        zenith_binpath = env_zenith_bin
+    # Find the neon binaries.
+    global neon_binpath
+    env_neon_bin = os.environ.get('ZENITH_BIN')
+    if env_neon_bin:
+        neon_binpath = env_neon_bin
     else:
-        zenith_binpath = os.path.join(base_dir, 'target/debug')
-    log.info(f'zenith_binpath is {zenith_binpath}')
-    if not os.path.exists(os.path.join(zenith_binpath, 'pageserver')):
-        raise Exception('zenith binaries not found at "{}"'.format(zenith_binpath))
+        neon_binpath = os.path.join(base_dir, 'target/debug')
+    log.info(f'neon_binpath is {neon_binpath}')
+    if not os.path.exists(os.path.join(neon_binpath, 'pageserver')):
+        raise Exception('neon binaries not found at "{}"'.format(neon_binpath))
 
 
 def profiling_supported():
     """Return True if the pageserver was compiled with the 'profiling' feature
     """
-    bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+    bin_pageserver = os.path.join(str(neon_binpath), 'pageserver')
     res = subprocess.run([bin_pageserver, '--version'],
                          check=True,
                          universal_newlines=True,
@@ -223,7 +223,7 @@ def can_bind(host: str, port: int) -> bool:
         # TODO: The pageserver and safekeepers don't use SO_REUSEADDR at the
         # moment. If that changes, we should use start using SO_REUSEADDR here
         # too, to allow reusing ports more quickly.
-        # See https://github.com/zenithdb/zenith/issues/801
+        # See https://github.com/neondatabase/neon/issues/801
         #sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         try:
@@ -479,27 +479,30 @@ class RemoteStorageUsers(Flag):
     SAFEKEEPER = auto()
 
 
-class ZenithEnvBuilder:
+class NeonEnvBuilder:
     """
-    Builder object to create a Zenith runtime environment
+    Builder object to create a Neon runtime environment
 
-    You should use the `zenith_env_builder` or `zenith_simple_env` pytest
-    fixture to create the ZenithEnv object. That way, the repository is
+    You should use the `neon_env_builder` or `neon_simple_env` pytest
+    fixture to create the NeonEnv object. That way, the repository is
     created in the right directory, based on the test name, and it's properly
     cleaned up after the test has finished.
     """
-    def __init__(self,
-                 repo_dir: Path,
-                 port_distributor: PortDistributor,
-                 broker: Etcd,
-                 mock_s3_server: MockS3Server,
-                 remote_storage: Optional[RemoteStorage] = None,
-                 remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
-                 pageserver_config_override: Optional[str] = None,
-                 num_safekeepers: int = 1,
-                 pageserver_auth_enabled: bool = False,
-                 rust_log_override: Optional[str] = None,
-                 default_branch_name=DEFAULT_BRANCH_NAME):
+    def __init__(
+            self,
+            repo_dir: Path,
+            port_distributor: PortDistributor,
+            broker: Etcd,
+            mock_s3_server: MockS3Server,
+            remote_storage: Optional[RemoteStorage] = None,
+            remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
+            pageserver_config_override: Optional[str] = None,
+            num_safekeepers: int = 1,
+            # Use non-standard SK ids to check for various parsing bugs
+            safekeepers_id_start: int = 0,
+            pageserver_auth_enabled: bool = False,
+            rust_log_override: Optional[str] = None,
+            default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -509,20 +512,21 @@ class ZenithEnvBuilder:
         self.mock_s3_server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
+        self.safekeepers_id_start = safekeepers_id_start
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
-        self.env: Optional[ZenithEnv] = None
+        self.env: Optional[NeonEnv] = None
 
-    def init(self) -> ZenithEnv:
+    def init(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
-        self.env = ZenithEnv(self)
+        self.env = NeonEnv(self)
         return self.env
 
     def start(self):
         self.env.start()
 
-    def init_start(self) -> ZenithEnv:
+    def init_start(self) -> NeonEnv:
         env = self.init()
         self.start()
         return env
@@ -571,12 +575,12 @@ class ZenithEnvBuilder:
             self.env.pageserver.stop(immediate=True)
 
 
-class ZenithEnv:
+class NeonEnv:
     """
-    An object representing the Zenith runtime environment. It consists of
+    An object representing the Neon runtime environment. It consists of
     the page server, 0-N safekeepers, and the compute nodes.
 
-    ZenithEnv contains functions for stopping/starting nodes in the
+    NeonEnv contains functions for stopping/starting nodes in the
     environment, checking their status, creating tenants, connecting to the
     nodes, creating and destroying compute nodes, etc. The page server and
     the safekeepers are considered fixed in the environment, you cannot
@@ -584,7 +588,7 @@ class ZenithEnv:
     likely change in the future, as we start supporting multiple page
     servers and adding/removing safekeepers on the fly).
 
-    Some notable functions and fields in ZenithEnv:
+    Some notable functions and fields in NeonEnv:
 
     postgres - A factory object for creating postgres compute nodes.
 
@@ -598,24 +602,24 @@ class ZenithEnv:
 
     initial_tenant - tenant ID of the initial tenant created in the repository
 
-    zenith_cli - can be used to run the 'zenith' CLI tool
+    neon_cli - can be used to run the 'neon' CLI tool
 
     create_tenant() - initializes a new tenant in the page server, returns
         the tenant id
     """
-    def __init__(self, config: ZenithEnvBuilder):
+    def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
-        self.zenith_cli = ZenithCli(env=self)
+        self.neon_cli = NeonCli(env=self)
         self.postgres = PostgresFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
         self.remote_storage = config.remote_storage
         self.remote_storage_users = config.remote_storage_users
 
-        # generate initial tenant ID here instead of letting 'zenith init' generate it,
+        # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = uuid.uuid4()
 
@@ -645,10 +649,10 @@ class ZenithEnv:
             auth_type = '{pageserver_auth_type}'
         """)
 
-        # Create a corresponding ZenithPageserver object
-        self.pageserver = ZenithPageserver(self,
-                                           port=pageserver_port,
-                                           config_override=config.pageserver_config_override)
+        # Create a corresponding NeonPageserver object
+        self.pageserver = NeonPageserver(self,
+                                         port=pageserver_port,
+                                         config_override=config.pageserver_config_override)
 
         # Create config and a Safekeeper object for each safekeeper
         for i in range(1, config.num_safekeepers + 1):
@@ -656,7 +660,7 @@ class ZenithEnv:
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-            id = i  # assign ids sequentially
+            id = config.safekeepers_id_start + i  # assign ids sequentially
             toml += textwrap.dedent(f"""
                 [[safekeepers]]
                 id = {id}
@@ -672,7 +676,7 @@ class ZenithEnv:
             self.safekeepers.append(safekeeper)
 
         log.info(f"Config: {toml}")
-        self.zenith_cli.init(toml)
+        self.neon_cli.init(toml)
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
@@ -697,10 +701,10 @@ class ZenithEnv:
 def _shared_simple_env(request: Any,
                        port_distributor: PortDistributor,
                        mock_s3_server: MockS3Server,
-                       default_broker: Etcd) -> Iterator[ZenithEnv]:
+                       default_broker: Etcd) -> Iterator[NeonEnv]:
     """
-   # Internal fixture backing the `zenith_simple_env` fixture. If TEST_SHARED_FIXTURES
-    is set, this is shared by all tests using `zenith_simple_env`.
+   # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
+    is set, this is shared by all tests using `neon_simple_env`.
     """
 
     if os.environ.get('TEST_SHARED_FIXTURES') is None:
@@ -711,23 +715,23 @@ def _shared_simple_env(request: Any,
         repo_dir = os.path.join(str(top_output_dir), "shared_repo")
         shutil.rmtree(repo_dir, ignore_errors=True)
 
-    with ZenithEnvBuilder(Path(repo_dir), port_distributor, default_broker,
-                          mock_s3_server) as builder:
+    with NeonEnvBuilder(Path(repo_dir), port_distributor, default_broker,
+                        mock_s3_server) as builder:
         env = builder.init_start()
 
         # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.zenith_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
+        env.neon_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
 
         yield env
 
 
 @pytest.fixture(scope='function')
-def zenith_simple_env(_shared_simple_env: ZenithEnv) -> Iterator[ZenithEnv]:
+def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
     """
-    Simple Zenith environment, with no authentication and no safekeepers.
+    Simple Neon environment, with no authentication and no safekeepers.
 
     If TEST_SHARED_FIXTURES environment variable is set, we reuse the same
-    environment for all tests that use 'zenith_simple_env', keeping the
+    environment for all tests that use 'neon_simple_env', keeping the
     page server and safekeepers running. Any compute nodes are stopped after
     each the test, however.
     """
@@ -737,17 +741,17 @@ def zenith_simple_env(_shared_simple_env: ZenithEnv) -> Iterator[ZenithEnv]:
 
 
 @pytest.fixture(scope='function')
-def zenith_env_builder(test_output_dir,
-                       port_distributor: PortDistributor,
-                       mock_s3_server: MockS3Server,
-                       default_broker: Etcd) -> Iterator[ZenithEnvBuilder]:
+def neon_env_builder(test_output_dir,
+                     port_distributor: PortDistributor,
+                     mock_s3_server: MockS3Server,
+                     default_broker: Etcd) -> Iterator[NeonEnvBuilder]:
     """
-    Fixture to create a Zenith environment for test.
+    Fixture to create a Neon environment for test.
 
-    To use, define 'zenith_env_builder' fixture in your test to get access to the
+    To use, define 'neon_env_builder' fixture in your test to get access to the
     builder object. Set properties on it to describe the environment.
     Finally, initialize and start up the environment by calling
-    zenith_env_builder.init_start().
+    neon_env_builder.init_start().
 
     After the initialization, you can launch compute nodes by calling
     the functions in the 'env.postgres' factory object, stop/start the
@@ -758,16 +762,16 @@ def zenith_env_builder(test_output_dir,
     repo_dir = os.path.join(test_output_dir, "repo")
 
     # Return the builder to the caller
-    with ZenithEnvBuilder(Path(repo_dir), port_distributor, default_broker,
-                          mock_s3_server) as builder:
+    with NeonEnvBuilder(Path(repo_dir), port_distributor, default_broker,
+                        mock_s3_server) as builder:
         yield builder
 
 
-class ZenithPageserverApiException(Exception):
+class NeonPageserverApiException(Exception):
     pass
 
 
-class ZenithPageserverHttpClient(requests.Session):
+class NeonPageserverHttpClient(requests.Session):
     def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
@@ -784,7 +788,7 @@ class ZenithPageserverHttpClient(requests.Session):
                 msg = res.json()['msg']
             except:
                 msg = ''
-            raise ZenithPageserverApiException(msg) from e
+            raise NeonPageserverApiException(msg) from e
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
@@ -891,12 +895,12 @@ TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline
                                      re.MULTILINE)
 
 
-class ZenithCli:
+class NeonCli:
     """
-    A typed wrapper around the `zenith` CLI tool.
+    A typed wrapper around the `neon` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
-    def __init__(self, env: ZenithEnv):
+    def __init__(self, env: NeonEnv):
         self.env = env
         pass
 
@@ -982,7 +986,7 @@ class ZenithCli:
             created_timeline_id = matches.group('timeline_id')
 
         if created_timeline_id is None:
-            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+            raise Exception('could not find timeline id after `neon timeline create` invocation')
         else:
             return uuid.UUID(created_timeline_id)
 
@@ -1014,13 +1018,13 @@ class ZenithCli:
             created_timeline_id = matches.group('timeline_id')
 
         if created_timeline_id is None:
-            raise Exception('could not find timeline id after `zenith timeline create` invocation')
+            raise Exception('could not find timeline id after `neon timeline create` invocation')
         else:
             return uuid.UUID(created_timeline_id)
 
     def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[Tuple[str, str]]:
         """
-        Returns a list of (branch_name, timeline_id) tuples out of parsed `zenith timeline list` CLI output.
+        Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
 
         # (L) main [b49f7954224a0ad25cc0013ea107b54b]
@@ -1053,7 +1057,7 @@ class ZenithCli:
             return res
 
     def pageserver_enabled_features(self) -> Any:
-        bin_pageserver = os.path.join(str(zenith_binpath), 'pageserver')
+        bin_pageserver = os.path.join(str(neon_binpath), 'pageserver')
         args = [bin_pageserver, '--enabled-features']
         log.info('Running command "{}"'.format(' '.join(args)))
 
@@ -1093,7 +1097,7 @@ class ZenithCli:
                         immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
         if id is not None:
-            args.extend(str(id))
+            args.append(str(id))
         if immediate:
             args.extend(['-m', 'immediate'])
         return self.raw_cli(args)
@@ -1173,22 +1177,22 @@ class ZenithCli:
                 extra_env_vars: Optional[Dict[str, str]] = None,
                 check_return_code=True) -> 'subprocess.CompletedProcess[str]':
         """
-        Run "zenith" with the specified arguments.
+        Run "neon" with the specified arguments.
 
         Arguments must be in list form, e.g. ['pg', 'create']
 
         Return both stdout and stderr, which can be accessed as
 
-        >>> result = env.zenith_cli.raw_cli(...)
+        >>> result = env.neon_cli.raw_cli(...)
         >>> assert result.stderr == ""
         >>> log.info(result.stdout)
         """
 
         assert type(arguments) == list
 
-        bin_zenith = os.path.join(str(zenith_binpath), 'neon_local')
+        bin_neon = os.path.join(str(neon_binpath), 'neon_local')
 
-        args = [bin_zenith] + arguments
+        args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(' '.join(args)))
         log.info(f'Running in "{self.env.repo_dir}"')
 
@@ -1231,20 +1235,20 @@ class ZenithCli:
         return res
 
 
-class ZenithPageserver(PgProtocol):
+class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
 
-    Initializes the repository via `zenith init`.
+    Initializes the repository via `neon init`.
     """
-    def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
+    def __init__(self, env: NeonEnv, port: PageserverPort, config_override: Optional[str] = None):
         super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
         self.running = False
         self.service_port = port
         self.config_override = config_override
 
-    def start(self, overrides=()) -> 'ZenithPageserver':
+    def start(self, overrides=()) -> 'NeonPageserver':
         """
         Start the page server.
         `overrides` allows to add some config to this pageserver start.
@@ -1252,17 +1256,17 @@ class ZenithPageserver(PgProtocol):
         """
         assert self.running == False
 
-        self.env.zenith_cli.pageserver_start(overrides=overrides)
+        self.env.neon_cli.pageserver_start(overrides=overrides)
         self.running = True
         return self
 
-    def stop(self, immediate=False) -> 'ZenithPageserver':
+    def stop(self, immediate=False) -> 'NeonPageserver':
         """
         Stop the page server.
         Returns self.
         """
         if self.running:
-            self.env.zenith_cli.pageserver_stop(immediate)
+            self.env.neon_cli.pageserver_stop(immediate)
             self.running = False
         return self
 
@@ -1272,8 +1276,8 @@ class ZenithPageserver(PgProtocol):
     def __exit__(self, exc_type, exc, tb):
         self.stop(True)
 
-    def http_client(self, auth_token: Optional[str] = None) -> ZenithPageserverHttpClient:
-        return ZenithPageserverHttpClient(
+    def http_client(self, auth_token: Optional[str] = None) -> NeonPageserverHttpClient:
+        return NeonPageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
         )
@@ -1453,7 +1457,7 @@ def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
         yield remote_pg
 
 
-class ZenithProxy(PgProtocol):
+class NeonProxy(PgProtocol):
     def __init__(self, port: int):
         super().__init__(host="127.0.0.1",
                          user="proxy_user",
@@ -1469,7 +1473,7 @@ class ZenithProxy(PgProtocol):
         assert self._popen is None
 
         # Start proxy
-        bin_proxy = os.path.join(str(zenith_binpath), 'proxy')
+        bin_proxy = os.path.join(str(neon_binpath), 'proxy')
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
@@ -1493,20 +1497,20 @@ class ZenithProxy(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
-    """Zenith proxy that routes directly to vanilla postgres."""
+def static_proxy(vanilla_pg) -> Iterator[NeonProxy]:
+    """Neon proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
     vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-    with ZenithProxy(4432) as proxy:
+    with NeonProxy(4432) as proxy:
         proxy.start_static()
         yield proxy
 
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
+    def __init__(self, env: NeonEnv, tenant_id: uuid.UUID, port: int):
         super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
@@ -1532,11 +1536,11 @@ class Postgres(PgProtocol):
             config_lines = []
 
         self.node_name = node_name or f'{branch_name}_pg_node'
-        self.env.zenith_cli.pg_create(branch_name,
-                                      node_name=self.node_name,
-                                      tenant_id=self.tenant_id,
-                                      lsn=lsn,
-                                      port=self.port)
+        self.env.neon_cli.pg_create(branch_name,
+                                    node_name=self.node_name,
+                                    tenant_id=self.tenant_id,
+                                    lsn=lsn,
+                                    port=self.port)
         path = pathlib.Path('pgdatadirs') / 'tenants' / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
@@ -1560,9 +1564,9 @@ class Postgres(PgProtocol):
 
         log.info(f"Starting postgres node {self.node_name}")
 
-        run_result = self.env.zenith_cli.pg_start(self.node_name,
-                                                  tenant_id=self.tenant_id,
-                                                  port=self.port)
+        run_result = self.env.neon_cli.pg_start(self.node_name,
+                                                tenant_id=self.tenant_id,
+                                                port=self.port)
         self.running = True
 
         log.info(f"stdout: {run_result.stdout}")
@@ -1630,7 +1634,7 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id)
+            self.env.neon_cli.pg_stop(self.node_name, self.tenant_id)
             self.running = False
 
         return self
@@ -1642,7 +1646,7 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.zenith_cli.pg_stop(self.node_name, self.tenant_id, True)
+        self.env.neon_cli.pg_stop(self.node_name, self.tenant_id, True)
         self.node_name = None
         self.running = False
 
@@ -1679,7 +1683,7 @@ class Postgres(PgProtocol):
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-    def __init__(self, env: ZenithEnv):
+    def __init__(self, env: NeonEnv):
         self.env = env
         self.num_instances = 0
         self.instances: List[Postgres] = []
@@ -1750,7 +1754,7 @@ class SafekeeperPort:
 @dataclass
 class Safekeeper:
     """ An object representing a running safekeeper daemon. """
-    env: ZenithEnv
+    env: NeonEnv
     port: SafekeeperPort
     id: int
     auth_token: Optional[str] = None
@@ -1758,7 +1762,7 @@ class Safekeeper:
 
     def start(self) -> 'Safekeeper':
         assert self.running == False
-        self.env.zenith_cli.safekeeper_start(self.id)
+        self.env.neon_cli.safekeeper_start(self.id)
         self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()
@@ -1778,7 +1782,7 @@ class Safekeeper:
 
     def stop(self, immediate=False) -> 'Safekeeper':
         log.info('Stopping safekeeper {}'.format(self.id))
-        self.env.zenith_cli.safekeeper_stop(self.id, immediate)
+        self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
 
@@ -1966,7 +1970,7 @@ def get_test_output_dir(request: Any) -> str:
 
 # This is autouse, so the test output directory always gets created, even
 # if a test doesn't put anything there. It also solves a problem with the
-# zenith_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
+# neon_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
 # creates the repo in the test output directory. But it cannot depend on
 # 'test_output_dir' fixture, because when TEST_SHARED_FIXTURES is not set,
 # it has 'session' scope and cannot access fixtures with 'function'
@@ -2044,7 +2048,7 @@ def list_files_to_compare(pgdata_dir: str):
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Postgres):
+def check_restored_datadir_content(test_output_dir: str, env: NeonEnv, pg: Postgres):
 
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
@@ -2134,7 +2138,7 @@ def wait_until(number_of_iterations: int, interval: int, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
+def assert_local(pageserver_http_client: NeonPageserverHttpClient,
                  tenant: uuid.UUID,
                  timeline: uuid.UUID):
     timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
@@ -2142,7 +2146,7 @@ def assert_local(pageserver_http_client: ZenithPageserverHttpClient,
     return timeline_detail
 
 
-def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
                           tenant: uuid.UUID,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
@@ -2158,7 +2162,7 @@ def remote_consistent_lsn(pageserver_http_client: ZenithPageserverHttpClient,
         return lsn_from_hex(lsn_str)
 
 
-def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
+def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
                     tenant: uuid.UUID,
                     timeline: uuid.UUID,
                     lsn: int):
@@ -2174,7 +2178,7 @@ def wait_for_upload(pageserver_http_client: ZenithPageserverHttpClient,
         lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
 
 
-def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+def last_record_lsn(pageserver_http_client: NeonPageserverHttpClient,
                     tenant: uuid.UUID,
                     timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
@@ -2184,7 +2188,7 @@ def last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
     return lsn_from_hex(lsn_str)
 
 
-def wait_for_last_record_lsn(pageserver_http_client: ZenithPageserverHttpClient,
+def wait_for_last_record_lsn(pageserver_http_client: NeonPageserverHttpClient,
                              tenant: uuid.UUID,
                              timeline: uuid.UUID,
                              lsn: int):

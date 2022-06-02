@@ -3,8 +3,8 @@ from contextlib import contextmanager
 from abc import ABC, abstractmethod
 from fixtures.pg_stats import PG_STATS, PgStat
 
-from fixtures.zenith_fixtures import PgBin, PgProtocol, Postgres, VanillaPostgres, RemotePostgres, ZenithEnv
-from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
+from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, NeonEnv
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 # Type-related stuff
 from typing import Dict, Iterator, List, Tuple
@@ -13,7 +13,7 @@ from typing import Dict, Iterator, List, Tuple
 class PgCompare(ABC):
     """Common interface of all postgres implementations, useful for benchmarks.
 
-    This class is a helper class for the zenith_with_baseline fixture. See its documentation
+    This class is a helper class for the neon_with_baseline fixture. See its documentation
     for more details.
     """
     @property
@@ -27,7 +27,7 @@ class PgCompare(ABC):
         pass
 
     @property
-    def zenbenchmark(self) -> ZenithBenchmarker:
+    def zenbenchmark(self) -> NeonBenchmarker:
         pass
 
     @abstractmethod
@@ -58,19 +58,19 @@ class PgCompare(ABC):
         pass
 
 
-class ZenithCompare(PgCompare):
-    """PgCompare interface for the zenith stack."""
+class NeonCompare(PgCompare):
+    """PgCompare interface for the neon stack."""
     def __init__(self,
-                 zenbenchmark: ZenithBenchmarker,
-                 zenith_simple_env: ZenithEnv,
+                 zenbenchmark: NeonBenchmarker,
+                 neon_simple_env: NeonEnv,
                  pg_bin: PgBin,
                  branch_name):
-        self.env = zenith_simple_env
+        self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
-        self.env.zenith_cli.create_branch(branch_name, 'empty')
+        self.env.neon_cli.create_branch(branch_name, 'empty')
         self._pg = self.env.postgres.create_start(branch_name)
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
@@ -83,7 +83,7 @@ class ZenithCompare(PgCompare):
         return self._pg
 
     @property
-    def zenbenchmark(self) -> ZenithBenchmarker:
+    def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
@@ -155,7 +155,7 @@ class VanillaCompare(PgCompare):
         return self._pg
 
     @property
-    def zenbenchmark(self) -> ZenithBenchmarker:
+    def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
@@ -254,9 +254,9 @@ class RemoteCompare(PgCompare):
 
 
 @pytest.fixture(scope='function')
-def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCompare:
+def neon_compare(request, zenbenchmark, pg_bin, neon_simple_env) -> NeonCompare:
     branch_name = request.node.name
-    return ZenithCompare(zenbenchmark, zenith_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
 
 
 @pytest.fixture(scope='function')
@@ -269,13 +269,13 @@ def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
     return RemoteCompare(zenbenchmark, remote_pg)
 
 
-@pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
-def zenith_with_baseline(request) -> PgCompare:
-    """Parameterized fixture that helps compare zenith against vanilla postgres.
+@pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
+def neon_with_baseline(request) -> PgCompare:
+    """Parameterized fixture that helps compare neon against vanilla postgres.
 
     A test that uses this fixture turns into a parameterized test that runs against:
     1. A vanilla postgres instance
-    2. A simple zenith env (see zenith_simple_env)
+    2. A simple neon env (see neon_simple_env)
     3. Possibly other postgres protocol implementations.
 
     The main goal of this fixture is to make it easier for people to read and write
@@ -287,7 +287,7 @@ def zenith_with_baseline(request) -> PgCompare:
     of that.
 
     If a test requires some one-off special implementation-specific logic, use of
-    isinstance(zenith_with_baseline, ZenithCompare) is encouraged. Though if that
+    isinstance(neon_with_baseline, NeonCompare) is encouraged. Though if that
     implementation-specific logic is widely useful across multiple tests, it might
     make sense to add methods to the PgCompare class.
     """

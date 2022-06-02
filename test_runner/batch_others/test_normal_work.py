@@ -1,9 +1,9 @@
 from fixtures.log_helper import log
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
 
 
-def check_tenant(env: ZenithEnv, pageserver_http: ZenithPageserverHttpClient):
-    tenant_id, timeline_id = env.zenith_cli.create_tenant()
+def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
     pg = env.postgres.create_start('main', tenant_id=tenant_id)
     # we rely upon autocommit after each statement
     res_1 = pg.safe_psql_many(queries=[
@@ -26,7 +26,7 @@ def check_tenant(env: ZenithEnv, pageserver_http: ZenithPageserverHttpClient):
     pageserver_http.timeline_detach(tenant_id, timeline_id)
 
 
-def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
+def test_normal_work(neon_env_builder: NeonEnvBuilder):
     """
     Basic test:
     * create new tenant with a timeline
@@ -40,7 +40,7 @@ def test_normal_work(zenith_env_builder: ZenithEnvBuilder):
     Repeat check for several tenants/timelines.
     """
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     for _ in range(3):

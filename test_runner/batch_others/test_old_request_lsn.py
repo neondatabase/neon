@@ -1,4 +1,4 @@
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 from fixtures.utils import print_gc_result
 import psycopg2.extras
@@ -14,11 +14,11 @@ import psycopg2.extras
 # just a hint that the page hasn't been modified since that LSN, and the page
 # server should return the latest page version regardless of the LSN.
 #
-def test_old_request_lsn(zenith_env_builder: ZenithEnvBuilder):
+def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
-    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
-    env = zenith_env_builder.init_start()
-    env.zenith_cli.create_branch("test_old_request_lsn", "main")
+    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("test_old_request_lsn", "main")
     pg = env.postgres.create_start('test_old_request_lsn')
     log.info('postgres is running on test_old_request_lsn branch')
 

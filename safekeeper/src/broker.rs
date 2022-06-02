@@ -144,19 +144,15 @@ async fn lease_keep_alive(mut client: Client, lease_id: i64) -> Result<()> {
 }
 
 pub fn get_campaign_name(
-    election_name: String,
-    broker_prefix: String,
-    timeline_id: &ZTenantTimelineId,
+    election_name: &str,
+    broker_prefix: &str,
+    id: ZTenantTimelineId,
 ) -> String {
-    return format!(
-        "{}/{}",
-        SkTimelineSubscriptionKind::timeline(broker_prefix, *timeline_id).watch_key(),
-        election_name
-    );
+    format!("{broker_prefix}/{id}/{election_name}")
 }
 
 pub fn get_candiate_name(system_id: NodeId) -> String {
-    format!("id_{}", system_id)
+    format!("id_{system_id}")
 }
 
 /// Push once in a while data about all active timelines to the broker.

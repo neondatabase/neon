@@ -4,28 +4,28 @@ import psycopg2.extras
 import json
 from ast import Assert
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 
 #
 # Test pageserver recovery after crash
 #
-def test_pageserver_recovery(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
+def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
     # Override default checkpointer settings to run it more often
-    zenith_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
+    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
 
-    env = zenith_env_builder.init()
+    env = neon_env_builder.init()
 
     # Check if failpoints enables. Otherwise the test doesn't make sense
-    f = env.zenith_cli.pageserver_enabled_features()
+    f = env.neon_cli.pageserver_enabled_features()
 
     assert "failpoints" in f["features"], "Build pageserver with --features=failpoints option to run this test"
-    zenith_env_builder.start()
+    neon_env_builder.start()
 
     # Create a branch for us
-    env.zenith_cli.create_branch("test_pageserver_recovery", "main")
+    env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
     pg = env.postgres.create_start('test_pageserver_recovery')
     log.info("postgres is running on 'test_pageserver_recovery' branch")

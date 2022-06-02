@@ -10,7 +10,7 @@ from typing import Optional
 import signal
 import pytest
 
-from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, Etcd, ZenithPageserverHttpClient, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
+from fixtures.neon_fixtures import PgProtocol, PortDistributor, Postgres, NeonEnvBuilder, Etcd, NeonPageserverHttpClient, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload, neon_binpath, pg_distrib_dir
 from fixtures.utils import lsn_from_hex
 
 
@@ -26,7 +26,7 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
                           http_port: int,
                           broker: Optional[Etcd]):
     """
-    cannot use ZenithPageserver yet because it depends on zenith cli
+    cannot use NeonPageserver yet because it depends on neon cli
     which currently lacks support for multiple pageservers
     """
     cmd = [
@@ -106,21 +106,21 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     "needs to replace callmemaybe call with better idea how to migrate timelines between pageservers"
 )
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
-def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
+def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                            port_distributor: PortDistributor,
                            with_load: str):
-    zenith_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_local_fs_remote_storage()
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
 
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    tenant, _ = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant, _ = env.neon_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
 
     # attach does not download ancestor branches (should it?), just use root branch for now
-    env.zenith_cli.create_root_branch('test_tenant_relocation', tenant_id=tenant)
+    env.neon_cli.create_root_branch('test_tenant_relocation', tenant_id=tenant)
 
     tenant_pg = env.postgres.create_start(branch_name='test_tenant_relocation',
                                           node_name='test_tenant_relocation',
@@ -177,16 +177,16 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     new_pageserver_pg_port = port_distributor.get_port()
     new_pageserver_http_port = port_distributor.get_port()
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = pathlib.Path(zenith_binpath) / 'pageserver'
+    pageserver_bin = pathlib.Path(neon_binpath) / 'pageserver'
 
-    new_pageserver_http = ZenithPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
+    new_pageserver_http = NeonPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
 
     with new_pageserver_helper(new_pageserver_dir,
                                pageserver_bin,
                                remote_storage_mock_path,
                                new_pageserver_pg_port,
                                new_pageserver_http_port,
-                               zenith_env_builder.broker):
+                               neon_env_builder.broker):
 
         # call to attach timeline to new pageserver
         new_pageserver_http.timeline_attach(tenant, timeline)
@@ -215,7 +215,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         tenant_pg.stop()
 
-        # rewrite zenith cli config to use new pageserver for basebackup to start new compute
+        # rewrite neon cli config to use new pageserver for basebackup to start new compute
         cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
         cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
@@ -258,7 +258,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         assert not os.path.exists(timeline_to_detach_local_path), f'After detach, local timeline dir {timeline_to_detach_local_path} should be removed'
 
-        # bring old pageserver back for clean shutdown via zenith cli
+        # bring old pageserver back for clean shutdown via neon cli
         # new pageserver will be shut down by the context manager
         cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"
