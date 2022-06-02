@@ -5,6 +5,7 @@
 __pycache__/
 test_output/
 .vscode
+.idea
 /.zenith
 /integration_tests/.zenith
 

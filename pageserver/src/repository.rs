@@ -195,6 +195,7 @@ impl Display for TimelineSyncStatusUpdate {
         f.write_str(s)
     }
 }
+
 ///
 /// A repository corresponds to one .zenith directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
@@ -242,7 +243,7 @@ pub trait Repository: Send + Sync {
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `checkpoint_before_gc` parameter is used to force compaction of storage before CG
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     fn gc_iteration(
