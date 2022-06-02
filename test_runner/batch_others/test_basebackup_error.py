@@ -1,7 +1,7 @@
 import pytest
 from contextlib import closing
 
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 
@@ -9,9 +9,9 @@ from fixtures.log_helper import log
 # Test error handling, if the 'basebackup' command fails in the middle
 # of building the tar archive.
 #
-def test_basebackup_error(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_basebackup_error", "empty")
+def test_basebackup_error(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_basebackup_error", "empty")
 
     # Introduce failpoint
     env.pageserver.safe_psql(f"failpoints basebackup-before-control-file=return")

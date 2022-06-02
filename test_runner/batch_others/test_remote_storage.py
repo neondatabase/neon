@@ -1,12 +1,12 @@
 # It's possible to run any regular test with the local fs remote storage via
-# env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/zenith_zzz/'}" poetry ......
+# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import shutil, os
 from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.zenith_fixtures import ZenithEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 import pytest
@@ -30,12 +30,12 @@ import pytest
 #
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
-    # zenith_env_builder.rust_log_override = 'debug'
+def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, storage_type: str):
+    # neon_env_builder.rust_log_override = 'debug'
     if storage_type == 'local_fs':
-        zenith_env_builder.enable_local_fs_remote_storage()
+        neon_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':
-        zenith_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
+        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
     else:
         raise RuntimeError(f'Unknown storage type: {storage_type}')
 
@@ -43,7 +43,7 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     data_secret = 'very secret secret'
 
     ##### First start, insert secret data and upload it to the remote storage
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     pg = env.postgres.create_start('main')
 
     client = env.pageserver.http_client()

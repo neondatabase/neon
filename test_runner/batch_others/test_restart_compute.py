@@ -1,7 +1,7 @@
 import pytest
 
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 
@@ -9,13 +9,13 @@ from fixtures.log_helper import log
 # Test restarting and recreating a postgres instance
 #
 @pytest.mark.parametrize('with_safekeepers', [False, True])
-def test_restart_compute(zenith_env_builder: ZenithEnvBuilder, with_safekeepers: bool):
-    zenith_env_builder.pageserver_auth_enabled = True
+def test_restart_compute(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
+    neon_env_builder.pageserver_auth_enabled = True
     if with_safekeepers:
-        zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+        neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_restart_compute')
+    env.neon_cli.create_branch('test_restart_compute')
     pg = env.postgres.create_start('test_restart_compute')
     log.info("postgres is running on 'test_restart_compute' branch")
 

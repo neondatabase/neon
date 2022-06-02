@@ -1,13 +1,13 @@
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_pageserver_restart(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
+def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_pageserver_restart')
+    env.neon_cli.create_branch('test_pageserver_restart')
     pg = env.postgres.create_start('test_pageserver_restart')
 
     pg_conn = pg.connect()

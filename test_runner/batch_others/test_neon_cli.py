@@ -1,12 +1,12 @@
 import uuid
 import requests
 
-from fixtures.zenith_fixtures import DEFAULT_BRANCH_NAME, ZenithEnv, ZenithEnvBuilder, ZenithPageserverHttpClient
+from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
 from typing import cast
 
 
-def helper_compare_timeline_list(pageserver_http_client: ZenithPageserverHttpClient,
-                                 env: ZenithEnv,
+def helper_compare_timeline_list(pageserver_http_client: NeonPageserverHttpClient,
+                                 env: NeonEnv,
                                  initial_tenant: uuid.UUID):
     """
     Compare timelines list returned by CLI and directly via API.
@@ -17,65 +17,65 @@ def helper_compare_timeline_list(pageserver_http_client: ZenithPageserverHttpCli
         map(lambda t: cast(str, t['timeline_id']),
             pageserver_http_client.timeline_list(initial_tenant)))
 
-    timelines_cli = env.zenith_cli.list_timelines()
-    assert timelines_cli == env.zenith_cli.list_timelines(initial_tenant)
+    timelines_cli = env.neon_cli.list_timelines()
+    assert timelines_cli == env.neon_cli.list_timelines(initial_tenant)
 
     cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
     assert timelines_api == cli_timeline_ids
 
 
-def test_cli_timeline_list(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_cli_timeline_list(neon_simple_env: NeonEnv):
+    env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
     # Initial sanity check
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a branch for us
-    main_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_main')
+    main_timeline_id = env.neon_cli.create_branch('test_cli_branch_list_main')
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
-    nested_timeline_id = env.zenith_cli.create_branch('test_cli_branch_list_nested',
+    nested_timeline_id = env.neon_cli.create_branch('test_cli_branch_list_nested',
                                                       'test_cli_branch_list_main')
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
-    timelines_cli = [timeline_id for (_, timeline_id) in env.zenith_cli.list_timelines()]
+    timelines_cli = [timeline_id for (_, timeline_id) in env.neon_cli.list_timelines()]
 
     assert main_timeline_id.hex in timelines_cli
     assert nested_timeline_id.hex in timelines_cli
 
 
-def helper_compare_tenant_list(pageserver_http_client: ZenithPageserverHttpClient, env: ZenithEnv):
+def helper_compare_tenant_list(pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv):
     tenants = pageserver_http_client.tenant_list()
     tenants_api = sorted(map(lambda t: cast(str, t['id']), tenants))
 
-    res = env.zenith_cli.list_tenants()
+    res = env.neon_cli.list_tenants()
     tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert tenants_api == tenants_cli
 
 
-def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_cli_tenant_list(neon_simple_env: NeonEnv):
+    env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
     # Initial sanity check
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1, _ = env.zenith_cli.create_tenant()
+    tenant1, _ = env.neon_cli.create_tenant()
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2, _ = env.zenith_cli.create_tenant()
+    tenant2, _ = env.neon_cli.create_tenant()
 
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
-    res = env.zenith_cli.list_tenants()
+    res = env.neon_cli.list_tenants()
     tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert env.initial_tenant.hex in tenants
@@ -83,18 +83,18 @@ def test_cli_tenant_list(zenith_simple_env: ZenithEnv):
     assert tenant2.hex in tenants
 
 
-def test_cli_tenant_create(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    tenant_id, _ = env.zenith_cli.create_tenant()
-    timelines = env.zenith_cli.list_timelines(tenant_id)
+def test_cli_tenant_create(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    tenant_id, _ = env.neon_cli.create_tenant()
+    timelines = env.neon_cli.list_timelines(tenant_id)
 
     # an initial timeline should be created upon tenant creation
     assert len(timelines) == 1
     assert timelines[0][0] == DEFAULT_BRANCH_NAME
 
 
-def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
+def test_cli_ipv4_listeners(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
     # Connect to sk port on v4 loopback
     res = requests.get(f'http://127.0.0.1:{env.safekeepers[0].port.http}/v1/status')
@@ -108,17 +108,17 @@ def test_cli_ipv4_listeners(zenith_env_builder: ZenithEnvBuilder):
     # assert res.ok
 
 
-def test_cli_start_stop(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
+def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
     # Stop default ps/sk
-    env.zenith_cli.pageserver_stop()
-    env.zenith_cli.safekeeper_stop()
+    env.neon_cli.pageserver_stop()
+    env.neon_cli.safekeeper_stop()
 
     # Default start
-    res = env.zenith_cli.raw_cli(["start"])
+    res = env.neon_cli.raw_cli(["start"])
     res.check_returncode()
 
     # Default stop
-    res = env.zenith_cli.raw_cli(["stop"])
+    res = env.neon_cli.raw_cli(["stop"])
     res.check_returncode()

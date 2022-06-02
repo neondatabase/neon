@@ -2,7 +2,7 @@ import timeit
 from fixtures.benchmark_fixture import MetricReport
 import pytest
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 # Run bulk tenant creation test.
 #
@@ -14,20 +14,20 @@ from fixtures.zenith_fixtures import ZenithEnvBuilder
 
 @pytest.mark.parametrize('tenants_count', [1, 5, 10])
 def test_bulk_tenant_create(
-    zenith_env_builder: ZenithEnvBuilder,
+    neon_env_builder: NeonEnvBuilder,
     tenants_count: int,
     zenbenchmark,
 ):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     time_slices = []
 
     for i in range(tenants_count):
         start = timeit.default_timer()
 
-        tenant, _ = env.zenith_cli.create_tenant()
-        env.zenith_cli.create_timeline(f'test_bulk_tenant_create_{tenants_count}_{i}',
+        tenant, _ = env.neon_cli.create_tenant()
+        env.neon_cli.create_timeline(f'test_bulk_tenant_create_{tenants_count}_{i}',
                                        tenant_id=tenant)
 
         # FIXME: We used to start new safekeepers here. Did that make sense? Should we do it now?

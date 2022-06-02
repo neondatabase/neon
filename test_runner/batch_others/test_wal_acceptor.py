@@ -12,7 +12,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
-from fixtures.zenith_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, ZenithEnv, ZenithEnvBuilder, PortDistributor, SafekeeperPort, zenith_binpath, PgProtocol
+from fixtures.neon_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol
 from fixtures.utils import get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
@@ -29,9 +29,9 @@ class TimelineMetrics:
 
 # Run page server and multiple acceptors, and multiple compute nodes running
 # against different timelines.
-def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+def test_many_timelines(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     n_timelines = 3
 
@@ -39,15 +39,15 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
         "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
     ]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
-    # that's not really human readable, so the branch names are introduced in Zenith CLI.
-    # Zenith CLI stores its branch <-> timeline mapping in its internals,
+    # that's not really human readable, so the branch names are introduced in Neon CLI.
+    # Neon CLI stores its branch <-> timeline mapping in its internals,
     # but we need this to collect metrics from other servers, related to the timeline.
     branch_names_to_timeline_ids = {}
 
     # start postgres on each timeline
     pgs = []
     for branch_name in branch_names:
-        new_timeline_id = env.zenith_cli.create_branch(branch_name)
+        new_timeline_id = env.neon_cli.create_branch(branch_name)
         pgs.append(env.postgres.create_start(branch_name))
         branch_names_to_timeline_ids[branch_name] = new_timeline_id
 
@@ -93,14 +93,14 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
             # the compute node, which only happens after a consensus of safekeepers
             # has confirmed the transaction. We assume majority consensus here.
             assert (2 * sum(m.last_record_lsn <= lsn
-                            for lsn in m.flush_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+                            for lsn in m.flush_lsns) > neon_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             assert (2 * sum(m.last_record_lsn <= lsn
-                            for lsn in m.commit_lsns) > zenith_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
+                            for lsn in m.commit_lsns) > neon_env_builder.num_safekeepers), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             timeline_metrics.append(m)
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
 
-    # TODO: https://github.com/zenithdb/zenith/issues/809
+    # TODO: https://github.com/neondb/neon/issues/809
     # collect_metrics("before CREATE TABLE")
 
     # Do everything in different loops to have actions on different timelines
@@ -168,15 +168,15 @@ def test_many_timelines(zenith_env_builder: ZenithEnvBuilder):
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up
 # along the way. 2 of 3 are always alive, so the work keeps going.
-def test_restarts(zenith_env_builder: ZenithEnvBuilder):
+def test_restarts(neon_env_builder: NeonEnvBuilder):
     fault_probability = 0.01
     n_inserts = 1000
     n_acceptors = 3
 
-    zenith_env_builder.num_safekeepers = n_acceptors
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = n_acceptors
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_restarts')
+    env.neon_cli.create_branch('test_safekeepers_restarts')
     pg = env.postgres.create_start('test_safekeepers_restarts')
 
     # we rely upon autocommit after each statement
@@ -209,11 +209,11 @@ def delayed_safekeeper_start(wa):
 
 
 # When majority of acceptors is offline, commits are expected to be frozen
-def test_unavailability(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 2
-    env = zenith_env_builder.init_start()
+def test_unavailability(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 2
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_unavailability')
+    env.neon_cli.create_branch('test_safekeepers_unavailability')
     pg = env.postgres.create_start('test_safekeepers_unavailability')
 
     # we rely upon autocommit after each statement
@@ -279,12 +279,12 @@ def stop_value():
 
 
 # do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
+def test_race_conditions(neon_env_builder: NeonEnvBuilder, stop_value):
 
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_race_conditions')
+    env.neon_cli.create_branch('test_safekeepers_race_conditions')
     pg = env.postgres.create_start('test_safekeepers_race_conditions')
 
     # we rely upon autocommit after each statement
@@ -308,16 +308,16 @@ def test_race_conditions(zenith_env_builder: ZenithEnvBuilder, stop_value):
 
 
 # Test that safekeepers push their info to the broker and learn peer status from it
-def test_broker(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
-    zenith_env_builder.enable_local_fs_remote_storage()
-    env = zenith_env_builder.init_start()
+def test_broker(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_local_fs_remote_storage()
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch("test_broker", "main")
+    env.neon_cli.create_branch("test_broker", "main")
     pg = env.postgres.create_start('test_broker')
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
-    # learn zenith timeline from compute
+    # learn neon timeline from compute
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
@@ -349,13 +349,13 @@ def test_broker(zenith_env_builder: ZenithEnvBuilder):
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
-def test_wal_removal(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 2
+def test_wal_removal(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 2
     # to advance remote_consistent_llsn
-    zenith_env_builder.enable_local_fs_remote_storage()
-    env = zenith_env_builder.init_start()
+    neon_env_builder.enable_local_fs_remote_storage()
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_wal_removal')
+    env.neon_cli.create_branch('test_safekeepers_wal_removal')
     pg = env.postgres.create_start('test_safekeepers_wal_removal')
 
     with closing(pg.connect()) as conn:
@@ -412,22 +412,22 @@ def wait_segment_offload(tenant_id, timeline_id, live_sk, seg_end):
 
 
 @pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
-def test_wal_backup(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
-    zenith_env_builder.num_safekeepers = 3
+def test_wal_backup(neon_env_builder: NeonEnvBuilder, storage_type: str):
+    neon_env_builder.num_safekeepers = 3
     if storage_type == 'local_fs':
-        zenith_env_builder.enable_local_fs_remote_storage()
+        neon_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':
-        zenith_env_builder.enable_s3_mock_remote_storage('test_safekeepers_wal_backup')
+        neon_env_builder.enable_s3_mock_remote_storage('test_safekeepers_wal_backup')
     else:
         raise RuntimeError(f'Unknown storage type: {storage_type}')
-    zenith_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+    neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_wal_backup')
+    env.neon_cli.create_branch('test_safekeepers_wal_backup')
     pg = env.postgres.create_start('test_safekeepers_wal_backup')
 
-    # learn zenith timeline from compute
+    # learn neon timeline from compute
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
@@ -460,7 +460,7 @@ def test_wal_backup(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
 
 
 class ProposerPostgres(PgProtocol):
-    """Object for running postgres without ZenithEnv"""
+    """Object for running postgres without NeonEnv"""
     def __init__(self,
                  pgdata_dir: str,
                  pg_bin,
@@ -542,14 +542,14 @@ class ProposerPostgres(PgProtocol):
 
 
 # insert wal in all safekeepers and run sync on proposer
-def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
+def test_sync_safekeepers(neon_env_builder: NeonEnvBuilder,
                           pg_bin: PgBin,
                           port_distributor: PortDistributor):
 
     # We don't really need the full environment for this test, just the
     # safekeepers would be enough.
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     timeline_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -596,17 +596,17 @@ def test_sync_safekeepers(zenith_env_builder: ZenithEnvBuilder,
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
 
 
-def test_timeline_status(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
+def test_timeline_status(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_timeline_status')
+    env.neon_cli.create_branch('test_timeline_status')
     pg = env.postgres.create_start('test_timeline_status')
 
     wa = env.safekeepers[0]
     wa_http_cli = wa.http_client()
     wa_http_cli.check_status()
 
-    # learn zenith timeline from compute
+    # learn neon timeline from compute
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
@@ -642,7 +642,7 @@ class SafekeeperEnv:
                            peer_port=self.port_distributor.get_port())
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
-        self.bin_safekeeper = os.path.join(str(zenith_binpath), 'safekeeper')
+        self.bin_safekeeper = os.path.join(str(neon_binpath), 'safekeeper')
         self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
         self.tenant_id: Optional[uuid.UUID] = None
@@ -753,8 +753,8 @@ def test_safekeeper_without_pageserver(test_output_dir: str,
         assert res == 5050
 
 
-def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
-    def safekeepers_guc(env: ZenithEnv, sk_names: List[int]) -> str:
+def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
+    def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
         return ','.join([f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.id in sk_names])
 
     def execute_payload(pg: Postgres):
@@ -781,9 +781,9 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
             except Exception as e:
                 log.info(f"Safekeeper {sk.id} status error: {e}")
 
-    zenith_env_builder.num_safekeepers = 4
-    env = zenith_env_builder.init_start()
-    env.zenith_cli.create_branch('test_replace_safekeeper')
+    neon_env_builder.num_safekeepers = 4
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch('test_replace_safekeeper')
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
@@ -792,7 +792,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
     pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
     pg.start()
 
-    # learn zenith timeline from compute
+    # learn neon timeline from compute
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
@@ -844,7 +844,7 @@ def test_replace_safekeeper(zenith_env_builder: ZenithEnvBuilder):
 # We have `wal_keep_size=0`, so postgres should trim WAL once it's broadcasted
 # to all safekeepers. This test checks that compute WAL can fit into small number
 # of WAL segments.
-def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
+def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     # used to calculate delta in collect_stats
     last_lsn = .0
 
@@ -866,10 +866,10 @@ def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
     def generate_wal(cur):
         cur.execute("INSERT INTO t SELECT generate_series(1,300000), 'payload'")
 
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_wal_deleted_after_broadcast')
+    env.neon_cli.create_branch('test_wal_deleted_after_broadcast')
     # Adjust checkpoint config to prevent keeping old WAL segments
     pg = env.postgres.create_start(
         'test_wal_deleted_after_broadcast',
@@ -894,18 +894,18 @@ def test_wal_deleted_after_broadcast(zenith_env_builder: ZenithEnvBuilder):
     assert wal_size_after_checkpoint < 16 * 2.5
 
 
-def test_delete_force(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
+def test_delete_force(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
 
     # Create two tenants: one will be deleted, other should be preserved.
     tenant_id = env.initial_tenant.hex
-    timeline_id_1 = env.zenith_cli.create_branch('br1').hex  # Active, delete explicitly
-    timeline_id_2 = env.zenith_cli.create_branch('br2').hex  # Inactive, delete explicitly
-    timeline_id_3 = env.zenith_cli.create_branch('br3').hex  # Active, delete with the tenant
-    timeline_id_4 = env.zenith_cli.create_branch('br4').hex  # Inactive, delete with the tenant
+    timeline_id_1 = env.neon_cli.create_branch('br1').hex  # Active, delete explicitly
+    timeline_id_2 = env.neon_cli.create_branch('br2').hex  # Inactive, delete explicitly
+    timeline_id_3 = env.neon_cli.create_branch('br3').hex  # Active, delete with the tenant
+    timeline_id_4 = env.neon_cli.create_branch('br4').hex  # Inactive, delete with the tenant
 
-    tenant_id_other_uuid, timeline_id_other_uuid = env.zenith_cli.create_tenant()
+    tenant_id_other_uuid, timeline_id_other_uuid = env.neon_cli.create_tenant()
     tenant_id_other = tenant_id_other_uuid.hex
     timeline_id_other = timeline_id_other_uuid.hex
 
