@@ -99,9 +99,9 @@ async fn wal_backup_launcher_main_loop(
 
                 // TODO: decide who should offload in launcher itself by simply checking current state
                 let election_name = broker::get_campaign_name(
-                    BACKUP_ELECTION_NAME.to_string(),
-                    conf.broker_etcd_prefix.clone(),
-                    &zttid,
+                    BACKUP_ELECTION_NAME,
+                    &conf.broker_etcd_prefix,
+                    zttid,
                 );
                 let my_candidate_name = broker::get_candiate_name(conf.my_id);
                 let election = broker::Election::new(
