@@ -1,12 +1,13 @@
 import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
+from fixtures.pg_stats import PG_STATS, PgStat
 
-from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, ZenithEnv
+from fixtures.zenith_fixtures import PgBin, PgProtocol, Postgres, VanillaPostgres, RemotePostgres, ZenithEnv
 from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
 
 # Type-related stuff
-from typing import Iterator
+from typing import Dict, Iterator, List, Tuple
 
 
 class PgCompare(ABC):
@@ -51,6 +52,11 @@ class PgCompare(ABC):
     def record_duration(self, out_name):
         pass
 
+    @contextmanager
+    @abstractmethod
+    def record_pg_stats(self, out_name, pg_stats: List[PgStat] = PG_STATS):
+        pass
+
 
 class ZenithCompare(PgCompare):
     """PgCompare interface for the zenith stack."""
@@ -73,15 +79,15 @@ class ZenithCompare(PgCompare):
         self.pscur = self.psconn.cursor()
 
     @property
-    def pg(self):
+    def pg(self) -> PgProtocol:
         return self._pg
 
     @property
-    def zenbenchmark(self):
+    def zenbenchmark(self) -> ZenithBenchmarker:
         return self._zenbenchmark
 
     @property
-    def pg_bin(self):
+    def pg_bin(self) -> PgBin:
         return self._pg_bin
 
     def flush(self):
@@ -124,6 +130,10 @@ class ZenithCompare(PgCompare):
     def record_duration(self, out_name):
         return self.zenbenchmark.record_duration(out_name)
 
+    @contextmanager
+    def record_pg_stats(self, out_name, pg_stats: List[PgStat] = PG_STATS):
+        yield
+
 
 class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
@@ -141,15 +151,15 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self):
+    def pg(self) -> PgProtocol:
         return self._pg
 
     @property
-    def zenbenchmark(self):
+    def zenbenchmark(self) -> ZenithBenchmarker:
         return self._zenbenchmark
 
     @property
-    def pg_bin(self):
+    def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
     def flush(self):
@@ -176,6 +186,25 @@ class VanillaCompare(PgCompare):
 
     def record_duration(self, out_name):
         return self.zenbenchmark.record_duration(out_name)
+
+    @contextmanager
+    def record_pg_stats(self, out_name, pg_stats: List[PgStat] = PG_STATS):
+        yield
+
+        results: Dict[str, float] = {}
+
+        for pg_stat in pg_stats:
+            self.cur.execute(f"SELECT {','.join(pg_stat.columns)} FROM {pg_stat.table} {pg_stat.filter_query}")
+            row = self.cur.fetchone()
+            print(row)
+            assert len(row) == len(pg_stat.columns)
+
+            for col, val in zip(pg_stat.columns, row):
+                results[f"{out_name}.{pg_stat.table}.{col}"] = val
+
+
+        for k, v in results.items():
+            self.zenbenchmark.record(k, v, '', MetricReport.HIGHER_IS_BETTER)
 
 
 class RemoteCompare(PgCompare):
@@ -218,6 +247,10 @@ class RemoteCompare(PgCompare):
 
     def record_duration(self, out_name):
         return self.zenbenchmark.record_duration(out_name)
+
+    @contextmanager
+    def record_pg_stats(self, out_name, pg_stats: List[PgStat] = PG_STATS):
+        yield
 
 
 @pytest.fixture(scope='function')
