@@ -258,7 +258,7 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                     }
                                 }
                             }
-                            Ok(None) => {}
+                            Ok(None) => warn!("Ignoring etcd KV with unexpected key {:?} that does not match required regex {}", new_etcd_kv.key_str(), regex),
                             Err(e) => error!("Failed to parse timeline update: {e}"),
                         };
                     }
@@ -272,7 +272,7 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
         }
 
         Ok(())
-    });
+    }.instrument(info_span!("etcd_broker")));
 
     Ok(SkTimelineSubscription {
         kind: subscription,
