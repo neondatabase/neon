@@ -57,8 +57,6 @@ pub struct SkTimelineInfo {
     pub peer_horizon_lsn: Option<Lsn>,
     #[serde(default)]
     pub safekeeper_connstr: Option<String>,
-    #[serde(default)]
-    pub pageserver_connstr: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

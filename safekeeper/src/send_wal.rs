@@ -162,9 +162,8 @@ impl ReplicationConn {
         spg: &mut SafekeeperPostgresHandler,
         pgb: &mut PostgresBackend,
         mut start_pos: Lsn,
-        pageserver_connstr: Option<String>,
     ) -> Result<()> {
-        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap(), pageserver_connstr = %pageserver_connstr.as_deref().unwrap_or_default()).entered();
+        let _enter = info_span!("WAL sender", timeline = %spg.ztimelineid.unwrap()).entered();
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());

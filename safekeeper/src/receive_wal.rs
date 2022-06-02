@@ -32,22 +32,14 @@ pub struct ReceiveWalConn<'pg> {
     pg_backend: &'pg mut PostgresBackend,
     /// The cached result of `pg_backend.socket().peer_addr()` (roughly)
     peer_addr: SocketAddr,
-    /// Pageserver connection string forwarded from compute
-    /// NOTE that it is allowed to operate without a pageserver.
-    /// So if compute has no pageserver configured do not use it.
-    pageserver_connstr: Option<String>,
 }
 
 impl<'pg> ReceiveWalConn<'pg> {
-    pub fn new(
-        pg: &'pg mut PostgresBackend,
-        pageserver_connstr: Option<String>,
-    ) -> ReceiveWalConn<'pg> {
+    pub fn new(pg: &'pg mut PostgresBackend) -> ReceiveWalConn<'pg> {
         let peer_addr = *pg.get_peer_addr();
         ReceiveWalConn {
             pg_backend: pg,
             peer_addr,
-            pageserver_connstr,
         }
     }
 
@@ -120,9 +112,7 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Register the connection and defer unregister. Do that only
                 // after processing first message, as it sets wal_seg_size,
                 // wanted by many.
-                spg.timeline
-                    .get()
-                    .on_compute_connect(self.pageserver_connstr.as_ref())?;
+                spg.timeline.get().on_compute_connect()?;
                 _guard = Some(ComputeConnectionGuard {
                     timeline: Arc::clone(spg.timeline.get()),
                 });
