@@ -1,6 +1,10 @@
 use std::ops::Deref;
 use std::time::Instant;
 
+/// A wrapper for any type that allows prioritization by time.
+/// A deadline is larger than another if it starts sooner,
+/// which allows us to conveniently put deadlines in a `BinaryHeap`
+/// and pull out the most urgent one.
 #[derive(Debug)]
 pub struct Deadline<T> {
     pub start_by: Instant,

@@ -9,11 +9,15 @@ use std::{
 
 use super::deadline::Deadline;
 
+/// A job is a wrapper for a function, which allows us to run that (blocking or non-blocking)
+/// function on a specified schedule using a thread pool.
 pub trait Job: std::fmt::Debug + Send + Clone + PartialOrd + Ord + Hash + 'static {
     type ErrorType;
 
+    /// Run the job, optionally returning a time when it should be scheduled to run again
     fn run(&self) -> Result<Option<Instant>, Self::ErrorType>;
 
+    /// Run, but catch panics
     fn run_safe(&self) -> Result<Option<Instant>, JobError<Self>> {
         match panic::catch_unwind(AssertUnwindSafe(|| self.run())) {
             Ok(Ok(res)) => Ok(res),
@@ -48,6 +52,7 @@ where
     Stuck(JobError<J>),
 }
 
+/// Data structure for scheduling jobs and inspecting status. Helper struct for `Pool`.
 #[derive(Debug, Default)]
 pub struct JobStatusTable<J: Job>
 where
@@ -57,15 +62,25 @@ where
     status: HashMap<J, JobStatus<J>>,
 
     /// Index over status for finding the next scheduled job
+    ///
+    /// Invariant: The queue contains every job with status
+    /// `JobStatus::Ready(scheduled_for)` exactly once, with
+    /// a deadline that mathes `scheduled_for`.
     queue: BinaryHeap<Deadline<J>>,
 }
 
+/// Helper for the `take_job` function.
 pub enum TakeResult<J: Job>
 where
     J::ErrorType: Debug,
 {
+    /// Successfully took a job, marked it as running and assigned it to you
     Assigned(Deadline<J>),
+
+    /// No pending jobs now, but there is one later
     WaitUntil(Instant),
+
+    /// There are no available jobs. Check again later.
     WaitForJobs,
 }
 
@@ -80,7 +95,9 @@ where
         }
     }
 
+    /// Schedule a new job
     pub fn schedule(&mut self, job: J) {
+        // TODO what happens if it's already in the table?
         let scheduled_for = Instant::now();
         self.status
             .insert(job.clone(), JobStatus::Ready { scheduled_for });
@@ -90,6 +107,7 @@ where
         });
     }
 
+    /// Take the next job if it's due.
     pub fn take_job(&mut self, worker_name: String) -> TakeResult<J> {
         if let Some(deadline) = self.queue.peek() {
             if Instant::now() > deadline.start_by {
@@ -110,6 +128,7 @@ where
         }
     }
 
+    /// Act on result of job.run_safe(). Reschedule if needed.
     pub fn report(&mut self, job: Deadline<J>, result: Result<Option<Instant>, JobError<J>>) {
         match result {
             Ok(Some(reschedule_for)) => {

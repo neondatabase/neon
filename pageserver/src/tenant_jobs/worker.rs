@@ -19,13 +19,17 @@ lazy_static! {
     .expect("Failed to register safekeeper_commit_lsn gauge vec");
 }
 
+/// Worker pool for executing scheduled jobs
 #[derive(Debug)]
 pub struct Pool<J: Job>
 where
     J::ErrorType: Debug,
 {
+    /// The scheduling data structure
     job_table: Mutex<JobStatusTable<J>>,
-    condvar: Arc<Condvar>, // Notified when idle worker should wake up
+
+    /// Notified when idle worker should wake up
+    condvar: Arc<Condvar>,
 }
 
 impl<J: Job> Default for Pool<J>
@@ -48,6 +52,7 @@ where
         }
     }
 
+    /// Main loop for a worker. Intended to be spawned via `thread_mgr::spawn`
     pub fn worker_main(&self, worker_name: String) -> anyhow::Result<()> {
         let mut job_table = self.job_table.lock().unwrap();
         while !is_shutdown_requested() {
@@ -66,6 +71,7 @@ where
 
                     // Reschedule or report error
                     job_table.report(job, result);
+                    self.condvar.notify_all();
                 }
                 super::job::TakeResult::WaitUntil(time) => {
                     let wait_time = time.duration_since(Instant::now());
@@ -80,7 +86,9 @@ where
         Ok(())
     }
 
+    /// Schedule a new job
     pub fn queue_job(&self, job: J) {
+        // TODO what happens if it's already scheduled or stuck?
         let mut job_table = self.job_table.lock().unwrap();
         job_table.schedule(job);
         self.condvar.notify_all();
