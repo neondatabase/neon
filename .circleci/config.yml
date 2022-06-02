@@ -750,7 +750,6 @@ workflows:
             - build-postgres-<< matrix.build_type >>
       - run-pytest:
           name: pg_regress-tests-<< matrix.build_type >>
-          context: PERF_TEST_RESULT_CONNSTR
           matrix:
             parameters:
               build_type: ["debug", "release"]
