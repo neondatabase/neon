@@ -1,5 +1,11 @@
-
-use std::{any::Any, collections::{BinaryHeap, HashMap}, fmt::Debug, hash::Hash, panic::{self, AssertUnwindSafe}, time::Instant};
+use std::{
+    any::Any,
+    collections::{BinaryHeap, HashMap},
+    fmt::Debug,
+    hash::Hash,
+    panic::{self, AssertUnwindSafe},
+    time::Instant,
+};
 
 use super::deadline::Deadline;
 
@@ -76,7 +82,8 @@ where
 
     pub fn schedule(&mut self, job: J) {
         let scheduled_for = Instant::now();
-        self.status.insert(job.clone(), JobStatus::Ready { scheduled_for });
+        self.status
+            .insert(job.clone(), JobStatus::Ready { scheduled_for });
         self.queue.push(Deadline {
             start_by: scheduled_for,
             inner: job,
@@ -87,16 +94,20 @@ where
         if let Some(deadline) = self.queue.peek() {
             if Instant::now() > deadline.start_by {
                 let job = self.queue.pop().expect("failed to pop job");
-                self.set_status(&job, JobStatus::Running {
-                    worker_name,
-                    started_at: Instant::now(),
-                });
-                return TakeResult::Assigned(job);
+                self.set_status(
+                    &job,
+                    JobStatus::Running {
+                        worker_name,
+                        started_at: Instant::now(),
+                    },
+                );
+                TakeResult::Assigned(job)
             } else {
-                TakeResult::<J>::WaitUntil(deadline.start_by);
+                TakeResult::<J>::WaitUntil(deadline.start_by)
             }
+        } else {
+            TakeResult::WaitForJobs
         }
-        TakeResult::WaitForJobs
     }
 
     pub fn report(&mut self, job: Deadline<J>, result: Result<Option<Instant>, JobError<J>>) {
@@ -110,13 +121,14 @@ where
             Err(e) => {
                 self.set_status(&job, JobStatus::Stuck(e));
                 println!("Job errored, thread is ok.");
+                // TODO put tenant in TenantState::Broken too?
             }
         }
     }
 
     fn reschedule(&mut self, job: &J, start_by: Instant) {
         self.set_status(
-            &job,
+            job,
             JobStatus::Ready {
                 scheduled_for: start_by,
             },

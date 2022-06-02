@@ -1,6 +1,5 @@
-use std::time::Instant;
 use std::ops::Deref;
-
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Deadline<T> {
@@ -29,8 +28,7 @@ impl<T> Ord for Deadline<T> {
     }
 }
 
-impl<T> PartialEq for Deadline<T>
-{
+impl<T> PartialEq for Deadline<T> {
     fn eq(&self, other: &Self) -> bool {
         self.start_by == other.start_by
     }
