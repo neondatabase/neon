@@ -269,11 +269,16 @@ impl FeStartupPacket {
                             .next()
                             .context("expected even number of params in StartupMessage")?;
                         if name == "options" {
-                            // deprecated way of passing params as cmd line args
-                            for cmdopt in value.split(' ') {
-                                let nameval: Vec<&str> = cmdopt.split('=').collect();
+                            // parsing options arguments "..&options=<var>:<val>,.."
+                            // extended example and set of options:
+                            // https://github.com/neondatabase/neon/blob/main/docs/rfcs/016-connection-routing.md#connection-url
+                            for cmdopt in value.split(',') {
+                                let nameval: Vec<&str> = cmdopt.split(':').collect();
                                 if nameval.len() == 2 {
                                     params.insert(nameval[0].to_string(), nameval[1].to_string());
+                                } else {
+                                    bail!("Options argument ill-formed.")
+                                    // todo: inform user / throw error message if options format is wrong.
                                 }
                             }
                         } else {
