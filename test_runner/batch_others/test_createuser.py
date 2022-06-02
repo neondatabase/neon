@@ -1,15 +1,15 @@
 from contextlib import closing
 
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 
 #
 # Test CREATE USER to check shared catalog restore
 #
-def test_createuser(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch('test_createuser', 'empty')
+def test_createuser(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch('test_createuser', 'empty')
     pg = env.postgres.create_start('test_createuser')
     log.info("postgres is running on 'test_createuser' branch")
 
@@ -24,7 +24,7 @@ def test_createuser(zenith_simple_env: ZenithEnv):
             lsn = cur.fetchone()[0]
 
     # Create a branch
-    env.zenith_cli.create_branch('test_createuser2', 'test_createuser', ancestor_start_lsn=lsn)
+    env.neon_cli.create_branch('test_createuser2', 'test_createuser', ancestor_start_lsn=lsn)
     pg2 = env.postgres.create_start('test_createuser2')
 
     # Test that you can connect to new branch as a new user

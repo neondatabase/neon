@@ -1,4 +1,4 @@
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 
@@ -6,10 +6,10 @@ from fixtures.log_helper import log
 # Test that the VM bit is cleared correctly at a HEAP_DELETE and
 # HEAP_UPDATE record.
 #
-def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_vm_bit_clear(neon_simple_env: NeonEnv):
+    env = neon_simple_env
 
-    env.zenith_cli.create_branch("test_vm_bit_clear", "empty")
+    env.neon_cli.create_branch("test_vm_bit_clear", "empty")
     pg = env.postgres.create_start('test_vm_bit_clear')
 
     log.info("postgres is running on 'test_vm_bit_clear' branch")
@@ -33,7 +33,7 @@ def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
     cur.execute('UPDATE vmtest_update SET id = 5000 WHERE id = 1')
 
     # Branch at this point, to test that later
-    env.zenith_cli.create_branch("test_vm_bit_clear_new", "test_vm_bit_clear")
+    env.neon_cli.create_branch("test_vm_bit_clear_new", "test_vm_bit_clear")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server

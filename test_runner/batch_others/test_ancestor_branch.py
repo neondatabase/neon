@@ -3,18 +3,18 @@ from contextlib import closing
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, ZenithPageserverApiException
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
 
 
 #
 # Create ancestor branches off the main branch.
 #
-def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
+def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
     # Extend compaction_period and gc_period to disable background compaction and gc.
-    tenant, _ = env.zenith_cli.create_tenant(
+    tenant, _ = env.neon_cli.create_tenant(
         conf={
             'gc_period': '10 m',
             'gc_horizon': '1048576',
@@ -48,7 +48,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 100k rows: {lsn_100}')
 
     # Create branch1.
-    env.zenith_cli.create_branch('branch1', 'main', tenant_id=tenant, ancestor_start_lsn=lsn_100)
+    env.neon_cli.create_branch('branch1', 'main', tenant_id=tenant, ancestor_start_lsn=lsn_100)
     pg_branch1 = env.postgres.create_start('branch1', tenant_id=tenant)
     log.info("postgres is running on 'branch1' branch")
 
@@ -72,7 +72,7 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     log.info(f'LSN after 200k rows: {lsn_200}')
 
     # Create branch2.
-    env.zenith_cli.create_branch('branch2', 'branch1', tenant_id=tenant, ancestor_start_lsn=lsn_200)
+    env.neon_cli.create_branch('branch2', 'branch1', tenant_id=tenant, ancestor_start_lsn=lsn_200)
     pg_branch2 = env.postgres.create_start('branch2', tenant_id=tenant)
     log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
@@ -110,15 +110,14 @@ def test_ancestor_branch(zenith_env_builder: ZenithEnvBuilder):
     assert branch2_cur.fetchone() == (300000, )
 
 
-def test_ancestor_branch_detach(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_ancestor_branch_detach(neon_simple_env: NeonEnv):
+    env = neon_simple_env
 
-    parent_timeline_id = env.zenith_cli.create_branch("test_ancestor_branch_detach_parent", "empty")
+    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_detach_parent", "empty")
 
-    env.zenith_cli.create_branch("test_ancestor_branch_detach_branch1",
-                                 "test_ancestor_branch_detach_parent")
+    env.neon_cli.create_branch("test_ancestor_branch_detach_branch1",
+                               "test_ancestor_branch_detach_parent")
 
     ps_http = env.pageserver.http_client()
-    with pytest.raises(ZenithPageserverApiException,
-                       match="Failed to detach inmem tenant timeline"):
+    with pytest.raises(NeonPageserverApiException, match="Failed to detach inmem tenant timeline"):
         ps_http.timeline_detach(env.initial_tenant, parent_timeline_id)

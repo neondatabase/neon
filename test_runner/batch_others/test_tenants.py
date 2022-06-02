@@ -3,26 +3,26 @@ from datetime import datetime
 import os
 import pytest
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.utils import lsn_to_hex
 
 
 @pytest.mark.parametrize('with_safekeepers', [False, True])
-def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_safekeepers: bool):
+def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
     if with_safekeepers:
-        zenith_env_builder.num_safekeepers = 3
+        neon_env_builder.num_safekeepers = 3
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
-    tenant_1, _ = env.zenith_cli.create_tenant()
-    tenant_2, _ = env.zenith_cli.create_tenant()
+    tenant_1, _ = env.neon_cli.create_tenant()
+    tenant_2, _ = env.neon_cli.create_tenant()
 
-    env.zenith_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                   tenant_id=tenant_1)
-    env.zenith_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                   tenant_id=tenant_2)
+    env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
+                                 tenant_id=tenant_1)
+    env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
+                                 tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start(
         f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
@@ -44,15 +44,15 @@ def test_tenants_normal_work(zenith_env_builder: ZenithEnvBuilder, with_safekeep
                 assert cur.fetchone() == (5000050000, )
 
 
-def test_metrics_normal_work(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
+def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
 
-    env = zenith_env_builder.init_start()
-    tenant_1, _ = env.zenith_cli.create_tenant()
-    tenant_2, _ = env.zenith_cli.create_tenant()
+    env = neon_env_builder.init_start()
+    tenant_1, _ = env.neon_cli.create_tenant()
+    tenant_2, _ = env.neon_cli.create_tenant()
 
-    timeline_1 = env.zenith_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_1)
-    timeline_2 = env.zenith_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_2)
+    timeline_1 = env.neon_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_1)
+    timeline_2 = env.neon_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_2)
 
     pg_tenant1 = env.postgres.create_start('test_metrics_normal_work', tenant_id=tenant_1)
     pg_tenant2 = env.postgres.create_start('test_metrics_normal_work', tenant_id=tenant_2)
@@ -72,7 +72,7 @@ def test_metrics_normal_work(zenith_env_builder: ZenithEnvBuilder):
         collected_metrics[f'safekeeper{sk.id}'] = sk.http_client().get_metrics_str()
 
     for name in collected_metrics:
-        basepath = os.path.join(zenith_env_builder.repo_dir, f'{name}.metrics')
+        basepath = os.path.join(neon_env_builder.repo_dir, f'{name}.metrics')
 
         with open(basepath, 'w') as stdout_f:
             print(collected_metrics[name], file=stdout_f, flush=True)

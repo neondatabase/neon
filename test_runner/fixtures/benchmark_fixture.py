@@ -25,9 +25,9 @@ To use, declare the 'zenbenchmark' fixture in the test function. Run the
 bencmark, and then record the result by calling zenbenchmark.record. For example:
 
 import timeit
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 
-def test_mybench(zenith_simple_env: env, zenbenchmark):
+def test_mybench(neon_simple_env: env, zenbenchmark):
 
     # Initialize the test
     ...
@@ -142,7 +142,7 @@ class MetricReport(str, enum.Enum):  # str is a hack to make it json serializabl
     LOWER_IS_BETTER = 'lower_is_better'
 
 
-class ZenithBenchmarker:
+class NeonBenchmarker:
     """
     An object for recording benchmark results. This is created for each test
     function by the zenbenchmark fixture
@@ -163,7 +163,7 @@ class ZenithBenchmarker:
         Record a benchmark result.
         """
         # just to namespace the value
-        name = f"zenith_benchmarker_{metric_name}"
+        name = f"neon_benchmarker_{metric_name}"
         self.property_recorder(
             name,
             {
@@ -289,12 +289,12 @@ class ZenithBenchmarker:
 
 
 @pytest.fixture(scope="function")
-def zenbenchmark(record_property) -> Iterator[ZenithBenchmarker]:
+def zenbenchmark(record_property) -> Iterator[NeonBenchmarker]:
     """
     This is a python decorator for benchmark fixtures. It contains functions for
     recording measurements, and prints them out at the end.
     """
-    benchmarker = ZenithBenchmarker(record_property)
+    benchmarker = NeonBenchmarker(record_property)
     yield benchmarker
 
 

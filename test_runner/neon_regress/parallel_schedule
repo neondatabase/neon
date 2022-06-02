@@ -4,7 +4,7 @@
 # number of connections needed to run the tests.
 # ----------
 
-test: zenith-cid
-test: zenith-rel-truncate
-test: zenith-clog
-test: zenith-vacuum-full
+test: neon-cid
+test: neon-rel-truncate
+test: neon-clog
+test: neon-vacuum-full

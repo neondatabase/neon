@@ -1,8 +1,8 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import PgBin, VanillaPostgres, ZenithEnv, profiling_supported
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
+from fixtures.neon_fixtures import PgBin, VanillaPostgres, NeonEnv, profiling_supported
+from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
 
-from fixtures.benchmark_fixture import PgBenchRunResult, MetricReport, ZenithBenchmarker
+from fixtures.benchmark_fixture import PgBenchRunResult, MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 
 from pathlib import Path
@@ -99,11 +99,11 @@ def get_scales_matrix():
     return list(map(int, scales.split(",")))
 
 
-# Run the pgbench tests against vanilla Postgres and zenith
+# Run the pgbench tests against vanilla Postgres and neon
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
-def test_pgbench(zenith_with_baseline: PgCompare, scale: int, duration: int):
-    run_test_pgbench(zenith_with_baseline, scale, duration)
+def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
+    run_test_pgbench(neon_with_baseline, scale, duration)
 
 
 # Run the pgbench tests, and generate a flamegraph from it
@@ -114,18 +114,18 @@ def test_pgbench(zenith_with_baseline: PgCompare, scale: int, duration: int):
 # can see how much overhead the profiling adds.
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
-def test_pgbench_flamegraph(zenbenchmark, pg_bin, zenith_env_builder, scale: int, duration: int):
-    zenith_env_builder.num_safekeepers = 1
-    zenith_env_builder.pageserver_config_override = '''
+def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int, duration: int):
+    neon_env_builder.num_safekeepers = 1
+    neon_env_builder.pageserver_config_override = '''
 profiling="page_requests"
 '''
     if not profiling_supported():
         pytest.skip("pageserver was built without 'profiling' feature")
 
-    env = zenith_env_builder.init_start()
-    env.zenith_cli.create_branch("empty", "main")
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("empty", "main")
 
-    run_test_pgbench(ZenithCompare(zenbenchmark, env, pg_bin, "pgbench"), scale, duration)
+    run_test_pgbench(NeonCompare(zenbenchmark, env, pg_bin, "pgbench"), scale, duration)
 
 
 # Run the pgbench tests against an existing Postgres cluster
