@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 # It is simpler infra-wise to have failpoints enabled by default
-# It shouldn't affect perf in any way because failpoints
+# It shouldn't affect performance in any way because failpoints
 # are not placed in hot code paths
 default = ["failpoints"]
 profiling = ["pprof"]

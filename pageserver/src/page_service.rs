@@ -7,7 +7,6 @@
 //     *status* -- show actual info about this pageserver,
 //     *pagestream* -- enter mode where smgr and pageserver talk with their
 //  custom protocol.
-//     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
 use anyhow::{bail, ensure, Context, Result};
@@ -38,7 +37,6 @@ use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::walreceiver;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
@@ -716,30 +714,6 @@ impl postgres_backend::Handler for PageServerHandler {
 
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("callmemaybe ") {
-            // callmemaybe <zenith tenantid as hex string> <zenith timelineid as hex string> <connstr>
-            // TODO lazy static
-            let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid callmemaybe: '{}'", query_string))?;
-
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let connstr = caps.get(3).unwrap().as_str().to_owned();
-
-            self.check_permission(Some(tenantid))?;
-
-            let _enter =
-                info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
-
-            // Check that the timeline exists
-            tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
-
-            walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
-
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

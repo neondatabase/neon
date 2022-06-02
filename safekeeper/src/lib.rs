@@ -8,7 +8,6 @@ use url::Url;
 use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId};
 
 pub mod broker;
-pub mod callmemaybe;
 pub mod control_file;
 pub mod control_file_upgrade;
 pub mod handler;

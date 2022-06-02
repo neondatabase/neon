@@ -29,13 +29,18 @@ Pageserver consists of:
 ## Running local installation
 
 
-#### building on Ubuntu/ Debian (Linux)
+#### building on Linux
 1. Install build dependencies and other useful packages
 
-On Ubuntu or Debian this set of packages should be sufficient to build the code:
-```text
+* On Ubuntu or Debian this set of packages should be sufficient to build the code:
+```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
+libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
+```
+* On Fedora these packages are needed:
+```bash
+dnf install flex bison readline-devel zlib-devel openssl-devel \
+  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -44,16 +49,11 @@ libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-3. Install PostgreSQL Client
-```
-apt install postgresql-client
-```
-
-4. Build neon and patched postgres
+3. Build neon and patched postgres
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
-make -j5
+make -j`nproc`
 ```
 
 #### building on OSX (12.3.1)
