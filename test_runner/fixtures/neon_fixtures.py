@@ -488,18 +488,21 @@ class NeonEnvBuilder:
     created in the right directory, based on the test name, and it's properly
     cleaned up after the test has finished.
     """
-    def __init__(self,
-                 repo_dir: Path,
-                 port_distributor: PortDistributor,
-                 broker: Etcd,
-                 mock_s3_server: MockS3Server,
-                 remote_storage: Optional[RemoteStorage] = None,
-                 remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
-                 pageserver_config_override: Optional[str] = None,
-                 num_safekeepers: int = 1,
-                 pageserver_auth_enabled: bool = False,
-                 rust_log_override: Optional[str] = None,
-                 default_branch_name=DEFAULT_BRANCH_NAME):
+    def __init__(
+            self,
+            repo_dir: Path,
+            port_distributor: PortDistributor,
+            broker: Etcd,
+            mock_s3_server: MockS3Server,
+            remote_storage: Optional[RemoteStorage] = None,
+            remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
+            pageserver_config_override: Optional[str] = None,
+            num_safekeepers: int = 1,
+            # Use non-standard SK ids to check for various parsing bugs
+            safekeepers_id_start: int = 0,
+            pageserver_auth_enabled: bool = False,
+            rust_log_override: Optional[str] = None,
+            default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
@@ -509,6 +512,7 @@ class NeonEnvBuilder:
         self.mock_s3_server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
+        self.safekeepers_id_start = safekeepers_id_start
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
@@ -656,7 +660,7 @@ class NeonEnv:
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-            id = i  # assign ids sequentially
+            id = config.safekeepers_id_start + i  # assign ids sequentially
             toml += textwrap.dedent(f"""
                 [[safekeepers]]
                 id = {id}
@@ -1093,7 +1097,7 @@ class NeonCli:
                         immediate=False) -> 'subprocess.CompletedProcess[str]':
         args = ['safekeeper', 'stop']
         if id is not None:
-            args.extend(str(id))
+            args.append(str(id))
         if immediate:
             args.extend(['-m', 'immediate'])
         return self.raw_cli(args)
