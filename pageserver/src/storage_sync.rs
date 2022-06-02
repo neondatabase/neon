@@ -892,7 +892,7 @@ fn storage_sync_loop<P, S>(
 
         REMAINING_SYNC_ITEMS.set(remaining_queue_length as i64);
         if remaining_queue_length > 0 || !batched_tasks.is_empty() {
-            info!("Processing tasks for {} timelines in batch, more tasks left to process: {remaining_queue_length}", batched_tasks.len());
+            debug!("Processing tasks for {} timelines in batch, more tasks left to process: {remaining_queue_length}", batched_tasks.len());
         } else {
             debug!("No tasks to process");
             continue;
@@ -1186,7 +1186,7 @@ async fn update_local_metadata(
     let remote_metadata = match remote_timeline {
         Some(timeline) => &timeline.metadata,
         None => {
-            info!("No remote timeline to update local metadata from, skipping the update");
+            debug!("No remote timeline to update local metadata from, skipping the update");
             return Ok(());
         }
     };

@@ -468,11 +468,17 @@ async fn timeline_wal_broker_loop_step(
             // finally, if no other tasks are completed, get another broker update and possibly reconnect
             updates = broker_subscription.fetch_data() => match updates {
                 Some(mut all_timeline_updates) => {
-                    if let Some(subscribed_timeline_updates) = all_timeline_updates.remove(&id) {
-                        if let Some(candidate) = wal_connection_manager.select_connection_candidate(subscribed_timeline_updates) {
-                            info!("Switching to different safekeeper {} for timeline {id}, reason: {:?}", candidate.safekeeper_id, candidate.reason);
-                            wal_connection_manager.change_connection(candidate.safekeeper_id, candidate.wal_producer_connstr).await;
+                    match all_timeline_updates.remove(&id) {
+                        Some(subscribed_timeline_updates) => {
+                            match wal_connection_manager.select_connection_candidate(subscribed_timeline_updates) {
+                                Some(candidate) => {
+                                    info!("Switching to different safekeeper {} for timeline {id}, reason: {:?}", candidate.safekeeper_id, candidate.reason);
+                                    wal_connection_manager.change_connection(candidate.safekeeper_id, candidate.wal_producer_connstr).await;
+                                },
+                                None => debug!("No connection candidate was selected for timeline"),
+                            }
                         }
+                        None => warn!("Timeline has an active broker subscription, but got no updates. Other data length: {}", all_timeline_updates.len()),
                     }
                 },
                 None => {
