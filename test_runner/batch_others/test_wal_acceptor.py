@@ -100,7 +100,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         log.info(f"{message}: {timeline_metrics}")
         return timeline_metrics
 
-    # TODO: https://github.com/neondb/neon/issues/809
+    # TODO: https://github.com/neondatabase/neon/issues/809
     # collect_metrics("before CREATE TABLE")
 
     # Do everything in different loops to have actions on different timelines

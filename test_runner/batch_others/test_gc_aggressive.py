@@ -48,7 +48,7 @@ async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: str):
 #
 # Aggressively force GC, while running queries.
 #
-# (repro for https://github.com/neondb/neon/issues/1047)
+# (repro for https://github.com/neondatabase/neon/issues/1047)
 #
 def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 

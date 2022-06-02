@@ -223,7 +223,7 @@ def can_bind(host: str, port: int) -> bool:
         # TODO: The pageserver and safekeepers don't use SO_REUSEADDR at the
         # moment. If that changes, we should use start using SO_REUSEADDR here
         # too, to allow reusing ports more quickly.
-        # See https://github.com/neondb/neon/issues/801
+        # See https://github.com/neondatabase/neon/issues/801
         #sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         try:
@@ -635,7 +635,7 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "NeonJWT" if config.pageserver_auth_enabled else "Trust"
+        pageserver_auth_type = "ZenithJWT" if config.pageserver_auth_enabled else "Trust"
 
         toml += textwrap.dedent(f"""
             [pageserver]
@@ -1193,7 +1193,7 @@ class NeonCli:
         log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
-        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override
@@ -1994,7 +1994,7 @@ SKIP_DIRS = frozenset(('pg_wal',
 
 SKIP_FILES = frozenset(('pg_internal.init',
                         'pg.log',
-                        'neon.signal',
+                        'zenith.signal',
                         'postgresql.conf',
                         'postmaster.opts',
                         'postmaster.pid',

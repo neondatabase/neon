@@ -17,7 +17,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Without safekeeper, walreceiver reconnection can stuck
     # because of IO deadlock.
     #
-    # See https://github.com/neondb/neon/issues/1068
+    # See https://github.com/neondatabase/neon/issues/1068
     neon_env_builder.num_safekeepers = 1
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
