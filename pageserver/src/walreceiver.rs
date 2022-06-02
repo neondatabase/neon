@@ -659,7 +659,6 @@ impl WalConnectionManager {
                 match wal_stream_connection_string(
                     self.id,
                     info.safekeeper_connstr.as_deref()?,
-                    info.pageserver_connstr.as_deref()?,
                 ) {
                     Ok(connstr) => Some((sk_id, info, connstr)),
                     Err(e) => {
@@ -749,7 +748,6 @@ fn wal_stream_connection_string(
         timeline_id,
     }: ZTenantTimelineId,
     listen_pg_addr_str: &str,
-    pageserver_connstr: &str,
 ) -> anyhow::Result<String> {
     let sk_connstr = format!("postgresql://no_user@{listen_pg_addr_str}/no_db");
     let me_conf = sk_connstr
@@ -759,7 +757,7 @@ fn wal_stream_connection_string(
         })?;
     let (host, port) = utils::connstring::connection_host_port(&me_conf);
     Ok(format!(
-        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id} pageserver_connstr={pageserver_connstr}'",
+        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
     ))
 }
 
@@ -792,20 +790,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: None,
-                        pageserver_connstr: Some("no safekeeper_connstr".to_string()),
-                    },
-                ),
-                (
-                    NodeId(1),
-                    SkTimelineInfo {
-                        last_log_term: None,
-                        flush_lsn: None,
-                        commit_lsn: Some(Lsn(1)),
-                        backup_lsn: None,
-                        remote_consistent_lsn: None,
-                        peer_horizon_lsn: None,
-                        safekeeper_connstr: Some("no pageserver_connstr".to_string()),
-                        pageserver_connstr: None,
                     },
                 ),
                 (
@@ -818,7 +802,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some("no commit_lsn".to_string()),
-                        pageserver_connstr: Some("no commit_lsn (p)".to_string()),
                     },
                 ),
                 (
@@ -831,7 +814,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some("no commit_lsn".to_string()),
-                        pageserver_connstr: Some("no commit_lsn (p)".to_string()),
                     },
                 ),
             ]));
@@ -887,7 +869,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-                        pageserver_connstr: Some(DUMMY_PAGESERVER_CONNSTR.to_string()),
                     },
                 ),
                 (
@@ -900,7 +881,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some("not advanced Lsn".to_string()),
-                        pageserver_connstr: Some("not advanced Lsn (p)".to_string()),
                     },
                 ),
                 (
@@ -915,7 +895,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some("not enough advanced Lsn".to_string()),
-                        pageserver_connstr: Some("not enough advanced Lsn (p)".to_string()),
                     },
                 ),
             ]));
@@ -947,7 +926,6 @@ mod tests {
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-                    pageserver_connstr: Some(DUMMY_PAGESERVER_CONNSTR.to_string()),
                 },
             )]))
             .expect("Expected one candidate selected out of the only data option, but got none");
@@ -960,9 +938,6 @@ mod tests {
         assert!(only_candidate
             .wal_producer_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
-        assert!(only_candidate
-            .wal_producer_connstr
-            .contains(DUMMY_PAGESERVER_CONNSTR));
 
         let selected_lsn = 100_000;
         let biggest_wal_candidate = data_manager_with_no_connection
@@ -977,7 +952,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some("smaller commit_lsn".to_string()),
-                        pageserver_connstr: Some("smaller commit_lsn (p)".to_string()),
                     },
                 ),
                 (
@@ -990,7 +964,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-                        pageserver_connstr: Some(DUMMY_PAGESERVER_CONNSTR.to_string()),
                     },
                 ),
                 (
@@ -1003,9 +976,6 @@ mod tests {
                         remote_consistent_lsn: None,
                         peer_horizon_lsn: None,
                         safekeeper_connstr: None,
-                        pageserver_connstr: Some(
-                            "no safekeeper_connstr despite bigger commit_lsn".to_string(),
-                        ),
                     },
                 ),
             ]))
@@ -1022,9 +992,6 @@ mod tests {
         assert!(biggest_wal_candidate
             .wal_producer_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
-        assert!(biggest_wal_candidate
-            .wal_producer_connstr
-            .contains(DUMMY_PAGESERVER_CONNSTR));
 
         Ok(())
     }
@@ -1071,7 +1038,6 @@ mod tests {
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-                    pageserver_connstr: Some(DUMMY_PAGESERVER_CONNSTR.to_string()),
                 },
             ),
             (
@@ -1084,7 +1050,6 @@ mod tests {
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
                     safekeeper_connstr: Some("advanced by Lsn safekeeper".to_string()),
-                    pageserver_connstr: Some("advanced by Lsn safekeeper (p)".to_string()),
                 },
             ),
         ]);
@@ -1108,9 +1073,6 @@ mod tests {
         assert!(over_threshcurrent_candidate
             .wal_producer_connstr
             .contains("advanced by Lsn safekeeper"));
-        assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
-            .contains("advanced by Lsn safekeeper (p)"));
 
         Ok(())
     }
@@ -1146,7 +1108,6 @@ mod tests {
                     remote_consistent_lsn: None,
                     peer_horizon_lsn: None,
                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-                    pageserver_connstr: Some(DUMMY_PAGESERVER_CONNSTR.to_string()),
                 },
             )]))
             .expect(
@@ -1168,9 +1129,6 @@ mod tests {
         assert!(over_threshcurrent_candidate
             .wal_producer_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
-        assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
-            .contains(DUMMY_PAGESERVER_CONNSTR));
 
         Ok(())
     }
@@ -1197,7 +1155,6 @@ mod tests {
     }
 
     const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
-    const DUMMY_PAGESERVER_CONNSTR: &str = "pageserver_connstr";
 
     // the function itself does not need async, but it spawns a tokio::task underneath hence neeed
     // a runtime to not to panic
@@ -1205,9 +1162,8 @@ mod tests {
         id: ZTenantTimelineId,
         safekeeper_id: NodeId,
     ) -> WalConnectionData {
-        let dummy_connstr =
-            wal_stream_connection_string(id, DUMMY_SAFEKEEPER_CONNSTR, DUMMY_PAGESERVER_CONNSTR)
-                .expect("Failed to construct dummy wal producer connstr");
+        let dummy_connstr = wal_stream_connection_string(id, DUMMY_SAFEKEEPER_CONNSTR)
+            .expect("Failed to construct dummy wal producer connstr");
         WalConnectionData {
             safekeeper_id,
             connection: WalReceiverConnection::open(

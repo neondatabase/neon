@@ -95,7 +95,6 @@ struct SharedState {
     /// when tli is inactive instead of having this flag.
     active: bool,
     num_computes: u32,
-    pageserver_connstr: Option<String>,
     last_removed_segno: XLogSegNo,
 }
 
@@ -119,7 +118,6 @@ impl SharedState {
             wal_backup_active: false,
             active: false,
             num_computes: 0,
-            pageserver_connstr: None,
             last_removed_segno: 0,
         })
     }
@@ -139,7 +137,6 @@ impl SharedState {
             wal_backup_active: false,
             active: false,
             num_computes: 0,
-            pageserver_connstr: None,
             last_removed_segno: 0,
         })
     }
@@ -188,35 +185,6 @@ impl SharedState {
     fn wal_backup_attend(&mut self) -> bool {
         self.wal_backup_active = self.is_wal_backup_required();
         self.wal_backup_active
-    }
-
-    /// Activate timeline's walsender: start/change timeline information propagated into etcd for further pageserver connections.
-    fn activate_walsender(
-        &mut self,
-        zttid: &ZTenantTimelineId,
-        new_pageserver_connstr: Option<String>,
-    ) {
-        if self.pageserver_connstr != new_pageserver_connstr {
-            self.deactivate_walsender(zttid);
-
-            if new_pageserver_connstr.is_some() {
-                info!(
-                    "timeline {} has activated its walsender with connstr {new_pageserver_connstr:?}",
-                    zttid.timeline_id,
-                );
-            }
-            self.pageserver_connstr = new_pageserver_connstr;
-        }
-    }
-
-    /// Deactivate the timeline: stop sending the timeline data into etcd, so no pageserver can connect for WAL streaming.
-    fn deactivate_walsender(&mut self, zttid: &ZTenantTimelineId) {
-        if let Some(pageserver_connstr) = self.pageserver_connstr.take() {
-            info!(
-                "timeline {} had deactivated its wallsender with connstr {pageserver_connstr:?}",
-                zttid.timeline_id,
-            )
-        }
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -318,17 +286,12 @@ impl Timeline {
     /// Register compute connection, starting timeline-related activity if it is
     /// not running yet.
     /// Can fail only if channel to a static thread got closed, which is not normal at all.
-    pub fn on_compute_connect(&self, pageserver_connstr: Option<&String>) -> Result<()> {
+    pub fn on_compute_connect(&self) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes += 1;
             is_wal_backup_action_pending = shared_state.update_status();
-            // FIXME: currently we always adopt latest pageserver connstr, but we
-            // should have kind of generations assigned by compute to distinguish
-            // the latest one or even pass it through consensus to reliably deliver
-            // to all safekeepers.
-            shared_state.activate_walsender(&self.zttid, pageserver_connstr.cloned());
         }
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
@@ -364,7 +327,7 @@ impl Timeline {
             (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
             if stop {
-                shared_state.deactivate_walsender(&self.zttid);
+                shared_state.update_status();
                 return Ok(true);
             }
         }
@@ -525,7 +488,6 @@ impl Timeline {
             )),
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
             safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
-            pageserver_connstr: shared_state.pageserver_connstr.clone(),
             backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
         })
     }
