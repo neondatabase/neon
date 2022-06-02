@@ -31,7 +31,10 @@ import pytest
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
 def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, storage_type: str):
-    # neon_env_builder.rust_log_override = 'debug'
+    # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
+    # and this test needs SK to write data to pageserver, so it will be visible
+    neon_env_builder.safekeepers_id_start = 12
+
     if storage_type == 'local_fs':
         neon_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':
