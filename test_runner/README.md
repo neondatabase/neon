@@ -45,12 +45,12 @@ If you want to run all tests that have the string "bench" in their names:
 
 Useful environment variables:
 
-`NEON_BIN`: The directory where neon binaries can be found.
+`ZENITH_BIN`: The directory where zenith binaries can be found.
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
-`NEON_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
+`ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
 `--pageserver-config-override=${value}` parameter values when neon cli is invoked
 `RUST_LOG`: logging configuration to pass into Neon CLI
 
