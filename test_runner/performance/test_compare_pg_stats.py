@@ -1,11 +1,12 @@
 import os
 from typing import List
+
 import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
 from fixtures.pg_stats import PgStatTable
 
-from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
+from performance.test_perf_pgbench import get_scales_matrix
 
 
 def get_seeds_matrix():

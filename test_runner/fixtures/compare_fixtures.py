@@ -2,13 +2,13 @@ import timeit
 import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-from fixtures.pg_stats import PG_STATS, PgStatTable
+from fixtures.pg_stats import PgStatTable
 
 from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, NeonEnv
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 # Type-related stuff
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, List
 
 
 class PgCompare(ABC):
@@ -62,7 +62,10 @@ class PgCompare(ABC):
 
         duration = timeit.default_timer() - init_t
         data = self._retrieve_pg_stats(out_name, pg_stats)
-        self.zenbenchmark.record(f"{out_name}.run_duration", duration, 's', MetricReport.LOWER_IS_BETTER)
+        self.zenbenchmark.record(f"{out_name}.run_duration",
+                                 duration,
+                                 's',
+                                 MetricReport.LOWER_IS_BETTER)
 
         for k in set(init_data) & set(data):
             self.zenbenchmark.record(f"{k}_per_s", (data[k] - init_data[k]) / duration,
@@ -105,15 +108,15 @@ class NeonCompare(PgCompare):
         self.pscur = self.psconn.cursor()
 
     @property
-    def pg(self) -> PgProtocol:
+    def pg(self):
         return self._pg
 
     @property
-    def zenbenchmark(self) -> NeonBenchmarker:
+    def zenbenchmark(self):
         return self._zenbenchmark
 
     @property
-    def pg_bin(self) -> PgBin:
+    def pg_bin(self):
         return self._pg_bin
 
     def flush(self):
@@ -159,7 +162,7 @@ class NeonCompare(PgCompare):
 
 class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
-    def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
+    def __init__(self, zenbenchmark: NeonBenchmarker, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
         vanilla_pg.configure([
@@ -173,15 +176,15 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
-    def pg(self) -> PgProtocol:
+    def pg(self):
         return self._pg
 
     @property
-    def zenbenchmark(self) -> NeonBenchmarker:
+    def zenbenchmark(self):
         return self._zenbenchmark
 
     @property
-    def pg_bin(self) -> PgBin:
+    def pg_bin(self):
         return self._pg.pg_bin
 
     def flush(self):
