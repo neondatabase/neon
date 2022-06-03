@@ -14,22 +14,39 @@ class PgStatTable:
         self.additional_query = filter_query
 
     @property
-    def select(self) -> str:
+    def query(self) -> str:
         return f"SELECT {','.join(self.columns)} FROM {self.table} {self.additional_query}"
 
 
-# a default set of PostgreSQL statistics [1] reported when calling `PgCompare.record_pg_stats`.
-# [1]: https://www.postgresql.org/docs/current/monitoring-stats.html
-PG_STATS: List[PgStatTable] = [
-    PgStatTable("pg_stat_database",
-                ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
-                "WHERE datname='postgres'"),
-    PgStatTable("pg_stat_wal",
-                ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
-                "")
-]
+@pytest.fixture(scope='function')
+def pg_stats_rw() -> List[PgStatTable]:
+    return [
+        PgStatTable("pg_stat_database",
+                    ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
+                    "WHERE datname='postgres'"),
+    ]
 
 
 @pytest.fixture(scope='function')
-def pg_stats() -> List[PgStatTable]:
-    return PG_STATS
+def pg_stats_ro() -> List[PgStatTable]:
+    return [
+        PgStatTable("pg_stat_database", ["tup_returned", "tup_fetched"],
+                    "WHERE datname='postgres'"),
+    ]
+
+
+@pytest.fixture(scope='function')
+def pg_stats_wo() -> List[PgStatTable]:
+    return [
+        PgStatTable("pg_stat_database", ["tup_inserted", "tup_updated", "tup_deleted"],
+                    "WHERE datname='postgres'"),
+    ]
+
+
+@pytest.fixture(scope='function')
+def pg_stats_wal() -> List[PgStatTable]:
+    return [
+        PgStatTable("pg_stat_wal",
+                    ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
+                    "")
+    ]

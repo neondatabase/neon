@@ -1,4 +1,3 @@
-import timeit
 import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
@@ -54,35 +53,27 @@ class PgCompare(ABC):
         pass
 
     @contextmanager
-    def record_pg_stats(self, out_name, pg_stats: List[PgStatTable]):
-        init_t = timeit.default_timer()
-        init_data = self._retrieve_pg_stats(out_name, pg_stats)
+    def record_pg_stats(self, pg_stats: List[PgStatTable]):
+        init_data = self._retrieve_pg_stats(pg_stats)
 
         yield
 
-        duration = timeit.default_timer() - init_t
-        data = self._retrieve_pg_stats(out_name, pg_stats)
-        self.zenbenchmark.record(f"{out_name}.run_duration",
-                                 duration,
-                                 's',
-                                 MetricReport.LOWER_IS_BETTER)
+        data = self._retrieve_pg_stats(pg_stats)
 
         for k in set(init_data) & set(data):
-            self.zenbenchmark.record(f"{k}_per_s", (data[k] - init_data[k]) / duration,
-                                     '',
-                                     MetricReport.HIGHER_IS_BETTER)
+            self.zenbenchmark.record(k, data[k] - init_data[k], '', MetricReport.HIGHER_IS_BETTER)
 
-    def _retrieve_pg_stats(self, out_name, pg_stats: List[PgStatTable]) -> Dict[str, float]:
-        results: Dict[str, float] = {}
+    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
+        results: Dict[str, int] = {}
 
         with self.pg.connect().cursor() as cur:
             for pg_stat in pg_stats:
-                cur.execute(pg_stat.select)
+                cur.execute(pg_stat.query)
                 row = cur.fetchone()
                 assert len(row) == len(pg_stat.columns)
 
                 for col, val in zip(pg_stat.columns, row):
-                    results[f"{out_name}.{pg_stat.table}.{col}"] = float(val)
+                    results[f"{pg_stat.table}.{col}"] = int(val)
 
         return results
 
