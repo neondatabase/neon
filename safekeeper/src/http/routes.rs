@@ -222,6 +222,7 @@ pub fn make_router(
             "/v1/timeline/:tenant_id/:timeline_id",
             timeline_status_handler,
         )
+        // Will be used in the future instead of implicit timeline creation
         .post("/v1/timeline", timeline_create_handler)
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
