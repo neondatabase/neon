@@ -113,3 +113,7 @@ fmt:
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
 	ln -s -f ../../pre-commit.py .git/hooks/pre-commit
+
+# Rebuild when any makefile changes
+# https://stackoverflow.com/questions/3871444/making-all-rules-depend-on-the-makefile-itself
+.EXTRA_PREREQS+=$(foreach mk, ${MAKEFILE_LIST},$(abspath ${mk}))
