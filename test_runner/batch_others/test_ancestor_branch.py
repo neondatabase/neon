@@ -24,7 +24,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
             'compaction_target_size': '4194304',
         })
 
-    env.pageserver.safe_psql("failpoints flush-frozen=sleep(10000)")
+    env.pageserver.safe_psql("failpoints flush-frozen-before-sync=sleep(10000)")
 
     pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()

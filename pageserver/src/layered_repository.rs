@@ -1727,9 +1727,7 @@ impl LayeredTimeline {
             new_delta_path.clone(),
             self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
         ])?;
-        fail_point!("checkpoint-before-sync");
-
-        fail_point!("flush-frozen");
+        fail_point!("flush-frozen-before-sync");
 
         // Finally, replace the frozen in-memory layer with the new on-disk layer
         {
