@@ -94,7 +94,7 @@ class NeonCompare(PgCompare):
         self._pg = self.env.postgres.create_start(branch_name)
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
-        # Long-lived pageserver cursor, useful for flushing
+        # Long-lived cursor, useful for flushing
         self.psconn = self.env.pageserver.connect()
         self.pscur = self.psconn.cursor()
 
@@ -153,7 +153,7 @@ class NeonCompare(PgCompare):
 
 class VanillaCompare(PgCompare):
     """PgCompare interface for vanilla postgres."""
-    def __init__(self, zenbenchmark: NeonBenchmarker, vanilla_pg: VanillaPostgres):
+    def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
         vanilla_pg.configure([
