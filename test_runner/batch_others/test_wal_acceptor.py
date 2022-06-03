@@ -18,26 +18,6 @@ from fixtures.log_helper import log
 from typing import List, Optional, Any
 
 
-# basic test, write something in setup with 3 wal acceptors, ensure that commits
-# succeed and data is written
-@pytest.mark.skip(reason="simple test for development")
-def test_safekeeper_normal_work(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch('test_safekeepers_normal_work')
-    pg = env.postgres.create_start('test_safekeepers_normal_work')
-
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            # we rely upon autocommit after each statement
-            # as waiting for acceptors happens there
-            cur.execute('CREATE TABLE t(key int primary key, value text)')
-            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
-            cur.execute('SELECT sum(key) FROM t')
-            assert cur.fetchone() == (5000050000, )
-
-
 @dataclass
 class TimelineMetrics:
     timeline_id: str
