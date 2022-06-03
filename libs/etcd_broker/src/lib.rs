@@ -65,7 +65,9 @@ pub struct SkTimelineInfo {
 pub enum BrokerError {
     #[error("Etcd client error: {0}. Context: {1}")]
     EtcdClient(etcd_client::Error, String),
-    #[error("Error during parsing etcd data: {0}")]
+    #[error("Error during parsing etcd key: {0}")]
+    InvalidKey(String),
+    #[error("Error during parsing etcd value: {0}")]
     ParsingError(String),
     #[error("Internal error: {0}")]
     InternalError(String),
@@ -221,7 +223,7 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                             },
                         };
 
-                        match parse_etcd_key_value(&subscription,  key_str, value_str) {
+                        match parse_safekeeper_timeline(&subscription,  key_str, value_str) {
                             Ok((zttid, timeline)) => {
                                 match timeline_updates
                                     .entry(zttid)
@@ -243,6 +245,8 @@ pub async fn subscribe_to_safekeeper_timeline_updates(
                                     }
                                 }
                             }
+                            // it is normal to get other keys when we subscribe to everything
+                            Err(BrokerError::InvalidKey(e)) => debug!("Unexpected key for timeline update: {e}"),
                             Err(e) => error!("Failed to parse timeline update: {e}"),
                         };
                     }
@@ -281,14 +285,14 @@ static SK_TIMELINE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
         .expect("wrong regex for safekeeper timeline etcd key")
 });
 
-fn parse_etcd_key_value(
+fn parse_safekeeper_timeline(
     subscription: &SkTimelineSubscriptionKind,
     key_str: &str,
     value_str: &str,
 ) -> Result<(ZTenantTimelineId, SafekeeperTimeline), BrokerError> {
     let broker_prefix = subscription.broker_etcd_prefix.as_str();
     if !key_str.starts_with(broker_prefix) {
-        return Err(BrokerError::ParsingError(format!(
+        return Err(BrokerError::InvalidKey(format!(
             "KV has unexpected key '{key_str}' that does not start with broker prefix {broker_prefix}"
         )));
     }
@@ -297,7 +301,7 @@ fn parse_etcd_key_value(
     let key_captures = match SK_TIMELINE_KEY_REGEX.captures(key_part) {
         Some(captures) => captures,
         None => {
-            return Err(BrokerError::ParsingError(format!(
+            return Err(BrokerError::InvalidKey(format!(
                 "KV has unexpected key part '{key_part}' that does not match required regex {}",
                 SK_TIMELINE_KEY_REGEX.as_str()
             )));
@@ -383,7 +387,7 @@ mod tests {
                 &timeline_subscription,
             ] {
                 let (id, _timeline) =
-                    parse_etcd_key_value(subscription, &key_string, value_str)
+                    parse_safekeeper_timeline(subscription, &key_string, value_str)
                         .unwrap_or_else(|e| panic!("Should be able to parse etcd key string '{key_string}' and etcd value string '{value_str}' for subscription {subscription:?}, but got: {e}"));
                 assert_eq!(id, ZTenantTimelineId::new(tenant_id, timeline_id));
             }
