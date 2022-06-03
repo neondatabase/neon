@@ -45,7 +45,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
                     # Configure failpoints
                     pscur.execute(
-                        "failpoints checkpoint-before-sync=sleep(2000);checkpoint-after-sync=exit")
+                        "failpoints flush-frozen-before-sync=sleep(2000);checkpoint-after-sync=exit"
+                    )
 
                     # Do some updates until pageserver is crashed
                     try:
