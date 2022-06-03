@@ -1,5 +1,6 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
+import pytest
 
 
 def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
@@ -26,7 +27,8 @@ def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
     pageserver_http.timeline_detach(tenant_id, timeline_id)
 
 
-def test_normal_work(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize('num_timelines,num_safekeepers', [(3, 1)])
+def test_normal_work(neon_env_builder: NeonEnvBuilder, num_timelines: int, num_safekeepers: int):
     """
     Basic test:
     * create new tenant with a timeline
@@ -41,7 +43,8 @@ def test_normal_work(neon_env_builder: NeonEnvBuilder):
     """
 
     env = neon_env_builder.init_start()
+    neon_env_builder.num_safekeepers = num_safekeepers
     pageserver_http = env.pageserver.http_client()
 
-    for _ in range(3):
+    for _ in range(num_timelines):
         check_tenant(env, pageserver_http)
