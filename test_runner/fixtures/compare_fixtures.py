@@ -82,7 +82,7 @@ class PgCompare(ABC):
                 assert len(row) == len(pg_stat.columns)
 
                 for col, val in zip(pg_stat.columns, row):
-                    results[f"{out_name}.{pg_stat.table}.{col}"] = val
+                    results[f"{out_name}.{pg_stat.table}.{col}"] = float(val)
 
         return results
 

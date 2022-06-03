@@ -23,7 +23,10 @@ class PgStatTable:
 PG_STATS: List[PgStatTable] = [
     PgStatTable("pg_stat_database",
                 ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
-                "WHERE datname='postgres'")
+                "WHERE datname='postgres'"),
+    PgStatTable("pg_stat_wal",
+                ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
+                "")
 ]
 
 
