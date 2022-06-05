@@ -55,6 +55,9 @@ impl TermHistory {
             bail!("TermHistory misses len");
         }
         let n_entries = bytes.get_u32_le();
+        if n_entries > 10 {
+            bail!("too long")
+        }
         let mut res = Vec::with_capacity(n_entries as usize);
         for _ in 0..n_entries {
             if bytes.remaining() < 16 {
@@ -246,7 +249,6 @@ impl SafeKeeperState {
         }
     }
 
-    #[cfg(test)]
     pub fn empty() -> Self {
         SafeKeeperState::new(&ZTenantTimelineId::empty(), vec![])
     }
@@ -906,63 +908,93 @@ where
     }
 }
 
+
+use crate::wal_storage::Storage;
+use std::ops::Deref;
+
+// fake storage for tests
+struct InMemoryState {
+    persisted_state: SafeKeeperState,
+}
+
+impl control_file::Storage for InMemoryState {
+    fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+        self.persisted_state = s.clone();
+        Ok(())
+    }
+}
+
+impl Deref for InMemoryState {
+    type Target = SafeKeeperState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.persisted_state
+    }
+}
+
+
+struct DummyWalStore {
+    lsn: Lsn,
+}
+
+impl wal_storage::Storage for DummyWalStore {
+    fn flush_lsn(&self) -> Lsn {
+        self.lsn
+    }
+
+    fn init_storage(&mut self, _state: &SafeKeeperState) -> Result<()> {
+        Ok(())
+    }
+
+    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
+        self.lsn = startpos + buf.len() as u64;
+        Ok(())
+    }
+
+    fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
+        self.lsn = end_pos;
+        Ok(())
+    }
+
+    fn flush_wal(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
+        Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
+    }
+}
+
+fn try_fuzz(data: &[u8]) -> anyhow::Result<()> {
+    let storage = InMemoryState {
+        persisted_state: SafeKeeperState::empty(),
+    };
+    let wal_store = DummyWalStore { lsn: Lsn(0) };
+    let ztli = ZTimelineId::from([0u8; 16]);
+    let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+
+    let bytes = Bytes::copy_from_slice(data);
+    let mut reader = bytes.reader();
+    loop {
+        let len = reader.read_u8()? as usize;
+        let mut buf: Vec<u8> = vec![0; len];
+        reader.read_exact(&mut buf)?;
+
+        let msg = ProposerAcceptorMessage::parse(Bytes::copy_from_slice(&buf))?;
+        sk.process_msg(&msg)?;
+    }
+}
+
+pub fn fuzz(data: &[u8]) {
+    try_fuzz(data);
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wal_storage::Storage;
     use std::ops::Deref;
-
-    // fake storage for tests
-    struct InMemoryState {
-        persisted_state: SafeKeeperState,
-    }
-
-    impl control_file::Storage for InMemoryState {
-        fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
-            self.persisted_state = s.clone();
-            Ok(())
-        }
-    }
-
-    impl Deref for InMemoryState {
-        type Target = SafeKeeperState;
-
-        fn deref(&self) -> &Self::Target {
-            &self.persisted_state
-        }
-    }
-
-    struct DummyWalStore {
-        lsn: Lsn,
-    }
-
-    impl wal_storage::Storage for DummyWalStore {
-        fn flush_lsn(&self) -> Lsn {
-            self.lsn
-        }
-
-        fn init_storage(&mut self, _state: &SafeKeeperState) -> Result<()> {
-            Ok(())
-        }
-
-        fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
-            self.lsn = startpos + buf.len() as u64;
-            Ok(())
-        }
-
-        fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
-            self.lsn = end_pos;
-            Ok(())
-        }
-
-        fn flush_wal(&mut self) -> Result<()> {
-            Ok(())
-        }
-
-        fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
-            Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
-        }
-    }
 
     #[test]
     fn test_voting() {
