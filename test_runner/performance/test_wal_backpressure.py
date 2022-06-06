@@ -79,7 +79,29 @@ def test_measure_read_latency_pgbench_simple_update_workload(neon_with_baseline:
                                     args=(env, scale, transactions))
     write_thread.start()
 
-    record_read_latency(env, write_thread, "SELECT count(*) from pgbench_accounts")
+    record_read_latency(env, write_thread, "SELECT sum(abalance) from pgbench_accounts")
+
+
+def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
+    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', env.pg.connstr()])
+    env.flush()
+
+
+@pytest.mark.parametrize("scale", get_scales_matrix(1000))
+def test_measure_read_latency_other_table(neon_with_baseline: PgCompare, scale: int):
+    # Measure the latency when reading from a table when doing a heavy write workload in another table
+    # This test tries to simulate the scenario described in https://github.com/neondatabase/neon/issues/1763.
+
+    env = neon_with_baseline
+    with pg_cur(env.pg) as cur:
+        cur.execute("CREATE TABLE foo(key int primary key, i int)")
+        cur.execute(f"INSERT INTO foo SELECT s, s FROM generate_series(1,100000) s")
+
+    write_thread = threading.Thread(target=start_pgbench_intensive_initialization,
+                                    args=(env, scale))
+    write_thread.start()
+
+    record_read_latency(env, write_thread, "SELECT count(*) from foo")
 
 
 def record_read_latency(env: PgCompare, write_thread: threading.Thread, read_query: str):
