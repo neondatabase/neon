@@ -1,13 +1,18 @@
-from random import randint
+import os
 import statistics
-import time
 import threading
+import time
 import timeit
+from random import randint
+
+import pytest
 from batch_others.test_backpressure import pg_cur
+from fixtures import log_helper
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
-from fixtures.neon_fixtures import NeonEnv, Postgres
-from fixtures.log_helper import log
+from fixtures.neon_fixtures import Postgres
+
+from performance.test_perf_pgbench import get_scales_matrix
 
 
 def start_heavy_write_workload(pg: Postgres, scale: int = 1, n_iters: int = 10):
@@ -15,9 +20,6 @@ def start_heavy_write_workload(pg: Postgres, scale: int = 1, n_iters: int = 10):
     At each subsequent step, we update a subset of rows in the table and insert new `new_rows_each_update` rows.
     The variable `new_rows_each_update` is equal to `scale * 100_000`."""
     new_rows_each_update = scale * 100_000
-
-    with pg_cur(pg) as cur:
-        cur.execute("CREATE TABLE t(key int primary key, tag int, cnt int)")
 
     with pg_cur(pg) as cur:
         cur.execute(
@@ -35,25 +37,64 @@ def start_heavy_write_workload(pg: Postgres, scale: int = 1, n_iters: int = 10):
         n_rows += new_rows_each_update
 
 
-def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare):
+@pytest.mark.parametrize("scale", get_scales_matrix(1))
+def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare, scale: int):
     env = neon_with_baseline
     pg = env.pg
 
-    with env.record_duration("run_duration"):
-        write_thread = threading.Thread(target=start_heavy_write_workload, args=(pg, ))
-        write_thread.start()
+    with pg_cur(pg) as cur:
+        cur.execute("CREATE TABLE t(key int primary key, tag int, cnt int)")
 
+    write_thread = threading.Thread(target=start_heavy_write_workload, args=(pg, ))
+    write_thread.start()
+
+    record_read_latency(env, write_thread, "SELECT count(*) from t")
+
+
+def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transactions: int):
+    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Igvp', env.pg.connstr()])
+    env.flush()
+
+    env.pg_bin.run_capture(['pgbench', '-N', f'-t{transactions}', '-Mprepared', env.pg.connstr()])
+    env.flush()
+
+
+def get_transactions_matrix(default: int = 100_000):
+    scales = os.getenv("TEST_PG_BENCH_TRANSACTIONS_MATRIX", default=str(default))
+    return list(map(int, scales.split(",")))
+
+
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("transactions", get_transactions_matrix())
+def test_measure_read_latency_pgbench_simple_update_workload(neon_with_baseline: PgCompare,
+                                                             scale: int,
+                                                             transactions: int):
+    env = neon_with_baseline
+
+    # create pgbench tables
+    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Idt', env.pg.connstr()])
+    env.flush()
+
+    write_thread = threading.Thread(target=start_pgbench_simple_update_workload,
+                                    args=(env, scale, transactions))
+    write_thread.start()
+
+    record_read_latency(env, write_thread, "SELECT count(*) from pgbench_accounts")
+
+
+def record_read_latency(env: PgCompare, write_thread: threading.Thread, read_query: str):
+    with env.record_duration("run_duration"):
         read_latencies = []
         while write_thread.is_alive():
             time.sleep(1.0)
 
-            with pg_cur(pg) as cur:
+            with pg_cur(env.pg) as cur:
                 t = timeit.default_timer()
-                cur.execute("SELECT count(*) from t")
-                res = cur.fetchone()[0]
+                cur.execute(read_query)
                 duration = timeit.default_timer() - t
 
-                log.info(f"Get the number of rows in the table `t`, got {res}, took {duration}s")
+                log_helper.log.info(
+                    f"Executed read query {read_query}, got {cur.fetchall()}, took {duration}")
 
                 read_latencies.append(duration)
 
