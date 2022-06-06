@@ -1,12 +1,13 @@
 import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
+from fixtures.pg_stats import PgStatTable
 
 from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, NeonEnv
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 # Type-related stuff
-from typing import Iterator
+from typing import Dict, List
 
 
 class PgCompare(ABC):
@@ -50,6 +51,31 @@ class PgCompare(ABC):
     @abstractmethod
     def record_duration(self, out_name):
         pass
+
+    @contextmanager
+    def record_pg_stats(self, pg_stats: List[PgStatTable]):
+        init_data = self._retrieve_pg_stats(pg_stats)
+
+        yield
+
+        data = self._retrieve_pg_stats(pg_stats)
+
+        for k in set(init_data) & set(data):
+            self.zenbenchmark.record(k, data[k] - init_data[k], '', MetricReport.HIGHER_IS_BETTER)
+
+    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
+        results: Dict[str, int] = {}
+
+        with self.pg.connect().cursor() as cur:
+            for pg_stat in pg_stats:
+                cur.execute(pg_stat.query)
+                row = cur.fetchone()
+                assert len(row) == len(pg_stat.columns)
+
+                for col, val in zip(pg_stat.columns, row):
+                    results[f"{pg_stat.table}.{col}"] = int(val)
+
+        return results
 
 
 class NeonCompare(PgCompare):

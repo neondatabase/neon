@@ -79,7 +79,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int):
     # Run simple-update workload
     run_pgbench(env,
                 "simple-update",
-                ['pgbench', '-n', '-c4', f'-T{duration}', '-P2', '-Mprepared', env.pg.connstr()])
+                ['pgbench', '-N', '-c4', f'-T{duration}', '-P2', '-Mprepared', env.pg.connstr()])
 
     # Run SELECT workload
     run_pgbench(env,
@@ -89,13 +89,13 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int):
     env.report_size()
 
 
-def get_durations_matrix():
-    durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default="45")
+def get_durations_matrix(default: int = 45):
+    durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default=str(default))
     return list(map(int, durations.split(",")))
 
 
-def get_scales_matrix():
-    scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default="10")
+def get_scales_matrix(default: int = 10):
+    scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default=str(default))
     return list(map(int, scales.split(",")))
 
 
