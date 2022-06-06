@@ -26,6 +26,11 @@ pub struct ClientCredentials {
     // New console API requires SNI info to determine the cluster name.
     // Other Auth backends don't need it.
     pub sni_data: Option<String>,
+
+    // project_name is passed as argument from options from url.
+    // In case sni_data is missing: project_name is used to determine cluster name.
+    // In case sni_data is available: project_name and sni_data should match (otherwise throws an error).
+    pub project_name: Option<String>,
 }
 
 impl ClientCredentials {
@@ -37,22 +42,47 @@ impl ClientCredentials {
 
 #[derive(Debug, Error)]
 pub enum ProjectNameError {
-    #[error("SNI is missing, please upgrade the postgres client library")]
+    #[error("SNI is missing. EITHER please upgrade the postgres client library OR pass the project name as a parameter: '...&options=project%3D<project-name>...'.")]
     Missing,
 
-    #[error("SNI is malformed")]
+    #[error("SNI is malformed.")]
     Bad,
+
+    #[error("Inconsistent project name inferred from SNI and project option. String from SNI: '{0}', String from project option: '{1}'")]
+    Inconsistent(String, String),
 }
 
 impl UserFacingError for ProjectNameError {}
 
 impl ClientCredentials {
-    /// Determine project name from SNI.
+    /// Determine project name from SNI or from project_name parameter from options argument.
     pub fn project_name(&self) -> Result<&str, ProjectNameError> {
-        // Currently project name is passed as a top level domain
-        let sni = self.sni_data.as_ref().ok_or(ProjectNameError::Missing)?;
-        let (first, _) = sni.split_once('.').ok_or(ProjectNameError::Bad)?;
-        Ok(first)
+        // Checking that if both sni_data and project_name are set, then they should match
+        // otherwise, throws a ProjectNameError::Inconsistent error.
+        if let Some(sni_data) = &self.sni_data {
+            let project_name_from_sni_data =
+                sni_data.split_once('.').ok_or(ProjectNameError::Bad)?.0;
+            if let Some(project_name_from_options) = &self.project_name {
+                if !project_name_from_options.eq(project_name_from_sni_data) {
+                    return Err(ProjectNameError::Inconsistent(
+                        project_name_from_sni_data.to_string(),
+                        project_name_from_options.to_string(),
+                    ));
+                }
+            }
+        }
+        // determine the project name from self.sni_data if it exists, otherwise from self.project_name.
+        let ret = match &self.sni_data {
+            // if sni_data exists, use it to determine project name
+            Some(sni_data) => sni_data.split_once('.').ok_or(ProjectNameError::Bad)?.0,
+            // otherwise use project_option if it was manually set thought options parameter.
+            None => self
+                .project_name
+                .as_ref()
+                .ok_or(ProjectNameError::Missing)?
+                .as_str(),
+        };
+        Ok(ret)
     }
 }
 
@@ -68,11 +98,13 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
 
         let user = get_param("user")?;
         let dbname = get_param("database")?;
+        let project_name = get_param("project").ok();
 
         Ok(Self {
             user,
             dbname,
             sni_data: None,
+            project_name,
         })
     }
 }

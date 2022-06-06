@@ -269,7 +269,14 @@ impl FeStartupPacket {
                             .next()
                             .context("expected even number of params in StartupMessage")?;
                         if name == "options" {
-                            // deprecated way of passing params as cmd line args
+                            // parsing options arguments "...&options=<var0>%3D<val0>+<var1>=<var1>..."
+                            // '%3D' is '=' and '+' is ' '
+
+                            // Note: we allow users that don't have SNI capabilities,
+                            // to pass a special keyword argument 'project'
+                            // to be used to determine the cluster name by the proxy.
+
+                            //TODO: write unit test for this and refactor in its own function.
                             for cmdopt in value.split(' ') {
                                 let nameval: Vec<&str> = cmdopt.split('=').collect();
                                 if nameval.len() == 2 {
