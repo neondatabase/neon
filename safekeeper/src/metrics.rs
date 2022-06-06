@@ -8,7 +8,7 @@ use metrics::{
     Gauge, IntGaugeVec,
 };
 use postgres_ffi::xlog_utils::XLogSegNo;
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{lsn::Lsn, pq_proto::FuzzableSystemTime, zid::ZTenantTimelineId};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
@@ -290,7 +290,9 @@ impl Collector for TimelineCollector {
                 self.feedback_ps_write_lsn
                     .with_label_values(labels)
                     .set(feedback.ps_writelsn);
-                if let Ok(unix_time) = feedback.ps_replytime.duration_since(SystemTime::UNIX_EPOCH)
+                if let Ok(unix_time) = feedback
+                    .ps_replytime
+                    .duration_since(&FuzzableSystemTime(SystemTime::UNIX_EPOCH))
                 {
                     self.feedback_last_time_seconds
                         .with_label_values(labels)

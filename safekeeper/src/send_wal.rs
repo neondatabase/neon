@@ -6,6 +6,7 @@ use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context, Result};
 
+use arbitrary::Arbitrary;
 use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
 
 use bytes::Bytes;
@@ -34,7 +35,7 @@ const ZENITH_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 type FullTransactionId = u64;
 
 /// Hot standby feedback received from replica
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct HotStandbyFeedback {
     pub ts: TimestampTz,
     pub xmin: FullTransactionId,

@@ -1,3 +1,4 @@
+use arbitrary::Arbitrary;
 use std::{fmt, str::FromStr};
 
 use hex::FromHex;
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
 /// Check the `serde_with::serde_as` documentation for options for more complex types.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Arbitrary)]
 struct ZId([u8; 16]);
 
 impl ZId {
@@ -176,7 +177,7 @@ macro_rules! zid_newtype {
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
 /// See [`ZId`] for alternative ways to serialize it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Arbitrary)]
 pub struct ZTimelineId(ZId);
 
 zid_newtype!(ZTimelineId);
@@ -187,7 +188,7 @@ zid_newtype!(ZTimelineId);
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
 /// See [`ZId`] for alternative ways to serialize it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Arbitrary)]
 pub struct ZTenantId(ZId);
 
 zid_newtype!(ZTenantId);
@@ -224,7 +225,9 @@ impl fmt::Display for ZTenantTimelineId {
 
 // Unique ID of a storage node (safekeeper or pageserver). Supposed to be issued
 // by the console.
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize, Arbitrary,
+)]
 #[serde(transparent)]
 pub struct NodeId(pub u64);
 

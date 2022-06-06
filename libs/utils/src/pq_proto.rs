@@ -4,6 +4,7 @@
 
 use crate::sync::{AsyncishRead, SyncFuture};
 use anyhow::{bail, ensure, Context, Result};
+use arbitrary::{Arbitrary, Unstructured};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Cursor};
 use std::str;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tracing::{trace, warn};
 
@@ -21,6 +22,8 @@ pub type SystemId = u64;
 pub const INT8_OID: Oid = 20;
 pub const INT4_OID: Oid = 23;
 pub const TEXT_OID: Oid = 25;
+
+// static FUZZABLE_PG_EPOCH: FuzzableSystemTime = FuzzableSystemTime(*PG_EPOCH);
 
 #[derive(Debug)]
 pub enum FeMessage {
@@ -921,7 +924,7 @@ impl<'a> BeMessage<'a> {
 
 // Zenith extension of postgres replication protocol
 // See ZENITH_STATUS_UPDATE_TAG_BYTE
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct ZenithFeedback {
     // Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
@@ -929,7 +932,31 @@ pub struct ZenithFeedback {
     pub ps_writelsn: u64,
     pub ps_applylsn: u64,
     pub ps_flushlsn: u64,
-    pub ps_replytime: SystemTime,
+    pub ps_replytime: FuzzableSystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FuzzableSystemTime(pub SystemTime);
+
+impl FuzzableSystemTime {
+    fn now() -> Self {
+        FuzzableSystemTime(SystemTime::now())
+    }
+    pub fn duration_since(&self, other: &Self) -> Result<Duration, std::time::SystemTimeError> {
+        self.0.duration_since(other.0)
+    }
+}
+
+impl<'a> Arbitrary<'a> for FuzzableSystemTime {
+    fn arbitrary(u: &mut Unstructured<'a>) -> Result<FuzzableSystemTime, arbitrary::Error> {
+        let after_epoch = bool::arbitrary(u)?;
+        let duration = Duration::arbitrary(u)?;
+        Ok(FuzzableSystemTime(if after_epoch {
+            UNIX_EPOCH + duration
+        } else {
+            UNIX_EPOCH - duration
+        }))
+    }
 }
 
 // NOTE: Do not forget to increment this number when adding new fields to ZenithFeedback.
@@ -943,7 +970,7 @@ impl ZenithFeedback {
             ps_writelsn: 0,
             ps_applylsn: 0,
             ps_flushlsn: 0,
-            ps_replytime: SystemTime::now(),
+            ps_replytime: FuzzableSystemTime::now(),
         }
     }
 
@@ -975,7 +1002,7 @@ impl ZenithFeedback {
 
         let timestamp = self
             .ps_replytime
-            .duration_since(*PG_EPOCH)
+            .duration_since(&FuzzableSystemTime(*PG_EPOCH))
             .expect("failed to serialize pg_replytime earlier than PG_EPOCH")
             .as_micros() as i64;
 
@@ -1020,9 +1047,11 @@ impl ZenithFeedback {
                     assert_eq!(len, 8);
                     let raw_time = buf.get_i64();
                     if raw_time > 0 {
-                        zf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
+                        zf.ps_replytime =
+                            FuzzableSystemTime(*PG_EPOCH + Duration::from_micros(raw_time as u64));
                     } else {
-                        zf.ps_replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
+                        zf.ps_replytime =
+                            FuzzableSystemTime(*PG_EPOCH - Duration::from_micros(-raw_time as u64));
                     }
                 }
                 _ => {
@@ -1051,7 +1080,7 @@ mod tests {
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        zf.ps_replytime = FuzzableSystemTime(*PG_EPOCH + Duration::from_secs(100_000_000));
         let mut data = BytesMut::new();
         zf.serialize(&mut data).unwrap();
 
@@ -1066,7 +1095,7 @@ mod tests {
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        zf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        zf.ps_replytime = FuzzableSystemTime(*PG_EPOCH + Duration::from_secs(100_000_000));
         let mut data = BytesMut::new();
         zf.serialize(&mut data).unwrap();
 

@@ -56,6 +56,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c38b6b6b79f671c25e1a3e785b7b82d7562ffc9cd3efdc98627e5668a2472490"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -196,7 +205,7 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "clap 2.34.0",
- "env_logger",
+ "env_logger 0.9.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -411,7 +420,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap 3.0.14",
- "env_logger",
+ "env_logger 0.9.0",
  "hyper",
  "libc",
  "log",
@@ -722,6 +731,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98e23c06c035dac87bd802d98f368df73a7f2cb05a66ffbd1f377e821fac4af9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "digest"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -775,6 +795,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7896dc8abb250ffdda33912550faa54c88ec8b998dec0b2c55ab224921ce11df"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "env_logger"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a19187fea3ac7e84da7dacf48de0c45d63c6a76f9490dae389aead16c243fce3"
+dependencies = [
+ "log",
+ "regex",
 ]
 
 [[package]]
@@ -2059,7 +2089,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32c",
- "env_logger",
+ "env_logger 0.9.0",
  "hex",
  "lazy_static",
  "log",
@@ -2266,6 +2296,8 @@ version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "588f6378e4dd99458b60ec275b4477add41ce4fa9f64dcba6f15adccb19b50d6"
 dependencies = [
+ "env_logger 0.8.4",
+ "log",
  "rand",
 ]
 
@@ -2667,6 +2699,7 @@ name = "safekeeper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "async-trait",
  "byteorder",
  "bytes",
@@ -3587,6 +3620,7 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bincode",
  "byteorder",
  "bytes",
@@ -3602,6 +3636,7 @@ dependencies = [
  "pin-project-lite",
  "postgres",
  "postgres-protocol",
+ "quickcheck",
  "rand",
  "routerify",
  "rustls",
@@ -3655,7 +3690,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap 3.0.14",
- "env_logger",
+ "env_logger 0.9.0",
  "log",
  "postgres",
  "tempfile",

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::*;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::{AcceptorProposerMessage, AppendResponse};
+use crate::safekeeper::{self, AcceptorProposerMessage, AppendResponse};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected, ProposerGreeting,
 };
@@ -166,7 +166,7 @@ fn append_logical_message(
             truncate_lsn: msg.truncate_lsn,
             proposer_uuid: [0u8; 16],
         },
-        wal_data: Bytes::from(wal_data),
+        wal_data: safekeeper::WalData(Bytes::from(wal_data)),
     });
 
     let response = spg.timeline.get().process_msg(&append_request)?;
@@ -202,7 +202,7 @@ impl XlLogicalMessage {
 /// Create new WAL record for non-transactional logical message.
 /// Used for creating artificial WAL for tests, as LogicalMessage
 /// record is basically no-op.
-fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
+pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     let mut prefix_bytes = BytesMut::with_capacity(prefix.len() + 1);
     prefix_bytes.put(prefix.as_bytes());
     prefix_bytes.put_u8(0);

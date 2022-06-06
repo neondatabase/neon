@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
 
+use arbitrary::Arbitrary;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +14,7 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, Arbitrary)]
 #[serde(transparent)]
 pub struct Lsn(pub u64);
 

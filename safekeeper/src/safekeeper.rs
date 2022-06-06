@@ -1,6 +1,8 @@
 //! Acceptor part of proposer-acceptor consensus algorithm.
 
 use anyhow::{bail, Context, Result};
+use arbitrary::Arbitrary;
+use arbitrary::Unstructured;
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -16,6 +18,7 @@ use std::io::Read;
 use tracing::*;
 
 use crate::control_file;
+use crate::json_ctrl::encode_logical_message;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
@@ -36,12 +39,12 @@ const UNKNOWN_SERVER_VERSION: u32 = 0;
 pub type Term = u64;
 const INVALID_TERM: Term = 0;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Arbitrary)]
 pub struct TermSwitchEntry {
     pub term: Term,
     pub lsn: Lsn,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Arbitrary)]
 pub struct TermHistory(pub Vec<TermSwitchEntry>);
 
 impl TermHistory {
@@ -257,7 +260,7 @@ impl SafeKeeperState {
 // protocol messages
 
 /// Initial Proposer -> Acceptor message
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Arbitrary)]
 pub struct ProposerGreeting {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
@@ -274,20 +277,20 @@ pub struct ProposerGreeting {
 
 /// Acceptor -> Proposer initial response: the highest term known to me
 /// (acceptor voted for).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Arbitrary)]
 pub struct AcceptorGreeting {
     term: u64,
     node_id: NodeId,
 }
 
 /// Vote request sent from proposer to safekeepers
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Arbitrary)]
 pub struct VoteRequest {
     term: Term,
 }
 
 /// Vote itself, sent from safekeeper to proposer
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Arbitrary)]
 pub struct VoteResponse {
     term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     vote_given: u64, // fixme u64 due to padding
@@ -303,7 +306,7 @@ pub struct VoteResponse {
  * Proposer -> Acceptor message announcing proposer is elected and communicating
  * term history to it.
  */
-#[derive(Debug)]
+#[derive(Debug, Arbitrary)]
 pub struct ProposerElected {
     pub term: Term,
     pub start_streaming_at: Lsn,
@@ -313,12 +316,23 @@ pub struct ProposerElected {
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
 /// communicates commit_lsn.
-#[derive(Debug)]
+#[derive(Debug, Arbitrary)]
 pub struct AppendRequest {
     pub h: AppendRequestHeader,
-    pub wal_data: Bytes,
+    pub wal_data: WalData,
 }
-#[derive(Debug, Clone, Deserialize)]
+
+#[derive(Debug)]
+pub struct WalData(pub Bytes);
+
+impl<'a> Arbitrary<'a> for WalData {
+    fn arbitrary(_u: &mut Unstructured<'a>) -> Result<WalData, arbitrary::Error> {
+        let data = encode_logical_message("prefix", "message");
+        Ok(WalData(bytes::Bytes::from(data)))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Arbitrary)]
 pub struct AppendRequestHeader {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
@@ -337,7 +351,7 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
@@ -366,7 +380,7 @@ impl AppendResponse {
 }
 
 /// Proposer -> Acceptor messages
-#[derive(Debug)]
+#[derive(Debug, Arbitrary)]
 pub enum ProposerAcceptorMessage {
     Greeting(ProposerGreeting),
     VoteRequest(VoteRequest),
@@ -430,7 +444,10 @@ impl ProposerAcceptorMessage {
                 let mut wal_data_vec: Vec<u8> = vec![0; rec_size];
                 stream.read_exact(&mut wal_data_vec)?;
                 let wal_data = Bytes::from(wal_data_vec);
-                let msg = AppendRequest { h: hdr, wal_data };
+                let msg = AppendRequest {
+                    h: hdr,
+                    wal_data: WalData(wal_data),
+                };
 
                 Ok(ProposerAcceptorMessage::AppendRequest(msg))
             }
@@ -794,8 +811,8 @@ where
         self.inmem.proposer_uuid = msg.h.proposer_uuid;
 
         // do the job
-        if !msg.wal_data.is_empty() {
-            self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
+        if !msg.wal_data.0.is_empty() {
+            self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data.0)?;
         }
 
         // flush wal to the disk, if required
@@ -815,15 +832,22 @@ where
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
         // when truncate_lsn delta exceeds WAL segment size.
-        if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < self.inmem.peer_horizon_lsn
+
+        // using subtraction to avoid LSN overflow
+        if self
+            .inmem
+            .peer_horizon_lsn
+            .0
+            .checked_sub(self.state.peer_horizon_lsn.0)
+            .unwrap()
+            > self.state.server.wal_seg_size as u64
         {
             self.persist_control_file(self.state.clone())?;
         }
 
         trace!(
             "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
-            msg.wal_data.len(),
+            msg.wal_data.0.len(),
             msg.h.end_lsn,
             msg.h.commit_lsn,
             msg.h.truncate_lsn,
@@ -908,7 +932,6 @@ where
     }
 }
 
-
 use crate::wal_storage::Storage;
 use std::ops::Deref;
 
@@ -931,7 +954,6 @@ impl Deref for InMemoryState {
         &self.persisted_state
     }
 }
-
 
 struct DummyWalStore {
     lsn: Lsn,
@@ -985,10 +1007,28 @@ fn try_fuzz(data: &[u8]) -> anyhow::Result<()> {
     }
 }
 
+fn try_fuzz_messages(messages: Vec<ProposerAcceptorMessage>) -> anyhow::Result<()> {
+    let storage = InMemoryState {
+        persisted_state: SafeKeeperState::empty(),
+    };
+    let wal_store = DummyWalStore { lsn: Lsn(0) };
+    let ztli = ZTimelineId::from([0u8; 16]);
+    let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
+
+    for msg in messages {
+        sk.process_msg(&msg)?;
+    }
+
+    Ok(())
+}
+
 pub fn fuzz(data: &[u8]) {
     try_fuzz(data);
 }
 
+pub fn fuzz_messages(messages: Vec<ProposerAcceptorMessage>) {
+    try_fuzz_messages(messages);
+}
 
 #[cfg(test)]
 mod tests {
