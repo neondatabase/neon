@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bookfile = { git = "https://github.com/zenithdb/bookfile.git", branch="generic-readext" }
+bookfile = { git = "https://github.com/neondatabase/bookfile.git", branch="main" }
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
@@ -16,6 +16,7 @@ lazy_static = "1.4.0"
 log = "0.4.14"
 clap = "3.0"
 daemonize = "0.4.1"
+itertools = "0.10.3"
 tokio = { version = "1.11", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="2949d98df52587d562986aad155dd4e889e408b7" }
