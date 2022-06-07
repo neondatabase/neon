@@ -170,6 +170,27 @@ impl fmt::Display for RelTag {
     }
 }
 
+impl RelTag {
+    /// Formats:
+    /// <oid>
+    /// <oid>_<fork name>
+    /// <oid>.<segment number>
+    /// <oid>_<fork name>.<segment number>
+    pub fn to_segfile_name(&self, segno: u32) -> String {
+        if segno == 0 {
+            if let Some(forkname) = forknumber_to_name(self.forknum) {
+                format!("{}_{}", self.relnode, forkname)
+            } else {
+                format!("{}", self.relnode)
+            }
+        } else if let Some(forkname) = forknumber_to_name(self.forknum) {
+            format!("{}_{}.{}", self.relnode, forkname, segno)
+        } else {
+            format!("{}.{}", self.relnode, segno)
+        }
+    }
+}
+
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
 /// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bookfile = { git = "https://github.com/zenithdb/bookfile.git", branch="generic-readext" }
+bookfile = { git = "https://github.com/neondatabase/bookfile.git", branch="main" }
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
