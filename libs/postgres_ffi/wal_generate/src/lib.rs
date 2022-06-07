@@ -4,6 +4,7 @@ use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
 use std::cmp::Ordering;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -69,6 +70,12 @@ impl Conf {
 
     pub fn start_server(&self) -> Result<PostgresServer> {
         info!("Starting Postgres server in {:?}", self.datadir);
+        let log_file = fs::File::create(self.datadir.join("pg.log")).with_context(|| {
+            format!(
+                "Failed to create pg.log file in directory {}",
+                self.datadir.display()
+            )
+        })?;
         let unix_socket_dir = tempdir()?; // We need a directory with a short name for Unix socket (up to 108 symbols)
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
         let server_process = self
@@ -84,7 +91,7 @@ impl Conf {
             // Disable background processes as much as possible
             .args(&["-c", "wal_writer_delay=10s"])
             .args(&["-c", "autovacuum=off"])
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(log_file))
             .spawn()?;
         let server = PostgresServer {
             process: server_process,
