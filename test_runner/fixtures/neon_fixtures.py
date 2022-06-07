@@ -500,6 +500,8 @@ class NeonEnvBuilder:
             num_safekeepers: int = 1,
             # Use non-standard SK ids to check for various parsing bugs
             safekeepers_id_start: int = 0,
+            # fsync is disabled by default to make the tests go faster
+            safekeepers_enable_fsync: bool = False,
             pageserver_auth_enabled: bool = False,
             rust_log_override: Optional[str] = None,
             default_branch_name=DEFAULT_BRANCH_NAME):
@@ -513,6 +515,7 @@ class NeonEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
+        self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.pageserver_auth_enabled = pageserver_auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
@@ -666,7 +669,7 @@ class NeonEnv:
                 id = {id}
                 pg_port = {port.pg}
                 http_port = {port.http}
-                sync = false # Disable fsyncs to make the tests go faster""")
+                sync = {'true' if config.safekeepers_enable_fsync else 'false'}""")
             if bool(self.remote_storage_users
                     & RemoteStorageUsers.SAFEKEEPER) and self.remote_storage is not None:
                 toml += textwrap.dedent(f"""

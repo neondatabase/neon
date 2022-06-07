@@ -9,8 +9,8 @@ import pytest
 from batch_others.test_backpressure import pg_cur
 from fixtures import log_helper
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import PgCompare
-from fixtures.neon_fixtures import Postgres
+from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, Postgres
 
 from performance.test_perf_pgbench import get_scales_matrix
 
@@ -23,6 +23,24 @@ def get_num_iters_matrix(default: int = 10):
 def get_transactions_matrix(default: int = 1_000):
     scales = os.getenv("TEST_TRANSACTIONS_MATRIX", default=str(default))
     return list(map(int, scales.split(",")))
+
+
+@pytest.fixture(scope='function')
+def neon_compare_with_fsync(request, zenbenchmark, pg_bin,
+                            neon_env_builder: NeonEnvBuilder) -> NeonCompare:
+    neon_env_builder.safekeepers_enable_fsync = True
+
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
+
+    branch_name = request.node.name
+    return NeonCompare(zenbenchmark, env, pg_bin, branch_name)
+
+
+@pytest.fixture(params=["vanilla_compare", "neon_compare", "neon_compare_with_fsync"],
+                ids=["vanilla", "neon_fsync_off", "neon_fsync_on"])
+def compare(request) -> PgCompare:
+    return request.getfixturevalue(request.param)
 
 
 def start_heavy_write_workload(pg: Postgres, scale: int, num_iters: int):
@@ -50,10 +68,8 @@ def start_heavy_write_workload(pg: Postgres, scale: int, num_iters: int):
 
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 @pytest.mark.parametrize("num_iters", get_scales_matrix(10))
-def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare,
-                                                   scale: int,
-                                                   num_iters: int):
-    env = neon_with_baseline
+def test_measure_read_latency_heavy_write_workload(compare: PgCompare, scale: int, num_iters: int):
+    env = compare
     pg = env.pg
 
     with pg_cur(pg) as cur:
@@ -75,10 +91,10 @@ def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transaction
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("transactions", get_transactions_matrix())
-def test_measure_read_latency_pgbench_simple_update_workload(neon_with_baseline: PgCompare,
+def test_measure_read_latency_pgbench_simple_update_workload(compare: PgCompare,
                                                              scale: int,
                                                              transactions: int):
-    env = neon_with_baseline
+    env = compare
 
     # create pgbench tables
     env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Idt', env.pg.connstr()])
@@ -97,11 +113,11 @@ def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix(100))
-def test_measure_read_latency_other_table(neon_with_baseline: PgCompare, scale: int):
+def test_measure_read_latency_other_table(compare: PgCompare, scale: int):
     # Measure the latency when reading from a table when doing a heavy write workload in another table
     # This test tries to simulate the scenario described in https://github.com/neondatabase/neon/issues/1763.
 
-    env = neon_with_baseline
+    env = compare
     with pg_cur(env.pg) as cur:
         cur.execute("CREATE TABLE foo as select generate_series(1,100000)")
 
