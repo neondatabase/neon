@@ -1859,41 +1859,37 @@ impl LayeredTimeline {
 
         let target_file_size = self.get_checkpoint_distance();
 
-        // Define partitioning schema if needed
-        if let Ok(pgdir) =
-            tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
-        {
-            let (partitioning, lsn) = pgdir.repartition(
-                self.get_last_record_lsn(),
-                self.get_compaction_target_size(),
-            )?;
-            let timer = self.create_images_time_histo.start_timer();
-            // 2. Create new image layers for partitions that have been modified
-            // "enough".
-            let mut layer_paths_to_upload = HashSet::with_capacity(partitioning.parts.len());
-            for part in partitioning.parts.iter() {
-                if self.time_for_new_image_layer(part, lsn)? {
-                    let new_path = self.create_image_layer(part, lsn)?;
-                    layer_paths_to_upload.insert(new_path);
-                }
-            }
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    None,
-                );
-            }
-            timer.stop_and_record();
+        // 1. Partition the key space
+        let pgdir = tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)?;
+        let (partitioning, lsn) = pgdir.repartition(
+            self.get_last_record_lsn(),
+            self.get_compaction_target_size(),
+        )?;
+        let timer = self.create_images_time_histo.start_timer();
 
-            // 3. Compact
-            let timer = self.compact_time_histo.start_timer();
-            self.compact_level0(target_file_size)?;
-            timer.stop_and_record();
-        } else {
-            debug!("Could not compact because no partitioning specified yet");
+        // 2. Create new image layers for partitions that have been modified
+        // "enough".
+        let mut layer_paths_to_upload = HashSet::with_capacity(partitioning.parts.len());
+        for part in partitioning.parts.iter() {
+            if self.time_for_new_image_layer(part, lsn)? {
+                let new_path = self.create_image_layer(part, lsn)?;
+                layer_paths_to_upload.insert(new_path);
+            }
         }
+        if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            storage_sync::schedule_layer_upload(
+                self.tenant_id,
+                self.timeline_id,
+                layer_paths_to_upload,
+                None,
+            );
+        }
+        timer.stop_and_record();
+
+        // 3. Compact
+        let timer = self.compact_time_histo.start_timer();
+        self.compact_level0(target_file_size)?;
+        timer.stop_and_record();
 
         Ok(())
     }
