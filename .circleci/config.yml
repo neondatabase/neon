@@ -724,7 +724,7 @@ jobs:
             --user "$CI_ACCESS_TOKEN" \
             --data \
               "{
-                \"ref\": \"main\",
+                \"ref\": \"ci-refactor\",
                 \"inputs\": {
                   \"ci_job_name\": \"neon-cloud-e2e\",
                   \"commit_hash\": \"$CIRCLE_SHA1\",
