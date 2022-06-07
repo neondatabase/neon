@@ -75,6 +75,27 @@ impl fmt::Display for RelTag {
     }
 }
 
+impl RelTag {
+    /// Formats:
+    /// <oid>
+    /// <oid>_<fork name>
+    /// <oid>.<segment number>
+    /// <oid>_<fork name>.<segment number>
+    pub fn to_segfile_name(&self, segno: u32) -> String {
+        if segno == 0 {
+            if let Some(forkname) = forknumber_to_name(self.forknum) {
+                format!("{}_{}", self.relnode, forkname)
+            } else {
+                format!("{}", self.relnode)
+            }
+        } else if let Some(forkname) = forknumber_to_name(self.forknum) {
+            format!("{}_{}.{}", self.relnode, forkname, segno)
+        } else {
+            format!("{}.{}", self.relnode, segno)
+        }
+    }
+}
+
 ///
 /// Non-relation transaction status files (clog (a.k.a. pg_xact) and
 /// pg_multixact) in Postgres are handled by SLRU (Simple LRU) buffer,
