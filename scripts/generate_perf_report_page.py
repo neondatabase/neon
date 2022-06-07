@@ -26,6 +26,7 @@ KEY_EXCLUDE_FIELDS = frozenset({
 })
 NEGATIVE_COLOR = 'negative'
 POSITIVE_COLOR = 'positive'
+EPS = 1e-6
 
 
 @dataclass
@@ -120,7 +121,8 @@ def get_row_values(columns: List[str], run_result: SuitRun,
             # this might happen when new metric is added and there is no value for it in previous run
             # let this be here, TODO add proper handling when this actually happens
             raise ValueError(f'{column} not found in previous result')
-        ratio = float(value) / float(prev_value['value']) - 1
+        # adding `EPS` to each term to avoid ZeroDivisionError when the denominator is zero
+        ratio = (float(value) + EPS) / (float(prev_value['value']) + EPS) - 1
         ratio_display, color = format_ratio(ratio, current_value['report'])
         row_values.append(RowValue(value, color, ratio_display))
     return row_values
