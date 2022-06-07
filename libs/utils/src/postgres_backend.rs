@@ -13,12 +13,9 @@ use std::fmt;
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
-
-static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub trait Handler {
     /// Handle single query.
@@ -44,6 +41,10 @@ pub trait Handler {
     /// Check auth jwt
     fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
         bail!("JWT auth failed")
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        false
     }
 }
 
@@ -274,7 +275,7 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
-        while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        while !handler.is_shutdown_requested() {
             match self.read_message() {
                 Ok(message) => {
                     if let Some(msg) = message {
@@ -492,9 +493,4 @@ impl PostgresBackend {
 
         Ok(ProcessMsgResult::Continue)
     }
-}
-
-// Set the flag to inform connections to cancel
-pub fn set_pgbackend_shutdown_requested() {
-    PGBACKEND_SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 }

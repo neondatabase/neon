@@ -676,6 +676,10 @@ impl postgres_backend::Handler for PageServerHandler {
         Ok(())
     }
 
+    fn is_shutdown_requested(&self) -> bool {
+        thread_mgr::is_shutdown_requested()
+    }
+
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
