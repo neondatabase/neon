@@ -200,20 +200,11 @@ impl WalBackupTask {
         loop {
             let mut retry_attempt = 0u32;
 
-            if let Some(l) = self.leader.take() {
-                l.give_up().await;
-            }
-
             info!("acquiring leadership");
-            match broker::get_leader(&self.election).await {
-                Ok(l) => {
-                    self.leader = Some(l);
-                }
-                Err(e) => {
-                    error!("error during leader election {:?}", e);
-                    sleep(Duration::from_millis(BROKER_CONNECTION_RETRY_DELAY_MS)).await;
-                    continue;
-                }
+            if let Err(e) = broker::get_leader(&self.election, &mut self.leader).await {
+                error!("error during leader election {:?}", e);
+                sleep(Duration::from_millis(BROKER_CONNECTION_RETRY_DELAY_MS)).await;
+                continue;
             }
             info!("acquired leadership");
 
