@@ -80,7 +80,7 @@ brew link --force libpq
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
-make -j5
+make -j`nproc`
 ```
 
 #### dependency installation notes
