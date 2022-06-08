@@ -30,6 +30,8 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
+use crate::import_datadir::import_timeline_from_tar;
+use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -39,6 +41,7 @@ use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
+use crate::timelines::create_timeline;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
 
@@ -519,22 +522,26 @@ impl PageServerHandler {
     fn handle_import(
         &self,
         pgb: &mut PostgresBackend,
-        tenant: ZTenantId,
-        timeline: ZTimelineId,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("import", timeline = %timeline, tenant = %tenant).entered();
+        let _enter = info_span!("import", timeline = %timeline_id, tenant = %tenant_id).entered();
         // TODO cap the max number of import threads allowed
         // TODO check that timeline doesn't exist already
         // TODO thread_mgr::associate_with?
 
+        // Create empty timeline
+        let init_lsn = Lsn(0);
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let timeline = repo.create_empty_timeline(timeline_id, init_lsn)?;
+        let repartition_distance = repo.get_checkpoint_distance();  // TODO
+        let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
+            timeline, repartition_distance);
+
+        // Import basebackup provided via CopyData
         pgb.write_message(&BeMessage::CopyInResponse)?;
-        let mut reader = CopyInReader::new(pgb);
-
-        // TODO instead of draining, pass into timeline importer
-        let mut buf = Vec::<u8>::new();
-        reader.read_to_end(&mut buf);
-        info!("Got {} bytes", buf.len());
-
+        let reader = CopyInReader::new(pgb);
+        import_timeline_from_tar(&mut datadir_timeline, reader, init_lsn)?;
         Ok(())
     }
 
