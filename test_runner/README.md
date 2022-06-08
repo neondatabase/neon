@@ -1,14 +1,14 @@
-## Zenith test runner
+## Neon test runner
 
 This directory contains integration tests.
 
 Prerequisites:
 - Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
-- Zenith and Postgres binaries
+- Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
     - Tests can be run from the git tree; or see the environment variables
       below to run from other directories.
-- The zenith git repo, including the postgres submodule
+- The neon git repo, including the postgres submodule
   (for some tests, e.g. `pg_regress`)
 - Some tests (involving storage nodes coordination) require etcd installed. Follow
   [`the guide`](https://etcd.io/docs/v3.5/install/) to obtain it.
@@ -51,8 +51,8 @@ Useful environment variables:
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `ZENITH_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
-`--pageserver-config-override=${value}` parameter values when zenith cli is invoked
-`RUST_LOG`: logging configuration to pass into Zenith CLI
+`--pageserver-config-override=${value}` parameter values when neon_local cli is invoked
+`RUST_LOG`: logging configuration to pass into Neon CLI
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `./scripts/pytest -s --log-cli-level=INFO ...`
@@ -65,32 +65,32 @@ Exit after the first test failure:
 
 ### Writing a test
 
-Every test needs a Zenith Environment, or ZenithEnv to operate in. A Zenith Environment
+Every test needs a Neon Environment, or NeonEnv to operate in. A Neon Environment
 is like a little cloud-in-a-box, and consists of a Pageserver, 0-N Safekeepers, and
 compute Postgres nodes. The connections between them can be configured to use JWT
 authentication tokens, and some other configuration options can be tweaked too.
 
-The easiest way to get access to a Zenith Environment is by using the `zenith_simple_env`
+The easiest way to get access to a Neon Environment is by using the `neon_simple_env`
 fixture. The 'simple' env may be shared across multiple tests, so don't shut down the nodes
 or make other destructive changes in that environment. Also don't assume that
 there are no tenants or branches or data in the cluster. For convenience, there is a
 branch called `empty`, though. The convention is to create a test-specific branch of
 that and load any test data there, instead of the 'main' branch.
 
-For more complicated cases, you can build a custom Zenith Environment, with the `zenith_env`
+For more complicated cases, you can build a custom Neon Environment, with the `neon_env`
 fixture:
 
 ```python
-def test_foobar(zenith_env_builder: ZenithEnvBuilder):
+def test_foobar(neon_env_builder: NeonEnvBuilder):
     # Prescribe the environment.
     # We want to have 3 safekeeper nodes, and use JWT authentication in the
     # connections to the page server
-    zenith_env_builder.num_safekeepers = 3
-    zenith_env_builder.set_pageserver_auth(True)
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.set_pageserver_auth(True)
 
     # Now create the environment. This initializes the repository, and starts
     # up the page server and the safekeepers
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
 
     # Run the test
     ...

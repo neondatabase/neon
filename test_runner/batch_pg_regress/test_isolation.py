@@ -1,16 +1,16 @@
 import os
 import pytest
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import ZenithEnv, base_dir, pg_distrib_dir
+from fixtures.neon_fixtures import NeonEnv, base_dir, pg_distrib_dir
 
 
 # The isolation tests run for a long time, especially in debug mode,
 # so use a larger-than-default timeout.
 @pytest.mark.timeout(1800)
-def test_isolation(zenith_simple_env: ZenithEnv, test_output_dir, pg_bin, capsys):
-    env = zenith_simple_env
+def test_isolation(neon_simple_env: NeonEnv, test_output_dir, pg_bin, capsys):
+    env = neon_simple_env
 
-    env.zenith_cli.create_branch("test_isolation", "empty")
+    env.neon_cli.create_branch("test_isolation", "empty")
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
     pg = env.postgres.create_start('test_isolation', config_lines=['max_prepared_transactions=100'])

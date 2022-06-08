@@ -37,7 +37,7 @@ pub mod defaults {
     pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
-    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1_000_000;
+    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10_000;
 }
 
 /// Per-tenant configuration options

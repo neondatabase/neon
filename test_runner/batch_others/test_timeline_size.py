@@ -1,15 +1,15 @@
 from contextlib import closing
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres, assert_local
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_local
 from fixtures.log_helper import log
 import time
 
 
-def test_timeline_size(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_timeline_size(neon_simple_env: NeonEnv):
+    env = neon_simple_env
     # Branch at the point where only 100 rows were inserted
-    new_timeline_id = env.zenith_cli.create_branch('test_timeline_size', 'empty')
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
     timeline_details = assert_local(client, env.initial_tenant, new_timeline_id)
@@ -69,9 +69,9 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
         time.sleep(polling_interval)
 
 
-def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
-    env = zenith_env_builder.init_start()
-    new_timeline_id = env.zenith_cli.create_branch('test_timeline_size_quota')
+def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_size_quota')
 
     client = env.pageserver.http_client()
     res = assert_local(client, env.initial_tenant, new_timeline_id)
@@ -86,7 +86,7 @@ def test_timeline_size_quota(zenith_env_builder: ZenithEnvBuilder):
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION neon")  # TODO move it to zenith_fixtures?
+            cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
 
             cur.execute("CREATE TABLE foo (t text)")
 

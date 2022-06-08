@@ -12,11 +12,11 @@ from uuid import UUID
 
 import pytest
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder, ZenithEnv, Postgres, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres, wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import lsn_from_hex
 
 
-async def tenant_workload(env: ZenithEnv, pg: Postgres):
+async def tenant_workload(env: NeonEnv, pg: Postgres):
     pageserver_conn = await env.pageserver.connect_async()
 
     pg_conn = await pg.connect_async()
@@ -35,7 +35,7 @@ async def tenant_workload(env: ZenithEnv, pg: Postgres):
         assert res == i * 1000
 
 
-async def all_tenants_workload(env: ZenithEnv, tenants_pgs):
+async def all_tenants_workload(env: NeonEnv, tenants_pgs):
     workers = []
     for tenant, pg in tenants_pgs:
         worker = tenant_workload(env, pg)
@@ -46,28 +46,28 @@ async def all_tenants_workload(env: ZenithEnv, tenants_pgs):
 
 
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_tenants_many(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
+def test_tenants_many(neon_env_builder: NeonEnvBuilder, storage_type: str):
 
     if storage_type == 'local_fs':
-        zenith_env_builder.enable_local_fs_remote_storage()
+        neon_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':
-        zenith_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
+        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
     else:
         raise RuntimeError(f'Unknown storage type: {storage_type}')
 
-    zenith_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_local_fs_remote_storage()
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
 
     tenants_pgs = []
 
     for i in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
-        tenant, _ = env.zenith_cli.create_tenant(
+        tenant, _ = env.neon_cli.create_tenant(
             conf={
                 'checkpoint_distance': '5000000',
                 })
-        env.zenith_cli.create_timeline(f'test_tenants_many', tenant_id=tenant)
+        env.neon_cli.create_timeline(f'test_tenants_many', tenant_id=tenant)
 
         pg = env.postgres.create_start(
             f'test_tenants_many',

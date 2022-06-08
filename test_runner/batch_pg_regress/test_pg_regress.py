@@ -1,16 +1,16 @@
 import os
 import pytest
 from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
 
 # The pg_regress tests run for a long time, especially in debug mode,
 # so use a larger-than-default timeout.
 @pytest.mark.timeout(1800)
-def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, capsys):
-    env = zenith_simple_env
+def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: str, pg_bin, capsys):
+    env = neon_simple_env
 
-    env.zenith_cli.create_branch("test_pg_regress", "empty")
+    env.neon_cli.create_branch("test_pg_regress", "empty")
     # Connect to postgres and create a database called "regression".
     pg = env.postgres.create_start('test_pg_regress')
     pg.safe_psql('CREATE DATABASE regression')

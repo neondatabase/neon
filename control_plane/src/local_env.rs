@@ -119,16 +119,24 @@ impl EtcdBroker {
     }
 
     pub fn comma_separated_endpoints(&self) -> String {
-        self.broker_endpoints.iter().map(Url::as_str).fold(
-            String::new(),
-            |mut comma_separated_urls, url| {
+        self.broker_endpoints
+            .iter()
+            .map(|url| {
+                // URL by default adds a '/' path at the end, which is not what etcd CLI wants.
+                let url_string = url.as_str();
+                if url_string.ends_with('/') {
+                    &url_string[0..url_string.len() - 1]
+                } else {
+                    url_string
+                }
+            })
+            .fold(String::new(), |mut comma_separated_urls, url| {
                 if !comma_separated_urls.is_empty() {
                     comma_separated_urls.push(',');
                 }
                 comma_separated_urls.push_str(url);
                 comma_separated_urls
-            },
-        )
+            })
     }
 }
 

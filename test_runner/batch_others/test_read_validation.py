@@ -1,12 +1,12 @@
 from contextlib import closing
 
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 from psycopg2.errors import UndefinedTable
 from psycopg2.errors import IoError
 
-pytest_plugins = ("fixtures.zenith_fixtures")
+pytest_plugins = ("fixtures.neon_fixtures")
 
 extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 
@@ -14,9 +14,9 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 # Validation of reading different page versions
 #
-def test_read_validation(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_read_validation", "empty")
+def test_read_validation(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_read_validation", "empty")
 
     pg = env.postgres.create_start("test_read_validation")
     log.info("postgres is running on 'test_read_validation' branch")
@@ -125,9 +125,9 @@ def test_read_validation(zenith_simple_env: ZenithEnv):
                 log.info("Caught an expected failure: {}".format(e))
 
 
-def test_read_validation_neg(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_read_validation_neg", "empty")
+def test_read_validation_neg(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_read_validation_neg", "empty")
 
     pg = env.postgres.create_start("test_read_validation_neg")
     log.info("postgres is running on 'test_read_validation_neg' branch")

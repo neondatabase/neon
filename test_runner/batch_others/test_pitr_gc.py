@@ -5,20 +5,20 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.utils import print_gc_result
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
 # Check pitr_interval GC behavior.
 # Insert some data, run GC and create a branch in the past.
 #
-def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
+def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
-    zenith_env_builder.num_safekeepers = 1
+    neon_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
-    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
+    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     pgmain = env.postgres.create_start('main')
     log.info("postgres is running on 'main' branch")
 
@@ -62,7 +62,7 @@ def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
 
     # Branch at the point where only 100 rows were inserted
     # It must have been preserved by PITR setting
-    env.zenith_cli.create_branch('test_pitr_gc_hundred', 'main', ancestor_start_lsn=lsn_a)
+    env.neon_cli.create_branch('test_pitr_gc_hundred', 'main', ancestor_start_lsn=lsn_a)
 
     pg_hundred = env.postgres.create_start('test_pitr_gc_hundred')
 

@@ -1,22 +1,22 @@
 import pytest
 import concurrent.futures
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnvBuilder, ZenithEnv
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv
 from fixtures.log_helper import log
 import os
 
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
+def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # One safekeeper is enough for this test.
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     tenant_timelines = []
 
     for n in range(4):
-        tenant_id_uuid, timeline_id_uuid = env.zenith_cli.create_tenant()
+        tenant_id_uuid, timeline_id_uuid = env.neon_cli.create_tenant()
         tenant_id = tenant_id_uuid.hex
         timeline_id = timeline_id_uuid.hex
 
@@ -81,14 +81,14 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
         log.info(f'compute startup failed as expected: {err}')
 
 
-def test_create_multiple_timelines_parallel(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
+    env = neon_simple_env
 
-    tenant_id, _ = env.zenith_cli.create_tenant()
+    tenant_id, _ = env.neon_cli.create_tenant()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(env.zenith_cli.create_timeline,
+            executor.submit(env.neon_cli.create_timeline,
                             f"test-create-multiple-timelines-{i}",
                             tenant_id) for i in range(4)
         ]
@@ -96,20 +96,20 @@ def test_create_multiple_timelines_parallel(zenith_simple_env: ZenithEnv):
             future.result()
 
 
-def test_fix_broken_timelines_on_startup(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
+def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
+    env = neon_simple_env
 
-    tenant_id, _ = env.zenith_cli.create_tenant()
+    tenant_id, _ = env.neon_cli.create_tenant()
 
     # Introduce failpoint when creating a new timeline
     env.pageserver.safe_psql(f"failpoints before-checkpoint-new-timeline=return")
     with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
-        _ = env.zenith_cli.create_timeline("test_fix_broken_timelines", tenant_id)
+        _ = env.neon_cli.create_timeline("test_fix_broken_timelines", tenant_id)
 
     # Restart the page server
-    env.zenith_cli.pageserver_stop(immediate=True)
-    env.zenith_cli.pageserver_start()
+    env.neon_cli.pageserver_stop(immediate=True)
+    env.neon_cli.pageserver_start()
 
     # Check that the "broken" timeline is not loaded
-    timelines = env.zenith_cli.list_timelines(tenant_id)
+    timelines = env.neon_cli.list_timelines(tenant_id)
     assert len(timelines) == 1

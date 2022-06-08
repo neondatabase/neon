@@ -409,7 +409,7 @@ removed because there is no newer layer file for the table.
 
 Things get slightly more complicated with multiple branches. All of
 the above still holds, but in addition to recent files we must also
-retain older shapshot files that are still needed by child branches.
+retain older snapshot files that are still needed by child branches.
 For example, if child branch is created at LSN 150, and the 'customers'
 table is updated on the branch, you would have these files:
 

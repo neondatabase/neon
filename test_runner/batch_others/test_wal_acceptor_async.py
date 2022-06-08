@@ -4,7 +4,7 @@ import asyncpg
 import random
 import time
 
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres, Safekeeper
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, Safekeeper
 from fixtures.log_helper import getLogger
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List
@@ -136,7 +136,7 @@ async def wait_for_lsn(safekeeper: Safekeeper,
 # On each iteration 1 acceptor is stopped, and 2 others should allow
 # background workers execute transactions. In the end, state should remain
 # consistent.
-async def run_restarts_under_load(env: ZenithEnv,
+async def run_restarts_under_load(env: NeonEnv,
                                   pg: Postgres,
                                   acceptors: List[Safekeeper],
                                   n_workers=10,
@@ -202,11 +202,11 @@ async def run_restarts_under_load(env: ZenithEnv,
 
 
 # Restart acceptors one by one, while executing and validating bank transactions
-def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_safekeepers_restarts_under_load')
+    env.neon_cli.create_branch('test_safekeepers_restarts_under_load')
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     pg = env.postgres.create_start('test_safekeepers_restarts_under_load',
                                    config_lines=['max_replication_write_lag=1MB'])
@@ -217,11 +217,11 @@ def test_restarts_under_load(zenith_env_builder: ZenithEnvBuilder):
 # Restart acceptors one by one and test that everything is working as expected
 # when checkpoins are triggered frequently by max_wal_size=32MB. Because we have
 # wal_keep_size=0, there will be aggressive WAL segments recycling.
-def test_restarts_frequent_checkpoints(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_restarts_frequent_checkpoints')
+    env.neon_cli.create_branch('test_restarts_frequent_checkpoints')
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     pg = env.postgres.create_start('test_restarts_frequent_checkpoints',
                                    config_lines=[

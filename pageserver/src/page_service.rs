@@ -370,6 +370,10 @@ impl PageServerHandler {
     ) -> anyhow::Result<()> {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
 
+        // NOTE: pagerequests handler exits when connection is closed,
+        //       so there is no need to reset the association
+        thread_mgr::associate_with(Some(tenantid), Some(timelineid));
+
         // Check that the timeline exists
         let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
             .context("Cannot load local timeline")?;
@@ -672,6 +676,10 @@ impl postgres_backend::Handler for PageServerHandler {
         Ok(())
     }
 
+    fn is_shutdown_requested(&self) -> bool {
+        thread_mgr::is_shutdown_requested()
+    }
+
     fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
@@ -802,7 +810,6 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             // Use tenant's pitr setting
             let pitr = repo.get_pitr_interval();
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;

@@ -1,15 +1,15 @@
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # Test safekeeper sync and pageserver catch up
 # while initial compute node is down and pageserver is lagging behind safekeepers.
 # Ensure that basebackup after restart of all components is correct
 # and new compute node contains all data.
-def test_pageserver_catchup_while_compute_down(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
-    env.zenith_cli.create_branch('test_pageserver_catchup_while_compute_down')
+    env.neon_cli.create_branch('test_pageserver_catchup_while_compute_down')
     # Make shared_buffers large to ensure we won't query pageserver while it is down.
     pg = env.postgres.create_start('test_pageserver_catchup_while_compute_down',
                                    config_lines=['shared_buffers=512MB'])
