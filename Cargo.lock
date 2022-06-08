@@ -56,6 +56,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apis"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1796,6 +1804,7 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apis",
  "byteorder",
  "bytes",
  "chrono",
