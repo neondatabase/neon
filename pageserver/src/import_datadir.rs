@@ -21,7 +21,6 @@ use postgres_ffi::xlog_utils::*;
 use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
-use postgres::CopyOutReader;
 
 ///
 /// Import all relation data pages from local disk into the repository.
@@ -405,6 +404,8 @@ fn import_wal<R: Repository>(
     Ok(())
 }
 
+
+// Rest of file copied from https://github.com/neondatabase/neon/compare/WIP_import_from_tar
 
 pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
     tline: &mut DatadirTimeline<R>,

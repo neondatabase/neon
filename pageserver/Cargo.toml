@@ -58,7 +58,6 @@ postgres_ffi = { path = "../libs/postgres_ffi" }
 etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
-apis = { path = "../libs/apis" }
 remote_storage = { path = "../libs/remote_storage" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 close_fds = "0.3.2"

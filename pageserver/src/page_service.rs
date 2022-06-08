@@ -13,7 +13,8 @@ use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::io;
+use std::collections::VecDeque;
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -26,8 +27,6 @@ use utils::{
     pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
     zid::{ZTenantId, ZTimelineId},
 };
-use apis::import::{ImportFeMessage, ImportBeMessage};
-use utils::bin_ser::BeSer;
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
@@ -199,6 +198,74 @@ impl PagestreamBeMessage {
         }
 
         bytes.into()
+    }
+}
+
+/// Implements Read for the server side of CopyIn
+struct CopyInReader<'a> {
+    pgb: &'a mut PostgresBackend,
+
+    /// Overflow buffer for bytes sent in CopyData messages
+    /// that the reader (caller of read) hasn't asked for yet.
+    buf: VecDeque<u8>,
+}
+
+impl<'a> CopyInReader<'a> {
+    // NOTE: pgb should be in copy in state already
+    fn new(pgb: &'a mut PostgresBackend) -> Self {
+        Self {
+            pgb,
+            buf: VecDeque::<_>::new(),
+        }
+    }
+}
+
+impl<'a> Read for CopyInReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // TODO check if shutdown was requested?
+
+            // Return from buffer if nonempty
+            if self.buf.len() > 0 {
+                let bytes_read = std::cmp::min(buf.len(), self.buf.len());
+                for i in 0..bytes_read {
+                    buf[i] = self.buf[i];
+                }
+                self.buf.drain(0..bytes_read);
+                return Ok(bytes_read);
+            }
+
+            // Wait for client to send CopyData bytes
+            match self.pgb.read_message() {
+                Ok(Some(message)) => {
+                    let copy_data_bytes = match message {
+                        FeMessage::CopyData(bytes) => bytes,
+                        FeMessage::CopyDone => {
+                            return Ok(0)
+                        }
+                        m => {
+                            info!("unexpected copy in client message {:?}", m);
+                            continue;
+                        },
+                    };
+
+                    // Return as much as we can, saving the rest in self.buf
+                    let mut reader = copy_data_bytes.reader();
+                    let bytes_read = reader.read(buf)?;
+                    self.buf.extend(reader.bytes().map(|r| r.expect("error reading from copy in")));
+                    return Ok(bytes_read);
+                },
+                Ok(None) => {
+                    // Is this ok?
+                    return Ok(0)
+                },
+                Err(e) => {
+                    if !is_socket_read_timed_out(&e) {
+                        todo!("return io::Error");
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -458,43 +525,15 @@ impl PageServerHandler {
         let _enter = info_span!("import", timeline = %timeline, tenant = %tenant).entered();
         // TODO cap the max number of import threads allowed
         // TODO check that timeline doesn't exist already
+        // TODO thread_mgr::associate_with?
 
-        // NOTE: pagerequests handler exits when connection is closed,
-        //       so there is no need to reset the association
-        thread_mgr::associate_with(Some(tenant), Some(timeline));
-
-        // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyInResponse)?;
+        let mut reader = CopyInReader::new(pgb);
 
-        while !thread_mgr::is_shutdown_requested() {
-
-            // TODO implement this as reader object and pass it into import_timeline_from_tar
-            match pgb.read_message() {
-                Ok(Some(message)) => {
-                    let copy_data_bytes = match message {
-                        FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => {
-                            return Ok(())
-                        }
-                        m => {
-                            info!("unexpected copy in client message {:?}", m);
-                            continue;
-                        },
-                    };
-
-                    // TODO use copy_data_bytes
-                },
-                Ok(None) => {
-                    // Is this ok?
-                    return Ok(())
-                },
-                Err(e) => {
-                    if !is_socket_read_timed_out(&e) {
-                        return Err(e);
-                    }
-                },
-            }
-        }
+        // TODO instead of draining, pass into timeline importer
+        let mut buf = Vec::<u8>::new();
+        reader.read_to_end(&mut buf);
+        info!("Got {} bytes", buf.len());
 
         Ok(())
     }
