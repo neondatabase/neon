@@ -467,6 +467,8 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
 
         while !thread_mgr::is_shutdown_requested() {
+
+            // TODO implement this as reader object and pass it into import_timeline_from_tar
             match pgb.read_message() {
                 Ok(Some(message)) => {
                     let copy_data_bytes = match message {
