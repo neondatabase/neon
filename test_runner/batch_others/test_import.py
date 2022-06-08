@@ -38,6 +38,7 @@ def test_import(neon_env_builder,
     # Create a new repo, load the basebackup into it, and check that data is there
     with NeonEnvBuilder(destination_repo_dir, port_distributor, default_broker, mock_s3_server) as builder:
         env = builder.init_start()
+        env.neon_cli.create_tenant(UUID(tenant))
         env.neon_cli.raw_cli([
             "timeline",
             "import",
@@ -46,5 +47,5 @@ def test_import(neon_env_builder,
             "--node-name", node_name,
             "--tarfile", basebackup_tar_path,
         ])
-        # pg = env.postgres.create_start(node_name, tenant_id=UUID(tenant))
-        # assert pg.safe_psql('select count(*) from t') == [(300000, )]
+        pg = env.postgres.create_start(node_name, tenant_id=UUID(tenant))
+        assert pg.safe_psql('select count(*) from t') == [(300000, )]
