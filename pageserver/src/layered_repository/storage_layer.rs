@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use utils::{
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
@@ -84,7 +84,7 @@ pub enum ValueReconstructResult {
 /// LSN
 ///
 pub trait Layer: Send + Sync {
-    fn get_tenant_id(&self) -> ZTenantId;
+    fn get_tenant_id(&self) -> TenantId;
 
     /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> ZTimelineId;

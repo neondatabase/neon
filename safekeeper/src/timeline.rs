@@ -22,7 +22,7 @@ use tracing::*;
 use utils::{
     lsn::Lsn,
     pq_proto::ZenithFeedback,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId},
 };
 
 use crate::control_file;
@@ -764,7 +764,7 @@ impl GlobalTimelines {
     /// There may be a race if new timelines are created simultaneously.
     pub async fn delete_force_all_for_tenant(
         conf: &SafeKeeperConf,
-        tenant_id: &ZTenantId,
+        tenant_id: &TenantId,
     ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
         let mut to_delete = HashMap::new();

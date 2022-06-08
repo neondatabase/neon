@@ -9,7 +9,7 @@ use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
     pq_proto::SystemId,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 /// Persistent consensus state of the acceptor.
@@ -45,7 +45,7 @@ pub struct ServerInfoV2 {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     /// Zenith timelineid
     pub ztli: ZTimelineId,
     pub wal_seg_size: u32,
@@ -76,7 +76,7 @@ pub struct ServerInfoV3 {
     pub pg_version: u32,
     pub system_id: SystemId,
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     /// Zenith timelineid
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
@@ -106,7 +106,7 @@ pub struct SafeKeeperStateV3 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperStateV4 {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     /// Zenith timelineid
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
@@ -193,7 +193,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
-    // migrate to moving ztenantid/ztli to the top and adding some lsns
+    // migrate to moving tenantid/ztli to the top and adding some lsns
     } else if version == 3 {
         info!("reading safekeeper control file version {}", version);
         let oldstate = SafeKeeperStateV3::des(&buf[..buf.len()])?;

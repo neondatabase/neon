@@ -47,7 +47,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 ///
@@ -62,7 +62,7 @@ struct Summary {
     magic: u16,
     format_version: u16,
 
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
     lsn: Lsn,
@@ -99,7 +99,7 @@ impl From<&ImageLayer> for Summary {
 ///
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
-    pub tenantid: ZTenantId,
+    pub tenantid: TenantId,
     pub timelineid: ZTimelineId,
     pub key_range: Range<Key>,
 
@@ -130,7 +130,7 @@ impl Layer for ImageLayer {
         Some(self.path())
     }
 
-    fn get_tenant_id(&self) -> ZTenantId {
+    fn get_tenant_id(&self) -> TenantId {
         self.tenantid
     }
 
@@ -231,7 +231,7 @@ impl ImageLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         fname: &ImageFileName,
     ) -> PathBuf {
         match path_or_conf {
@@ -245,7 +245,7 @@ impl ImageLayer {
     fn temp_path_for(
         conf: &PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         fname: &ImageFileName,
     ) -> PathBuf {
         let rand_string: String = rand::thread_rng()
@@ -339,7 +339,7 @@ impl ImageLayer {
     pub fn new(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         filename: &ImageFileName,
     ) -> ImageLayer {
         ImageLayer {
@@ -417,7 +417,7 @@ pub struct ImageLayerWriter {
     conf: &'static PageServerConf,
     path: PathBuf,
     timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
 
@@ -429,7 +429,7 @@ impl ImageLayerWriter {
     pub fn new(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {

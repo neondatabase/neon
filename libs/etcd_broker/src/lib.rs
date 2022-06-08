@@ -17,7 +17,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
 use utils::{
     lsn::Lsn,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId},
 };
 
 /// Default value to use for prefixing to all etcd keys with.
@@ -123,7 +123,7 @@ impl SkTimelineSubscriptionKind {
         }
     }
 
-    pub fn tenant(broker_etcd_prefix: String, tenant: ZTenantId) -> Self {
+    pub fn tenant(broker_etcd_prefix: String, tenant: TenantId) -> Self {
         Self {
             broker_etcd_prefix,
             kind: SubscriptionKind::Tenant(tenant),
@@ -160,7 +160,7 @@ enum SubscriptionKind {
     /// Get every timeline update.
     All,
     /// Get certain tenant timelines' updates.
-    Tenant(ZTenantId),
+    Tenant(TenantId),
     /// Get certain timeline updates.
     Timeline(ZTenantTimelineId),
 }
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn typical_etcd_prefix_should_be_parsed() {
         let prefix = "neon";
-        let tenant_id = ZTenantId::generate();
+        let tenant_id = TenantId::generate();
         let timeline_id = ZTimelineId::generate();
         let all_subscription = SkTimelineSubscriptionKind {
             broker_etcd_prefix: prefix.to_string(),

@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::zid::{TenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
     use anyhow::ensure;
@@ -35,24 +35,24 @@ mod tenants_state {
     use tokio::sync::mpsc;
     use tracing::{debug, error};
 
-    use utils::zid::ZTenantId;
+    use utils::zid::TenantId;
 
     use crate::tenant_mgr::{LocalTimelineUpdate, Tenant};
 
     lazy_static::lazy_static! {
-        static ref TENANTS: RwLock<HashMap<ZTenantId, Tenant>> = RwLock::new(HashMap::new());
+        static ref TENANTS: RwLock<HashMap<TenantId, Tenant>> = RwLock::new(HashMap::new());
         /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
         /// so that it can enable/disable corresponding processes.
         static ref TIMELINE_UPDATE_SENDER: RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>> = RwLock::new(None);
     }
 
-    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Tenant>> {
+    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, Tenant>> {
         TENANTS
             .read()
             .expect("Failed to read() tenants lock, it got poisoned")
     }
 
-    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Tenant>> {
+    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<TenantId, Tenant>> {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
@@ -182,7 +182,7 @@ impl std::fmt::Debug for LocalTimelineUpdate {
 pub fn apply_timeline_sync_status_updates(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
-    sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
+    sync_status_updates: HashMap<TenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
 ) {
     if sync_status_updates.is_empty() {
         debug!("no sync status updates to apply");
@@ -259,9 +259,9 @@ pub fn shutdown_all_tenants() {
 pub fn create_tenant_repository(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     remote_index: RemoteIndex,
-) -> anyhow::Result<Option<ZTenantId>> {
+) -> anyhow::Result<Option<TenantId>> {
     match tenants_state::write_tenants().entry(tenant_id) {
         Entry::Occupied(_) => {
             debug!("tenant {tenant_id} already exists");
@@ -290,7 +290,7 @@ pub fn create_tenant_repository(
 
 pub fn update_tenant_config(
     tenant_conf: TenantConfOpt,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     let repo = get_repository_for_tenant(tenant_id)?;
@@ -299,11 +299,11 @@ pub fn update_tenant_config(
     Ok(())
 }
 
-pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
+pub fn get_tenant_state(tenantid: TenantId) -> Option<TenantState> {
     Some(tenants_state::read_tenants().get(&tenantid)?.state)
 }
 
-pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow::Result<()> {
+pub fn set_tenant_state(tenant_id: TenantId, new_state: TenantState) -> anyhow::Result<()> {
     let mut m = tenants_state::write_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -387,7 +387,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<RepositoryImpl>> {
+pub fn get_repository_for_tenant(tenant_id: TenantId) -> anyhow::Result<Arc<RepositoryImpl>> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
@@ -399,7 +399,7 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Rep
 /// Retrieves local timeline for tenant.
 /// Loads it into memory if it is not already loaded.
 pub fn get_local_timeline_with_load(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<DatadirTimelineImpl>> {
     let mut m = tenants_state::write_tenants();
@@ -421,7 +421,7 @@ pub fn get_local_timeline_with_load(
 
 pub fn detach_timeline(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<()> {
     // shutdown the timeline threads (this shuts down the walreceiver)
@@ -478,7 +478,7 @@ fn load_local_timeline(
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
-    pub id: ZTenantId,
+    pub id: TenantId,
     pub state: TenantState,
 }
 
@@ -514,7 +514,7 @@ fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> 
 
 fn init_local_repository(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     local_timeline_init_statuses: HashMap<ZTimelineId, LocalTimelineInitStatus>,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<(), anyhow::Error> {
@@ -596,7 +596,7 @@ fn apply_timeline_remote_sync_status_updates(
 // Used during pageserver startup, or when new tenant is attached to pageserver.
 fn load_local_repo(
     conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<Arc<RepositoryImpl>> {
     let mut m = tenants_state::write_tenants();

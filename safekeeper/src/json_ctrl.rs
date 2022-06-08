@@ -100,7 +100,7 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
         proposer_id: [0u8; 16],
         system_id: 0,
         ztli: spg.ztimelineid.unwrap(),
-        tenant_id: spg.ztenantid.unwrap(),
+        tenant_id: spg.tenantid.unwrap(),
         tli: 0,
         wal_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
     });

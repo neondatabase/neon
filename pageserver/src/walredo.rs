@@ -36,7 +36,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
-use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
+use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::TenantId};
 
 use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
@@ -129,7 +129,7 @@ lazy_static! {
 /// records.
 ///
 pub struct PostgresRedoManager {
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     conf: &'static PageServerConf,
 
     process: Mutex<Option<PostgresRedoProcess>>,
@@ -229,7 +229,7 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
+    pub fn new(conf: &'static PageServerConf, tenantid: TenantId) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
             tenantid,
@@ -603,7 +603,7 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    fn launch(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<PostgresRedoProcess, Error> {
+    fn launch(conf: &PageServerConf, tenantid: &TenantId) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.

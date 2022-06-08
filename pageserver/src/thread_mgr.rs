@@ -47,7 +47,7 @@ use tracing::{debug, error, info, warn};
 
 use lazy_static::lazy_static;
 
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{TenantId, ZTimelineId};
 
 use crate::shutdown_pageserver;
 
@@ -110,7 +110,7 @@ pub enum ThreadKind {
 
 struct MutableThreadState {
     /// Tenant and timeline that this thread is associated with.
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
 
     /// Handle for waiting for the thread to exit. It can be None, if the
@@ -138,7 +138,7 @@ struct PageServerThread {
 ///   of the thread will lead to shutdown of entire process
 pub fn spawn<F>(
     kind: ThreadKind,
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
@@ -266,7 +266,7 @@ fn thread_wrapper<F>(
 }
 
 // expected to be called from the thread of the given id.
-pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelineId>) {
+pub fn associate_with(tenant_id: Option<TenantId>, timeline_id: Option<ZTimelineId>) {
     CURRENT_THREAD.with(|ct| {
         let borrowed = ct.borrow();
         let mut thread_mut = borrowed.as_ref().unwrap().mutable.lock().unwrap();
@@ -291,7 +291,7 @@ pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelin
 ///
 pub fn shutdown_threads(
     kind: Option<ThreadKind>,
-    tenant_id: Option<ZTenantId>,
+    tenant_id: Option<TenantId>,
     timeline_id: Option<ZTimelineId>,
 ) {
     let mut victim_threads = Vec::new();

@@ -69,7 +69,7 @@ use tracing::*;
 use url::Url;
 use utils::lsn::Lsn;
 use utils::pq_proto::ZenithFeedback;
-use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
+use utils::zid::{NodeId, TenantId, ZTenantTimelineId, ZTimelineId};
 
 use self::connection_handler::{WalConnectionEvent, WalReceiverConnection};
 
@@ -87,7 +87,7 @@ static WAL_RECEIVER_ENTRIES: Lazy<RwLock<HashMap<ZTenantTimelineId, WalReceiverE
 
 /// Gets the public WAL streaming entry for a certain timeline.
 pub async fn get_wal_receiver_entry(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
 ) -> Option<WalReceiverEntry> {
     WAL_RECEIVER_ENTRIES
@@ -169,7 +169,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
     etcd_client: &'a Client,
     timeline_updates_receiver: &'a mut mpsc::UnboundedReceiver<LocalTimelineUpdate>,
     local_timeline_wal_receivers: &'a mut HashMap<
-        ZTenantId,
+        TenantId,
         HashMap<ZTimelineId, TimelineWalBrokerLoopHandle>,
     >,
 ) {
@@ -298,7 +298,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
 }
 
 async fn fetch_tenant_settings(
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
 ) -> anyhow::Result<(Duration, Duration, NonZeroU64)> {
     tokio::task::spawn_blocking(move || {
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
@@ -313,7 +313,7 @@ async fn fetch_tenant_settings(
     .with_context(|| format!("Failed to join on tenant {tenant_id} settings fetch task"))?
 }
 
-async fn change_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow::Result<()> {
+async fn change_tenant_state(tenant_id: TenantId, new_state: TenantState) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         tenant_mgr::set_tenant_state(tenant_id, new_state)
             .with_context(|| format!("Failed to activate tenant {tenant_id}"))
@@ -333,7 +333,7 @@ async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
 
 async fn shutdown_all_wal_connections(
     local_timeline_wal_receivers: &mut HashMap<
-        ZTenantId,
+        TenantId,
         HashMap<ZTimelineId, TimelineWalBrokerLoopHandle>,
     >,
 ) {
@@ -757,7 +757,7 @@ fn wal_stream_connection_string(
         })?;
     let (host, port) = utils::connstring::connection_host_port(&me_conf);
     Ok(format!(
-        "host={host} port={port} options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
+        "host={host} port={port} options='-c ztimelineid={timeline_id} tenantid={tenant_id}'"
     ))
 }
 

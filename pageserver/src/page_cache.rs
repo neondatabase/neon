@@ -49,7 +49,7 @@ use once_cell::sync::OnceCell;
 use tracing::error;
 use utils::{
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::layered_repository::writeback_ephemeral_file;
@@ -108,7 +108,7 @@ enum CacheKey {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct MaterializedPageHashKey {
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     timeline_id: ZTimelineId,
     key: Key,
 }
@@ -307,7 +307,7 @@ impl PageCache {
     /// returned page.
     pub fn lookup_materialized_page(
         &self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         timeline_id: ZTimelineId,
         key: &Key,
         lsn: Lsn,
@@ -337,7 +337,7 @@ impl PageCache {
     ///
     pub fn memorize_materialized_page(
         &self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         timeline_id: ZTimelineId,
         key: Key,
         lsn: Lsn,

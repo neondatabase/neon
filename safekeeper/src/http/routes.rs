@@ -20,7 +20,7 @@ use utils::{
         RequestExt, RouterBuilder,
     },
     lsn::Lsn,
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use super::models::TimelineCreateRequest;
@@ -65,7 +65,7 @@ struct AcceptorStateStatus {
 #[derive(Debug, Serialize)]
 struct TimelineStatus {
     #[serde(serialize_with = "display_serialize")]
-    tenant_id: ZTenantId,
+    tenant_id: TenantId,
     #[serde(serialize_with = "display_serialize")]
     timeline_id: ZTimelineId,
     acceptor_state: AcceptorStateStatus,

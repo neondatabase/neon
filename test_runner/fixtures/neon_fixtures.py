@@ -1798,7 +1798,7 @@ class Safekeeper:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id.hex} ztenantid={tenant_id.hex}'"
+        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id.hex} tenantid={tenant_id.hex}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions

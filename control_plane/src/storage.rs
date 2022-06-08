@@ -23,7 +23,7 @@ use utils::{
     http::error::HttpErrorBody,
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::local_env::LocalEnv;
@@ -109,7 +109,7 @@ impl PageServerNode {
 
     pub fn init(
         &self,
-        create_tenant: Option<ZTenantId>,
+        create_tenant: Option<TenantId>,
         initial_timeline_id: Option<ZTimelineId>,
         config_overrides: &[&str],
     ) -> anyhow::Result<ZTimelineId> {
@@ -387,9 +387,9 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<ZTenantId>,
+        new_tenant_id: Option<TenantId>,
         settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<Option<ZTenantId>> {
+    ) -> anyhow::Result<Option<TenantId>> {
         let tenant_id_string = self
             .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&TenantCreateRequest {
@@ -443,7 +443,7 @@ impl PageServerNode {
             .transpose()
     }
 
-    pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
+    pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
             .json(&TenantConfigRequest {
                 tenant_id,
@@ -491,7 +491,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub fn timeline_list(&self, tenant_id: &ZTenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+    pub fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
         let timeline_infos: Vec<TimelineInfo> = self
             .http_request(
                 Method::GET,
@@ -506,7 +506,7 @@ impl PageServerNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         new_timeline_id: Option<ZTimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<ZTimelineId>,

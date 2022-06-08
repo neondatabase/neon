@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
-use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId};
+use utils::zid::{NodeId, TenantId, ZTenantTimelineId};
 
 pub mod broker;
 pub mod control_file;
@@ -60,7 +60,7 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &ZTenantId) -> PathBuf {
+    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
         self.workdir.join(tenant_id.to_string())
     }
 

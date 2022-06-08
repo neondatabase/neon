@@ -15,7 +15,7 @@ use utils::{
     connstring::connection_host_port,
     lsn::Lsn,
     postgres_backend::AuthType,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::local_env::LocalEnv;
@@ -28,7 +28,7 @@ use crate::storage::PageServerNode;
 pub struct ComputeControlPlane {
     base_port: u16,
     pageserver: Arc<PageServerNode>,
-    pub nodes: BTreeMap<(ZTenantId, String), Arc<PostgresNode>>,
+    pub nodes: BTreeMap<(TenantId, String), Arc<PostgresNode>>,
     env: LocalEnv,
 }
 
@@ -76,7 +76,7 @@ impl ComputeControlPlane {
 
     pub fn new_node(
         &mut self,
-        tenant_id: ZTenantId,
+        tenant_id: TenantId,
         name: &str,
         timeline_id: ZTimelineId,
         lsn: Option<Lsn>,
@@ -116,7 +116,7 @@ pub struct PostgresNode {
     is_test: bool,
     pub timeline_id: ZTimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     uses_wal_proposer: bool,
 }
 
@@ -149,7 +149,7 @@ impl PostgresNode {
         let context = format!("in config file {}", cfg_path_str);
         let port: u16 = conf.parse_field("port", &context)?;
         let timeline_id: ZTimelineId = conf.parse_field("neon.timeline_id", &context)?;
-        let tenant_id: ZTenantId = conf.parse_field("neon.tenant_id", &context)?;
+        let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
         let uses_wal_proposer = conf.get("safekeepers").is_some();
 
         // parse recovery_target_lsn, if any
