@@ -1,6 +1,5 @@
 #
-# Tests used to measure the application's performance with WAL backpressure.
-# Each test in this file measures the read latencies and WAL write lags when running a workload.
+# Tests measure the WAL pressure's performance under different workloads.
 #
 import os
 import time
@@ -31,8 +30,8 @@ def get_transactions_matrix(default: int = 1_000):
 
 
 @pytest.fixture(scope='function')
-def neon_compare_with_fsync(request, zenbenchmark, pg_bin,
-                            neon_env_builder: NeonEnvBuilder) -> NeonCompare:
+def neon_compare_with_sk_fsync(request, zenbenchmark, pg_bin,
+                               neon_env_builder: NeonEnvBuilder) -> NeonCompare:
     neon_env_builder.safekeepers_enable_fsync = True
 
     env = neon_env_builder.init_start()
@@ -42,40 +41,41 @@ def neon_compare_with_fsync(request, zenbenchmark, pg_bin,
     return NeonCompare(zenbenchmark, env, pg_bin, branch_name)
 
 
-@pytest.fixture(params=["vanilla_compare", "neon_compare", "neon_compare_with_fsync"],
-                ids=["vanilla", "neon_fsync_off", "neon_fsync_on"])
+@pytest.fixture(params=["vanilla_compare", "neon_compare", "neon_compare_with_sk_fsync"],
+                ids=["vanilla", "neon_sk_fsync_off", "neon_sk_fsync_on"])
 def pg_compare(request) -> PgCompare:
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare)
     return fixture
 
 
-def start_heavy_write_workload(pg: Postgres, scale: int, num_iters: int):
+def start_heavy_write_workload(env: PgCompare, scale: int, num_iters: int):
     """Start an intensive write workload.
-    At each step, we insert new `new_rows_each_update` rows.
+    At each step, insert new `new_rows_each_update` rows.
     The variable `new_rows_each_update` is equal to `scale * 100_000`.
     The number of steps is determined by `num_iters` variable."""
     new_rows_each_update = scale * 100_000
 
     n_rows = 0
-    for _ in range(num_iters):
-        with pg_cur(pg) as cur:
-            cur.execute(
-                f"INSERT INTO t SELECT s+{n_rows} FROM generate_series(1,{new_rows_each_update}) s")
-        n_rows += new_rows_each_update
+    with env.record_duration("run_duration"):
+        for _ in range(num_iters):
+            with pg_cur(env.pg) as cur:
+                cur.execute(
+                    f"INSERT INTO t SELECT s+{n_rows} FROM generate_series(1,{new_rows_each_update}) s"
+                )
+            n_rows += new_rows_each_update
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix(5))
 @pytest.mark.parametrize("num_iters", get_num_iters_matrix())
 def test_heavy_write_workload(pg_compare: PgCompare, scale: int, num_iters: int):
     env = pg_compare
-    pg = env.pg
 
-    with pg_cur(pg) as cur:
+    with pg_cur(env.pg) as cur:
         cur.execute("CREATE TABLE t(key int primary key)")
 
     workload_thread = threading.Thread(target=start_heavy_write_workload,
-                                       args=(pg, scale, num_iters))
+                                       args=(env, scale, num_iters))
     workload_thread.start()
 
     threading.Thread(target=record_lsn_write_lag,
@@ -85,11 +85,13 @@ def test_heavy_write_workload(pg_compare: PgCompare, scale: int, num_iters: int)
 
 
 def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transactions: int):
-    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Igvp', env.pg.connstr()])
-    env.flush()
+    with env.record_duration("run_duration"):
+        env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Igvp', env.pg.connstr()])
+        env.flush()
 
-    env.pg_bin.run_capture(['pgbench', '-N', f'-t{transactions}', '-Mprepared', env.pg.connstr()])
-    env.flush()
+        env.pg_bin.run_capture(
+            ['pgbench', '-N', f'-t{transactions}', '-Mprepared', env.pg.connstr()])
+        env.flush()
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix(100))
@@ -114,8 +116,9 @@ def test_pgbench_simple_update_workload(pg_compare: PgCompare, scale: int, trans
 
 
 def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
-    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-n', env.pg.connstr()])
-    env.flush()
+    with env.record_duration("run_duration"):
+        env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-n', env.pg.connstr()])
+        env.flush()
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix(1000))
@@ -178,19 +181,18 @@ def record_read_latency(env: PgCompare,
                         run_cond: Callable[[], bool],
                         read_query: str,
                         read_interval: float = 1.0):
-    with env.record_duration("run_duration"):
-        read_latencies = []
-        while run_cond():
-            with pg_cur(env.pg) as cur:
-                t = timeit.default_timer()
-                cur.execute(read_query)
-                duration = timeit.default_timer() - t
+    read_latencies = []
+    while run_cond():
+        with pg_cur(env.pg) as cur:
+            t = timeit.default_timer()
+            cur.execute(read_query)
+            duration = timeit.default_timer() - t
 
-                log.info(f"Executed read query {read_query}, got {cur.fetchall()}, took {duration}")
+            log.info(f"Executed read query {read_query}, got {cur.fetchall()}, took {duration}")
 
-                read_latencies.append(duration)
+            read_latencies.append(duration)
 
-            time.sleep(read_interval)
+        time.sleep(read_interval)
 
     env.zenbenchmark.record("read_latency_max",
                             max(read_latencies),
