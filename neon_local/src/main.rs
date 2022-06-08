@@ -159,6 +159,12 @@ fn main() -> Result<()> {
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
                 .arg(branch_name_arg.clone()))
+            .subcommand(App::new("import")
+                .about("Import timeline from basebackup directory")
+                .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
+                .arg(Arg::new("node-name").long("node-name").takes_value(true)
+                    .help("Name to assign to the imported timeline")))
         ).subcommand(
             App::new("tenant")
             .setting(AppSettings::ArgRequiredElseHelp)
@@ -612,7 +618,22 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 "Created timeline '{}' at Lsn {} for tenant: {}",
                 timeline.timeline_id, last_record_lsn, tenant_id,
             );
-        }
+        },
+        Some(("import", import_match)) => {
+            let tenant_id = get_tenant_id(import_match, env)?;
+            let timeline_id = parse_timeline_id(import_match)?
+                .expect("No timeline id provided");
+            let name = import_match.value_of("node-name")
+                .ok_or_else(|| anyhow!("No node name provided"))?;
+
+            let mut cplane = ComputeControlPlane::load(env.clone())?;
+            println!("Importing timeline into pageserver ...");
+            pageserver.timeline_import(tenant_id, timeline_id)?;
+            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
+            println!("Creating node for imported timeline ...");
+            cplane.new_node(tenant_id, name, timeline_id, None, None)?;
+            println!("Done");
+        },
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
             let new_branch_name = branch_match
