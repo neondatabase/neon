@@ -78,10 +78,13 @@ def test_heavy_write_workload(pg_compare: PgCompare, scale: int, num_iters: int)
                                        args=(env, scale, num_iters))
     workload_thread.start()
 
-    threading.Thread(target=record_lsn_write_lag,
-                     args=(env, lambda: workload_thread.is_alive())).start()
+    record_thread = threading.Thread(target=record_lsn_write_lag,
+                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread.start()
 
     record_read_latency(env, lambda: workload_thread.is_alive(), "SELECT count(*) from t")
+    workload_thread.join()
+    record_thread.join()
 
 
 def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transactions: int):
@@ -107,12 +110,15 @@ def test_pgbench_simple_update_workload(pg_compare: PgCompare, scale: int, trans
                                        args=(env, scale, transactions))
     workload_thread.start()
 
-    threading.Thread(target=record_lsn_write_lag,
-                     args=(env, lambda: workload_thread.is_alive())).start()
+    record_thread = threading.Thread(target=record_lsn_write_lag,
+                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread.start()
 
     record_read_latency(env,
                         lambda: workload_thread.is_alive(),
                         "SELECT sum(abalance) from pgbench_accounts")
+    workload_thread.join()
+    record_thread.join()
 
 
 def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
@@ -134,10 +140,13 @@ def test_pgbench_intensive_init_workload(pg_compare: PgCompare, scale: int):
                                        args=(env, scale))
     workload_thread.start()
 
-    threading.Thread(target=record_lsn_write_lag,
-                     args=(env, lambda: workload_thread.is_alive())).start()
+    record_thread = threading.Thread(target=record_lsn_write_lag,
+                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread.start()
 
     record_read_latency(env, lambda: workload_thread.is_alive(), "SELECT count(*) from foo")
+    workload_thread.join()
+    record_thread.join()
 
 
 def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_interval: float = 1.0):
