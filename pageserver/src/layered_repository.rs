@@ -25,6 +25,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
@@ -555,6 +556,27 @@ impl LayeredRepository {
         tenant_conf
             .pitr_interval
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
+    }
+
+    pub fn get_wal_receiver_connect_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout)
+    }
+
+    pub fn get_lagging_wal_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout)
+    }
+
+    pub fn get_max_lsn_wal_lag(&self) -> NonZeroU64 {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag)
     }
 
     pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) -> Result<()> {

@@ -8,11 +8,10 @@ use crate::repository::{Repository, TimelineSyncStatusUpdate};
 use crate::storage_sync::index::RemoteIndex;
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
-use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::timelines;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
+use crate::{thread_mgr, timelines, walreceiver};
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -21,23 +20,30 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::*;
 use utils::lsn::Lsn;
 
-use utils::zid::{TenantId, ZTimelineId};
+use utils::zid::{TenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
+    use anyhow::ensure;
     use std::{
         collections::HashMap,
         sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
+    use tokio::sync::mpsc;
+    use tracing::{debug, error};
 
     use utils::zid::TenantId;
 
-    use crate::tenant_mgr::Tenant;
+    use crate::tenant_mgr::{LocalTimelineUpdate, Tenant};
 
     lazy_static::lazy_static! {
         static ref TENANTS: RwLock<HashMap<TenantId, Tenant>> = RwLock::new(HashMap::new());
+        /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
+        /// so that it can enable/disable corresponding processes.
+        static ref TIMELINE_UPDATE_SENDER: RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>> = RwLock::new(None);
     }
 
     pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<TenantId, Tenant>> {
@@ -50,6 +56,39 @@ mod tenants_state {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
+    }
+
+    pub(super) fn set_timeline_update_sender(
+        timeline_updates_sender: mpsc::UnboundedSender<LocalTimelineUpdate>,
+    ) -> anyhow::Result<()> {
+        let mut sender_guard = TIMELINE_UPDATE_SENDER
+            .write()
+            .expect("Failed to write() timeline_update_sender lock, it got poisoned");
+        ensure!(sender_guard.is_none(), "Timeline update sender already set");
+        *sender_guard = Some(timeline_updates_sender);
+        Ok(())
+    }
+
+    pub(super) fn try_send_timeline_update(update: LocalTimelineUpdate) {
+        match TIMELINE_UPDATE_SENDER
+            .read()
+            .expect("Failed to read() timeline_update_sender lock, it got poisoned")
+            .as_ref()
+        {
+            Some(sender) => {
+                if let Err(e) = sender.send(update) {
+                    error!("Failed to send timeline update: {}", e);
+                }
+            }
+            None => debug!("Timeline update sender is not enabled, cannot send update {update:?}"),
+        }
+    }
+
+    pub(super) fn stop_timeline_update_sender() {
+        TIMELINE_UPDATE_SENDER
+            .write()
+            .expect("Failed to write() timeline_update_sender lock, it got poisoned")
+            .take();
     }
 }
 
@@ -87,10 +126,10 @@ pub enum TenantState {
 impl fmt::Display for TenantState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TenantState::Active => f.write_str("Active"),
-            TenantState::Idle => f.write_str("Idle"),
-            TenantState::Stopping => f.write_str("Stopping"),
-            TenantState::Broken => f.write_str("Broken"),
+            Self::Active => f.write_str("Active"),
+            Self::Idle => f.write_str("Idle"),
+            Self::Stopping => f.write_str("Stopping"),
+            Self::Broken => f.write_str("Broken"),
         }
     }
 }
@@ -99,6 +138,11 @@ impl fmt::Display for TenantState {
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the repository once download is completed.
 pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIndex> {
+    let (timeline_updates_sender, timeline_updates_receiver) =
+        mpsc::unbounded_channel::<LocalTimelineUpdate>();
+    tenants_state::set_timeline_update_sender(timeline_updates_sender)?;
+    walreceiver::init_wal_receiver_main_thread(conf, timeline_updates_receiver)?;
+
     let SyncStartupData {
         remote_index,
         local_timeline_init_statuses,
@@ -113,14 +157,25 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
             // loading a tenant is serious, but it's better to complete the startup and
             // serve other tenants, than fail completely.
             error!("Failed to initialize local tenant {tenant_id}: {:?}", err);
-            let mut m = tenants_state::write_tenants();
-            if let Some(tenant) = m.get_mut(&tenant_id) {
-                tenant.state = TenantState::Broken;
-            }
+            set_tenant_state(tenant_id, TenantState::Broken)?;
         }
     }
 
     Ok(remote_index)
+}
+
+pub enum LocalTimelineUpdate {
+    Detach(ZTenantTimelineId),
+    Attach(ZTenantTimelineId, Arc<DatadirTimelineImpl>),
+}
+
+impl std::fmt::Debug for LocalTimelineUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Detach(ttid) => f.debug_tuple("Remove").field(ttid).finish(),
+            Self::Attach(ttid, _) => f.debug_tuple("Add").field(ttid).finish(),
+        }
+    }
 }
 
 /// Updates tenants' repositories, changing their timelines state in memory.
@@ -160,6 +215,7 @@ pub fn apply_timeline_sync_status_updates(
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
 pub fn shutdown_all_tenants() {
+    tenants_state::stop_timeline_update_sender();
     let mut m = tenants_state::write_tenants();
     let mut tenantids = Vec::new();
     for (tenantid, tenant) in m.iter_mut() {
@@ -173,7 +229,7 @@ pub fn shutdown_all_tenants() {
     }
     drop(m);
 
-    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiver), None, None);
+    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiverManager), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
     thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
 
@@ -244,32 +300,49 @@ pub fn get_tenant_state(tenantid: TenantId) -> Option<TenantState> {
     Some(tenants_state::read_tenants().get(&tenantid)?.state)
 }
 
-///
-/// Change the state of a tenant to Active and launch its compactor and GC
-/// threads. If the tenant was already in Active state or Stopping, does nothing.
-///
-pub fn activate_tenant(tenant_id: TenantId) -> anyhow::Result<()> {
+pub fn set_tenant_state(tenant_id: TenantId, new_state: TenantState) -> anyhow::Result<()> {
     let mut m = tenants_state::write_tenants();
     let tenant = m
         .get_mut(&tenant_id)
         .with_context(|| format!("Tenant not found for id {tenant_id}"))?;
+    let old_state = tenant.state;
+    tenant.state = new_state;
+    drop(m);
 
-    info!("activating tenant {tenant_id}");
-
-    match tenant.state {
-        // If the tenant is already active, nothing to do.
-        TenantState::Active => {}
-
-        // If it's Idle, launch the compactor and GC threads
-        TenantState::Idle => {
-            thread_mgr::spawn(
+    match (old_state, new_state) {
+        (TenantState::Broken, TenantState::Broken)
+        | (TenantState::Active, TenantState::Active)
+        | (TenantState::Idle, TenantState::Idle)
+        | (TenantState::Stopping, TenantState::Stopping) => {
+            debug!("tenant {tenant_id} already in state {new_state}");
+        }
+        (TenantState::Broken, ignored) => {
+            debug!("Ignoring {ignored} since tenant {tenant_id} is in broken state");
+        }
+        (_, TenantState::Broken) => {
+            debug!("Setting tenant {tenant_id} status to broken");
+        }
+        (TenantState::Stopping, ignored) => {
+            debug!("Ignoring {ignored} since tenant {tenant_id} is in stopping state");
+        }
+        (TenantState::Idle, TenantState::Active) => {
+            info!("activating tenant {tenant_id}");
+            let compactor_spawn_result = thread_mgr::spawn(
                 ThreadKind::Compactor,
                 Some(tenant_id),
                 None,
                 "Compactor thread",
                 false,
                 move || crate::tenant_threads::compact_loop(tenant_id),
-            )?;
+            );
+            if compactor_spawn_result.is_err() {
+                let mut m = tenants_state::write_tenants();
+                m.get_mut(&tenant_id)
+                    .with_context(|| format!("Tenant not found for id {tenant_id}"))?
+                    .state = old_state;
+                drop(m);
+            }
+            compactor_spawn_result?;
 
             let gc_spawn_result = thread_mgr::spawn(
                 ThreadKind::GarbageCollector,
@@ -283,21 +356,31 @@ pub fn activate_tenant(tenant_id: TenantId) -> anyhow::Result<()> {
             .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
 
             if let Err(e) = &gc_spawn_result {
+                let mut m = tenants_state::write_tenants();
+                m.get_mut(&tenant_id)
+                    .with_context(|| format!("Tenant not found for id {tenant_id}"))?
+                    .state = old_state;
+                drop(m);
                 error!("Failed to start GC thread for tenant {tenant_id}, stopping its checkpointer thread: {e:?}");
                 thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
                 return gc_spawn_result;
             }
-            tenant.state = TenantState::Active;
         }
-
-        TenantState::Stopping => {
-            // don't re-activate it if it's being stopped
+        (TenantState::Idle, TenantState::Stopping) => {
+            info!("stopping idle tenant {tenant_id}");
         }
-
-        TenantState::Broken => {
-            // cannot activate
+        (TenantState::Active, TenantState::Stopping | TenantState::Idle) => {
+            info!("stopping tenant {tenant_id} threads due to new state {new_state}");
+            thread_mgr::shutdown_threads(
+                Some(ThreadKind::WalReceiverManager),
+                Some(tenant_id),
+                None,
+            );
+            thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), Some(tenant_id), None);
+            thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
         }
     }
+
     Ok(())
 }
 
@@ -322,15 +405,15 @@ pub fn get_local_timeline_with_load(
         .with_context(|| format!("Tenant {tenant_id} not found"))?;
 
     if let Some(page_tline) = tenant.local_timelines.get(&timeline_id) {
-        return Ok(Arc::clone(page_tline));
+        Ok(Arc::clone(page_tline))
+    } else {
+        let page_tline = load_local_timeline(&tenant.repo, timeline_id)
+            .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
+        tenant
+            .local_timelines
+            .insert(timeline_id, Arc::clone(&page_tline));
+        Ok(page_tline)
     }
-
-    let page_tline = load_local_timeline(&tenant.repo, timeline_id)
-        .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
-    tenant
-        .local_timelines
-        .insert(timeline_id, Arc::clone(&page_tline));
-    Ok(page_tline)
 }
 
 pub fn detach_timeline(
@@ -348,6 +431,9 @@ pub fn detach_timeline(
                 .detach_timeline(timeline_id)
                 .context("Failed to detach inmem tenant timeline")?;
             tenant.local_timelines.remove(&timeline_id);
+            tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach(
+                ZTenantTimelineId::new(tenant_id, timeline_id),
+            ));
         }
         None => bail!("Tenant {tenant_id} not found in local tenant state"),
     }
@@ -376,6 +462,12 @@ fn load_local_timeline(
         repartition_distance,
     ));
     page_tline.init_logical_size()?;
+
+    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach(
+        ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
+        Arc::clone(&page_tline),
+    ));
+
     Ok(page_tline)
 }
 

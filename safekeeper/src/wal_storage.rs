@@ -31,20 +31,11 @@ use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 use postgres_ffi::waldecoder::WalStreamDecoder;
 
-use metrics::{
-    register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
-    DISK_WRITE_SECONDS_BUCKETS,
-};
+use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 
 lazy_static! {
     // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
     // i64 is faster than f64, so update to u64 when available.
-    static ref FLUSH_LSN_GAUGE: GaugeVec = register_gauge_vec!(
-        "safekeeper_flush_lsn",
-        "Current flush_lsn, grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("Failed to register safekeeper_flush_lsn gauge vec");
     static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
@@ -69,7 +60,6 @@ lazy_static! {
 }
 
 struct WalStorageMetrics {
-    flush_lsn: Gauge,
     write_wal_bytes: Histogram,
     write_wal_seconds: Histogram,
     flush_wal_seconds: Histogram,
@@ -80,7 +70,6 @@ impl WalStorageMetrics {
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
         Self {
-            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
             write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&tenant_id, &timeline_id]),
             write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
             flush_wal_seconds: FLUSH_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
@@ -171,7 +160,6 @@ impl PhysicalStorage {
     /// Wrapper for flush_lsn updates that also updates metrics.
     fn update_flush_lsn(&mut self) {
         self.flush_record_lsn = self.write_record_lsn;
-        self.metrics.flush_lsn.set(self.flush_record_lsn.0 as f64);
     }
 
     /// Call fdatasync if config requires so.

@@ -10,6 +10,7 @@
 //!
 use crate::config::PageServerConf;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 use utils::zid::TenantId;
@@ -34,6 +35,9 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: &str = "100 s";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "30 days";
+    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
+    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
+    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1_000_000;
 }
 
 /// Per-tenant configuration options
@@ -68,6 +72,17 @@ pub struct TenantConf {
     // Page versions older than this are garbage collected away.
     #[serde(with = "humantime_serde")]
     pub pitr_interval: Duration,
+    /// Maximum amount of time to wait while opening a connection to receive wal, before erroring.
+    #[serde(with = "humantime_serde")]
+    pub walreceiver_connect_timeout: Duration,
+    /// Considers safekeepers stalled after no WAL updates were received longer than this threshold.
+    /// A stalled safekeeper will be changed to a newer one when it appears.
+    #[serde(with = "humantime_serde")]
+    pub lagging_wal_timeout: Duration,
+    /// Considers safekeepers lagging when their WAL is behind another safekeeper for more than this threshold.
+    /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
+    /// to avoid eager reconnects.
+    pub max_lsn_wal_lag: NonZeroU64,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -85,6 +100,11 @@ pub struct TenantConfOpt {
     pub image_creation_threshold: Option<usize>,
     #[serde(with = "humantime_serde")]
     pub pitr_interval: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    pub walreceiver_connect_timeout: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    pub lagging_wal_timeout: Option<Duration>,
+    pub max_lsn_wal_lag: Option<NonZeroU64>,
 }
 
 impl TenantConfOpt {
@@ -108,6 +128,13 @@ impl TenantConfOpt {
                 .image_creation_threshold
                 .unwrap_or(global_conf.image_creation_threshold),
             pitr_interval: self.pitr_interval.unwrap_or(global_conf.pitr_interval),
+            walreceiver_connect_timeout: self
+                .walreceiver_connect_timeout
+                .unwrap_or(global_conf.walreceiver_connect_timeout),
+            lagging_wal_timeout: self
+                .lagging_wal_timeout
+                .unwrap_or(global_conf.lagging_wal_timeout),
+            max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
         }
     }
 
@@ -136,6 +163,15 @@ impl TenantConfOpt {
         if let Some(pitr_interval) = other.pitr_interval {
             self.pitr_interval = Some(pitr_interval);
         }
+        if let Some(walreceiver_connect_timeout) = other.walreceiver_connect_timeout {
+            self.walreceiver_connect_timeout = Some(walreceiver_connect_timeout);
+        }
+        if let Some(lagging_wal_timeout) = other.lagging_wal_timeout {
+            self.lagging_wal_timeout = Some(lagging_wal_timeout);
+        }
+        if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
+            self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+        }
     }
 }
 
@@ -155,6 +191,14 @@ impl TenantConf {
             image_creation_threshold: DEFAULT_IMAGE_CREATION_THRESHOLD,
             pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
                 .expect("cannot parse default PITR interval"),
+            walreceiver_connect_timeout: humantime::parse_duration(
+                DEFAULT_WALRECEIVER_CONNECT_TIMEOUT,
+            )
+            .expect("cannot parse default walreceiver connect timeout"),
+            lagging_wal_timeout: humantime::parse_duration(DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT)
+                .expect("cannot parse default walreceiver lagging wal timeout"),
+            max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
+                .expect("cannot parse default max walreceiver Lsn wal lag"),
         }
     }
 
@@ -175,6 +219,16 @@ impl TenantConf {
             gc_period: Duration::from_secs(10),
             image_creation_threshold: defaults::DEFAULT_IMAGE_CREATION_THRESHOLD,
             pitr_interval: Duration::from_secs(60 * 60),
+            walreceiver_connect_timeout: humantime::parse_duration(
+                defaults::DEFAULT_WALRECEIVER_CONNECT_TIMEOUT,
+            )
+            .unwrap(),
+            lagging_wal_timeout: humantime::parse_duration(
+                defaults::DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT,
+            )
+            .unwrap(),
+            max_lsn_wal_lag: NonZeroU64::new(defaults::DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
+                .unwrap(),
         }
     }
 }

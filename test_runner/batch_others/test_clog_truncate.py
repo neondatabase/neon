@@ -29,7 +29,7 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
     log.info('postgres is running on test_clog_truncate branch')
 
     # Install extension containing function needed for test
-    pg.safe_psql('CREATE EXTENSION zenith_test_utils')
+    pg.safe_psql('CREATE EXTENSION neon_test_utils')
 
     # Consume many xids to advance clog
     with closing(pg.connect()) as conn:

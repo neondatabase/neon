@@ -26,7 +26,7 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
     log.info("checks started")
 
     with pg_cur(pg) as cur:
-        cur.execute("CREATE EXTENSION zenith")  # TODO move it to zenith_fixtures?
+        cur.execute("CREATE EXTENSION neon")  # TODO move it to zenith_fixtures?
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()

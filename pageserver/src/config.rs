@@ -34,7 +34,7 @@ pub mod defaults {
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
-    pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
+    pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -480,6 +480,21 @@ impl PageServerConf {
         if let Some(pitr_interval) = item.get("pitr_interval") {
             t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
         }
+        if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
+            t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
+                "walreceiver_connect_timeout",
+                walreceiver_connect_timeout,
+            )?);
+        }
+        if let Some(lagging_wal_timeout) = item.get("lagging_wal_timeout") {
+            t_conf.lagging_wal_timeout = Some(parse_toml_duration(
+                "lagging_wal_timeout",
+                lagging_wal_timeout,
+            )?);
+        }
+        if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
+            t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+        }
 
         Ok(t_conf)
     }
@@ -499,7 +514,7 @@ impl PageServerConf {
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            superuser: "zenith_admin".to_string(),
+            superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: PathBuf::new(),
             auth_type: AuthType::Trust,

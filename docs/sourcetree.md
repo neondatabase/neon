@@ -42,13 +42,13 @@ Integration tests, written in Python using the `pytest` framework.
 
 `/vendor/postgres`:
 
-PostgreSQL source tree, with the modifications needed for Zenith.
+PostgreSQL source tree, with the modifications needed for Neon.
 
-`/vendor/postgres/contrib/zenith`:
+`/vendor/postgres/contrib/neon`:
 
 PostgreSQL extension that implements storage manager API and network communications with remote page server.
 
-`/vendor/postgres/contrib/zenith_test_utils`:
+`/vendor/postgres/contrib/neon_test_utils`:
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 

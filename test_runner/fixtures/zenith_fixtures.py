@@ -338,18 +338,30 @@ class PgProtocol:
                     conn_options['server_settings'] = {key: val}
         return await asyncpg.connect(**conn_options)
 
-    def safe_psql(self, query: str, **kwargs: Any) -> List[Any]:
+    def safe_psql(self, query: str, **kwargs: Any) -> List[Tuple[Any, ...]]:
         """
         Execute query against the node and return all rows.
         This method passes all extra params to connstr.
         """
+        return self.safe_psql_many([query], **kwargs)[0]
 
+    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+        """
+        Execute queries against the node and return all rows.
+        This method passes all extra params to connstr.
+        """
+        result: List[List[Any]] = []
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
-                cur.execute(query)
-                if cur.description is None:
-                    return []  # query didn't return data
-                return cast(List[Any], cur.fetchall())
+                for query in queries:
+                    log.info(f"Executing query: {query}")
+                    cur.execute(query)
+
+                    if cur.description is None:
+                        result.append([])  # query didn't return data
+                    else:
+                        result.append(cast(List[Any], cur.fetchall()))
+        return result
 
 
 @dataclass
@@ -1226,7 +1238,7 @@ class ZenithPageserver(PgProtocol):
     Initializes the repository via `zenith init`.
     """
     def __init__(self, env: ZenithEnv, port: PageserverPort, config_override: Optional[str] = None):
-        super().__init__(host='localhost', port=port.pg, user='zenith_admin')
+        super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
         self.running = False
         self.service_port = port
@@ -1495,7 +1507,7 @@ def static_proxy(vanilla_pg) -> Iterator[ZenithProxy]:
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
     def __init__(self, env: ZenithEnv, tenant_id: uuid.UUID, port: int):
-        super().__init__(host='localhost', port=port, user='zenith_admin', dbname='postgres')
+        super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
@@ -1588,14 +1600,12 @@ class Postgres(PgProtocol):
             for cfg_line in cfg_lines:
                 # walproposer uses different application_name
                 if ("synchronous_standby_names" in cfg_line or
-                        # don't ask pageserver to fetch WAL from compute
-                        "callmemaybe_connstring" in cfg_line or
                         # don't repeat safekeepers/wal_acceptors multiple times
-                        "wal_acceptors" in cfg_line):
+                        "safekeepers" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("wal_acceptors = '{}'\n".format(safekeepers))
+            f.write("safekeepers = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':
@@ -2039,7 +2049,7 @@ def check_restored_datadir_content(test_output_dir: str, env: ZenithEnv, pg: Pos
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timeline_id")
             timeline = cur.fetchone()[0]
 
     # stop postgres to ensure that files won't change

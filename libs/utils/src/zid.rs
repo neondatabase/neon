@@ -193,7 +193,7 @@ pub struct TenantId(ZId);
 zid_newtype!(TenantId);
 
 // A pair uniquely identifying Zenith instance.
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ZTenantTimelineId {
     pub tenant_id: TenantId,
     pub timeline_id: ZTimelineId,

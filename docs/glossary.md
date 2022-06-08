@@ -2,7 +2,7 @@
 
 ### Authentication
 
-### Backpresssure
+### Backpressure
 
 Backpressure is used to limit the lag between pageserver and compute node or WAL service.
 

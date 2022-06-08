@@ -8,12 +8,12 @@ use url::Url;
 use utils::zid::{NodeId, TenantId, ZTenantTimelineId};
 
 pub mod broker;
-pub mod callmemaybe;
 pub mod control_file;
 pub mod control_file_upgrade;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
+pub mod metrics;
 pub mod receive_wal;
 pub mod remove_wal;
 pub mod safekeeper;

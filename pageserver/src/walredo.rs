@@ -28,6 +28,7 @@ use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::os::unix::io::AsRawFd;
+use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -555,6 +556,40 @@ impl PostgresRedoManager {
 }
 
 ///
+/// Command with ability not to give all file descriptors to child process
+///
+trait CloseFileDescriptors: CommandExt {
+    ///
+    /// Close file descriptors (other than stdin, stdout, stderr) in child process
+    ///
+    fn close_fds(&mut self) -> &mut Command;
+}
+
+impl<C: CommandExt> CloseFileDescriptors for C {
+    fn close_fds(&mut self) -> &mut Command {
+        unsafe {
+            self.pre_exec(move || {
+                // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+                // which means it should be safe to execute inside a signal handler.
+                // The precise meaning depends on platform. See `man signal-safety`
+                // for the linux definition.
+                //
+                // The set_fds_cloexec_threadsafe function is documented to be
+                // async-signal-safe.
+                //
+                // Aside from this function, the rest of the code is re-entrant and
+                // doesn't make any syscalls. We're just passing constants.
+                //
+                // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+                // which is not async-signal-safe. Be careful.
+                close_fds::set_fds_cloexec_threadsafe(3, &[]);
+                Ok(())
+            })
+        }
+    }
+}
+
+///
 /// Handle to the Postgres WAL redo process
 ///
 struct PostgresRedoProcess {
@@ -607,9 +642,10 @@ impl PostgresRedoProcess {
                 .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
             config.write_all(b"shared_buffers=128kB\n")?;
             config.write_all(b"fsync=off\n")?;
-            config.write_all(b"shared_preload_libraries=zenith\n")?;
-            config.write_all(b"zenith.wal_redo=on\n")?;
+            config.write_all(b"shared_preload_libraries=neon\n")?;
+            config.write_all(b"neon.wal_redo=on\n")?;
         }
+
         // Start postgres itself
         let mut child = Command::new(conf.pg_bin_dir().join("postgres"))
             .arg("--wal-redo")
@@ -620,6 +656,19 @@ impl PostgresRedoProcess {
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("PGDATA", &datadir)
+            // The redo process is not trusted, so it runs in seccomp mode
+            // (see seccomp in zenith_wal_redo.c). We have to make sure it doesn't
+            // inherit any file descriptors from the pageserver that would allow
+            // an attacker to do bad things.
+            //
+            // The Rust standard library makes sure to mark any file descriptors with
+            // as close-on-exec by default, but that's not enough, since we use
+            // libraries that directly call libc open without setting that flag.
+            //
+            // One example is the pidfile of the daemonize library, which doesn't
+            // currently mark file descriptors as close-on-exec. Either way, we
+            // want to be on the safe side and prevent accidental regression.
+            .close_fds()
             .spawn()
             .map_err(|e| {
                 Error::new(

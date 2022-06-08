@@ -91,8 +91,8 @@ pub enum ThreadKind {
     // associated with one later, after receiving a command from the client.
     PageRequestHandler,
 
-    // Thread that connects to a safekeeper to fetch WAL for one timeline.
-    WalReceiver,
+    // Main walreceiver manager thread that ensures that every timeline spawns a connection to safekeeper, to fetch WAL.
+    WalReceiverManager,
 
     // Thread that handles compaction of all timelines for a tenant.
     Compactor,

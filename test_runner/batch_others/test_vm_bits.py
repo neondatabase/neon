@@ -17,7 +17,7 @@ def test_vm_bit_clear(zenith_simple_env: ZenithEnv):
     cur = pg_conn.cursor()
 
     # Install extension containing function needed for test
-    cur.execute('CREATE EXTENSION zenith_test_utils')
+    cur.execute('CREATE EXTENSION neon_test_utils')
 
     # Create a test table and freeze it to set the VM bit.
     cur.execute('CREATE TABLE vmtest_delete (id integer PRIMARY KEY)')
