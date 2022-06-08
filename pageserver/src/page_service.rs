@@ -464,36 +464,32 @@ impl PageServerHandler {
         thread_mgr::associate_with(Some(tenant), Some(timeline));
 
         // switch client to COPYBOTH
-        pgb.write_message(&BeMessage::CopyBothResponse)?;
+        pgb.write_message(&BeMessage::CopyInResponse)?;
 
         while !thread_mgr::is_shutdown_requested() {
             match pgb.read_message() {
                 Ok(Some(message)) => {
                     let copy_data_bytes = match message {
                         FeMessage::CopyData(bytes) => bytes,
-                        _ => continue,  // TODO maybe error?
-                    };
-
-                    let fe_msg = ImportFeMessage::des(&copy_data_bytes)?;
-                    match fe_msg {
-                        ImportFeMessage::File(name, _file_bytes) => {
-                            info!("Got file {}", name);
-                            // TODO chunk (what does pg_basebackup do?)
-                            // TODO handle
-                        }
-                        ImportFeMessage::Done => {
-                            info!("Done importing.");
-                            pgb.write_message(&BeMessage::CopyData(&ImportBeMessage::Done.ser()?))?;
+                        FeMessage::CopyDone => {
                             return Ok(())
                         }
-                    }
+                        m => {
+                            info!("unexpected copy in client message {:?}", m);
+                            continue;
+                        },
+                    };
 
+                    // TODO use copy_data_bytes
                 },
                 Ok(None) => {
-                    todo!("error on none?");
+                    // Is this ok?
+                    return Ok(())
                 },
                 Err(e) => {
-                    todo!("import error handler not implemented {}", e);
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(e);
+                    }
                 },
             }
         }
@@ -814,8 +810,6 @@ impl postgres_backend::Handler for PageServerHandler {
             info!("Importing timeline {}.{}", tenant, timeline);
             self.handle_import(pgb, tenant, timeline)?;
             info!("Done importing timeline {}.{}", tenant, timeline);
-
-            // Do I need this?
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

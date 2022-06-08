@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -532,8 +533,21 @@ impl PageServerNode {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
+        tarfile: PathBuf,
     ) -> anyhow::Result<()> {
-        // TODO send using apis::upload::send_basebackup
+        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+
+        // Init reader
+        let file = File::open(tarfile)?;
+        let mut reader = BufReader::new(file);
+
+        // Init writer
+        let import_cmd = format!("import {tenant_id} {timeline_id}");
+        let mut writer = client.copy_in(&import_cmd)?;
+
+        // Stream reader -> writer
+        io::copy(&mut reader, &mut writer)?;
+        writer.finish()?;
         Ok(())
     }
 }
