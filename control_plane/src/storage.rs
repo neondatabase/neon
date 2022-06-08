@@ -527,4 +527,13 @@ impl PageServerNode {
 
         Ok(timeline_info_response)
     }
+
+    pub fn timeline_import(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+    ) -> anyhow::Result<()> {
+        // TODO
+        Ok(())
+    }
 }

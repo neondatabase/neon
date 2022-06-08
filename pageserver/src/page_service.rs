@@ -723,6 +723,17 @@ impl postgres_backend::Handler for PageServerHandler {
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("import ") {
+            let (_, params_raw) = query_string.split_at("import ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            ensure!(params.len() == 2);
+            let tenant = ZTenantId::from_str(params[0])?;
+            let timeline = ZTimelineId::from_str(params[1])?;
+
+            info!("Importing timeline {}.{}", tenant, timeline);
+            todo!("timeline import not implemented in pageserver");
+
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
