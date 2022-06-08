@@ -31,6 +31,7 @@ def test_import(neon_env_builder,
     # Create a new repo, load the basebackup into it, and check that data is there
     with NeonEnvBuilder(destination_repo_dir, port_distributor, default_broker, mock_s3_server) as builder:
         env = builder.init_start()
+        # TODO do everything from neon_cli instead
         env.pageserver.safe_psql(f"import {tenant} {timeline}")
         env.neon_cli.raw_cli([
             "timeline",
