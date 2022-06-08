@@ -40,7 +40,9 @@ def neon_compare_with_fsync(request, zenbenchmark, pg_bin,
 @pytest.fixture(params=["vanilla_compare", "neon_compare", "neon_compare_with_fsync"],
                 ids=["vanilla", "neon_fsync_off", "neon_fsync_on"])
 def compare(request) -> PgCompare:
-    return request.getfixturevalue(request.param)
+    fixture = request.getfixturevalue(request.param)
+    assert isinstance(fixture, PgCompare)
+    return fixture
 
 
 def start_heavy_write_workload(pg: Postgres, scale: int, num_iters: int):
