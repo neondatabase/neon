@@ -66,7 +66,7 @@ def start_heavy_write_workload(pg: Postgres, scale: int, num_iters: int):
         n_rows += new_rows_each_update
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix(1))
+@pytest.mark.parametrize("scale", get_scales_matrix(10))
 @pytest.mark.parametrize("num_iters", get_num_iters_matrix())
 def test_measure_read_latency_heavy_write_workload(compare: PgCompare, scale: int, num_iters: int):
     env = compare
@@ -93,7 +93,7 @@ def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transaction
     env.flush()
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("scale", get_scales_matrix(100))
 @pytest.mark.parametrize("transactions", get_transactions_matrix())
 def test_measure_read_latency_pgbench_simple_update_workload(compare: PgCompare,
                                                              scale: int,
@@ -122,7 +122,7 @@ def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
     env.flush()
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix(100))
+@pytest.mark.parametrize("scale", get_scales_matrix(1000))
 def test_measure_read_latency_other_table(compare: PgCompare, scale: int):
     # Measure the latency when reading from a table when doing a heavy write workload in another table
     # This test tries to simulate the scenario described in https://github.com/neondatabase/neon/issues/1763.
