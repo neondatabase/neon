@@ -59,6 +59,7 @@ dependencies = [
 name = "apis"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "serde",
 ]

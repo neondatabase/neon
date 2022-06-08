@@ -533,7 +533,7 @@ impl PageServerNode {
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
     ) -> anyhow::Result<()> {
-        // TODO send the timeline via the "import {tenant} {timeline}" copy both API
+        // TODO send using apis::upload::send_basebackup
         Ok(())
     }
 }
