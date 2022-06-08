@@ -4,6 +4,7 @@ use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
+use lazy_static::lazy_static;
 use remote_storage::RemoteStorage;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
@@ -17,6 +18,16 @@ use super::{
 use crate::{
     config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
+use metrics::{register_int_counter_vec, IntCounterVec};
+
+lazy_static! {
+    static ref NO_LAYERS_UPLOAD: IntCounterVec = register_int_counter_vec!(
+        "pageserver_remote_storage_no_layers_uploads_total",
+        "Number of skipped uploads due to no layers",
+        &["tenant_id", "timeline_id"],
+    )
+    .expect("failed to register pageserver no layers upload vec");
+}
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<P, S>(
@@ -102,7 +113,13 @@ where
         .collect::<Vec<_>>();
 
     if layers_to_upload.is_empty() {
-        info!("No layers to upload after filtering, aborting");
+        debug!("No layers to upload after filtering, aborting");
+        NO_LAYERS_UPLOAD
+            .with_label_values(&[
+                &sync_id.tenant_id.to_string(),
+                &sync_id.timeline_id.to_string(),
+            ])
+            .inc();
         return UploadedTimeline::Successful(upload_data);
     }
 
