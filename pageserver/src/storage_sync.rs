@@ -967,10 +967,8 @@ where
         })
         .collect::<FuturesUnordered<_>>();
 
-    let mut new_timeline_states: HashMap<
-        TenantId,
-        HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
-    > = HashMap::new();
+    let mut new_timeline_states: HashMap<TenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>> =
+        HashMap::new();
 
     while let Some((sync_id, state_update)) = sync_results.next().await {
         debug!("Finished storage sync task for sync id {sync_id}");
