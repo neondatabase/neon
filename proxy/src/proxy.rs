@@ -33,8 +33,8 @@ lazy_static! {
 
 /// A small combinator for pluggable error logging.
 async fn log_error<R, F>(future: F) -> F::Output
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
+    where
+        F: std::future::Future<Output = anyhow::Result<R>>,
 {
     future.await.map_err(|err| {
         println!("error: {}", err);
@@ -82,7 +82,7 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.clone();
-    let (stream, creds) = match handshake(stream, tls, cancel_map).await? {
+    let (stream, creds) = match handshake(stream, tls, cancel_map, &config.common_name).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
@@ -101,6 +101,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<TlsConfig>,
     cancel_map: &CancelMap,
+    common_name: &Option<String>,
 ) -> anyhow::Result<Option<(PqStream<Stream<S>>, auth::ClientCredentials)>> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
@@ -152,6 +153,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 if let Stream::Tls { tls } = stream.get_ref() {
                     creds.sni_data = tls.get_ref().1.sni_hostname().map(|s| s.to_owned());
                 }
+
+                // Set common_name
+                creds.common_name = common_name.clone();
 
                 break Ok(Some((stream, creds)));
             }

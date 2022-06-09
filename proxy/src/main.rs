@@ -26,6 +26,7 @@ use futures::FutureExt;
 use std::{future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
+use substring::Substring;
 
 project_git_version!(GIT_VERSION);
 
@@ -118,11 +119,29 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
+    // determine common name from tls-cert (-c server.crt param).
+    // used in asserting project name formatting invariant.
+    let common_name = match arg_matches.value_of("tls-cert") {
+        Some(cert_path) => {
+            let file = std::fs::File::open(cert_path).unwrap();
+            let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))
+                .unwrap().0
+                .parse_x509().unwrap()
+                .tbs_certificate.subject.to_string();
+            let prefix = "CN=*";
+            // making sure formatting is as expected: almost_common_name = "'CN=*'[<common name>]"
+            assert_eq!(almost_common_name.substring(0, prefix.len()), prefix);
+            Some(almost_common_name.substring(prefix.len(), almost_common_name.len()).to_string())
+        }
+        None => None,
+    };
+
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
+        common_name,
     }));
 
     println!("Version: {GIT_VERSION}");

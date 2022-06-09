@@ -2,6 +2,7 @@ use crate::url::ApiUrl;
 use anyhow::{bail, ensure, Context};
 use std::{str::FromStr, sync::Arc};
 
+
 #[derive(Debug)]
 pub enum AuthBackendType {
     /// Legacy Cloud API (V1).
@@ -34,6 +35,9 @@ pub struct ProxyConfig {
     pub auth_backend: AuthBackendType,
     pub auth_endpoint: ApiUrl,
     pub auth_link_uri: ApiUrl,
+
+    // common name is extracted from server.crt and used as help to determine project name from SNI.
+    pub common_name: Option<String>,
 }
 
 pub type TlsConfig = Arc<rustls::ServerConfig>;
