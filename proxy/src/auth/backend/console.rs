@@ -259,3 +259,15 @@ fn parse_host_port(input: &str) -> Option<(&str, u16)> {
     let (host, port) = input.split_once(':')?;
     Some((host, port.parse().ok()?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_host_port() {
+        let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 5432);
+    }
+}
