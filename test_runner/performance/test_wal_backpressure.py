@@ -2,7 +2,6 @@
 # Tests measure the WAL pressure's performance under different workloads.
 #
 import os
-import time
 import statistics
 import threading
 import time
@@ -11,10 +10,10 @@ from typing import Callable
 
 import pytest
 from batch_others.test_backpressure import pg_cur
-from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (DEFAULT_BRANCH_NAME, NeonEnvBuilder, Postgres)
+from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, PgBin
 
 from performance.test_perf_pgbench import get_scales_matrix
 
@@ -29,24 +28,47 @@ def get_transactions_matrix(default: int = 10_000):
     return list(map(int, scales.split(",")))
 
 
-@pytest.fixture(scope='function')
-def neon_compare_with_sk_fsync(request, zenbenchmark, pg_bin,
-                               neon_env_builder: NeonEnvBuilder) -> NeonCompare:
-    neon_env_builder.safekeepers_enable_fsync = True
-
-    env = neon_env_builder.init_start()
-    env.neon_cli.create_branch('empty', ancestor_branch_name=DEFAULT_BRANCH_NAME)
-
-    branch_name = request.node.name
-    return NeonCompare(zenbenchmark, env, pg_bin, branch_name)
-
-
-@pytest.fixture(params=["vanilla_compare", "neon_compare", "neon_compare_with_sk_fsync"],
-                ids=["vanilla", "neon_sk_fsync_off", "neon_sk_fsync_on"])
+@pytest.fixture(
+    params=["vanilla", "neon_off_15MB", "neon_off_500MB", "neon_on_15MB", "neon_on_500MB"])
+# This fixture constructs multiple `PgCompare` interfaces using a builder pattern.
+# The builder parameters are encoded in the fixture's param.
+# For example, to build a `NeonCompare` interface, the corresponding fixture's param should have
+# a format of `neon_{safekeepers_enable_fsync}_{max_replication_apply_lag}`.
+# Note that, here "_" is used to separate builder parameters.
 def pg_compare(request) -> PgCompare:
-    fixture = request.getfixturevalue(request.param)
-    assert isinstance(fixture, PgCompare)
-    return fixture
+    x = request.param.split("_")
+
+    if x[0] == "vanilla":
+        # `VanillaCompare` interface
+        fixture = request.getfixturevalue("vanilla_compare")
+        assert isinstance(fixture, VanillaCompare)
+
+        return fixture
+    else:
+        assert len(x) == 3, f"request param ({request.param}) should have a format of \
+        `neon_{{safekeepers_enable_fsync}}_{{max_replication_apply_lag}}`"
+
+        # `NeonCompare` interface
+        neon_env_builder = request.getfixturevalue("neon_env_builder")
+        assert isinstance(neon_env_builder, NeonEnvBuilder)
+
+        zenbenchmark = request.getfixturevalue("zenbenchmark")
+        assert isinstance(zenbenchmark, NeonBenchmarker)
+
+        pg_bin = request.getfixturevalue("pg_bin")
+        assert isinstance(pg_bin, PgBin)
+
+        neon_env_builder.safekeepers_enable_fsync = x[1] == "on"
+
+        env = neon_env_builder.init_start()
+        env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
+
+        branch_name = request.node.name
+        return NeonCompare(zenbenchmark,
+                           env,
+                           pg_bin,
+                           branch_name,
+                           config_lines=[f"max_replication_write_lag={x[2]}"])
 
 
 def start_heavy_write_workload(env: PgCompare, scale: int, num_iters: int):

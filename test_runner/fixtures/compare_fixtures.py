@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePos
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 # Type-related stuff
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class PgCompare(ABC):
@@ -84,14 +84,15 @@ class NeonCompare(PgCompare):
                  zenbenchmark: NeonBenchmarker,
                  neon_simple_env: NeonEnv,
                  pg_bin: PgBin,
-                 branch_name):
+                 branch_name: str,
+                 config_lines: Optional[List[str]] = None):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
         self.env.neon_cli.create_branch(branch_name, 'empty')
-        self._pg = self.env.postgres.create_start(branch_name)
+        self._pg = self.env.postgres.create_start(branch_name, config_lines=config_lines)
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
         # Long-lived cursor, useful for flushing
