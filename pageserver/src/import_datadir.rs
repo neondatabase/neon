@@ -26,7 +26,8 @@ use utils::lsn::Lsn;
 /// Import all relation data pages from local disk into the repository.
 ///
 /// This is currently only used to import a cluster freshly created by initdb.
-/// The code that deals with the checkpoint would not work right if the
+/// The code that deals with the
+/// checkpoint would not work right if the
 /// cluster was not shut down cleanly.
 pub fn import_timeline_from_postgres_datadir<R: Repository>(
     path: &Path,
@@ -438,6 +439,11 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
             }
         }
     }
+
+    modification.commit()?;
+
+    // TODO import wal.
+
     Ok(())
 }
 
@@ -446,6 +452,10 @@ pub fn import_file<R: Repository>(
     file_path: &Path,
     buffer: &[u8],
 ) -> Result<()> {
+    let bytes = Bytes::copy_from_slice(&buffer[..]);
+
+    // TODO does tar use absolute paths? I'm seeing stuff like:
+    // "home/bojan/src/neondatabase/neon/test_output/test_import/basebackup/global/pg_filenode.map"
     if file_path.starts_with("global") {
         let spcnode = pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
@@ -455,7 +465,7 @@ pub fn import_file<R: Repository>(
                 println!("pg_control file {}", file_path.display());
 
                 // Import it as ControlFile
-                modification.put_control_file(Bytes::copy_from_slice(&buffer[..]))?;
+                modification.put_control_file(bytes)?;
 
                 // Extract the checkpoint record and import it separately.
                 let pg_control = ControlFileData::decode(&buffer)?;
@@ -463,11 +473,18 @@ pub fn import_file<R: Repository>(
                 modification.put_checkpoint(checkpoint_bytes)?;
             }
             "pg_filenode.map" => {
-                ("pg_filenode.map file {}", file_path.display());
+                println!("pg_filenode.map file {}", file_path.display());
+
+                modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
             _ => {
                 println!("global relfile {}", file_path.display());
-                //TODO
+
+                modification.put_relmap_file(
+                    pg_constants::GLOBALTABLESPACE_OID,
+                    0,
+                    Bytes::copy_from_slice(&buffer[..]),
+                )?;
             }
         }
     } else if file_path.starts_with("base") {
@@ -488,15 +505,11 @@ pub fn import_file<R: Repository>(
                     dbnode,
                     file_path.display()
                 );
-                modification.put_relmap_file(
-                    spcnode,
-                    dbnode,
-                    Bytes::copy_from_slice(&buffer[..]),
-                )?;
+                modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
             _ => {
                 println!("dbnode {} relfile {}", dbnode, file_path.display());
-                //TODO
+                modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
         }
     } else if file_path.starts_with("pg_xact") {
@@ -504,19 +517,25 @@ pub fn import_file<R: Repository>(
             "pg_xact {} ",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
-        // TODO
+        let slru = SlruKind::Clog;
+
+        // TODO copy from import_slru_file
     } else if file_path.starts_with("pg_multixact/offset") {
         println!(
             "pg_multixact/offset {}",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
-        // TODO
+        let slru = SlruKind::MultiXactOffsets;
+
+        // TODO copy from import_slru_file
     } else if file_path.starts_with("pg_multixact/members") {
         println!(
             "pg_multixact/members {}",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
-        // TODO
+        let slru = SlruKind::MultiXactMembers;
+
+        // TODO copy from import_slru_file
     } else if file_path.starts_with("pg_twophase") {
         let xid = u32::from_str_radix(&file_path.file_name().unwrap().to_string_lossy(), 16)?;
 
@@ -526,6 +545,11 @@ pub fn import_file<R: Repository>(
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
+    } else {
+        println!("ignoring file {:?}", file_path);
     }
+
+    // TODO: pg_tblspc ??
+
     Ok(())
 }
