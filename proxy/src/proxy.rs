@@ -350,8 +350,9 @@ mod tests {
         auth: impl TestAuth + Send,
     ) -> anyhow::Result<()> {
         let cancel_map = CancelMap::default();
-        let (mut stream, _creds) = handshake(client, tls, &cancel_map)
+        let (mut stream, _creds) = handshake(client, tls, &cancel_map, &None)
             .await?
+
             .context("handshake failed")?;
 
         auth.authenticate(&mut stream).await?;
