@@ -1636,30 +1636,40 @@ impl LayeredTimeline {
     ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
+        let layers = self.layers.read().unwrap();
+        if let Some(open_layer) = &layers.open_layer {
+            let open_layer_size = open_layer.size()?;
+			drop(layers);
+            let distance = last_lsn.widening_sub(self.last_freeze_at.load());
+            if distance >= self.get_checkpoint_distance().into()
+                || open_layer_size > self.get_checkpoint_distance().into()
+            {
+                info!(
+                    "check_checkpoint_distance {}, last lsn {}, open layer size {}",
+                    distance, last_lsn, open_layer_size
+                );
 
-        // Has more than 'checkpoint_distance' of WAL been accumulated?
-        let distance = last_lsn.widening_sub(self.last_freeze_at.load());
-        if distance >= self.get_checkpoint_distance().into() {
-            // Yes. Freeze the current in-memory layer.
-            self.freeze_inmem_layer(true);
-            self.last_freeze_at.store(last_lsn);
+                // Yes. Freeze the current in-memory layer.
+                self.freeze_inmem_layer(true);
+                self.last_freeze_at.store(last_lsn);
 
-            // Launch a thread to flush the frozen layer to disk, unless
-            // a thread was already running. (If the thread was running
-            // at the time that we froze the layer, it must've seen the
-            // the layer we just froze before it exited; see comments
-            // in flush_frozen_layers())
-            if let Ok(guard) = self.layer_flush_lock.try_lock() {
-                drop(guard);
-                let self_clone = Arc::clone(self);
-                thread_mgr::spawn(
-                    thread_mgr::ThreadKind::LayerFlushThread,
-                    Some(self.tenant_id),
-                    Some(self.timeline_id),
-                    "layer flush thread",
-                    false,
-                    move || self_clone.flush_frozen_layers(false),
-                )?;
+                // Launch a thread to flush the frozen layer to disk, unless
+                // a thread was already running. (If the thread was running
+                // at the time that we froze the layer, it must've seen the
+                // the layer we just froze before it exited; see comments
+                // in flush_frozen_layers())
+                if let Ok(guard) = self.layer_flush_lock.try_lock() {
+                    drop(guard);
+                    let self_clone = Arc::clone(self);
+                    thread_mgr::spawn(
+                        thread_mgr::ThreadKind::LayerFlushThread,
+                        Some(self.tenant_id),
+                        Some(self.timeline_id),
+                        "layer flush thread",
+                        false,
+                        move || self_clone.flush_frozen_layers(false),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -2063,7 +2073,7 @@ impl LayeredTimeline {
             let (key, lsn, value) = x?;
 
             if let Some(prev_key) = prev_key {
-                if key != prev_key && writer.is_some() {
+                if writer.is_some() {
                     let size = writer.as_mut().unwrap().size();
                     if size > target_file_size {
                         new_layers.push(writer.take().unwrap().finish(prev_key.next())?);

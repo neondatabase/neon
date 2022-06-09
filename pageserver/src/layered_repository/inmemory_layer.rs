@@ -180,6 +180,11 @@ impl Layer for InMemoryLayer {
         true
     }
 
+    fn size(&self) -> Result<u64> {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.file.size)
+    }
+
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool) -> Result<()> {
         let inner = self.inner.read().unwrap();

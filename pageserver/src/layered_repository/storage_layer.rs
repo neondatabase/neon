@@ -100,6 +100,11 @@ pub trait Layer: Send + Sync {
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     fn get_lsn_range(&self) -> Range<Lsn>;
 
+    /// Get layer size
+    fn size(&self) -> Result<u64> {
+        Ok(std::fs::metadata(self.local_path().unwrap())?.len())
+    }
+
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for
     /// log messages, even though they're never not on disk.)
