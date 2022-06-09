@@ -223,6 +223,15 @@ impl<'a> CopyInReader<'a> {
     }
 }
 
+impl<'a> Drop for CopyInReader<'a> {
+    fn drop(&mut self) {
+        // Finalize copy protocol so that self.pgb can be reused
+        // TODO instead, maybe take ownership of pgb and give it back at the end
+        let mut buf: Vec<u8> = vec![];
+        let _ = self.read_to_end(&mut buf);
+    }
+}
+
 impl<'a> Read for CopyInReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
@@ -531,6 +540,7 @@ impl PageServerHandler {
         // TODO thread_mgr::associate_with?
 
         // Create empty timeline
+        info!("creating new timeline");
         let init_lsn = Lsn(0);
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let timeline = repo.create_empty_timeline(timeline_id, init_lsn)?;
@@ -539,9 +549,12 @@ impl PageServerHandler {
             timeline, repartition_distance);
 
         // Import basebackup provided via CopyData
+        info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
         import_timeline_from_tar(&mut datadir_timeline, reader, init_lsn)?;
+
+        info!("done");
         Ok(())
     }
 
@@ -855,9 +868,9 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenant = ZTenantId::from_str(params[0])?;
             let timeline = ZTimelineId::from_str(params[1])?;
 
-            info!("Importing timeline {}.{}", tenant, timeline);
+            self.check_permission(Some(tenant))?;
+
             self.handle_import(pgb, tenant, timeline)?;
-            info!("Done importing timeline {}.{}", tenant, timeline);
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
