@@ -533,6 +533,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
+        end_lsn: Lsn,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("import", timeline = %timeline_id, tenant = %tenant_id).entered();
         // TODO cap the max number of import threads allowed
@@ -541,9 +542,8 @@ impl PageServerHandler {
 
         // Create empty timeline
         info!("creating new timeline");
-        let init_lsn = Lsn(0);
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.create_empty_timeline(timeline_id, init_lsn)?;
+        let timeline = repo.create_empty_timeline(timeline_id, Lsn(0))?;
         let repartition_distance = repo.get_checkpoint_distance();  // TODO
         let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
             timeline, repartition_distance);
@@ -552,7 +552,7 @@ impl PageServerHandler {
         info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
-        import_timeline_from_tar(&mut datadir_timeline, reader, init_lsn)?;
+        import_timeline_from_tar(&mut datadir_timeline, reader, end_lsn)?;
 
         info!("done");
         Ok(())
@@ -864,13 +864,14 @@ impl postgres_backend::Handler for PageServerHandler {
         } else if query_string.starts_with("import ") {
             let (_, params_raw) = query_string.split_at("import ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 2);
+            ensure!(params.len() == 3);
             let tenant = ZTenantId::from_str(params[0])?;
             let timeline = ZTimelineId::from_str(params[1])?;
+            let lsn = Lsn::from_str(params[2])?;
 
             self.check_permission(Some(tenant))?;
 
-            self.handle_import(pgb, tenant, timeline)?;
+            self.handle_import(pgb, tenant, timeline, lsn)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

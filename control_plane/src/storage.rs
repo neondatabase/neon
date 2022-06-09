@@ -534,6 +534,7 @@ impl PageServerNode {
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         tarfile: PathBuf,
+        lsn: Lsn,
     ) -> anyhow::Result<()> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
@@ -542,7 +543,7 @@ impl PageServerNode {
         let mut reader = BufReader::new(file);
 
         // Init writer
-        let import_cmd = format!("import {tenant_id} {timeline_id}");
+        let import_cmd = format!("import {tenant_id} {timeline_id} {lsn}");
         let mut writer = client.copy_in(&import_cmd)?;
 
         // Stream reader -> writer
