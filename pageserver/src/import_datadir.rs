@@ -8,7 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
@@ -281,31 +281,41 @@ fn import_control_file<R: Repository>(
     Ok(pg_control)
 }
 
-///
-/// Import an SLRU segment file
-///
 fn import_slru_file<R: Repository>(
     modification: &mut DatadirModification<R>,
     slru: SlruKind,
     path: &Path,
 ) -> Result<()> {
+    let file = File::open(path)?;
+    let len = file.metadata().unwrap().len() as usize;
+    import_slru(modification, slru, path, file, len)
+}
+
+///
+/// Import an SLRU segment file
+///
+fn import_slru<R: Repository, Reader: Read>(
+    modification: &mut DatadirModification<R>,
+    slru: SlruKind,
+    path: &Path,
+    mut reader: Reader,
+    len: usize,
+) -> Result<()> {
     trace!("importing slru file {}", path.display());
 
-    let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
     let segno = u32::from_str_radix(&path.file_name().unwrap().to_string_lossy(), 16)?;
 
-    let len = file.metadata().unwrap().len();
-    ensure!(len % pg_constants::BLCKSZ as u64 == 0); // we assume SLRU block size is the same as BLCKSZ
-    let nblocks = len / pg_constants::BLCKSZ as u64;
+    ensure!(len % pg_constants::BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
+    let nblocks = len / pg_constants::BLCKSZ as usize;
 
-    ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as u64);
+    ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 
     modification.put_slru_segment_creation(slru, segno, nblocks as u32)?;
 
     let mut rpageno = 0;
     loop {
-        let r = file.read_exact(&mut buf);
+        let r = reader.read_exact(&mut buf);
         match r {
             Ok(_) => {
                 modification.put_slru_page_image(
@@ -423,6 +433,9 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
         let header = entry.header();
         let file_path = header.path().unwrap().into_owned();
 
+        // HACK why does python put absolute file paths inside tar?
+        let file_path = file_path.strip_prefix("home/bojan/src/neondatabase/neon/test_output/test_import/basebackup/").unwrap();
+
         match header.entry_type() {
             tar::EntryType::Regular => {
                 let mut buffer = Vec::new();
@@ -432,7 +445,7 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
                 import_file(&mut modification, &file_path.as_ref(), &buffer)?;
             }
             tar::EntryType::Directory => {
-                println!("tar::EntryType::Directory {}", file_path.display());
+                info!("tar::EntryType::Directory {}", file_path.display());
             }
             _ => {
                 panic!("tar::EntryType::?? {}", file_path.display());
@@ -453,16 +466,15 @@ pub fn import_file<R: Repository>(
     buffer: &[u8],
 ) -> Result<()> {
     let bytes = Bytes::copy_from_slice(&buffer[..]);
+    let bytes_len = bytes.len();
 
-    // TODO does tar use absolute paths? I'm seeing stuff like:
-    // "home/bojan/src/neondatabase/neon/test_output/test_import/basebackup/global/pg_filenode.map"
     if file_path.starts_with("global") {
         let spcnode = pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
         match file_path.file_name().unwrap().to_string_lossy().as_ref() {
             "pg_control" => {
-                println!("pg_control file {}", file_path.display());
+                info!("pg_control file {}", file_path.display());
 
                 // Import it as ControlFile
                 modification.put_control_file(bytes)?;
@@ -473,12 +485,12 @@ pub fn import_file<R: Repository>(
                 modification.put_checkpoint(checkpoint_bytes)?;
             }
             "pg_filenode.map" => {
-                println!("pg_filenode.map file {}", file_path.display());
+                info!("pg_filenode.map file {}", file_path.display());
 
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
             _ => {
-                println!("global relfile {}", file_path.display());
+                info!("global relfile {}", file_path.display());
 
                 modification.put_relmap_file(
                     pg_constants::GLOBALTABLESPACE_OID,
@@ -500,7 +512,7 @@ pub fn import_file<R: Repository>(
 
         match file_path.file_name().unwrap().to_string_lossy().as_ref() {
             "pg_filenode.map" => {
-                println!(
+                info!(
                     "dbnode {} pg_filenode.map file {}",
                     dbnode,
                     file_path.display()
@@ -508,45 +520,45 @@ pub fn import_file<R: Repository>(
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
             _ => {
-                println!("dbnode {} relfile {}", dbnode, file_path.display());
+                info!("dbnode {} relfile {}", dbnode, file_path.display());
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
             }
         }
     } else if file_path.starts_with("pg_xact") {
-        println!(
+        info!(
             "pg_xact {} ",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
         let slru = SlruKind::Clog;
 
-        // TODO copy from import_slru_file
+        import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
     } else if file_path.starts_with("pg_multixact/offset") {
-        println!(
+        info!(
             "pg_multixact/offset {}",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
         let slru = SlruKind::MultiXactOffsets;
 
-        // TODO copy from import_slru_file
+        import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
     } else if file_path.starts_with("pg_multixact/members") {
-        println!(
+        info!(
             "pg_multixact/members {}",
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
         let slru = SlruKind::MultiXactMembers;
 
-        // TODO copy from import_slru_file
+        import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
     } else if file_path.starts_with("pg_twophase") {
         let xid = u32::from_str_radix(&file_path.file_name().unwrap().to_string_lossy(), 16)?;
 
-        println!(
+        info!(
             "xid {} pg_twophase {}",
             xid,
             file_path.file_name().unwrap().to_string_lossy().as_ref()
         );
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
     } else {
-        println!("ignoring file {:?}", file_path);
+        info!("ignoring file {:?}", file_path);
     }
 
     // TODO: pg_tblspc ??
