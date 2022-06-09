@@ -1642,7 +1642,7 @@ impl LayeredTimeline {
             drop(layers);
             let distance = last_lsn.widening_sub(self.last_freeze_at.load());
             if distance >= self.get_checkpoint_distance().into()
-                || open_layer_size > self.get_checkpoint_distance().into()
+                || open_layer_size > self.get_checkpoint_distance()
             {
                 info!(
                     "check_checkpoint_distance {}, last lsn {}, open layer size {}",
