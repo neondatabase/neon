@@ -127,7 +127,7 @@ def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
         env.flush()
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix(1000))
+@pytest.mark.parametrize("scale", get_scales_matrix(500))
 def test_pgbench_intensive_init_workload(pg_compare: PgCompare, scale: int):
     # This test tries to simulate a scenario when doing an intensive write on a table possibly
     # blocks queries from another table, as described in https://github.com/neondatabase/neon/issues/1763.
