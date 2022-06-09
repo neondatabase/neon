@@ -17,7 +17,7 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::*;
-use utils::zid::{ZTenantId, ZTimelineId};
+use utils::zid::{TenantId, ZTimelineId};
 
 use std::os::unix::fs::FileExt;
 
@@ -39,7 +39,7 @@ pub struct EphemeralFiles {
 
 pub struct EphemeralFile {
     file_id: u64,
-    _tenantid: ZTenantId,
+    _tenantid: TenantId,
     _timelineid: ZTimelineId,
     file: Arc<VirtualFile>,
 
@@ -49,7 +49,7 @@ pub struct EphemeralFile {
 impl EphemeralFile {
     pub fn create(
         conf: &PageServerConf,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         timelineid: ZTimelineId,
     ) -> Result<EphemeralFile, std::io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
@@ -322,7 +322,7 @@ mod tests {
 
     fn repo_harness(
         test_name: &str,
-    ) -> Result<(&'static PageServerConf, ZTenantId, ZTimelineId), Error> {
+    ) -> Result<(&'static PageServerConf, TenantId, ZTimelineId), Error> {
         let repo_dir = PageServerConf::test_repo_dir(test_name);
         let _ = fs::remove_dir_all(&repo_dir);
         let conf = PageServerConf::dummy_conf(repo_dir);
@@ -330,7 +330,7 @@ mod tests {
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let tenantid = ZTenantId::from_str("11000000000000000000000000000000").unwrap();
+        let tenantid = TenantId::from_str("11000000000000000000000000000000").unwrap();
         let timelineid = ZTimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&timelineid, &tenantid))?;
 

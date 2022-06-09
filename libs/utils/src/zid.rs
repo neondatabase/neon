@@ -188,19 +188,19 @@ zid_newtype!(ZTimelineId);
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
 /// See [`ZId`] for alternative ways to serialize it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ZTenantId(ZId);
+pub struct TenantId(ZId);
 
-zid_newtype!(ZTenantId);
+zid_newtype!(TenantId);
 
 // A pair uniquely identifying Zenith instance.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ZTenantTimelineId {
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     pub timeline_id: ZTimelineId,
 }
 
 impl ZTenantTimelineId {
-    pub fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
+    pub fn new(tenant_id: TenantId, timeline_id: ZTimelineId) -> Self {
         ZTenantTimelineId {
             tenant_id,
             timeline_id,
@@ -208,11 +208,11 @@ impl ZTenantTimelineId {
     }
 
     pub fn generate() -> Self {
-        Self::new(ZTenantId::generate(), ZTimelineId::generate())
+        Self::new(TenantId::generate(), ZTimelineId::generate())
     }
 
     pub fn empty() -> Self {
-        Self::new(ZTenantId::from([0u8; 16]), ZTimelineId::from([0u8; 16]))
+        Self::new(TenantId::from([0u8; 16]), ZTimelineId::from([0u8; 16]))
     }
 }
 

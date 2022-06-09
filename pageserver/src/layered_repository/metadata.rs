@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 use crate::config::PageServerConf;
@@ -70,7 +70,7 @@ struct TimelineMetadataBody {
 pub fn metadata_path(
     conf: &'static PageServerConf,
     timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
 ) -> PathBuf {
     conf.timeline_path(&timelineid, &tenantid)
         .join(METADATA_FILE_NAME)

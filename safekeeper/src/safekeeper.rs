@@ -24,7 +24,7 @@ use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
     pq_proto::{SystemId, ZenithFeedback},
-    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, TenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
@@ -169,7 +169,7 @@ pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
     #[serde(with = "hex")]
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     /// Zenith timelineid
     #[serde(with = "hex")]
     pub timeline_id: ZTimelineId,
@@ -265,7 +265,7 @@ pub struct ProposerGreeting {
     pub system_id: SystemId,
     /// Zenith timelineid
     pub ztli: ZTimelineId,
-    pub tenant_id: ZTenantId,
+    pub tenant_id: TenantId,
     pub tli: TimeLineID,
     pub wal_seg_size: u32,
 }

@@ -6,12 +6,12 @@ use crate::tenant_mgr::TenantState;
 use anyhow::Result;
 use std::time::Duration;
 use tracing::*;
-use utils::zid::ZTenantId;
+use utils::zid::TenantId;
 
 ///
 /// Compaction thread's main loop
 ///
-pub fn compact_loop(tenantid: ZTenantId) -> Result<()> {
+pub fn compact_loop(tenantid: TenantId) -> Result<()> {
     if let Err(err) = compact_loop_ext(tenantid) {
         error!("compact loop terminated with error: {:?}", err);
         Err(err)
@@ -20,7 +20,7 @@ pub fn compact_loop(tenantid: ZTenantId) -> Result<()> {
     }
 }
 
-fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
+fn compact_loop_ext(tenantid: TenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
@@ -47,7 +47,7 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
 ///
 /// GC thread's main loop
 ///
-pub fn gc_loop(tenantid: ZTenantId) -> Result<()> {
+pub fn gc_loop(tenantid: TenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;

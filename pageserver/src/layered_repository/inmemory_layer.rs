@@ -21,7 +21,7 @@ use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
     vec_map::VecMap,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
@@ -32,7 +32,7 @@ use std::sync::RwLock;
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     timelineid: ZTimelineId,
 
     ///
@@ -89,7 +89,7 @@ impl Layer for InMemoryLayer {
         None
     }
 
-    fn get_tenant_id(&self) -> ZTenantId {
+    fn get_tenant_id(&self) -> TenantId {
         self.tenantid
     }
 
@@ -239,7 +239,7 @@ impl InMemoryLayer {
     pub fn create(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!(

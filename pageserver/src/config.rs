@@ -16,7 +16,7 @@ use toml_edit::{Document, Item};
 use url::Url;
 use utils::{
     postgres_backend::AuthType,
-    zid::{NodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, TenantId, ZTimelineId},
 };
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
@@ -341,15 +341,15 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
-    pub fn tenant_path(&self, tenantid: &ZTenantId) -> PathBuf {
+    pub fn tenant_path(&self, tenantid: &TenantId) -> PathBuf {
         self.tenants_path().join(tenantid.to_string())
     }
 
-    pub fn timelines_path(&self, tenantid: &ZTenantId) -> PathBuf {
+    pub fn timelines_path(&self, tenantid: &TenantId) -> PathBuf {
         self.tenant_path(tenantid).join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &ZTenantId) -> PathBuf {
+    pub fn timeline_path(&self, timelineid: &ZTimelineId, tenantid: &TenantId) -> PathBuf {
         self.timelines_path(tenantid).join(timelineid.to_string())
     }
 

@@ -51,7 +51,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 ///
@@ -66,7 +66,7 @@ struct Summary {
     magic: u16,
     format_version: u16,
 
-    tenantid: ZTenantId,
+    tenantid: TenantId,
     timelineid: ZTimelineId,
     key_range: Range<Key>,
     lsn_range: Range<Lsn>,
@@ -175,7 +175,7 @@ impl DeltaKey {
 pub struct DeltaLayer {
     path_or_conf: PathOrConf,
 
-    pub tenantid: ZTenantId,
+    pub tenantid: TenantId,
     pub timelineid: ZTimelineId,
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
@@ -196,7 +196,7 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
-    fn get_tenant_id(&self) -> ZTenantId {
+    fn get_tenant_id(&self) -> TenantId {
         self.tenantid
     }
 
@@ -410,7 +410,7 @@ impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         fname: &DeltaFileName,
     ) -> PathBuf {
         match path_or_conf {
@@ -424,7 +424,7 @@ impl DeltaLayer {
     fn temp_path_for(
         conf: &PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> PathBuf {
@@ -525,7 +525,7 @@ impl DeltaLayer {
     pub fn new(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         filename: &DeltaFileName,
     ) -> DeltaLayer {
         DeltaLayer {
@@ -603,7 +603,7 @@ pub struct DeltaLayerWriter {
     conf: &'static PageServerConf,
     path: PathBuf,
     timelineid: ZTimelineId,
-    tenantid: ZTenantId,
+    tenantid: TenantId,
 
     key_start: Key,
     lsn_range: Range<Lsn>,
@@ -620,7 +620,7 @@ impl DeltaLayerWriter {
     pub fn new(
         conf: &'static PageServerConf,
         timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        tenantid: TenantId,
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> Result<DeltaLayerWriter> {

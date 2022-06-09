@@ -24,7 +24,7 @@ use utils::{
     shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
-    zid::{ZTenantId, ZTimelineId},
+    zid::{TenantId, ZTimelineId},
 };
 
 project_git_version!(GIT_VERSION);
@@ -113,7 +113,7 @@ fn main() -> anyhow::Result<()> {
     let init = arg_matches.is_present("init");
     let create_tenant = arg_matches
         .value_of("create-tenant")
-        .map(ZTenantId::from_str)
+        .map(TenantId::from_str)
         .transpose()
         .context("Failed to parse tenant id from the arguments")?;
     let initial_timeline_id = arg_matches

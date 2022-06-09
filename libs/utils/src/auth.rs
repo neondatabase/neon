@@ -14,7 +14,7 @@ use jsonwebtoken::{
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-use crate::zid::ZTenantId;
+use crate::zid::TenantId;
 
 const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 
@@ -30,17 +30,17 @@ pub enum Scope {
 pub struct Claims {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub tenant_id: Option<ZTenantId>,
+    pub tenant_id: Option<TenantId>,
     pub scope: Scope,
 }
 
 impl Claims {
-    pub fn new(tenant_id: Option<ZTenantId>, scope: Scope) -> Self {
+    pub fn new(tenant_id: Option<TenantId>, scope: Scope) -> Self {
         Self { tenant_id, scope }
     }
 }
 
-pub fn check_permission(claims: &Claims, tenantid: Option<ZTenantId>) -> Result<()> {
+pub fn check_permission(claims: &Claims, tenantid: Option<TenantId>) -> Result<()> {
     match (&claims.scope, tenantid) {
         (Scope::Tenant, None) => {
             bail!("Attempt to access management api with tenant scope. Permission denied")
