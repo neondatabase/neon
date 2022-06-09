@@ -2,7 +2,6 @@ use crate::url::ApiUrl;
 use anyhow::{bail, ensure, Context};
 use std::{str::FromStr, sync::Arc};
 
-
 #[derive(Debug)]
 pub enum AuthBackendType {
     /// Legacy Cloud API (V1).

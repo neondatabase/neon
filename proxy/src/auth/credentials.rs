@@ -64,9 +64,10 @@ pub enum ProjectNameError {
 impl UserFacingError for ProjectNameError {}
 
 /// Inferring project name from sni_data.
-/// Used in ClientCredentials::project_name(...).
-fn project_name_from_sni_data<'a>(sni_data : &'a String, common_name : &Option<String>) -> Result<&'a str, ProjectNameError>
-{
+fn project_name_from_sni_data<'sni>(
+    sni_data: &'sni String,
+    common_name: &Option<String>,
+) -> Result<&'sni str, ProjectNameError> {
     // extract common name. If unset, throw a CommonNameNotSet error.
     let common_name = match &common_name {
         Some(common_name) => common_name,
@@ -75,15 +76,16 @@ fn project_name_from_sni_data<'a>(sni_data : &'a String, common_name : &Option<S
 
     // check that the common name passed from common_name is the actual suffix in sni_data.
     use substring::Substring;
-    let sni_suffix = sni_data.substring(
-        sni_data.len()-common_name.len(), sni_data.len());
+    let sni_suffix = sni_data.substring(sni_data.len() - common_name.len(), sni_data.len());
     if !sni_suffix.eq(common_name) {
         return Err(ProjectNameError::InconsistentCommonNameAndSNI(
-            common_name.to_string(), sni_data.to_string()));
+            common_name.to_string(),
+            sni_data.to_string(),
+        ));
     }
 
     // return sni_data without the common name suffix.
-    Ok(sni_data.substring(0, sni_data.len()-common_name.len()))
+    Ok(sni_data.substring(0, sni_data.len() - common_name.len()))
 }
 
 impl ClientCredentials {
@@ -118,8 +120,10 @@ impl ClientCredentials {
 
         // checking that formatting invariant holds.
         // project name must contain only alphanumeric characters and hyphens.
-        if !ret.chars().all(|x : char| x.is_alphanumeric() || x == '-') {
-            return Err(ProjectNameError::ProjectNameContainsIllegalChars(ret.to_string()));
+        if !ret.chars().all(|x: char| x.is_alphanumeric() || x == '-') {
+            return Err(ProjectNameError::ProjectNameContainsIllegalChars(
+                ret.to_string(),
+            ));
         }
 
         Ok(ret)
@@ -145,7 +149,7 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
             dbname,
             sni_data: None,
             project_name,
-            common_name : None,
+            common_name: None,
         })
     }
 }

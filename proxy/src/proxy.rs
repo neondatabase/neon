@@ -33,8 +33,8 @@ lazy_static! {
 
 /// A small combinator for pluggable error logging.
 async fn log_error<R, F>(future: F) -> F::Output
-    where
-        F: std::future::Future<Output = anyhow::Result<R>>,
+where
+    F: std::future::Future<Output = anyhow::Result<R>>,
 {
     future.await.map_err(|err| {
         println!("error: {}", err);

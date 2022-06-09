@@ -24,9 +24,9 @@ use clap::{App, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
 use std::{future::Future, net::SocketAddr};
+use substring::Substring;
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
-use substring::Substring;
 
 project_git_version!(GIT_VERSION);
 
@@ -125,13 +125,18 @@ async fn main() -> anyhow::Result<()> {
         Some(cert_path) => {
             let file = std::fs::File::open(cert_path).unwrap();
             let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))
-                .unwrap().0
-                .parse_x509().unwrap()
-                .tbs_certificate.subject.to_string();
+                .unwrap()
+                .0
+                .parse_x509()
+                .unwrap()
+                .tbs_certificate
+                .subject
+                .to_string();
             let prefix = "CN=*";
             // making sure formatting is as expected: almost_common_name = "'CN=*'[<common name>]"
             assert_eq!(almost_common_name.substring(0, prefix.len()), prefix);
-            Some(almost_common_name.substring(prefix.len(), almost_common_name.len()).to_string())
+            let common_name = almost_common_name.substring(prefix.len(), almost_common_name.len());
+            Some(common_name.to_string())
         }
         None => None,
     };
