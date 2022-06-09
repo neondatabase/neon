@@ -24,7 +24,7 @@ def get_num_iters_matrix(default: int = 10):
     return list(map(int, scales.split(",")))
 
 
-def get_transactions_matrix(default: int = 1_000):
+def get_transactions_matrix(default: int = 10_000):
     scales = os.getenv("TEST_TRANSACTIONS_MATRIX", default=str(default))
     return list(map(int, scales.split(",")))
 
@@ -97,7 +97,7 @@ def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transaction
         env.flush()
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix(100))
+@pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("transactions", get_transactions_matrix())
 def test_pgbench_simple_update_workload(pg_compare: PgCompare, scale: int, transactions: int):
     env = pg_compare
@@ -127,7 +127,7 @@ def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
         env.flush()
 
 
-@pytest.mark.parametrize("scale", get_scales_matrix(500))
+@pytest.mark.parametrize("scale", get_scales_matrix(100))
 def test_pgbench_intensive_init_workload(pg_compare: PgCompare, scale: int):
     # This test tries to simulate a scenario when doing an intensive write on a table possibly
     # blocks queries from another table, as described in https://github.com/neondatabase/neon/issues/1763.
