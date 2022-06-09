@@ -165,7 +165,7 @@ fn import_relfile<R: Repository>(
     spcoid: Oid,
     dboid: Oid,
 ) -> anyhow::Result<()> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let len = file.metadata().unwrap().len() as usize;
 
     import_rel(modification, path, spcoid, dboid, file, len)
@@ -189,12 +189,10 @@ fn import_rel<R: Repository, Reader: Read>(
             e
         })?;
 
-    let mut file = File::open(path)?;
     let mut buf: [u8; 8192] = [0u8; 8192];
 
-    let len = file.metadata().unwrap().len();
-    ensure!(len % pg_constants::BLCKSZ as u64 == 0);
-    let nblocks = len / pg_constants::BLCKSZ as u64;
+    ensure!(len % pg_constants::BLCKSZ as usize == 0);
+    let nblocks = len / pg_constants::BLCKSZ as usize;
 
     if segno != 0 {
         todo!();
@@ -210,7 +208,7 @@ fn import_rel<R: Repository, Reader: Read>(
 
     let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
     loop {
-        let r = file.read_exact(&mut buf);
+        let r = reader.read_exact(&mut buf);
         match r {
             Ok(_) => {
                 modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
