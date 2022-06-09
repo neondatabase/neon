@@ -166,7 +166,9 @@ fn main() -> Result<()> {
                 .arg(Arg::new("node-name").long("node-name").takes_value(true)
                     .help("Name to assign to the imported timeline"))
                 .arg(Arg::new("tarfile").long("tarfile").takes_value(true)
-                    .help("Basebackup tarfil to import")))
+                    .help("Basebackup tarfil to import"))
+                .arg(Arg::new("lsn").long("lsn").takes_value(true)
+                    .help("Lsn the basebackup ends at")))
         ).subcommand(
             App::new("tenant")
             .setting(AppSettings::ArgRequiredElseHelp)
@@ -629,10 +631,12 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .ok_or_else(|| anyhow!("No node name provided"))?;
             let tarfile = import_match.value_of("tarfile")
                 .ok_or_else(|| anyhow!("No tarfile provided"))?;
+            let lsn = Lsn::from_str(import_match.value_of("lsn")
+                .ok_or_else(|| anyhow!("No lsn provided"))?)?;
 
             let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
-            pageserver.timeline_import(tenant_id, timeline_id, tarfile.try_into()?)?;
+            pageserver.timeline_import(tenant_id, timeline_id, tarfile.try_into()?, lsn)?;
             println!("Creating node for imported timeline ...");
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
             cplane.new_node(tenant_id, name, timeline_id, None, None)?;
