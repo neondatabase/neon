@@ -65,7 +65,7 @@ impl UserFacingError for ProjectNameError {}
 
 /// Inferring project name from sni_data.
 fn project_name_from_sni_data<'sni>(
-    sni_data: &'sni String,
+    sni_data: &'sni str,
     common_name: &Option<String>,
 ) -> Result<&'sni str, ProjectNameError> {
     // extract common name. If unset, throw a CommonNameNotSet error.
