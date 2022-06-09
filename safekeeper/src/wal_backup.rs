@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use etcd_broker::subscription_key::{
+    NodeKind, OperationKind, SkOperationKind, SubscriptionKey, SubscriptionKind,
+};
 use tokio::task::JoinHandle;
 
 use std::cmp::min;
@@ -26,8 +29,6 @@ use crate::{broker, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
 
-const BACKUP_ELECTION_NAME: &str = "WAL_BACKUP";
-
 const BROKER_CONNECTION_RETRY_DELAY_MS: u64 = 1000;
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
@@ -48,20 +49,66 @@ pub fn wal_backup_launcher_thread_main(
     });
 }
 
-/// Check whether wal backup is required for timeline and mark that launcher is
-/// aware of current status (if timeline exists).
-fn is_wal_backup_required(zttid: ZTenantTimelineId) -> bool {
-    if let Some(tli) = GlobalTimelines::get_loaded(zttid) {
-        tli.wal_backup_attend()
-    } else {
-        false
-    }
+/// Check whether wal backup is required for timeline. If yes, mark that launcher is
+/// aware of current status and return the timeline.
+fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
+    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
 }
 
 struct WalBackupTaskHandle {
     shutdown_tx: Sender<()>,
     handle: JoinHandle<()>,
 }
+
+struct WalBackupTimelineEntry {
+    timeline: Arc<Timeline>,
+    handle: Option<WalBackupTaskHandle>,
+}
+
+/// Start per timeline task, if it makes sense for this safekeeper to offload.
+fn consider_start_task(
+    conf: &SafeKeeperConf,
+    zttid: ZTenantTimelineId,
+    task: &mut WalBackupTimelineEntry,
+) {
+    if !task.timeline.can_wal_backup() {
+        return;
+    }
+    info!("starting WAL backup task for {}", zttid);
+
+    // TODO: decide who should offload right here by simply checking current
+    // state instead of running elections in offloading task.
+    let election_name = SubscriptionKey {
+        cluster_prefix: conf.broker_etcd_prefix.clone(),
+        kind: SubscriptionKind::Operation(
+            zttid,
+            NodeKind::Safekeeper,
+            OperationKind::Safekeeper(SkOperationKind::WalBackup),
+        ),
+    }
+    .watch_key();
+    let my_candidate_name = broker::get_candiate_name(conf.my_id);
+    let election = broker::Election::new(
+        election_name,
+        my_candidate_name,
+        conf.broker_endpoints.clone(),
+    );
+
+    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let timeline_dir = conf.timeline_dir(&zttid);
+
+    let handle = tokio::spawn(
+        backup_task_main(zttid, timeline_dir, shutdown_rx, election)
+            .instrument(info_span!("WAL backup task", zttid = %zttid)),
+    );
+
+    task.handle = Some(WalBackupTaskHandle {
+        shutdown_tx,
+        handle,
+    });
+}
+
+const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
 /// tasks. Having this in separate task simplifies locking, allows to reap
@@ -71,7 +118,7 @@ async fn wal_backup_launcher_main_loop(
     mut wal_backup_launcher_rx: Receiver<ZTenantTimelineId>,
 ) {
     info!(
-        "WAL backup launcher: started, remote config {:?}",
+        "WAL backup launcher started, remote config {:?}",
         conf.remote_storage
     );
 
@@ -82,60 +129,50 @@ async fn wal_backup_launcher_main_loop(
         })
     });
 
-    let mut tasks: HashMap<ZTenantTimelineId, WalBackupTaskHandle> = HashMap::new();
+    // Presense in this map means launcher is aware s3 offloading is needed for
+    // the timeline, but task is started only if it makes sense for to offload
+    // from this safekeeper.
+    let mut tasks: HashMap<ZTenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
 
+    let mut ticker = tokio::time::interval(Duration::from_millis(CHECK_TASKS_INTERVAL_MSEC));
     loop {
-        // channel is never expected to get closed
-        let zttid = wal_backup_launcher_rx.recv().await.unwrap();
-        let is_wal_backup_required = is_wal_backup_required(zttid);
-        if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
-            continue; /* just drain the channel and do nothing */
-        }
-        // do we need to do anything at all?
-        if is_wal_backup_required != tasks.contains_key(&zttid) {
-            if is_wal_backup_required {
-                // need to start the task
-                info!("starting WAL backup task for {}", zttid);
+        tokio::select! {
+            zttid = wal_backup_launcher_rx.recv() => {
+                // channel is never expected to get closed
+                let zttid = zttid.unwrap();
+                if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
+                    continue; /* just drain the channel and do nothing */
+                }
+                let timeline = is_wal_backup_required(zttid);
+                // do we need to do anything at all?
+                if timeline.is_some() != tasks.contains_key(&zttid) {
+                    if let Some(timeline) = timeline {
+                        // need to start the task
+                        let entry = tasks.entry(zttid).or_insert(WalBackupTimelineEntry {
+                            timeline,
+                            handle: None,
+                        });
+                        consider_start_task(&conf, zttid, entry);
+                    } else {
+                        // need to stop the task
+                        info!("stopping WAL backup task for {}", zttid);
 
-                // TODO: decide who should offload in launcher itself by simply checking current state
-                let election_name = broker::get_campaign_name(
-                    BACKUP_ELECTION_NAME,
-                    &conf.broker_etcd_prefix,
-                    zttid,
-                );
-                let my_candidate_name = broker::get_candiate_name(conf.my_id);
-                let election = broker::Election::new(
-                    election_name,
-                    my_candidate_name,
-                    conf.broker_endpoints.clone(),
-                );
-
-                let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-                let timeline_dir = conf.timeline_dir(&zttid);
-
-                let handle = tokio::spawn(
-                    backup_task_main(zttid, timeline_dir, shutdown_rx, election)
-                        .instrument(info_span!("WAL backup task", zttid = %zttid)),
-                );
-
-                tasks.insert(
-                    zttid,
-                    WalBackupTaskHandle {
-                        shutdown_tx,
-                        handle,
-                    },
-                );
-            } else {
-                // need to stop the task
-                info!("stopping WAL backup task for {}", zttid);
-
-                let wb_handle = tasks.remove(&zttid).unwrap();
-                // Tell the task to shutdown. Error means task exited earlier, that's ok.
-                let _ = wb_handle.shutdown_tx.send(()).await;
-                // Await the task itself. TODO: restart panicked tasks earlier.
-                // Hm, why I can't await on reference to handle?
-                if let Err(e) = wb_handle.handle.await {
-                    warn!("WAL backup task for {} panicked: {}", zttid, e);
+                        let entry = tasks.remove(&zttid).unwrap();
+                        if let Some(wb_handle) = entry.handle {
+                            // Tell the task to shutdown. Error means task exited earlier, that's ok.
+                            let _ = wb_handle.shutdown_tx.send(()).await;
+                            // Await the task itself. TODO: restart panicked tasks earlier.
+                            if let Err(e) = wb_handle.handle.await {
+                                warn!("WAL backup task for {} panicked: {}", zttid, e);
+                            }
+                        }
+                    }
+                }
+            }
+            // Start known tasks, if needed and possible.
+            _ = ticker.tick() => {
+                for (zttid, entry) in tasks.iter_mut().filter(|(_, entry)| entry.handle.is_none()) {
+                    consider_start_task(&conf, *zttid, entry);
                 }
             }
         }
@@ -200,20 +237,11 @@ impl WalBackupTask {
         loop {
             let mut retry_attempt = 0u32;
 
-            if let Some(l) = self.leader.take() {
-                l.give_up().await;
-            }
-
             info!("acquiring leadership");
-            match broker::get_leader(&self.election).await {
-                Ok(l) => {
-                    self.leader = Some(l);
-                }
-                Err(e) => {
-                    error!("error during leader election {:?}", e);
-                    sleep(Duration::from_millis(BROKER_CONNECTION_RETRY_DELAY_MS)).await;
-                    continue;
-                }
+            if let Err(e) = broker::get_leader(&self.election, &mut self.leader).await {
+                error!("error during leader election {:?}", e);
+                sleep(Duration::from_millis(BROKER_CONNECTION_RETRY_DELAY_MS)).await;
+                continue;
             }
             info!("acquired leadership");
 

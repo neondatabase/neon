@@ -10,6 +10,7 @@ use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use tokio::sync::mpsc;
 use toml_edit::Document;
@@ -27,6 +28,7 @@ use safekeeper::timeline::GlobalTimelines;
 use safekeeper::wal_backup;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
+use utils::auth::JwtAuth;
 use utils::{
     http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
     zid::NodeId,
@@ -132,6 +134,12 @@ fn main() -> anyhow::Result<()> {
                 .default_missing_value("true")
                 .help("Enable/disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring WAL backup horizon."),
         )
+        .arg(
+            Arg::new("auth-validation-public-key-path")
+                .long("auth-validation-public-key-path")
+                .takes_value(true)
+                .help("Path to an RSA .pem public key which is used to check JWT tokens")
+        )
         .get_matches();
 
     if let Some(addr) = arg_matches.value_of("dump-control-file") {
@@ -204,6 +212,10 @@ fn main() -> anyhow::Result<()> {
         .parse()
         .context("failed to parse bool enable-s3-offload bool")?;
 
+    conf.auth_validation_public_key_path = arg_matches
+        .value_of("auth-validation-public-key-path")
+        .map(PathBuf::from);
+
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
 
@@ -238,6 +250,19 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
     })?;
+
+    let auth = match conf.auth_validation_public_key_path.as_ref() {
+        None => {
+            info!("Auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("Loading JWT auth key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
 
     // XXX: Don't spawn any threads before daemonizing!
     if conf.daemonize {
@@ -280,8 +305,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         thread::Builder::new()
             .name("http_endpoint_thread".into())
             .spawn(|| {
-                // TODO authentication
-                let router = http::make_router(conf_);
+                let router = http::make_router(conf_, auth);
                 endpoint::serve_thread_main(
                     router,
                     http_listener,
@@ -295,6 +319,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
     let safekeeper_thread = thread::Builder::new()
         .name("Safekeeper thread".into())
         .spawn(|| {
+            // TODO: add auth
             if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener) {
                 info!("safekeeper thread terminated: {e}");
             }
@@ -309,6 +334,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
             thread::Builder::new()
                 .name("broker thread".into())
                 .spawn(|| {
+                    // TODO: add auth?
                     broker::thread_main(conf_);
                 })?,
         );
@@ -321,6 +347,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         thread::Builder::new()
             .name("WAL removal thread".into())
             .spawn(|| {
+                // TODO: add auth?
                 remove_wal::thread_main(conf_);
             })?,
     );
@@ -330,6 +357,7 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bo
         thread::Builder::new()
             .name("wal backup launcher thread".into())
             .spawn(move || {
+                // TODO: add auth?
                 wal_backup::wal_backup_launcher_thread_main(conf_, wal_backup_launcher_rx);
             })?,
     );

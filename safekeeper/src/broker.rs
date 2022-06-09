@@ -4,9 +4,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
-use etcd_broker::Client;
-use etcd_broker::PutOptions;
-use etcd_broker::SkTimelineSubscriptionKind;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use std::time::Duration;
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -15,6 +13,10 @@ use tracing::*;
 use url::Url;
 
 use crate::{timeline::GlobalTimelines, SafeKeeperConf};
+use etcd_broker::{
+    subscription_key::{OperationKind, SkOperationKind, SubscriptionKey},
+    Client, PutOptions,
+};
 use utils::zid::{NodeId, ZTenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
@@ -43,7 +45,7 @@ fn timeline_safekeeper_path(
 ) -> String {
     format!(
         "{}/{sk_id}",
-        SkTimelineSubscriptionKind::timeline(broker_etcd_prefix, zttid).watch_key()
+        SubscriptionKey::sk_timeline_info(broker_etcd_prefix, zttid).watch_key()
     )
 }
 
@@ -90,7 +92,7 @@ impl ElectionLeader {
     }
 }
 
-pub async fn get_leader(req: &Election) -> Result<ElectionLeader> {
+pub async fn get_leader(req: &Election, leader: &mut Option<ElectionLeader>) -> Result<()> {
     let mut client = Client::connect(req.broker_endpoints.clone(), None)
         .await
         .context("Could not connect to etcd")?;
@@ -102,22 +104,27 @@ pub async fn get_leader(req: &Election) -> Result<ElectionLeader> {
 
     let lease_id = lease.map(|l| l.id()).unwrap();
 
-    let keep_alive = spawn::<_>(lease_keep_alive(client.clone(), lease_id));
+    // kill previous keepalive, if any
+    if let Some(l) = leader.take() {
+        l.give_up().await;
+    }
 
-    if let Err(e) = client
+    let keep_alive = spawn::<_>(lease_keep_alive(client.clone(), lease_id));
+    // immediately save handle to kill task if we get canceled below
+    *leader = Some(ElectionLeader {
+        client: client.clone(),
+        keep_alive,
+    });
+
+    client
         .campaign(
             req.election_name.clone(),
             req.candidate_name.clone(),
             lease_id,
         )
-        .await
-    {
-        keep_alive.abort();
-        let _ = keep_alive.await;
-        return Err(e.into());
-    }
+        .await?;
 
-    Ok(ElectionLeader { client, keep_alive })
+    Ok(())
 }
 
 async fn lease_keep_alive(mut client: Client, lease_id: i64) -> Result<()> {
@@ -141,14 +148,6 @@ async fn lease_keep_alive(mut client: Client, lease_id: i64) -> Result<()> {
 
         sleep(push_interval).await;
     }
-}
-
-pub fn get_campaign_name(
-    election_name: &str,
-    broker_prefix: &str,
-    id: ZTenantTimelineId,
-) -> String {
-    format!("{broker_prefix}/{id}/{election_name}")
 }
 
 pub fn get_candiate_name(system_id: NodeId) -> String {
@@ -204,9 +203,20 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
-    let mut subscription = etcd_broker::subscribe_to_safekeeper_timeline_updates(
+    let mut subscription = etcd_broker::subscribe_for_values(
         &mut client,
-        SkTimelineSubscriptionKind::all(conf.broker_etcd_prefix.clone()),
+        SubscriptionKey::all(conf.broker_etcd_prefix.clone()),
+        |full_key, value_str| {
+            if full_key.operation == OperationKind::Safekeeper(SkOperationKind::TimelineInfo) {
+                match serde_json::from_str::<SkTimelineInfo>(value_str) {
+                    Ok(new_info) => return Some(new_info),
+                    Err(e) => {
+                        error!("Failed to parse timeline info from value str '{value_str}': {e}")
+                    }
+                }
+            }
+            None
+        },
     )
     .await
     .context("failed to subscribe for safekeeper info")?;

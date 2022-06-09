@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use etcd_broker::SkTimelineInfo;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
@@ -149,8 +149,12 @@ impl SharedState {
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action.
-    fn update_status(&mut self) -> bool {
-        self.active = self.is_active();
+    fn update_status(&mut self, ttid: ZTenantTimelineId) -> bool {
+        let is_active = self.is_active();
+        if self.active != is_active {
+            info!("timeline {} active={} now", ttid, is_active);
+        }
+        self.active = is_active;
         self.is_wal_backup_action_pending()
     }
 
@@ -185,6 +189,12 @@ impl SharedState {
     fn wal_backup_attend(&mut self) -> bool {
         self.wal_backup_active = self.is_wal_backup_required();
         self.wal_backup_active
+    }
+
+    // Can this safekeeper offload to s3? Recently joined safekeepers might not
+    // have necessary WAL.
+    fn can_wal_backup(&self) -> bool {
+        self.sk.state.local_start_lsn <= self.sk.inmem.backup_lsn
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -291,7 +301,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes += 1;
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
@@ -308,7 +318,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes -= 1;
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if it is time to stop the offloading.
         if is_wal_backup_action_pending {
@@ -327,7 +337,7 @@ impl Timeline {
             (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
             if stop {
-                shared_state.update_status();
+                shared_state.update_status(self.zttid);
                 return Ok(true);
             }
         }
@@ -339,6 +349,12 @@ impl Timeline {
     pub fn wal_backup_attend(&self) -> bool {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.wal_backup_attend()
+    }
+
+    // Can this safekeeper offload to s3? Recently joined safekeepers might not
+    // have necessary WAL.
+    pub fn can_wal_backup(&self) -> bool {
+        self.mutex.lock().unwrap().can_wal_backup()
     }
 
     /// Deactivates the timeline, assuming it is being deleted.
@@ -509,7 +525,7 @@ impl Timeline {
             }
             shared_state.sk.record_safekeeper_info(sk_info)?;
             self.notify_wal_senders(&mut shared_state);
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;

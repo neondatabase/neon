@@ -57,6 +57,7 @@ pub struct SafeKeeperConf {
     pub my_id: NodeId,
     pub broker_endpoints: Vec<Url>,
     pub broker_etcd_prefix: String,
+    pub auth_validation_public_key_path: Option<PathBuf>,
 }
 
 impl SafeKeeperConf {
@@ -88,6 +89,7 @@ impl Default for SafeKeeperConf {
             broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             backup_runtime_threads: DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
             wal_backup_enabled: true,
+            auth_validation_public_key_path: None,
         }
     }
 }
