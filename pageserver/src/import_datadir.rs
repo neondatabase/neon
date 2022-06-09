@@ -503,6 +503,9 @@ pub fn import_file<R: Repository>(
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
                 info!("imported relmap file")
             }
+            "PG_VERSION" => {
+                info!("ignored");
+            },
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, bytes.reader(), bytes_len)?;
                 info!("imported rel creation");
@@ -524,6 +527,9 @@ pub fn import_file<R: Repository>(
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
                 info!("imported relmap file")
             }
+            "PG_VERSION" => {
+                info!("ignored");
+            },
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, bytes.reader(), bytes_len)?;
                 info!("imported rel creation");
