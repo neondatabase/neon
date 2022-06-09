@@ -145,6 +145,14 @@ impl<S> Stream<S> {
     pub fn from_raw(raw: S) -> Self {
         Self::Raw { raw }
     }
+
+    /// Return SNI if it's available.
+    pub fn sni_hostname(&self) -> Option<&str> {
+        match self {
+            Stream::Raw { .. } => None,
+            Stream::Tls { tls } => tls.get_ref().1.sni_hostname(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

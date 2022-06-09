@@ -1,9 +1,11 @@
 //! User credentials used in authentication.
 
-use crate::compute;
-use crate::config::ProxyConfig;
-use crate::error::UserFacingError;
-use crate::stream::PqStream;
+use crate::{
+    compute,
+    config::ProxyConfig,
+    error::UserFacingError,
+    stream::{PqStream, Stream},
+};
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -38,60 +40,13 @@ impl ClientCredentials {
         // This logic will likely change in the future.
         self.user.ends_with("@zenith")
     }
-}
 
-#[derive(Debug, Error)]
-pub enum ProjectNameError {
-    #[error("SNI is missing. EITHER please upgrade the postgres client library OR pass the project name as a parameter: '...&options=project%3D<project-name>...'.")]
-    Missing,
-
-    #[error("SNI is malformed.")]
-    Bad,
-
-    #[error("Inconsistent project name inferred from SNI and project option. String from SNI: '{0}', String from project option: '{1}'")]
-    Inconsistent(String, String),
-}
-
-impl UserFacingError for ProjectNameError {}
-
-impl ClientCredentials {
-    /// Determine project name from SNI or from project_name parameter from options argument.
-    pub fn project_name(&self) -> Result<&str, ProjectNameError> {
-        // Checking that if both sni_data and project_name are set, then they should match
-        // otherwise, throws a ProjectNameError::Inconsistent error.
-        if let Some(sni_data) = &self.sni_data {
-            let project_name_from_sni_data =
-                sni_data.split_once('.').ok_or(ProjectNameError::Bad)?.0;
-            if let Some(project_name_from_options) = &self.project_name {
-                if !project_name_from_options.eq(project_name_from_sni_data) {
-                    return Err(ProjectNameError::Inconsistent(
-                        project_name_from_sni_data.to_string(),
-                        project_name_from_options.to_string(),
-                    ));
-                }
-            }
-        }
-        // determine the project name from self.sni_data if it exists, otherwise from self.project_name.
-        let ret = match &self.sni_data {
-            // if sni_data exists, use it to determine project name
-            Some(sni_data) => sni_data.split_once('.').ok_or(ProjectNameError::Bad)?.0,
-            // otherwise use project_option if it was manually set thought options parameter.
-            None => self
-                .project_name
-                .as_ref()
-                .ok_or(ProjectNameError::Missing)?
-                .as_str(),
-        };
-        Ok(ret)
-    }
-}
-
-impl TryFrom<HashMap<String, String>> for ClientCredentials {
-    type Error = ClientCredsParseError;
-
-    fn try_from(mut value: HashMap<String, String>) -> Result<Self, Self::Error> {
+    pub fn parse<T>(
+        stream: &Stream<T>,
+        mut options: HashMap<String, String>,
+    ) -> Result<Self, ClientCredsParseError> {
         let mut get_param = |key| {
-            value
+            options
                 .remove(key)
                 .ok_or(ClientCredsParseError::MissingKey(key))
         };
@@ -103,9 +58,48 @@ impl TryFrom<HashMap<String, String>> for ClientCredentials {
         Ok(Self {
             user,
             dbname,
-            sni_data: None,
+            sni_data: stream.sni_hostname().map(|s| s.to_owned()),
             project_name,
         })
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProjectNameError {
+    #[error(
+        "Project name is not specified. \
+        EITHER please upgrade the postgres client library (libpq) for SNI support \
+        OR pass the project name as a parameter: '&options=project%3D<project-name>'."
+    )]
+    Missing,
+
+    #[error("SNI is malformed.")]
+    Bad,
+
+    #[error("Inconsistent project name inferred from SNI ({0}) and project option ({0}).")]
+    Inconsistent(String, String),
+}
+
+impl UserFacingError for ProjectNameError {}
+
+impl ClientCredentials {
+    /// Determine project name from SNI or from connection string options.
+    pub fn project_name(&self) -> Result<&str, ProjectNameError> {
+        use ProjectNameError::*;
+
+        let name_from_options = self.project_name.as_ref();
+        let name_from_sni = self
+            .sni_data
+            .as_ref()
+            .map(|n| Ok(n.split_once('.').ok_or(Bad)?.0))
+            .transpose()?;
+
+        match (name_from_sni, name_from_options) {
+            (Some(a), Some(b)) if a != b => Err(Inconsistent(a.to_owned(), b.to_owned())),
+            (Some(a), _) => Ok(a),
+            (_, Some(b)) => Ok(b),
+            _ => Err(Missing),
+        }
     }
 }
 
