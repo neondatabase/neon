@@ -158,12 +158,27 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     Ok(())
 }
 
-// subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
+
 fn import_relfile<R: Repository>(
     modification: &mut DatadirModification<R>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
+) -> anyhow::Result<()> {
+    let mut file = File::open(path)?;
+    let len = file.metadata().unwrap().len() as usize;
+
+    import_rel(modification, path, spcoid, dboid, file, len)
+}
+
+// subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
+fn import_rel<R: Repository, Reader: Read>(
+    modification: &mut DatadirModification<R>,
+    path: &Path,
+    spcoid: Oid,
+    dboid: Oid,
+    mut reader: Reader,
+    len: usize,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
@@ -445,7 +460,7 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
                 import_file(&mut modification, &file_path.as_ref(), &buffer)?;
             }
             tar::EntryType::Directory => {
-                info!("tar::EntryType::Directory {}", file_path.display());
+                // info!("tar::EntryType::Directory {}", file_path.display());
             }
             _ => {
                 panic!("tar::EntryType::?? {}", file_path.display());
@@ -465,6 +480,7 @@ pub fn import_file<R: Repository>(
     file_path: &Path,
     buffer: &[u8],
 ) -> Result<()> {
+    info!("looking at {:?}", file_path);
     let bytes = Bytes::copy_from_slice(&buffer[..]);
     let bytes_len = bytes.len();
 
@@ -474,8 +490,6 @@ pub fn import_file<R: Repository>(
 
         match file_path.file_name().unwrap().to_string_lossy().as_ref() {
             "pg_control" => {
-                info!("pg_control file {}", file_path.display());
-
                 // Import it as ControlFile
                 modification.put_control_file(bytes)?;
 
@@ -483,20 +497,15 @@ pub fn import_file<R: Repository>(
                 let pg_control = ControlFileData::decode(&buffer)?;
                 let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
                 modification.put_checkpoint(checkpoint_bytes)?;
+                info!("imported control file");
             }
             "pg_filenode.map" => {
-                info!("pg_filenode.map file {}", file_path.display());
-
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                info!("imported relmap file")
             }
             _ => {
-                info!("global relfile {}", file_path.display());
-
-                modification.put_relmap_file(
-                    pg_constants::GLOBALTABLESPACE_OID,
-                    0,
-                    Bytes::copy_from_slice(&buffer[..]),
-                )?;
+                import_rel(modification, file_path, spcnode, dbnode, bytes.reader(), bytes_len)?;
+                info!("imported rel creation");
             }
         }
     } else if file_path.starts_with("base") {
@@ -512,53 +521,36 @@ pub fn import_file<R: Repository>(
 
         match file_path.file_name().unwrap().to_string_lossy().as_ref() {
             "pg_filenode.map" => {
-                info!(
-                    "dbnode {} pg_filenode.map file {}",
-                    dbnode,
-                    file_path.display()
-                );
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                info!("imported relmap file")
             }
             _ => {
-                info!("dbnode {} relfile {}", dbnode, file_path.display());
-                modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                import_rel(modification, file_path, spcnode, dbnode, bytes.reader(), bytes_len)?;
+                info!("imported rel creation");
             }
         }
     } else if file_path.starts_with("pg_xact") {
-        info!(
-            "pg_xact {} ",
-            file_path.file_name().unwrap().to_string_lossy().as_ref()
-        );
         let slru = SlruKind::Clog;
 
         import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
+        info!("imported clog slru");
     } else if file_path.starts_with("pg_multixact/offset") {
-        info!(
-            "pg_multixact/offset {}",
-            file_path.file_name().unwrap().to_string_lossy().as_ref()
-        );
         let slru = SlruKind::MultiXactOffsets;
 
         import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
+        info!("imported multixact offsets slru");
     } else if file_path.starts_with("pg_multixact/members") {
-        info!(
-            "pg_multixact/members {}",
-            file_path.file_name().unwrap().to_string_lossy().as_ref()
-        );
         let slru = SlruKind::MultiXactMembers;
 
         import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
+        info!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
         let xid = u32::from_str_radix(&file_path.file_name().unwrap().to_string_lossy(), 16)?;
 
-        info!(
-            "xid {} pg_twophase {}",
-            xid,
-            file_path.file_name().unwrap().to_string_lossy().as_ref()
-        );
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
+        info!("imported twophase file");
     } else {
-        info!("ignoring file {:?}", file_path);
+        info!("ignored");
     }
 
     // TODO: pg_tblspc ??
