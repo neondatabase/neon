@@ -4,8 +4,8 @@ use crate::config::{ProxyConfig, TlsConfig};
 use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
-use lazy_static::lazy_static;
 use metrics::{register_int_counter, IntCounter};
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeMessage as Be, *};
@@ -13,23 +13,29 @@ use utils::pq_proto::{BeMessage as Be, *};
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-lazy_static! {
-    static ref NUM_CONNECTIONS_ACCEPTED_COUNTER: IntCounter = register_int_counter!(
+static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "proxy_accepted_connections_total",
         "Number of TCP client connections accepted."
     )
-    .unwrap();
-    static ref NUM_CONNECTIONS_CLOSED_COUNTER: IntCounter = register_int_counter!(
+    .expect("failed to define a metric")
+});
+
+static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "proxy_closed_connections_total",
         "Number of TCP client connections closed."
     )
-    .unwrap();
-    static ref NUM_BYTES_PROXIED_COUNTER: IntCounter = register_int_counter!(
+    .expect("failed to define a metric")
+});
+
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "proxy_io_bytes_total",
         "Number of bytes sent/received between any client and backend."
     )
-    .unwrap();
-}
+    .expect("failed to define a metric")
+});
 
 /// A small combinator for pluggable error logging.
 async fn log_error<R, F>(future: F) -> F::Output

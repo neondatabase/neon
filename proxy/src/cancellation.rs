@@ -52,6 +52,16 @@ impl CancelMap {
         let session = Session::new(key, self);
         f(session).await
     }
+
+    #[cfg(test)]
+    fn contains(&self, session: &Session) -> bool {
+        self.0.lock().contains_key(&session.key)
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.0.lock().is_empty()
+    }
 }
 
 /// This should've been a [`std::future::Future`], but
@@ -102,5 +112,39 @@ impl<'a> Session<'a> {
             .insert(self.key, Some(cancel_closure));
 
         self.key
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use once_cell::sync::Lazy;
+
+    #[tokio::test]
+    async fn check_session_drop() -> anyhow::Result<()> {
+        static CANCEL_MAP: Lazy<CancelMap> = Lazy::new(Default::default);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(CANCEL_MAP.with_session(|session| async move {
+            assert!(CANCEL_MAP.contains(&session));
+
+            tx.send(()).expect("failed to send");
+            Ok(futures::future::pending::<()>().await)
+        }));
+
+        // Wait until the task has been spawned.
+        let () = rx.await.context("failed to hear from the task")?;
+
+        // Drop the session's entry by cancelling the task.
+        task.abort();
+        let error = task.await.expect_err("task should have failed");
+        if !error.is_cancelled() {
+            anyhow::bail!(error);
+        }
+
+        // Check that the session has been dropped.
+        assert!(CANCEL_MAP.is_empty());
+
+        Ok(())
     }
 }
