@@ -42,8 +42,8 @@ def test_normal_work(neon_env_builder: NeonEnvBuilder, num_timelines: int, num_s
     Repeat check for several tenants/timelines.
     """
 
-    env = neon_env_builder.init_start()
     neon_env_builder.num_safekeepers = num_safekeepers
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     for _ in range(num_timelines):
