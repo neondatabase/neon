@@ -430,20 +430,17 @@ fn import_wal<R: Repository>(
 }
 
 
-// Rest of file copied from https://github.com/neondatabase/neon/compare/WIP_import_from_tar
-
-pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
+pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     tline: &mut DatadirTimeline<R>,
     mut reader: Reader,
     base_lsn: Lsn,
-    end_lsn: Lsn,
 ) -> Result<()> {
     info!("importing base at {}", base_lsn);
     let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
     // Import base
-    for base_tar_entry in tar::Archive::new(&mut reader).entries()? {
+    for base_tar_entry in tar::Archive::new(reader).entries()? {
         let mut entry = base_tar_entry.unwrap();
         let header = entry.header();
         let file_path = header.path().unwrap().into_owned();
@@ -469,17 +466,26 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
     }
 
     modification.commit()?;
+    Ok(())
+}
+
+pub fn import_wal_from_tar<R: Repository, Reader: Read>(
+    tline: &mut DatadirTimeline<R>,
+    mut reader: Reader,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+) -> Result<()> {
 
     // Set up walingest mutable state
-    let mut waldecoder = WalStreamDecoder::new(base_lsn);
-    let mut segno = base_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-    let mut offset = base_lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
-    let mut last_lsn = base_lsn;
-    let mut walingest = WalIngest::new(tline, base_lsn)?;
+    let mut waldecoder = WalStreamDecoder::new(start_lsn);
+    let mut segno = start_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+    let mut offset = start_lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut last_lsn = start_lsn;
+    let mut walingest = WalIngest::new(tline, start_lsn)?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
-    let mut pg_wal_tar = tar::Archive::new(&mut reader);
+    let mut pg_wal_tar = tar::Archive::new(reader);
     let mut pg_wal_entries_iter = pg_wal_tar.entries()?;
     while last_lsn <= end_lsn {
         let bytes = {
@@ -523,7 +529,7 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
         offset = 0;
     }
 
-    if last_lsn != base_lsn {
+    if last_lsn != start_lsn {
         info!("reached end of WAL at {}", last_lsn);
     } else {
         info!("there was no WAL to import at {}", last_lsn);

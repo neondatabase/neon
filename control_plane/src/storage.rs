@@ -541,24 +541,31 @@ impl PageServerNode {
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
         let base_tarfile = File::open(base_tarfile_path)?;
-        let mut reader = BufReader::new(base_tarfile);
+        let mut base_reader = BufReader::new(base_tarfile);
 
         // If there's any wal, extend the reader and end_lsn
-        let end_lsn = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
+        let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
             let wal_tarfile = File::open(wal_tarfile_path)?;
-            (&mut reader).chain(BufReader::new(wal_tarfile));
-            end_lsn
+            let wal_reader = BufReader::new(wal_tarfile);
+            (end_lsn, Some(wal_reader))
         } else {
-            start_lsn
+            (start_lsn, None)
         };
 
-        // Init writer
-        let import_cmd = format!("import {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        // Import base
+        let import_cmd = format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
         let mut writer = client.copy_in(&import_cmd)?;
-
-        // Stream reader -> writer
-        io::copy(&mut reader, &mut writer)?;
+        io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;
+
+        // Import wal
+        if let Some(mut wal_reader) = wal_reader {
+            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+            let mut writer = client.copy_in(&import_cmd)?;
+            io::copy(&mut wal_reader, &mut writer)?;
+            writer.finish()?;
+        }
+
         Ok(())
     }
 }
