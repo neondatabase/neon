@@ -123,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     // used in asserting project name formatting invariant.
     let common_name = match arg_matches.value_of("tls-cert") {
         Some(cert_path) => {
-            let file = std::fs::File::open(cert_path).unwrap();
+            let file = std::fs::File::open(cert_path)?;
             let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))
                 .unwrap()
                 .0
