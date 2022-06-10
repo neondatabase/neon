@@ -5,30 +5,6 @@ defaults:
     shell: bash -ex {0}
 
 jobs:
-  check-codestyle-rust:
-    runs-on: [ self-hosted, Linux ]
-    strategy:
-      matrix:
-        rust_toolchain: [ 1.58 ]
-    container:
-      image: zimg/rust:${{ matrix.rust_toolchain }}
-
-    steps:
-      - name: Fix permissions
-        run: sudo chmod -R a+rwx /__w/
-
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
-
-      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
-        run: rustup default ${{ matrix.rust_toolchain }}
-
-      - name: rustfmt
-        run: cargo fmt --all -- --check
-
   build-postgres:
     runs-on: [ self-hosted, Linux ]
     strategy:
