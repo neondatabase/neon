@@ -16,6 +16,7 @@ use regex::Regex;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
@@ -30,7 +31,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::import_datadir::import_timeline_from_tar;
+use crate::import_datadir::{import_timeline_from_postgres_datadir, import_timeline_from_tar};
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
