@@ -139,7 +139,7 @@ mod tests_for_project_name_from_sni_data {
 }
 
 /// Determine project name from SNI or from project_name parameter from options argument.
-fn project_name<'ret>(
+fn get_project_name<'ret>(
     sni_data: &'ret Option<String>,
     common_name: &Option<String>,
     project_name: &'ret Option<String>,
@@ -161,7 +161,7 @@ fn project_name<'ret>(
     // determine the project name from self.sni_data if it exists, otherwise from self.project_name.
     let ret = match &sni_data {
         // if sni_data exists, use it to determine project name
-        Some(sni_data) => project_name_from_sni_data(sni_data, &common_name)?,
+        Some(sni_data) => project_name_from_sni_data(sni_data, common_name)?,
         // otherwise use project_option if it was manually set thought options parameter.
         None => project_name
             .as_ref()
@@ -190,7 +190,7 @@ mod tests_for_project_name_only {
         let common_name = String::from(".localtest.me");
         let sni_data = target_project_name.to_string() + common_name.as_str();
         assert_eq!(
-            project_name(&Some(sni_data), &Some(common_name), &None).ok(),
+            get_project_name(&Some(sni_data), &Some(common_name), &None).ok(),
             Some(target_project_name)
         );
     }
@@ -211,7 +211,7 @@ mod tests_for_project_name_only {
                     + project_name_suffix;
                 let sni_data = target_project_name.to_string() + common_name.as_str();
                 assert_eq!(
-                    project_name(&Some(sni_data), &Some(common_name.clone()), &None).err(),
+                    get_project_name(&Some(sni_data), &Some(common_name.clone()), &None).err(),
                     Some(ProjectNameError::ProjectNameContainsIllegalChars(
                         target_project_name
                     ))
@@ -226,7 +226,7 @@ mod tests_for_project_name_only {
         let common_names = [Some(String::from(".localtest.me")), None];
         for common_name in common_names {
             assert_eq!(
-                project_name(&None, &common_name, &Some(target_project_name.to_string())).ok(),
+                get_project_name(&None, &common_name, &Some(target_project_name.to_string())).ok(),
                 Some(target_project_name)
             );
         }
@@ -248,8 +248,12 @@ mod tests_for_project_name_only {
                         + illegal_char.to_string().as_str()
                         + project_name_suffix;
                     assert_eq!(
-                        project_name(&None, &common_name, &Some(target_project_name.to_string()))
-                            .err(),
+                        get_project_name(
+                            &None,
+                            &common_name,
+                            &Some(target_project_name.to_string())
+                        )
+                        .err(),
                         Some(ProjectNameError::ProjectNameContainsIllegalChars(
                             target_project_name
                         ))
@@ -265,7 +269,7 @@ mod tests_for_project_name_only {
         let common_name = String::from(".localtest.me");
         let sni_data = target_project_name.to_string() + common_name.as_str();
         assert_eq!(
-            project_name(
+            get_project_name(
                 &Some(sni_data),
                 &Some(common_name),
                 &Some(target_project_name.to_string())
@@ -282,8 +286,8 @@ mod tests_for_project_name_only {
         let common_name = String::from(".localtest.me");
         let sni_data = wrong_project_name.to_string() + common_name.as_str();
         assert_eq!(
-            project_name(
-                &Some(sni_data.clone()),
+            get_project_name(
+                &Some(sni_data),
                 &Some(common_name),
                 &Some(project_name_param.to_string())
             )
@@ -308,7 +312,7 @@ mod tests_for_project_name_only {
         for sni_data in sni_datas {
             for project_name_param in &project_names {
                 assert_eq!(
-                    project_name(&sni_data, &None, &project_name_param).err(),
+                    get_project_name(&sni_data, &None, project_name_param).err(),
                     Some(ProjectNameError::CommonNameNotSet)
                 );
             }
@@ -331,10 +335,10 @@ mod tests_for_project_name_only {
         for sni_data in sni_datas {
             for project_name_param in &project_names {
                 assert_eq!(
-                    project_name(
+                    get_project_name(
                         &sni_data.clone(),
                         &Some(common_name.clone()),
-                        &project_name_param
+                        project_name_param
                     )
                     .err(),
                     Some(ProjectNameError::InconsistentCommonNameAndSNI(
@@ -351,7 +355,7 @@ mod tests_for_project_name_only {
 impl ClientCredentials {
     /// Determine project name from SNI or from project_name parameter from options argument.
     pub fn project_name(&self) -> Result<&str, ProjectNameError> {
-        return project_name(&self.sni_data, &self.common_name, &self.project_name);
+        get_project_name(&self.sni_data, &self.common_name, &self.project_name)
     }
 }
 
