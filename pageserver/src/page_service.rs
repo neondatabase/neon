@@ -534,6 +534,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
+        base_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("import", timeline = %timeline_id, tenant = %tenant_id).entered();
@@ -553,7 +554,7 @@ impl PageServerHandler {
         info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
-        import_timeline_from_tar(&mut datadir_timeline, reader, end_lsn)?;
+        import_timeline_from_tar(&mut datadir_timeline, reader, base_lsn, end_lsn)?;
 
         info!("done");
         Ok(())
@@ -838,14 +839,15 @@ impl postgres_backend::Handler for PageServerHandler {
         } else if query_string.starts_with("import ") {
             let (_, params_raw) = query_string.split_at("import ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 3);
+            ensure!(params.len() == 4);
             let tenant = ZTenantId::from_str(params[0])?;
             let timeline = ZTimelineId::from_str(params[1])?;
-            let lsn = Lsn::from_str(params[2])?;
+            let base_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[2])?;
 
             self.check_permission(Some(tenant))?;
 
-            self.handle_import(pgb, tenant, timeline, lsn)?;
+            self.handle_import(pgb, tenant, timeline, base_lsn, end_lsn)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

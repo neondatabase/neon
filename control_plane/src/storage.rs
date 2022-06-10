@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -533,17 +533,27 @@ impl PageServerNode {
         &self,
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
-        tarfile: PathBuf,
-        lsn: Lsn,
+        base: (Lsn, PathBuf),
+        pg_wal: Option<(Lsn, PathBuf)>,
     ) -> anyhow::Result<()> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
-        // Init reader
-        let file = File::open(tarfile)?;
-        let mut reader = BufReader::new(file);
+        // Init base reader
+        let (start_lsn, base_tarfile_path) = base;
+        let base_tarfile = File::open(base_tarfile_path)?;
+        let mut reader = BufReader::new(base_tarfile);
+
+        // If there's any wal, extend the reader and end_lsn
+        let end_lsn = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
+            let wal_tarfile = File::open(wal_tarfile_path)?;
+            (&mut reader).chain(BufReader::new(wal_tarfile));
+            end_lsn
+        } else {
+            start_lsn
+        };
 
         // Init writer
-        let import_cmd = format!("import {tenant_id} {timeline_id} {lsn}");
+        let import_cmd = format!("import {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
         let mut writer = client.copy_in(&import_cmd)?;
 
         // Stream reader -> writer

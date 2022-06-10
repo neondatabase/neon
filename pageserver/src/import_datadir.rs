@@ -434,65 +434,56 @@ fn import_wal<R: Repository>(
 
 pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
     tline: &mut DatadirTimeline<R>,
-    reader: Reader,
+    mut reader: Reader,
+    base_lsn: Lsn,
     end_lsn: Lsn,
 ) -> Result<()> {
-    let mut ar = tar::Archive::new(reader);
-
-    // HACK
-    let mut modification = tline.begin_modification(Lsn::from_str("0/3000028")?);
+    info!("importing base at {}", base_lsn);
+    let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
-    let mut entries_iter = ar.entries()?;
-
-    let mut pg_control: Option<ControlFileData> = None;
-
     // Import base
-    for e in &mut entries_iter {
-        let mut entry = e.unwrap();
+    for base_tar_entry in tar::Archive::new(&mut reader).entries()? {
+        let mut entry = base_tar_entry.unwrap();
         let header = entry.header();
         let file_path = header.path().unwrap().into_owned();
 
         match header.entry_type() {
             tar::EntryType::Regular => {
                 let mut buffer = Vec::new();
-                // read the whole entry
+                // TODO stream it instead
                 entry.read_to_end(&mut buffer).unwrap();
 
-                if let Some(control) = import_file(&mut modification, &file_path.as_ref(), &buffer)? {
-                    pg_control = Some(control);
-                }
-            }
+                import_file(&mut modification, &file_path.as_ref(), &buffer)?;
+            },
             tar::EntryType::Directory => {
                 info!("directory {:?}", file_path);
                 if file_path.starts_with("pg_wal") {
-                    info!("found pg_wal");
-                    break;
+                    info!("found pg_wal in base lol");
                 }
-            }
+            },
             _ => {
                 panic!("tar::EntryType::?? {}", file_path.display());
-            }
+            },
         }
     }
-
-    let pg_control = pg_control.context("pg_control file not found")?;
-    let startpoint = Lsn(pg_control.checkPointCopy.redo);
-    info!("wal redo startpoint {}", startpoint);
 
     modification.commit()?;
 
     // Set up walingest mutable state
-    let mut waldecoder = WalStreamDecoder::new(startpoint);
-    let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
-    let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
-    let mut last_lsn = startpoint;
-    let mut walingest = WalIngest::new(tline, startpoint)?;
+    let mut waldecoder = WalStreamDecoder::new(base_lsn);
+    let mut segno = base_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+    let mut offset = base_lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut last_lsn = base_lsn;
+    let mut walingest = WalIngest::new(tline, base_lsn)?;
 
     // Ingest wal until end_lsn
+    info!("importing wal until {}", end_lsn);
+    let mut pg_wal_tar = tar::Archive::new(&mut reader);
+    let mut pg_wal_entries_iter = pg_wal_tar.entries()?;
     while last_lsn <= end_lsn {
         let bytes = {
-            let mut entry = entries_iter.next().expect("expected more wal")?;
+            let mut entry = pg_wal_entries_iter.next().expect("expected more wal")?;
             let header = entry.header();
             let file_path = header.path().unwrap().into_owned();
 
@@ -500,10 +491,6 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
                 tar::EntryType::Regular => {
                     let mut buffer = Vec::new();
                     entry.read_to_end(&mut buffer).unwrap();
-
-                    if !file_path.starts_with("pg_wal") {
-                        panic!("found non-wal file in wal section")
-                    }
 
                     // TODO assert filename matches segno
 
@@ -536,15 +523,15 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
         offset = 0;
     }
 
-    if last_lsn != startpoint {
+    if last_lsn != base_lsn {
         info!("reached end of WAL at {}", last_lsn);
     } else {
         info!("there was no WAL to import at {}", last_lsn);
     }
 
     // Log any extra unused files
-    for e in &mut entries_iter {
-        let mut entry = e.unwrap();
+    for e in &mut pg_wal_entries_iter {
+        let entry = e.unwrap();
         let header = entry.header();
         let file_path = header.path().unwrap().into_owned();
         info!("skipping {:?}", file_path);
