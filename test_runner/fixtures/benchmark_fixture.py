@@ -170,7 +170,7 @@ class NeonBenchmarker:
                 "name": metric_name,
                 "value": metric_value,
                 "unit": unit,
-                "report": report,
+                "report": str(report),
             },
         )
 

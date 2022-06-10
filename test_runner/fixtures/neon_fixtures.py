@@ -1378,6 +1378,7 @@ class VanillaPostgres(PgProtocol):
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
+        self.port = port
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
     def configure(self, options: List[str]):
@@ -1413,10 +1414,13 @@ class VanillaPostgres(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
+def vanilla_pg(test_output_dir: str,
+               port_distributor: PortDistributor) -> Iterator[VanillaPostgres]:
     pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
     pg_bin = PgBin(test_output_dir)
-    with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
+    port = port_distributor.get_port()
+    log.info(f"Start vanilla PG on {port}")
+    with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         yield vanilla_pg
 
 
