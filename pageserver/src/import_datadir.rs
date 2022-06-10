@@ -434,20 +434,22 @@ fn import_wal<R: Repository>(
 pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
     tline: &mut DatadirTimeline<R>,
     reader: Reader,
-    lsn: Lsn,
+    end_lsn: Lsn,
 ) -> Result<()> {
     let mut ar = tar::Archive::new(reader);
 
-    let mut modification = tline.begin_modification(lsn);
+    let mut modification = tline.begin_modification(end_lsn);
     modification.init_empty()?;
 
-    for e in ar.entries().unwrap() {
+    let mut entries_iter = ar.entries()?;
+
+    let mut pg_control: Option<ControlFileData> = None;
+
+    // Import base
+    for e in &mut entries_iter {
         let mut entry = e.unwrap();
         let header = entry.header();
         let file_path = header.path().unwrap().into_owned();
-
-        // HACK why does python put absolute file paths inside tar?
-        let file_path = file_path.strip_prefix("home/bojan/src/neondatabase/neon/test_output/test_import/basebackup/").unwrap();
 
         match header.entry_type() {
             tar::EntryType::Regular => {
@@ -455,10 +457,16 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
                 // read the whole entry
                 entry.read_to_end(&mut buffer).unwrap();
 
-                import_file(&mut modification, &file_path.as_ref(), &buffer)?;
+                if let Some(control) = import_file(&mut modification, &file_path.as_ref(), &buffer)? {
+                    pg_control = Some(control);
+                }
             }
             tar::EntryType::Directory => {
-                // info!("tar::EntryType::Directory {}", file_path.display());
+                info!("directory {:?}", file_path);
+                if file_path.starts_with("pg_wal") {
+                    info!("found pg_wal");
+                    break;
+                }
             }
             _ => {
                 panic!("tar::EntryType::?? {}", file_path.display());
@@ -466,9 +474,79 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
         }
     }
 
+    let pg_control = pg_control.context("pg_control file not found")?;
+    let startpoint = Lsn(pg_control.checkPointCopy.redo);
+    info!("wal redo startpoint {}", startpoint);
+
     modification.commit()?;
 
-    // TODO import wal.
+    // Set up walingest mutable state
+    let mut waldecoder = WalStreamDecoder::new(startpoint);
+    let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
+    let mut offset = startpoint.segment_offset(pg_constants::WAL_SEGMENT_SIZE);
+    let mut last_lsn = startpoint;
+    let mut walingest = WalIngest::new(tline, startpoint)?;
+
+    // Ingest wal until end_lsn
+    while last_lsn <= end_lsn {
+        let bytes = {
+            let mut entry = entries_iter.next().expect("expected more wal")?;
+            let header = entry.header();
+            let file_path = header.path().unwrap().into_owned();
+
+            match header.entry_type() {
+                tar::EntryType::Regular => {
+                    let mut buffer = Vec::new();
+                    entry.read_to_end(&mut buffer).unwrap();
+
+                    if !file_path.starts_with("pg_wal") {
+                        panic!("found non-wal file in wal section")
+                    }
+
+                    // TODO assert filename matches segno
+
+                    info!("processing wal file {:?}", file_path);
+                    buffer
+                }
+                tar::EntryType::Directory => {
+                    info!("directory {:?}", file_path);
+                    continue;
+                }
+                _ => {
+                    panic!("tar::EntryType::?? {}", file_path.display());
+                }
+            }
+        };
+
+        waldecoder.feed_bytes(&bytes[offset..]);
+
+        while last_lsn <= end_lsn {
+            if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                walingest.ingest_record(tline, recdata, lsn)?;
+                last_lsn = lsn;
+
+                info!("imported record at {} (end {})", lsn, end_lsn);
+            }
+        }
+
+        info!("imported records up to {}", last_lsn);
+        segno += 1;
+        offset = 0;
+    }
+
+    if last_lsn != startpoint {
+        info!("reached end of WAL at {}", last_lsn);
+    } else {
+        info!("there was no WAL to import at {}", last_lsn);
+    }
+
+    // Log any extra unused files
+    for e in &mut entries_iter {
+        let mut entry = e.unwrap();
+        let header = entry.header();
+        let file_path = header.path().unwrap().into_owned();
+        info!("skipping {:?}", file_path);
+    }
 
     Ok(())
 }
@@ -477,7 +555,7 @@ pub fn import_file<R: Repository>(
     modification: &mut DatadirModification<R>,
     file_path: &Path,
     buffer: &[u8],
-) -> Result<()> {
+) -> Result<Option<ControlFileData>> {
     info!("looking at {:?}", file_path);
     let bytes = Bytes::copy_from_slice(&buffer[..]);
     let bytes_len = bytes.len();
@@ -496,6 +574,7 @@ pub fn import_file<R: Repository>(
                 let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
                 modification.put_checkpoint(checkpoint_bytes)?;
                 info!("imported control file");
+                return Ok(Some(pg_control));
             }
             "pg_filenode.map" => {
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
@@ -553,11 +632,13 @@ pub fn import_file<R: Repository>(
 
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
         info!("imported twophase file");
+    } else if file_path.starts_with("pg_wal") {
+        panic!("found wal file in base section");
     } else {
         info!("ignored");
     }
 
     // TODO: pg_tblspc ??
 
-    Ok(())
+    Ok(None)
 }
