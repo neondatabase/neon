@@ -1381,6 +1381,9 @@ class VanillaPostgres(PgProtocol):
         self.port = port
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
+        with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
+            conf_file.write(f"port={self.port}")
+
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
@@ -1419,7 +1422,6 @@ def vanilla_pg(test_output_dir: str,
     pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
     pg_bin = PgBin(test_output_dir)
     port = port_distributor.get_port()
-    log.info(f"Start vanilla PG on {port}")
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         yield vanilla_pg
 
@@ -1466,7 +1468,7 @@ def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, port: int):
+    def __init__(self, port: int, pg_port: int):
         super().__init__(host="127.0.0.1",
                          user="proxy_user",
                          password="pytest2",
@@ -1475,6 +1477,7 @@ class NeonProxy(PgProtocol):
         self.http_port = 7001
         self.host = "127.0.0.1"
         self.port = port
+        self.pg_port = pg_port
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start_static(self, addr="127.0.0.1:5432") -> None:
@@ -1486,7 +1489,8 @@ class NeonProxy(PgProtocol):
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
         args.extend(["--auth-backend", "postgres"])
-        args.extend(["--auth-endpoint", "postgres://proxy_auth:pytest1@localhost:5432/postgres"])
+        args.extend(
+            ["--auth-endpoint", f"postgres://proxy_auth:pytest1@localhost:{self.pg_port}/postgres"])
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1505,13 +1509,13 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def static_proxy(vanilla_pg) -> Iterator[NeonProxy]:
+def static_proxy(vanilla_pg: VanillaPostgres) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
     vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-    with NeonProxy(4432) as proxy:
+    with NeonProxy(port=4432, pg_port=vanilla_pg.port) as proxy:
         proxy.start_static()
         yield proxy
 
