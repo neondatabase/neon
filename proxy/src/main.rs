@@ -124,11 +124,9 @@ async fn main() -> anyhow::Result<()> {
     let common_name = match arg_matches.value_of("tls-cert") {
         Some(cert_path) => {
             let file = std::fs::File::open(cert_path)?;
-            let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))
-                .unwrap()
+            let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))?
                 .0
-                .parse_x509()
-                .unwrap()
+                .parse_x509()?
                 .tbs_certificate
                 .subject
                 .to_string();
