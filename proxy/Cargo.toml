@@ -40,7 +40,6 @@ metrics = { path = "../libs/metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
 x509-parser = "0.13.2"
-substring = "1.4.5"
 
 [dev-dependencies]
 rcgen = "0.8.14"

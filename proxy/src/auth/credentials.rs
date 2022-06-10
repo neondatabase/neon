@@ -54,8 +54,8 @@ pub enum ProjectNameError {
     #[error("Common name is not set.")]
     CommonNameNotSet,
 
-    #[error("Inconsistent common name and SNI suffix. Common name: '{0}', SNI: '{1}', SNI suffix: '{2}'")]
-    InconsistentCommonNameAndSNI(String, String, String),
+    #[error("Inconsistent common name and SNI suffix. Common name: '{0}', SNI: '{1}'")]
+    InconsistentCommonNameAndSNI(String, String),
 
     #[error("Project name must contain only alphanumeric characters and hyphens ('-'). Project name: '{0}'.")]
     ProjectNameContainsIllegalChars(String),
@@ -64,10 +64,6 @@ pub enum ProjectNameError {
 impl UserFacingError for ProjectNameError {}
 
 /// Inferring project name from sni_data.
-/// If common_name is None, throws an CommonNameNotSet error,
-/// otherwise checks if common_name is suffix to sni_data.
-/// if common_name is not suffix to sni_data throws InconsistentCommonNameAndSNI error,
-/// otherwise returns the prefix of sni_data without the common_name suffix.
 fn project_name_from_sni_data<'sni>(
     sni_data: &'sni str,
     common_name: &Option<String>,
@@ -78,19 +74,16 @@ fn project_name_from_sni_data<'sni>(
         None => return Err(ProjectNameError::CommonNameNotSet),
     };
 
-    // check that the common name passed from common_name is the actual suffix in sni_data.
-    use substring::Substring;
-    let sni_suffix = sni_data.substring(sni_data.len() - common_name.len(), sni_data.len());
-    if !sni_suffix.eq(common_name) {
+    // check that the common_name is the actual suffix in sni_data
+    if !sni_data.ends_with(common_name) {
         return Err(ProjectNameError::InconsistentCommonNameAndSNI(
             common_name.to_string(),
             sni_data.to_string(),
-            sni_suffix.to_string(),
         ));
     }
 
     // return sni_data without the common name suffix.
-    Ok(sni_data.substring(0, sni_data.len() - common_name.len()))
+    Ok(sni_data.strip_suffix(common_name).unwrap())
 }
 
 #[cfg(test)]
@@ -131,8 +124,7 @@ mod tests_for_project_name_from_sni_data {
             project_name_from_sni_data(sni_data.as_str(), &Some(common_name.clone())).err(),
             Some(ProjectNameError::InconsistentCommonNameAndSNI(
                 common_name,
-                sni_data,
-                wrong_suffix.to_string()
+                sni_data
             ))
         );
     }
@@ -343,8 +335,7 @@ mod tests_for_project_name_only {
                     .err(),
                     Some(ProjectNameError::InconsistentCommonNameAndSNI(
                         common_name.to_string(),
-                        sni_data.clone().unwrap(),
-                        wrong_suffix.to_string()
+                        sni_data.clone().unwrap()
                     ))
                 );
             }

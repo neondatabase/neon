@@ -24,7 +24,6 @@ use clap::{App, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
 use std::{future::Future, net::SocketAddr};
-use substring::Substring;
 use tokio::{net::TcpListener, task::JoinError};
 use utils::project_git_version;
 
@@ -130,11 +129,12 @@ async fn main() -> anyhow::Result<()> {
                 .tbs_certificate
                 .subject
                 .to_string();
-            let prefix = "CN=*";
-            // making sure formatting is as expected: almost_common_name = "'CN=*'[<common name>]"
-            assert_eq!(almost_common_name.substring(0, prefix.len()), prefix);
-            let common_name = almost_common_name.substring(prefix.len(), almost_common_name.len());
-            Some(common_name.to_string())
+            let expected_prefix = "CN=*";
+            let common_name = almost_common_name
+                .strip_prefix(expected_prefix)
+                .unwrap_or("Expected 'CN=*' prefix before the common name.")
+                .to_string();
+            Some(common_name)
         }
         None => None,
     };
