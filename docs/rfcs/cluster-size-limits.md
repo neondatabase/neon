@@ -36,12 +36,12 @@ This is how the `LOGICAL_TIMELINE_SIZE` metric is implemented in the pageserver.
 Alternatively, we could count only relation data. As in pg_database_size().
 This approach is somewhat more user-friendly because it is the data that is really affected by the user.
 On the other hand, it puts us in a weaker position than other services, i.e., RDS.
-We will need to refactor the timeline_size counter or add another counter to implement it. 
+We will need to refactor the timeline_size counter or add another counter to implement it.
 
 Timeline size is updated during wal digestion. It is not versioned and is valid at the last_received_lsn moment.
 Then this size should be reported to compute node.
 
-`current_timeline_size` value is included in the walreceiver's custom feedback message: `ZenithFeedback.`
+`current_timeline_size` value is included in the walreceiver's custom feedback message: `ReplicationFeedback.`
 
 (PR about protocol changes https://github.com/zenithdb/zenith/pull/1037).
 
@@ -64,11 +64,11 @@ We should warn users if the limit is soon to be reached.
 ### **Reliability, failure modes and corner cases**
 
 1. `current_timeline_size` is valid at the last received and digested by pageserver lsn.
-    
+
     If pageserver lags behind compute node, `current_timeline_size` will lag too. This lag can be tuned using backpressure, but it is not expected to be 0 all the time.
-    
+
     So transactions that happen in this lsn range may cause limit overflow. Especially operations that generate (i.e., CREATE DATABASE) or free (i.e., TRUNCATE) a lot of data pages while generating a small amount of WAL. Are there other operations like this?
-    
+
     Currently, CREATE DATABASE operations are restricted in the console. So this is not an issue.
 
 

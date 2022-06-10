@@ -23,7 +23,7 @@ use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
-    pq_proto::{SystemId, ZenithFeedback},
+    pq_proto::{ReplicationFeedback, SystemId},
     zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
@@ -348,7 +348,7 @@ pub struct AppendResponse {
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub zenith_feedback: ZenithFeedback,
+    pub pageserver_feedback: ReplicationFeedback,
 }
 
 impl AppendResponse {
@@ -358,7 +358,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            zenith_feedback: ZenithFeedback::empty(),
+            pageserver_feedback: ReplicationFeedback::empty(),
         }
     }
 }
@@ -476,7 +476,7 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.zenith_feedback.serialize(buf)?
+                msg.pageserver_feedback.serialize(buf)?
             }
         }
 
@@ -677,7 +677,7 @@ where
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            zenith_feedback: ZenithFeedback::empty(),
+            pageserver_feedback: ReplicationFeedback::empty(),
         };
         trace!("formed AppendResponse {:?}", ar);
         ar

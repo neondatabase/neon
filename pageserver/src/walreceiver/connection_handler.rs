@@ -19,7 +19,7 @@ use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use utils::{
     lsn::Lsn,
-    pq_proto::ZenithFeedback,
+    pq_proto::ReplicationFeedback,
     zid::{NodeId, ZTenantTimelineId},
 };
 
@@ -33,7 +33,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum WalConnectionEvent {
     Started,
-    NewWal(ZenithFeedback),
+    NewWal(ReplicationFeedback),
     End(Result<(), String>),
 }
 
@@ -328,7 +328,7 @@ async fn handle_walreceiver_connection(
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
-            let zenith_status_update = ZenithFeedback {
+            let zenith_status_update = ReplicationFeedback {
                 current_timeline_size: timeline.get_current_logical_size() as u64,
                 ps_writelsn: write_lsn,
                 ps_flushlsn: flush_lsn,

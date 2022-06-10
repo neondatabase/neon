@@ -21,7 +21,7 @@ use tracing::*;
 
 use utils::{
     lsn::Lsn,
-    pq_proto::ZenithFeedback,
+    pq_proto::ReplicationFeedback,
     zid::{NodeId, ZTenantId, ZTenantTimelineId},
 };
 
@@ -48,8 +48,8 @@ pub struct ReplicaState {
     pub remote_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
-    /// Zenith specific feedback received from pageserver, if any
-    pub zenith_feedback: Option<ZenithFeedback>,
+    /// Replication specific feedback received from pageserver, if any
+    pub pageserver_feedback: Option<ReplicationFeedback>,
 }
 
 impl Default for ReplicaState {
@@ -68,7 +68,7 @@ impl ReplicaState {
                 xmin: u64::MAX,
                 catalog_xmin: u64::MAX,
             },
-            zenith_feedback: None,
+            pageserver_feedback: None,
         }
     }
 }
@@ -221,25 +221,25 @@ impl SharedState {
             // we need to know which pageserver compute node considers to be main.
             // See https://github.com/zenithdb/zenith/issues/1171
             //
-            if let Some(zenith_feedback) = state.zenith_feedback {
-                if let Some(acc_feedback) = acc.zenith_feedback {
-                    if acc_feedback.ps_writelsn < zenith_feedback.ps_writelsn {
+            if let Some(pageserver_feedback) = state.pageserver_feedback {
+                if let Some(acc_feedback) = acc.pageserver_feedback {
+                    if acc_feedback.ps_writelsn < pageserver_feedback.ps_writelsn {
                         warn!("More than one pageserver is streaming WAL for the timeline. Feedback resolving is not fully supported yet.");
-                        acc.zenith_feedback = Some(zenith_feedback);
+                        acc.pageserver_feedback = Some(pageserver_feedback);
                     }
                 } else {
-                    acc.zenith_feedback = Some(zenith_feedback);
+                    acc.pageserver_feedback = Some(pageserver_feedback);
                 }
 
                 // last lsn received by pageserver
                 // FIXME if multiple pageservers are streaming WAL, last_received_lsn must be tracked per pageserver.
                 // See https://github.com/zenithdb/zenith/issues/1171
-                acc.last_received_lsn = Lsn::from(zenith_feedback.ps_writelsn);
+                acc.last_received_lsn = Lsn::from(pageserver_feedback.ps_writelsn);
 
                 // When at least one pageserver has preserved data up to remote_consistent_lsn,
                 // safekeeper is free to delete it, so choose max of all pageservers.
                 acc.remote_consistent_lsn = max(
-                    Lsn::from(zenith_feedback.ps_applylsn),
+                    Lsn::from(pageserver_feedback.ps_applylsn),
                     acc.remote_consistent_lsn,
                 );
             }
@@ -457,8 +457,8 @@ impl Timeline {
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
                 let state = shared_state.get_replicas_state();
                 resp.hs_feedback = state.hs_feedback;
-                if let Some(zenith_feedback) = state.zenith_feedback {
-                    resp.zenith_feedback = zenith_feedback;
+                if let Some(pageserver_feedback) = state.pageserver_feedback {
+                    resp.pageserver_feedback = pageserver_feedback;
                 }
             }
 
