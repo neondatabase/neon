@@ -10,7 +10,7 @@ import json
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
 
     # HACK
-    basebackup_cache = "/home/bojan/tmp/basebackup"
+    basebackup_cache = "/home/bojan/tmp/ff/basebackup"
     # basebackup_cache = None
 
     basebackup_dir = os.path.join(test_output_dir, "basebackup")
@@ -18,6 +18,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         basebackup_dir = basebackup_cache
     else:
         vanilla_pg.start()
+        vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
         vanilla_pg.safe_psql("create table t as select generate_series(1,300000)")
         assert vanilla_pg.safe_psql('select count(*) from t') == [(300000, )]
 
@@ -25,7 +26,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         os.mkdir(basebackup_dir)
         pg_bin.run([
             "pg_basebackup",
-            "-F", "tar",
+            # "-F", "tar",
             "-d", vanilla_pg.connstr(),
             "-D", basebackup_dir,
         ])
