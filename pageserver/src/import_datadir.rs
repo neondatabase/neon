@@ -6,6 +6,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, Bytes};
@@ -438,7 +439,8 @@ pub fn import_timeline_from_tar<R: Repository, Reader: Read>(
 ) -> Result<()> {
     let mut ar = tar::Archive::new(reader);
 
-    let mut modification = tline.begin_modification(end_lsn);
+    // HACK
+    let mut modification = tline.begin_modification(Lsn::from_str("0/3000028")?);
     modification.init_empty()?;
 
     let mut entries_iter = ar.entries()?;
@@ -617,7 +619,7 @@ pub fn import_file<R: Repository>(
 
         import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
         info!("imported clog slru");
-    } else if file_path.starts_with("pg_multixact/offset") {
+    } else if file_path.starts_with("pg_multixact/offsets") {
         let slru = SlruKind::MultiXactOffsets;
 
         import_slru(modification, slru, file_path, bytes.reader(), bytes_len)?;
