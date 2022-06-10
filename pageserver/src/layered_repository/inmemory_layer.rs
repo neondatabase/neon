@@ -326,13 +326,13 @@ impl InMemoryLayer {
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
-
+        let lsn_range = self.start_lsn..inner.end_lsn.unwrap();
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timelineid,
             self.tenantid,
             Key::MIN,
-            self.start_lsn..inner.end_lsn.unwrap(),
+            lsn_range.clone(),
         )?;
 
         let mut buf = Vec::new();
@@ -352,7 +352,7 @@ impl InMemoryLayer {
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX)?;
+        let delta_layer = delta_layer_writer.finish(lsn_range, Key::MAX)?;
         Ok(delta_layer)
     }
 }

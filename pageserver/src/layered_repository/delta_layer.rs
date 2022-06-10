@@ -606,7 +606,7 @@ pub struct DeltaLayerWriter {
     tenantid: ZTenantId,
 
     key_start: Key,
-    lsn_range: Range<Lsn>,
+    pub lsn_range: Range<Lsn>,
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
@@ -679,7 +679,7 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    pub fn finish(self, lsn_range: Range<Lsn>, key_end: Key) -> anyhow::Result<DeltaLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -700,7 +700,7 @@ impl DeltaLayerWriter {
             tenantid: self.tenantid,
             timelineid: self.timelineid,
             key_range: self.key_start..key_end,
-            lsn_range: self.lsn_range.clone(),
+            lsn_range: lsn_range.clone(),
             index_start_blk,
             index_root_blk,
         };
@@ -715,7 +715,7 @@ impl DeltaLayerWriter {
             tenantid: self.tenantid,
             timelineid: self.timelineid,
             key_range: self.key_start..key_end,
-            lsn_range: self.lsn_range.clone(),
+            lsn_range: lsn_range.clone(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -736,7 +736,7 @@ impl DeltaLayerWriter {
             self.tenantid,
             &DeltaFileName {
                 key_range: self.key_start..key_end,
-                lsn_range: self.lsn_range,
+                lsn_range: lsn_range,
             },
         );
         std::fs::rename(self.path, &final_path)?;
