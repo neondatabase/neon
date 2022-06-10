@@ -736,7 +736,7 @@ impl DeltaLayerWriter {
             self.tenantid,
             &DeltaFileName {
                 key_range: self.key_start..key_end,
-                lsn_range: lsn_range,
+                lsn_range,
             },
         );
         std::fs::rename(self.path, &final_path)?;
