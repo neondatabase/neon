@@ -2076,7 +2076,16 @@ impl LayeredTimeline {
                 if writer.is_some() {
                     let size = writer.as_mut().unwrap().size();
                     if size > target_file_size {
-                        new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
+                        let final_lsn_range = Range {
+                            start: lsn_range.start,
+                            end: lsn,
+                        };
+                        new_layers.push(
+                            writer
+                                .take()
+                                .unwrap()
+                                .finish(final_lsn_range, prev_key.next())?,
+                        );
                         writer = None;
                     }
                 }
@@ -2096,7 +2105,7 @@ impl LayeredTimeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next())?);
+            new_layers.push(writer.finish(lsn_range, prev_key.unwrap().next())?);
         }
 
         // Sync layers
