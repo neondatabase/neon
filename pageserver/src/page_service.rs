@@ -31,7 +31,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::import_datadir::{import_timeline_from_postgres_datadir, import_timeline_from_tar};
+use crate::import_datadir::{import_basebackup_from_tar, import_timeline_from_postgres_datadir, import_wal_from_tar};
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
@@ -529,7 +529,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    fn handle_import(
+    fn handle_import_basebackup(
         &self,
         pgb: &mut PostgresBackend,
         tenant_id: ZTenantId,
@@ -537,9 +537,7 @@ impl PageServerHandler {
         base_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("import", timeline = %timeline_id, tenant = %tenant_id).entered();
-        // TODO cap the max number of import threads allowed
-        // TODO check that timeline doesn't exist already
+        let _enter = info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
         // TODO thread_mgr::associate_with?
 
         // Create empty timeline
@@ -550,11 +548,40 @@ impl PageServerHandler {
         let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
             timeline, repartition_distance);
 
+        // TODO mark timeline as not ready until it reaches end_lsn
+
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
-        import_timeline_from_tar(&mut datadir_timeline, reader, base_lsn, end_lsn)?;
+        import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
+
+        info!("done");
+        Ok(())
+    }
+
+    fn handle_import_wal(
+        &self,
+        pgb: &mut PostgresBackend,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        start_lsn: Lsn,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let _enter = info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
+        // TODO thread_mgr::associate_with?
+
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let timeline = repo.get_timeline_load(timeline_id)?;
+        let repartition_distance = repo.get_checkpoint_distance();  // TODO
+        let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
+            timeline, repartition_distance);
+
+        // Import wal provided via CopyData
+        info!("importing wal");
+        pgb.write_message(&BeMessage::CopyInResponse)?;
+        let reader = CopyInReader::new(pgb);
+        import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
 
         info!("done");
         Ok(())
@@ -863,8 +890,8 @@ impl postgres_backend::Handler for PageServerHandler {
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, timelineid, lsn, tenantid, true)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("import ") {
-            let (_, params_raw) = query_string.split_at("import ".len());
+        } else if query_string.starts_with("import basebackup ") {
+            let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);
             let tenant = ZTenantId::from_str(params[0])?;
@@ -874,7 +901,20 @@ impl postgres_backend::Handler for PageServerHandler {
 
             self.check_permission(Some(tenant))?;
 
-            self.handle_import(pgb, tenant, timeline, base_lsn, end_lsn)?;
+            self.handle_import_basebackup(pgb, tenant, timeline, base_lsn, end_lsn)?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("import wal ") {
+            let (_, params_raw) = query_string.split_at("import wal ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            ensure!(params.len() == 4);
+            let tenant = ZTenantId::from_str(params[0])?;
+            let timeline = ZTimelineId::from_str(params[1])?;
+            let start_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[2])?;
+
+            self.check_permission(Some(tenant))?;
+
+            self.handle_import_wal(pgb, tenant, timeline, start_lsn, end_lsn)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
