@@ -2074,19 +2074,38 @@ impl LayeredTimeline {
 
             if let Some(prev_key) = prev_key {
                 if writer.is_some() {
-                    let size = writer.as_mut().unwrap().size();
-                    if size > target_file_size {
-                        let final_lsn_range = Range {
-                            start: lsn_range.start,
-                            end: lsn,
-                        };
-                        new_layers.push(
-                            writer
-                                .take()
-                                .unwrap()
-                                .finish(final_lsn_range, prev_key.next())?,
-                        );
-                        writer = None;
+                    let size = writer.as_ref().unwrap().size();
+                    if lsn < writer.as_ref().unwrap().lsn_range.start
+                        || (prev_key != key && size > target_file_size)
+                        || size > target_file_size * 2
+                    {
+                        if prev_key == key {
+                            let final_lsn_range = Range {
+                                start: lsn_range.start,
+                                end: lsn,
+                            };
+                            new_layers.push(
+                                writer
+                                    .take()
+                                    .unwrap()
+                                    .finish(final_lsn_range, prev_key.next())?,
+                            );
+                            writer = Some(DeltaLayerWriter::new(
+                                self.conf,
+                                self.timeline_id,
+                                self.tenant_id,
+                                key,
+                                lsn..lsn_range.end,
+                            )?);
+                        } else {
+                            new_layers.push(
+                                writer
+                                    .take()
+                                    .unwrap()
+                                    .finish(lsn_range.clone(), prev_key.next())?,
+                            );
+                            writer = None;
+                        }
                     }
                 }
             }
