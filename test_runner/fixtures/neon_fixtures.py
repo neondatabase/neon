@@ -1382,7 +1382,7 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
         with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
-            conf_file.write(f"port={self.port}")
+            conf_file.write(f"port={self.port}\n")
 
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
