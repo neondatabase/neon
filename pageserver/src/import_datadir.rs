@@ -26,9 +26,8 @@ use utils::lsn::Lsn;
 /// Import all relation data pages from local disk into the repository.
 ///
 /// This is currently only used to import a cluster freshly created by initdb.
-/// The code that deals with the
-/// checkpoint would not work right if the
-/// cluster was not shut down cleanly.
+/// The code that deals with the checkpoint would not work right if the
+/// clusterwas not shut down cleanly.
 pub fn import_timeline_from_postgres_datadir<R: Repository>(
     path: &Path,
     tline: &mut DatadirTimeline<R>,
