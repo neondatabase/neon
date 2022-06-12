@@ -1,6 +1,7 @@
 import time
 import os
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.log_helper import log
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -70,5 +71,5 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant_id, timeline_id)
     for filename in os.listdir(timeline_path):
         if filename.startswith('00000'):
-            print(f'layer {filename} size is {os.path.getsize(timeline_path + filename)}')
+            log.info(f'layer {filename} size is {os.path.getsize(timeline_path + filename)}')
             assert os.path.getsize(timeline_path + filename) < 1000000000
