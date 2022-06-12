@@ -261,9 +261,11 @@ impl<'a> Read for CopyInReader<'a> {
                     let copy_data_bytes = match message {
                         FeMessage::CopyData(bytes) => bytes,
                         FeMessage::CopyDone => return Ok(0),
+                        FeMessage::Sync => continue,
                         m => {
-                            info!("unexpected copy in client message {:?}", m);
-                            continue;
+                            let msg = format!("unexpected message {:?}", m);
+                            self.pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            return Err(io::Error::new(io::ErrorKind::Other, msg));
                         }
                     };
 
@@ -274,12 +276,13 @@ impl<'a> Read for CopyInReader<'a> {
                     return Ok(bytes_read);
                 }
                 Ok(None) => {
-                    // Is this ok?
-                    return Ok(0);
+                    let msg = "client closed connection";
+                    self.pgb.write_message(&BeMessage::ErrorResponse(msg))?;
+                    return Err(io::Error::new(io::ErrorKind::Other, msg));
                 }
                 Err(e) => {
                     if !is_socket_read_timed_out(&e) {
-                        todo!("return io::Error");
+                        return Err(io::Error::new(io::ErrorKind::Other, e));
                     }
                 }
             }
