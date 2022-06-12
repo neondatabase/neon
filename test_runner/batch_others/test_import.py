@@ -20,9 +20,12 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     vanilla_pg.safe_psql("CHECKPOINT")
     pg_bin.run([
         "pg_basebackup",
-        "-F", "tar",
-        "-d", vanilla_pg.connstr(),
-        "-D", basebackup_dir,
+        "-F",
+        "tar",
+        "-d",
+        vanilla_pg.connstr(),
+        "-D",
+        basebackup_dir,
     ])
 
     # Get start_lsn and end_lsn
@@ -41,13 +44,20 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     env.neon_cli.raw_cli([
         "timeline",
         "import",
-        "--tenant-id", tenant.hex,
-        "--timeline-id", timeline.hex,
-        "--node-name", node_name,
-        "--base-lsn", start_lsn,
-        "--base-tarfile", os.path.join(basebackup_dir, "base.tar"),
-        "--end-lsn", end_lsn,
-        "--wal-tarfile", os.path.join(basebackup_dir, "pg_wal.tar"),
+        "--tenant-id",
+        tenant.hex,
+        "--timeline-id",
+        timeline.hex,
+        "--node-name",
+        node_name,
+        "--base-lsn",
+        start_lsn,
+        "--base-tarfile",
+        os.path.join(basebackup_dir, "base.tar"),
+        "--end-lsn",
+        end_lsn,
+        "--wal-tarfile",
+        os.path.join(basebackup_dir, "pg_wal.tar"),
     ])
 
     # Check it worked
