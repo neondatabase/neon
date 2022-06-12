@@ -577,6 +577,8 @@ impl PageServerHandler {
         let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
             timeline, repartition_distance);
 
+        // TODO ensure start_lsn matches current lsn
+
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message(&BeMessage::CopyInResponse)?;
