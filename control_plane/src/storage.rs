@@ -543,7 +543,7 @@ impl PageServerNode {
         let base_tarfile = File::open(base_tarfile_path)?;
         let mut base_reader = BufReader::new(base_tarfile);
 
-        // If there's any wal, extend the reader and end_lsn
+        // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
             let wal_tarfile = File::open(wal_tarfile_path)?;
             let wal_reader = BufReader::new(wal_tarfile);
@@ -559,7 +559,7 @@ impl PageServerNode {
         io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;
 
-        // Import wal
+        // Import wal if necessary
         if let Some(mut wal_reader) = wal_reader {
             let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
             let mut writer = client.copy_in(&import_cmd)?;
