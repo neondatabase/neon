@@ -495,7 +495,10 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
             match header.entry_type() {
                 tar::EntryType::Regular => {
-                    // TODO assert filename matches segno
+                    // FIXME: assume postgresql tli 1 for now
+                    let expected_filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
+                    let file_name = file_path.file_name().unwrap().to_string_lossy();
+                    ensure!(expected_filename == file_name);
 
                     info!("processing wal file {:?}", file_path);
                     read_all_bytes(entry)?
