@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -553,7 +553,8 @@ impl PageServerNode {
         };
 
         // Import base
-        let import_cmd = format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let import_cmd =
+            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
         let mut writer = client.copy_in(&import_cmd)?;
         io::copy(&mut base_reader, &mut writer)?;
         writer.finish()?;

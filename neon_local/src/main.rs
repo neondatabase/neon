@@ -626,26 +626,32 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 "Created timeline '{}' at Lsn {} for tenant: {}",
                 timeline.timeline_id, last_record_lsn, tenant_id,
             );
-        },
+        }
         Some(("import", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
-            let timeline_id = parse_timeline_id(import_match)?
-                .expect("No timeline id provided");
-            let name = import_match.value_of("node-name")
+            let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
+            let name = import_match
+                .value_of("node-name")
                 .ok_or_else(|| anyhow!("No node name provided"))?;
 
             // Parse base inputs
-            let base_tarfile = import_match.value_of("base-tarfile")
+            let base_tarfile = import_match
+                .value_of("base-tarfile")
                 .map(|s| PathBuf::from_str(s).unwrap())
                 .ok_or_else(|| anyhow!("No base-tarfile provided"))?;
-            let base_lsn = Lsn::from_str(import_match.value_of("base-lsn")
-                .ok_or_else(|| anyhow!("No base-lsn provided"))?)?;
+            let base_lsn = Lsn::from_str(
+                import_match
+                    .value_of("base-lsn")
+                    .ok_or_else(|| anyhow!("No base-lsn provided"))?,
+            )?;
             let base = (base_lsn, base_tarfile);
 
             // Parse pg_wal inputs
-            let wal_tarfile = import_match.value_of("wal-tarfile")
+            let wal_tarfile = import_match
+                .value_of("wal-tarfile")
                 .map(|s| PathBuf::from_str(s).unwrap());
-            let end_lsn = import_match.value_of("end-lsn")
+            let end_lsn = import_match
+                .value_of("end-lsn")
                 .map(|s| Lsn::from_str(s).unwrap());
             // TODO validate both or none are provided
             let pg_wal = end_lsn.zip(wal_tarfile);
@@ -657,7 +663,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
             cplane.new_node(tenant_id, name, timeline_id, None, None)?;
             println!("Done");
-        },
+        }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
             let new_branch_name = branch_match
