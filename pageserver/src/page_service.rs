@@ -13,10 +13,8 @@ use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::str;
 use std::str::FromStr;
 use std::sync::{Arc, RwLockReadGuard};
@@ -31,7 +29,7 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
-use crate::import_datadir::{import_basebackup_from_tar, import_timeline_from_postgres_datadir, import_wal_from_tar};
+use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
 use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
@@ -42,7 +40,6 @@ use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
-use crate::timelines::create_timeline;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
 
@@ -211,7 +208,14 @@ struct CopyInReader<'a> {
 
     /// Overflow buffer for bytes sent in CopyData messages
     /// that the reader (caller of read) hasn't asked for yet.
-    buf: VecDeque<u8>,
+    /// TODO use BytesMut?
+    buf: Vec<u8>,
+
+    /// Bytes before `buf_begin` are considered as dropped.
+    /// This allows us to implement O(1) pop_front on Vec<u8>.
+    /// The Vec won't grow large because we only add to it
+    /// when it's empty.
+    buf_begin: usize,
 }
 
 impl<'a> CopyInReader<'a> {
@@ -219,7 +223,8 @@ impl<'a> CopyInReader<'a> {
     fn new(pgb: &'a mut PostgresBackend) -> Self {
         Self {
             pgb,
-            buf: VecDeque::<_>::new(),
+            buf: Vec::<_>::new(),
+            buf_begin: 0,
         }
     }
 }
@@ -239,44 +244,44 @@ impl<'a> Read for CopyInReader<'a> {
             // TODO check if shutdown was requested?
 
             // Return from buffer if nonempty
-            if self.buf.len() > 0 {
-                let bytes_read = std::cmp::min(buf.len(), self.buf.len());
-                for i in 0..bytes_read {
-                    buf[i] = self.buf[i];
-                }
-                self.buf.drain(0..bytes_read);
-                return Ok(bytes_read);
+            if self.buf_begin < self.buf.len() {
+                let bytes_to_read = std::cmp::min(buf.len(), self.buf.len() - self.buf_begin);
+                buf[..bytes_to_read].copy_from_slice(&self.buf[self.buf_begin..][..bytes_to_read]);
+                self.buf_begin += bytes_to_read;
+                return Ok(bytes_to_read);
             }
+
+            // Delete garbage
+            self.buf.clear();
+            self.buf_begin = 0;
 
             // Wait for client to send CopyData bytes
             match self.pgb.read_message() {
                 Ok(Some(message)) => {
                     let copy_data_bytes = match message {
                         FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => {
-                            return Ok(0)
-                        }
+                        FeMessage::CopyDone => return Ok(0),
                         m => {
                             info!("unexpected copy in client message {:?}", m);
                             continue;
-                        },
+                        }
                     };
 
                     // Return as much as we can, saving the rest in self.buf
                     let mut reader = copy_data_bytes.reader();
                     let bytes_read = reader.read(buf)?;
-                    self.buf.extend(reader.bytes().map(|r| r.expect("error reading from copy in")));
+                    reader.read_to_end(&mut self.buf)?;
                     return Ok(bytes_read);
-                },
+                }
                 Ok(None) => {
                     // Is this ok?
-                    return Ok(0)
-                },
+                    return Ok(0);
+                }
                 Err(e) => {
                     if !is_socket_read_timed_out(&e) {
                         todo!("return io::Error");
                     }
-                },
+                }
             }
         }
     }
@@ -535,20 +540,21 @@ impl PageServerHandler {
         tenant_id: ZTenantId,
         timeline_id: ZTimelineId,
         base_lsn: Lsn,
-        end_lsn: Lsn,
+        _end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
+        let _enter =
+            info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
         // TODO thread_mgr::associate_with?
 
         // Create empty timeline
         info!("creating new timeline");
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let timeline = repo.create_empty_timeline(timeline_id, Lsn(0))?;
-        let repartition_distance = repo.get_checkpoint_distance();  // TODO
-        let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
-            timeline, repartition_distance);
+        let repartition_distance = repo.get_checkpoint_distance(); // TODO
+        let mut datadir_timeline =
+            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
 
-        // TODO mark timeline as not ready until it reaches end_lsn
+        // TODO mark timeline as not ready until it reaches end_lsn?
 
         // Import basebackup provided via CopyData
         info!("importing basebackup");
@@ -568,14 +574,15 @@ impl PageServerHandler {
         start_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
+        let _enter =
+            info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
         // TODO thread_mgr::associate_with?
 
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let timeline = repo.get_timeline_load(timeline_id)?;
-        let repartition_distance = repo.get_checkpoint_distance();  // TODO
-        let mut datadir_timeline = DatadirTimeline::<LayeredRepository>::new(
-            timeline, repartition_distance);
+        let repartition_distance = repo.get_checkpoint_distance(); // TODO
+        let mut datadir_timeline =
+            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
 
         // TODO ensure start_lsn matches current lsn
 

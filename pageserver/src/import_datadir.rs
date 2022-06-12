@@ -6,10 +6,9 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{bail, ensure, Context, Result};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use tracing::*;
 
 use crate::pgdatadir_mapping::*;
@@ -158,7 +157,6 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     Ok(())
 }
-
 
 fn import_relfile<R: Repository>(
     modification: &mut DatadirModification<R>,
@@ -429,7 +427,6 @@ fn import_wal<R: Repository>(
     Ok(())
 }
 
-
 pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     tline: &mut DatadirTimeline<R>,
     reader: Reader,
@@ -441,7 +438,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
 
     // Import base
     for base_tar_entry in tar::Archive::new(reader).entries()? {
-        let mut entry = base_tar_entry.unwrap();
+        let entry = base_tar_entry.unwrap();
         let header = entry.header();
         let len = header.entry_size()? as usize;
         let file_path = header.path().unwrap().into_owned();
@@ -451,17 +448,17 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                 // let mut buffer = Vec::new();
                 // entry.read_to_end(&mut buffer).unwrap();
 
-                import_file(&mut modification, &file_path.as_ref(), entry, len)?;
-            },
+                import_file(&mut modification, file_path.as_ref(), entry, len)?;
+            }
             tar::EntryType::Directory => {
                 info!("directory {:?}", file_path);
                 if file_path.starts_with("pg_wal") {
                     info!("found pg_wal in base lol");
                 }
-            },
+            }
             _ => {
                 panic!("tar::EntryType::?? {}", file_path.display());
-            },
+            }
         }
     }
 
@@ -475,7 +472,6 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
     start_lsn: Lsn,
     end_lsn: Lsn,
 ) -> Result<()> {
-
     // Set up walingest mutable state
     let mut waldecoder = WalStreamDecoder::new(start_lsn);
     let mut segno = start_lsn.segment_number(pg_constants::WAL_SEGMENT_SIZE);
@@ -579,7 +575,7 @@ pub fn import_file<R: Repository, Reader: Read>(
             }
             "PG_VERSION" => {
                 info!("ignored");
-            },
+            }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
                 info!("imported rel creation");
@@ -589,8 +585,7 @@ pub fn import_file<R: Repository, Reader: Read>(
         let spcnode = pg_constants::DEFAULTTABLESPACE_OID;
         let dbnode: u32 = file_path
             .iter()
-            .skip(1)
-            .next()
+            .nth(1)
             .unwrap()
             .to_string_lossy()
             .parse()
@@ -604,7 +599,7 @@ pub fn import_file<R: Repository, Reader: Read>(
             }
             "PG_VERSION" => {
                 info!("ignored");
-            },
+            }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
                 info!("imported rel creation");
