@@ -2149,14 +2149,15 @@ impl LayeredTimeline {
         drop(layers);
 
         // Only compact if enough layers have accumulated.
-        // Also force compaction if L0 delta layers contains large BLOBs, like serialized directory, not present in WAL.
-        // For such layers LSN range is less than checkpoint_distance = target_file_size
+        // Also force compaction if L0 delta layers contains a lot of dup;icatd keys.
+        // As far as compaction can not split key ito two layers, at may cause generation of large layer files
+        // (up to compaction_threshold*checkpoint_distance).
         if level0_deltas.is_empty()
             || (level0_deltas.len() < self.get_compaction_threshold()
                 && level0_deltas
                     .iter()
-                    .find(|l| l.get_lsn_range().start + target_file_size > l.get_lsn_range().end)
-                    .is_none())
+                    .fold(0u64, |acc, l| acc + l.get_max_key_range().unwrap())
+                    < target_file_size)
         {
             return Ok(());
         }

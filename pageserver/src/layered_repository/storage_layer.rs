@@ -4,7 +4,7 @@
 
 use crate::repository::{Key, Value};
 use crate::walrecord::ZenithWalRecord;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -144,4 +144,10 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+
+    /// Get maximal range of values for one key in this layer.
+    /// Right now it is implemented only for delta layer
+    fn get_max_key_range(&self) -> Result<u64> {
+        bail!("Not implemented")
+    }
 }

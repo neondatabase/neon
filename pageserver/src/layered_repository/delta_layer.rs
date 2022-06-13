@@ -196,6 +196,38 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
+    fn get_max_key_range(&self) -> Result<u64> {
+        let inner = self.load()?;
+
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+        let mut prev_key: Key = Key::MIN;
+        let mut max_range: u64 = 0;
+        let mut start_pos: u64 = 0;
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |delta_key, value| {
+                let key = DeltaKey::extract_key_from_buf(delta_key);
+                if key != prev_key {
+                    let curr_pos = BlobRef(value).pos();
+                    if curr_pos - start_pos > max_range {
+                        max_range = curr_pos - start_pos;
+                    }
+                    start_pos = curr_pos;
+                    prev_key = key;
+                }
+                true
+            },
+        )?;
+        Ok(max_range)
+    }
+
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
     }
