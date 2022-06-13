@@ -192,19 +192,26 @@ fn import_rel<R: Repository, Reader: Read>(
     ensure!(len % pg_constants::BLCKSZ as usize == 0);
     let nblocks = len / pg_constants::BLCKSZ as usize;
 
-    if segno != 0 {
-        todo!();
-    }
-
     let rel = RelTag {
         spcnode: spcoid,
         dbnode: dboid,
         relnode,
         forknum,
     };
-    modification.put_rel_creation(rel, nblocks as u32)?;
 
     let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+
+    // Call put_rel_creation for every segment of the relation,
+    // because there is no guarantee about the order in which we are processing segments.
+    // ignore "relation already exists" error
+    if let Err(e) = modification.put_rel_creation(rel, nblocks as u32) {
+        if e.to_string().contains("already exists") {
+            info!("relation {} already exists. we must be extending it", rel);
+        } else {
+            return Err(e);
+        }
+    }
+
     loop {
         let r = reader.read_exact(&mut buf);
         match r {
@@ -216,7 +223,9 @@ fn import_rel<R: Repository, Reader: Read>(
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
-                    ensure!(blknum == nblocks as u32, "unexpected EOF");
+                    let relative_blknum =
+                        blknum - segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+                    ensure!(relative_blknum == nblocks as u32, "unexpected EOF");
                     break;
                 }
                 _ => {
@@ -226,6 +235,12 @@ fn import_rel<R: Repository, Reader: Read>(
         };
         blknum += 1;
     }
+
+    // Update relation size
+    //
+    // If we process rel segments out of order,
+    // put_rel_extend will skip the update.
+    modification.put_rel_extend(rel, blknum)?;
 
     Ok(())
 }
