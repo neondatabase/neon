@@ -93,11 +93,12 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
             .subject
             .to_string();
         let expected_prefix = "CN=*.";
-        let common_name = almost_common_name
-            .strip_prefix(expected_prefix)
-            .unwrap_or("Expected {expected_prefix} prefix before the common name.")
-            .to_string();
-        common_name
+        let option_common_name = almost_common_name.strip_prefix(expected_prefix);
+        let common_name = match option_common_name {
+            Some(common_name) => common_name,
+            None => panic!("Expected {expected_prefix} prefix before the common name."),
+        };
+        common_name.to_string()
     };
     Ok(TlsConfig {
         tls_config: config.into(),
