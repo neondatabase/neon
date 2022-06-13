@@ -54,7 +54,7 @@ jobs:
 
 
   build-neon:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-postgres ]
     strategy:
       matrix:
@@ -192,7 +192,7 @@ jobs:
           path: ./neon.tgz
 
   check-codestyle-python:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
       matrix:
         rust_toolchain: [ 1.58 ]
