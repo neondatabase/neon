@@ -81,8 +81,8 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
-    let tls = config.tls_config.clone();
-    let (stream, creds) = match handshake(stream, tls, cancel_map, &config.common_name).await? {
+    let tls_config = config.tls_config.clone();
+    let (stream, creds) = match handshake(stream, tls_config, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
@@ -101,10 +101,11 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<TlsConfig>,
     cancel_map: &CancelMap,
-    common_name: &Option<String>,
 ) -> anyhow::Result<Option<(PqStream<Stream<S>>, auth::ClientCredentials)>> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
+
+    let common_name = tls.as_ref().map(|tls| tls.common_name);
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -123,7 +124,8 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
-                        stream = PqStream::new(stream.into_inner().upgrade(tls).await?);
+                        stream =
+                            PqStream::new(stream.into_inner().upgrade(tls.get_tls_config()).await?);
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -155,7 +157,10 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
 
                 // Set common_name
-                creds.common_name = common_name.clone();
+                creds.common_name = match common_name {
+                    Some(common_name) => common_name,
+                    None => None,
+                };
 
                 break Ok(Some((stream, creds)));
             }
@@ -350,7 +355,7 @@ mod tests {
         auth: impl TestAuth + Send,
     ) -> anyhow::Result<()> {
         let cancel_map = CancelMap::default();
-        let (mut stream, _creds) = handshake(client, tls, &cancel_map, &None)
+        let (mut stream, _creds) = handshake(client, tls, &cancel_map)
             .await?
             .context("handshake failed")?;
 
@@ -370,7 +375,11 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (_, server_config) = generate_tls_config("localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
+        let proxy = tokio::spawn(dummy_proxy(
+            client,
+            Some(TlsConfig::new(server_config)),
+            NoAuth,
+        ));
 
         let client_err = tokio_postgres::Config::new()
             .user("john_doe")
@@ -398,7 +407,11 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (client_config, server_config) = generate_tls_config("localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
+        let proxy = tokio::spawn(dummy_proxy(
+            client,
+            Some(TlsConfig::new(server_config)),
+            NoAuth,
+        ));
 
         let (_client, _conn) = tokio_postgres::Config::new()
             .user("john_doe")
@@ -483,7 +496,7 @@ mod tests {
         let (client_config, server_config) = generate_tls_config("localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
-            Some(server_config),
+            Some(TlsConfig::new(server_config)),
             Scram::new(password)?,
         ));
 
@@ -505,7 +518,7 @@ mod tests {
         let (client_config, server_config) = generate_tls_config("localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
-            Some(server_config),
+            Some(TlsConfig::new(server_config)),
             Scram::mock("user"),
         ));
 

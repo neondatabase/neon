@@ -34,12 +34,26 @@ pub struct ProxyConfig {
     pub auth_backend: AuthBackendType,
     pub auth_endpoint: ApiUrl,
     pub auth_link_uri: ApiUrl,
-
-    // common name is extracted from server.crt and used as help to determine project name from SNI.
-    pub common_name: Option<String>,
 }
 
-pub type TlsConfig = Arc<rustls::ServerConfig>;
+#[derive(Clone)]
+pub struct TlsConfig {
+    pub tls_config: Arc<rustls::ServerConfig>,
+    pub common_name: Option<&'static str>,
+}
+
+impl TlsConfig {
+    #[cfg(test)]
+    pub fn new(tls_config: Arc<rustls::ServerConfig>) -> TlsConfig {
+        TlsConfig {
+            tls_config,
+            common_name: None,
+        }
+    }
+    pub fn get_tls_config(self) -> Arc<rustls::ServerConfig> {
+        self.tls_config
+    }
+}
 
 /// Configure TLS for the main endpoint.
 pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfig> {
@@ -68,6 +82,25 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
-
-    Ok(config.into())
+    // determine common name from tls-cert (-c server.crt param).
+    // used in asserting project name formatting invariant.
+    let common_name = {
+        let file = std::fs::File::open(cert_path)?;
+        let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))?
+            .0
+            .parse_x509()?
+            .tbs_certificate
+            .subject
+            .to_string();
+        let expected_prefix = "CN=*.";
+        let common_name = almost_common_name
+            .strip_prefix(expected_prefix)
+            .unwrap_or("Expected {expected_prefix} prefix before the common name.")
+            .to_string();
+        common_name
+    };
+    Ok(TlsConfig {
+        tls_config: config.into(),
+        common_name: Some(Box::<str>::leak(common_name.into_boxed_str())),
+    })
 }

@@ -118,33 +118,11 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
-    // determine common name from tls-cert (-c server.crt param).
-    // used in asserting project name formatting invariant.
-    let common_name = match arg_matches.value_of("tls-cert") {
-        Some(cert_path) => {
-            let file = std::fs::File::open(cert_path)?;
-            let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))?
-                .0
-                .parse_x509()?
-                .tbs_certificate
-                .subject
-                .to_string();
-            let expected_prefix = "CN=*";
-            let common_name = almost_common_name
-                .strip_prefix(expected_prefix)
-                .unwrap_or("Expected 'CN=*' prefix before the common name.")
-                .to_string();
-            Some(common_name)
-        }
-        None => None,
-    };
-
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
         auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        common_name,
     }));
 
     println!("Version: {GIT_VERSION}");
