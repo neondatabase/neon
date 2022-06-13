@@ -14,6 +14,7 @@ jobs:
 
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      options: --user 1000
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
@@ -63,6 +64,7 @@ jobs:
 
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      options: --user 1000
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
 
@@ -195,6 +197,7 @@ jobs:
         rust_toolchain: [ 1.58 ]
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      options: --user 1000
     steps:
 #      - name: Fix permissions
 #        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
