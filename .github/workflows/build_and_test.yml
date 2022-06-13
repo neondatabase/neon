@@ -76,9 +76,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Install rust toolchain ${{ matrix.rust_toolchain }}
-        run: rustup default ${{ matrix.rust_toolchain }}
-
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
