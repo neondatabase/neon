@@ -1204,7 +1204,7 @@ class NeonCli:
         log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
-        env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override

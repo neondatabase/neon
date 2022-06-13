@@ -21,9 +21,9 @@ use utils::{
 use crate::safekeeper::SafekeeperNode;
 
 //
-// This data structures represents zenith CLI config
+// This data structures represents neon_local CLI config
 //
-// It is deserialized from the .zenith/config file, or the config file passed
+// It is deserialized from the .neon/config file, or the config file passed
 // to 'zenith init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
@@ -34,8 +34,8 @@ pub struct LocalEnv {
     // compute nodes).
     //
     // This is not stored in the config file. Rather, this is the path where the
-    // config file itself is. It is read from the ZENITH_REPO_DIR env variable or
-    // '.zenith' if not given.
+    // config file itself is. It is read from the NEON_REPO_DIR env variable or
+    // '.neon' if not given.
     #[serde(skip)]
     pub base_data_dir: PathBuf,
 
@@ -339,7 +339,7 @@ impl LocalEnv {
     pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
         // Currently, the user first passes a config file with 'zenith init --config=<path>'
         // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
-        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
+        // to .neon/config. TODO: We lose any formatting and comments along the way, which is
         // a bit sad.
         let mut conf_content = r#"# This file describes a locale deployment of the page server
 # and safekeeeper node. It is read by the 'zenith' command-line
@@ -483,9 +483,9 @@ impl LocalEnv {
 }
 
 fn base_path() -> PathBuf {
-    match std::env::var_os("ZENITH_REPO_DIR") {
+    match std::env::var_os("NEON_REPO_DIR") {
         Some(val) => PathBuf::from(val),
-        None => PathBuf::from(".zenith"),
+        None => PathBuf::from(".neon"),
     }
 }
 

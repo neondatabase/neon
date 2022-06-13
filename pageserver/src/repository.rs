@@ -197,7 +197,7 @@ impl Display for TimelineSyncStatusUpdate {
 }
 
 ///
-/// A repository corresponds to one .zenith directory. One repository holds multiple
+/// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
     type Timeline: Timeline;
