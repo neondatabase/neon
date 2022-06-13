@@ -2149,7 +2149,15 @@ impl LayeredTimeline {
         drop(layers);
 
         // Only compact if enough layers have accumulated.
-        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
+        // Also force compaction if L0 delta layers contains large BLOBs, like serialized directory, not present in WAL.
+        // For such layers LSN range is less than checkpoint_distance = target_file_size
+        if level0_deltas.is_empty()
+            || (level0_deltas.len() < self.get_compaction_threshold()
+                && level0_deltas
+                    .iter()
+                    .find(|l| l.get_lsn_range().start + target_file_size > l.get_lsn_range().end)
+                    .is_none())
+        {
             return Ok(());
         }
 
