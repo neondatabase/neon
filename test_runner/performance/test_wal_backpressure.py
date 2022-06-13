@@ -195,16 +195,16 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
             time.sleep(pool_interval)
 
     env.zenbenchmark.record("lsn_write_lag_max",
-                            max(lsn_write_lags) // 1024,
-                            "kB",
+                            float(max(lsn_write_lags) / (1024**2)),
+                            "MB",
                             MetricReport.LOWER_IS_BETTER)
     env.zenbenchmark.record("lsn_write_lag_avg",
-                            statistics.mean(lsn_write_lags) // 1024,
-                            "kB",
+                            float(statistics.mean(lsn_write_lags) / (1024**2)),
+                            "MB",
                             MetricReport.LOWER_IS_BETTER)
     env.zenbenchmark.record("lsn_write_lag_stdev",
-                            statistics.stdev(lsn_write_lags) // 1024,
-                            "kB",
+                            float(statistics.stdev(lsn_write_lags) / (1024**2)),
+                            "MB",
                             MetricReport.LOWER_IS_BETTER)
 
 
