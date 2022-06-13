@@ -12,7 +12,7 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
         pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
         pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
     ])
-def test_hot_page(env: PgCompare):
+def test_dup_key(env: PgCompare):
     # Update the same page many times, then measure read performance
 
     with closing(env.pg.connect()) as conn:
