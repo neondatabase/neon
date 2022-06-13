@@ -6,7 +6,7 @@ defaults:
 
 jobs:
   build-postgres:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
       matrix:
         build_type: [ debug, release ]
