@@ -82,6 +82,7 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
+
     // determine common name from tls-cert (-c server.crt param).
     // used in asserting project name formatting invariant.
     let common_name = {
@@ -95,13 +96,18 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         let expected_prefix = "CN=*.";
         let option_common_name = almost_common_name.strip_prefix(expected_prefix);
         let common_name = match option_common_name {
-            Some(common_name) => common_name,
-            None => panic!("Expected {expected_prefix} prefix before the common name."),
+            Some(common_name) => {
+                let leaked_str: &'static str =
+                    Box::<str>::leak(common_name.to_string().into_boxed_str());
+                Some(leaked_str)
+            }
+            None => None,
         };
-        common_name.to_string()
+        common_name
     };
+
     Ok(TlsConfig {
         tls_config: config.into(),
-        common_name: Some(Box::<str>::leak(common_name.into_boxed_str())),
+        common_name,
     })
 }

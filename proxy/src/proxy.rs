@@ -273,9 +273,7 @@ mod tests {
     }
 
     /// Generate TLS certificates and build rustls configs for client and server.
-    fn generate_tls_config(
-        hostname: &str,
-    ) -> anyhow::Result<(ClientConfig<'_>, Arc<rustls::ServerConfig>)> {
+    fn generate_tls_config(hostname: &str) -> anyhow::Result<(ClientConfig<'_>, TlsConfig)> {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let server_config = {
@@ -300,7 +298,7 @@ mod tests {
             ClientConfig { config, hostname }
         };
 
-        Ok((client_config, server_config))
+        Ok((client_config, TlsConfig::new(server_config)))
     }
 
     #[async_trait]
@@ -375,11 +373,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (_, server_config) = generate_tls_config("localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(
-            client,
-            Some(TlsConfig::new(server_config)),
-            NoAuth,
-        ));
+        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let client_err = tokio_postgres::Config::new()
             .user("john_doe")
@@ -407,11 +401,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (client_config, server_config) = generate_tls_config("localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(
-            client,
-            Some(TlsConfig::new(server_config)),
-            NoAuth,
-        ));
+        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let (_client, _conn) = tokio_postgres::Config::new()
             .user("john_doe")
@@ -496,7 +486,7 @@ mod tests {
         let (client_config, server_config) = generate_tls_config("localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
-            Some(TlsConfig::new(server_config)),
+            Some(server_config),
             Scram::new(password)?,
         ));
 
@@ -518,7 +508,7 @@ mod tests {
         let (client_config, server_config) = generate_tls_config("localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
-            Some(TlsConfig::new(server_config)),
+            Some(server_config),
             Scram::mock("user"),
         ));
 
