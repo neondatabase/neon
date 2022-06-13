@@ -233,6 +233,11 @@ impl Layer for InMemoryLayer {
 }
 
 impl InMemoryLayer {
+    pub fn size(&self) -> Result<u64> {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.file.size)
+    }
+
     ///
     /// Create a new, empty, in-memory layer
     ///

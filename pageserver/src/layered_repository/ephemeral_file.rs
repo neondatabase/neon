@@ -43,7 +43,7 @@ pub struct EphemeralFile {
     _timelineid: ZTimelineId,
     file: Arc<VirtualFile>,
 
-    size: u64,
+    pub size: u64,
 }
 
 impl EphemeralFile {
