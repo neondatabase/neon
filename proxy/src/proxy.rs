@@ -81,8 +81,8 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
-    let tls_config = config.tls_config.clone();
-    let (stream, creds) = match handshake(stream, tls_config, cancel_map).await? {
+    let tls = config.tls_config.clone();
+    let (stream, creds) = match handshake(stream, tls, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
