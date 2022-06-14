@@ -4,6 +4,7 @@ use crate::repository::Repository;
 use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
 use anyhow::Result;
+use tokio::task::JoinError;
 use std::time::Duration;
 use tracing::*;
 use utils::zid::ZTenantId;
@@ -47,31 +48,42 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
 ///
 /// GC thread's main loop
 ///
-pub fn gc_loop(tenantid: ZTenantId) -> Result<()> {
+pub async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
         }
 
-        trace!("gc thread for tenant {} waking up", tenantid);
+        trace!("gc loop for tenant {} waking up", tenantid);
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+        let gc_period = repo.get_gc_period();
         let gc_horizon = repo.get_gc_horizon();
+
         // Garbage collect old files that are not needed for PITR anymore
         if gc_horizon > 0 {
-            repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
+            let gc_result = tokio::task::spawn_blocking(move || {
+                repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)
+            }).await;
+
+            match gc_result {
+                Ok(Ok(gc_result)) => {
+                    // Gc success, do nothing
+                }
+                Ok(Err(e)) => {
+                    error!("Gc failed: {}", e);
+                    // TODO maybe also don't reschedule on error?
+                }
+                Err(e) => {
+                    error!("Gc failed: {}", e);
+                    // TODO maybe also don't reschedule on error?
+                }
+            }
         }
 
-        // TODO Write it in more adequate way using
-        // condvar.wait_timeout() or something
-        let mut sleep_time = repo.get_gc_period().as_secs();
-        while sleep_time > 0 && tenant_mgr::get_tenant_state(tenantid) == Some(TenantState::Active)
-        {
-            sleep_time -= 1;
-            std::thread::sleep(Duration::from_secs(1));
-        }
+        tokio::time::sleep(gc_period);
     }
     trace!(
-        "GC thread stopped for tenant {} state is {:?}",
+        "GC loop stopped for tenant {} state is {:?}",
         tenantid,
         tenant_mgr::get_tenant_state(tenantid)
     );
