@@ -347,27 +347,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
             }
             compactor_spawn_result?;
 
-            let gc_spawn_result = thread_mgr::spawn(
-                ThreadKind::GarbageCollector,
-                Some(tenant_id),
-                None,
-                "GC thread",
-                false,
-                move || crate::tenant_threads::gc_loop(tenant_id),
-            )
-            .map(|_thread_id| ()) // update the `Result::Ok` type to match the outer function's return signature
-            .with_context(|| format!("Failed to launch GC thread for tenant {tenant_id}"));
-
-            if let Err(e) = &gc_spawn_result {
-                let mut m = tenants_state::write_tenants();
-                m.get_mut(&tenant_id)
-                    .with_context(|| format!("Tenant not found for id {tenant_id}"))?
-                    .state = old_state;
-                drop(m);
-                error!("Failed to start GC thread for tenant {tenant_id}, stopping its checkpointer thread: {e:?}");
-                thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
-                return gc_spawn_result;
-            }
+            crate::tenant_threads::start_gc_loop(tenant_id)?;
         }
         (TenantState::Idle, TenantState::Stopping) => {
             info!("stopping idle tenant {tenant_id}");

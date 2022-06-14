@@ -276,6 +276,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
 
     let remote_index = tenant_mgr::init_tenant_mgr(conf)?;
 
+    pageserver::tenant_threads::init_tenant_task_pool()?;
+
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
     let auth_cloned = auth.clone();

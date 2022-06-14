@@ -1,11 +1,16 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
+use std::str::FromStr;
+
 use crate::repository::Repository;
-use crate::tenant_mgr;
 use crate::tenant_mgr::TenantState;
+use crate::thread_mgr::ThreadKind;
+use crate::{tenant_mgr, thread_mgr};
 use anyhow::Result;
-use tokio::task::JoinError;
-use std::time::Duration;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
+use once_cell::sync::OnceCell;
+use tokio::sync::mpsc::{self, Sender};
 use tracing::*;
 use utils::zid::ZTenantId;
 
@@ -45,6 +50,58 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
     Ok(())
 }
 
+static START_GC_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
+
+pub fn start_gc_loop(tenantid: ZTenantId) -> Result<()> {
+    START_GC_LOOP
+        .get()
+        .unwrap()
+        .blocking_send(tenantid)
+        .unwrap();
+    Ok(())
+}
+
+pub fn init_tenant_task_pool() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("tenant-task-worker")
+        .worker_threads(40)
+        .max_blocking_threads(100)
+        .enable_all()
+        .build()?;
+
+    let (send, mut recv) = mpsc::channel::<ZTenantId>(100);
+    START_GC_LOOP.set(send).unwrap();
+
+    thread_mgr::spawn(
+        ThreadKind::WalReceiverManager, // TODO
+        None,
+        None,
+        "WAL receiver manager main thread",
+        true,
+        move || {
+            runtime.block_on(async move {
+                let mut futures = FuturesUnordered::new();
+                loop {
+                    tokio::select! {
+                        _ = thread_mgr::shutdown_watcher() => break,
+                        tenantid = recv.recv() => {
+                            let tenantid = tenantid.unwrap();
+                            // Await concurrently with all other futures
+                            futures.push(tokio::spawn(gc_loop(tenantid)));
+                        },
+                        _ = futures.next() => {
+                            // Do nothing. We're waiting on them just to make progress
+                        },
+                    }
+                }
+            });
+            Ok(())
+        },
+    )?;
+
+    Ok(())
+}
+
 ///
 /// GC thread's main loop
 ///
@@ -63,10 +120,11 @@ pub async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
         if gc_horizon > 0 {
             let gc_result = tokio::task::spawn_blocking(move || {
                 repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)
-            }).await;
+            })
+            .await;
 
             match gc_result {
-                Ok(Ok(gc_result)) => {
+                Ok(Ok(_gc_result)) => {
                     // Gc success, do nothing
                 }
                 Ok(Err(e)) => {
@@ -80,7 +138,7 @@ pub async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
             }
         }
 
-        tokio::time::sleep(gc_period);
+        tokio::time::sleep(gc_period).await;
     }
     trace!(
         "GC loop stopped for tenant {} state is {:?}",
