@@ -41,6 +41,30 @@ impl ClientCredentials {
         // This logic will likely change in the future.
         self.user.ends_with("@zenith")
     }
+
+    pub fn construct(
+        mut options: HashMap<String, String>,
+        sni_data: Option<String>,
+        common_name: Option<&'static str>,
+    ) -> Result<Self, ClientCredsParseError> {
+        let mut get_param = |key| {
+            options
+                .remove(key)
+                .ok_or(ClientCredsParseError::MissingKey(key))
+        };
+
+        let user = get_param("user")?;
+        let dbname = get_param("database")?;
+        let project_name = get_param("project").ok();
+
+        Ok(Self {
+            user,
+            dbname,
+            sni_data,
+            project_name,
+            common_name,
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -336,30 +360,6 @@ impl ClientCredentials {
     /// Determine project name from SNI or from project_name parameter from options argument.
     pub fn project_name(&self) -> Result<&str, ProjectNameError> {
         get_project_name(&self.sni_data, &self.common_name, &self.project_name)
-    }
-}
-
-impl TryFrom<HashMap<String, String>> for ClientCredentials {
-    type Error = ClientCredsParseError;
-
-    fn try_from(mut value: HashMap<String, String>) -> Result<Self, Self::Error> {
-        let mut get_param = |key| {
-            value
-                .remove(key)
-                .ok_or(ClientCredsParseError::MissingKey(key))
-        };
-
-        let user = get_param("user")?;
-        let dbname = get_param("database")?;
-        let project_name = get_param("project").ok();
-
-        Ok(Self {
-            user,
-            dbname,
-            sni_data: None,
-            project_name,
-            common_name: None,
-        })
     }
 }
 

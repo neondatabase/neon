@@ -106,6 +106,10 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
     let common_name = tls.as_ref().map(|tls| tls.common_name);
+    let common_name = match common_name {
+        Some(common_name) => common_name,
+        None => None,
+    };
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -146,21 +150,15 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
                 }
 
-                // Here and forth: `or_else` demands that we use a future here
-                let mut creds: auth::ClientCredentials = async { params.try_into() }
-                    .or_else(|e| stream.throw_error(e))
-                    .await?;
-
-                // Set SNI info when available
-                if let Stream::Tls { tls } = stream.get_ref() {
-                    creds.sni_data = tls.get_ref().1.sni_hostname().map(|s| s.to_owned());
-                }
-
-                // Set common_name
-                creds.common_name = match common_name {
-                    Some(common_name) => common_name,
-                    None => None,
+                // Get SNI info when available
+                let sni_data = match stream.get_ref() {
+                    Stream::Tls { tls } => tls.get_ref().1.sni_hostname().map(|s| s.to_owned()),
+                    _ => None,
                 };
+
+                // Construct credentials
+                let creds = auth::ClientCredentials::construct(params, sni_data, common_name);
+                let creds = async { creds }.or_else(|e| stream.throw_error(e)).await?;
 
                 break Ok(Some((stream, creds)));
             }
