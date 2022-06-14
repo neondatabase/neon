@@ -69,19 +69,23 @@ impl ClientCredentials {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ProjectNameError {
-    #[error("SNI is missing. EITHER please upgrade the postgres client library OR pass the project name as a parameter: '...&options=project%3D<project-name>...'.")]
+    #[error(
+        "Project name is not specified. \
+        EITHER please upgrade the postgres client library (libpq) for SNI support \
+        OR pass the project name as a parameter: '&options=project%3D<project-name>'."
+    )]
     Missing,
 
-    #[error("Inconsistent project name inferred from SNI and project option. Project name from SNI: '{0}', Project name from project option: '{1}'")]
+    #[error("Inconsistent project name inferred from SNI ('{0}') and project option ('{1}').")]
     InconsistentProjectNameAndSNI(String, String),
 
     #[error("Common name is not set.")]
     CommonNameNotSet,
 
-    #[error("Inconsistent common name and SNI suffix. Common name: '{0}', SNI: '{1}'")]
+    #[error("Inconsistent common name ('{0}') and SNI suffix (SNI: '{1}').")]
     InconsistentCommonNameAndSNI(&'static str, String),
 
-    #[error("Project name must contain only alphanumeric characters and hyphens ('-'). Project name: '{0}'.")]
+    #[error("Project name ('{0}') must contain only alphanumeric characters and hyphens ('-').")]
     ProjectNameContainsIllegalChars(String),
 }
 
