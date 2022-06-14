@@ -80,17 +80,11 @@ pub fn init_tenant_task_pool() -> Result<()> {
         true,
         move || {
             runtime.block_on(async move {
-                let mut futures = FuturesUnordered::new();
                 loop {
                     tokio::select! {
                         _ = thread_mgr::shutdown_watcher() => break,
                         tenantid = recv.recv() => {
-                            let tenantid = tenantid.unwrap();
-                            // Await concurrently with all other futures
-                            futures.push(tokio::spawn(gc_loop(tenantid)));
-                        },
-                        _ = futures.next() => {
-                            // Do nothing. We're waiting on them just to make progress
+                            tokio::spawn(gc_loop(tenantid.unwrap()));
                         },
                     }
                 }
