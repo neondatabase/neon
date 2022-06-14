@@ -100,7 +100,6 @@ fn project_name_from_sni_data<'sni>(
             sni_data.to_string(),
         ));
     }
-
     // return sni_data without the common name suffix.
     Ok(sni_data.strip_suffix(&common_name_with_dot).unwrap())
 }
@@ -144,32 +143,27 @@ fn get_project_name<'ret>(
     common_name: &Option<&'static str>,
     project_name: &'ret Option<String>,
 ) -> Result<&'ret str, ProjectNameError> {
-    // Checking that if both sni_data and project_name are set, then they should match
-    // otherwise, throws a ProjectNameError::Inconsistent error.
-    if let Some(sni_data) = sni_data {
-        // extract common name. If unset, throw a CommonNameNotSet error.
-        let common_name = match &common_name {
-            Some(common_name) => common_name,
-            None => return Err(ProjectNameError::CommonNameNotSet),
-        };
-        let project_name_from_sni_data = project_name_from_sni_data(sni_data, common_name)?;
-        if let Some(project_name_from_options) = &project_name {
-            if !project_name_from_options.eq(project_name_from_sni_data) {
-                return Err(ProjectNameError::InconsistentProjectNameAndSNI(
-                    project_name_from_sni_data.to_string(),
-                    project_name_from_options.to_string(),
-                ));
-            }
-        }
-    }
-
-    // determine the project name from self.sni_data if it exists, otherwise from self.project_name.
-    let ret = match &sni_data {
+    // determine the project name from sni_data if it exists, otherwise from project_name.
+    let ret = match sni_data {
         // if sni_data exists, use it to determine project name
         Some(sni_data) => {
-            // common_name.is_some() bc we already checked the invariant.
-            assert!(common_name.is_some());
-            project_name_from_sni_data(sni_data, common_name.unwrap())?
+            // extract common name. If unset, throw a CommonNameNotSet error.
+            let common_name = match &common_name {
+                Some(common_name) => common_name,
+                None => return Err(ProjectNameError::CommonNameNotSet),
+            };
+            // extract project name from sni.
+            let project_name_from_sni = project_name_from_sni_data(sni_data, common_name)?;
+            // check invariant: project name from options and from sni should match
+            if let Some(project_name) = &project_name {
+                if !project_name_from_sni.eq(project_name) {
+                    return Err(ProjectNameError::InconsistentProjectNameAndSNI(
+                        project_name_from_sni.to_string(),
+                        project_name.to_string(),
+                    ));
+                }
+            }
+            project_name_from_sni
         }
         // otherwise use project_option if it was manually set thought options parameter.
         None => project_name
