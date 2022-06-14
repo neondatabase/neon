@@ -926,10 +926,10 @@ impl<'a> BeMessage<'a> {
     }
 }
 
-// Zenith extension of postgres replication protocol
-// See ZENITH_STATUS_UPDATE_TAG_BYTE
+// Neon extension of postgres replication protocol
+// See NEON_STATUS_UPDATE_TAG_BYTE
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ZenithFeedback {
+pub struct ReplicationFeedback {
     // Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
     // Parts of StandbyStatusUpdate we resend to compute via safekeeper
@@ -939,13 +939,13 @@ pub struct ZenithFeedback {
     pub ps_replytime: SystemTime,
 }
 
-// NOTE: Do not forget to increment this number when adding new fields to ZenithFeedback.
+// NOTE: Do not forget to increment this number when adding new fields to ReplicationFeedback.
 // Do not remove previously available fields because this might be backwards incompatible.
-pub const ZENITH_FEEDBACK_FIELDS_NUMBER: u8 = 5;
+pub const REPLICATION_FEEDBACK_FIELDS_NUMBER: u8 = 5;
 
-impl ZenithFeedback {
-    pub fn empty() -> ZenithFeedback {
-        ZenithFeedback {
+impl ReplicationFeedback {
+    pub fn empty() -> ReplicationFeedback {
+        ReplicationFeedback {
             current_timeline_size: 0,
             ps_writelsn: 0,
             ps_applylsn: 0,
@@ -954,7 +954,7 @@ impl ZenithFeedback {
         }
     }
 
-    // Serialize ZenithFeedback using custom format
+    // Serialize ReplicationFeedback using custom format
     // to support protocol extensibility.
     //
     // Following layout is used:
@@ -965,7 +965,7 @@ impl ZenithFeedback {
     // uint32 - value length in bytes
     // value itself
     pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
-        buf.put_u8(ZENITH_FEEDBACK_FIELDS_NUMBER); // # of keys
+        buf.put_u8(REPLICATION_FEEDBACK_FIELDS_NUMBER); // # of keys
         write_cstr(&Bytes::from("current_timeline_size"), buf)?;
         buf.put_i32(8);
         buf.put_u64(self.current_timeline_size);
@@ -992,9 +992,9 @@ impl ZenithFeedback {
         Ok(())
     }
 
-    // Deserialize ZenithFeedback message
-    pub fn parse(mut buf: Bytes) -> ZenithFeedback {
-        let mut zf = ZenithFeedback::empty();
+    // Deserialize ReplicationFeedback message
+    pub fn parse(mut buf: Bytes) -> ReplicationFeedback {
+        let mut zf = ReplicationFeedback::empty();
         let nfields = buf.get_u8();
         let mut i = 0;
         while i < nfields {
@@ -1035,14 +1035,14 @@ impl ZenithFeedback {
                 _ => {
                     let len = buf.get_i32();
                     warn!(
-                        "ZenithFeedback parse. unknown key {} of len {}. Skip it.",
+                        "ReplicationFeedback parse. unknown key {} of len {}. Skip it.",
                         key, len
                     );
                     buf.advance(len as usize);
                 }
             }
         }
-        trace!("ZenithFeedback parsed is {:?}", zf);
+        trace!("ReplicationFeedback parsed is {:?}", zf);
         zf
     }
 }
@@ -1052,8 +1052,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_zenithfeedback_serialization() {
-        let mut zf = ZenithFeedback::empty();
+    fn test_replication_feedback_serialization() {
+        let mut zf = ReplicationFeedback::empty();
         // Fill zf with some values
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
@@ -1062,13 +1062,13 @@ mod tests {
         let mut data = BytesMut::new();
         zf.serialize(&mut data).unwrap();
 
-        let zf_parsed = ZenithFeedback::parse(data.freeze());
+        let zf_parsed = ReplicationFeedback::parse(data.freeze());
         assert_eq!(zf, zf_parsed);
     }
 
     #[test]
-    fn test_zenithfeedback_unknown_key() {
-        let mut zf = ZenithFeedback::empty();
+    fn test_replication_feedback_unknown_key() {
+        let mut zf = ReplicationFeedback::empty();
         // Fill zf with some values
         zf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
@@ -1079,7 +1079,7 @@ mod tests {
 
         // Add an extra field to the buffer and adjust number of keys
         if let Some(first) = data.first_mut() {
-            *first = ZENITH_FEEDBACK_FIELDS_NUMBER + 1;
+            *first = REPLICATION_FEEDBACK_FIELDS_NUMBER + 1;
         }
 
         write_cstr(&Bytes::from("new_field_one"), &mut data).unwrap();
@@ -1087,7 +1087,7 @@ mod tests {
         data.put_u64(42);
 
         // Parse serialized data and check that new field is not parsed
-        let zf_parsed = ZenithFeedback::parse(data.freeze());
+        let zf_parsed = ReplicationFeedback::parse(data.freeze());
         assert_eq!(zf, zf_parsed);
     }
 

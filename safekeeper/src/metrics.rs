@@ -242,9 +242,9 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.zttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
-            let mut most_advanced: Option<utils::pq_proto::ZenithFeedback> = None;
+            let mut most_advanced: Option<utils::pq_proto::ReplicationFeedback> = None;
             for replica in tli.replicas.iter() {
-                if let Some(replica_feedback) = replica.zenith_feedback {
+                if let Some(replica_feedback) = replica.pageserver_feedback {
                     if let Some(current) = most_advanced {
                         if current.ps_writelsn < replica_feedback.ps_writelsn {
                             most_advanced = Some(replica_feedback);

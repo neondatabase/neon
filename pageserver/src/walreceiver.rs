@@ -71,7 +71,7 @@ use tokio::{
 use tracing::*;
 use url::Url;
 use utils::lsn::Lsn;
-use utils::pq_proto::ZenithFeedback;
+use utils::pq_proto::ReplicationFeedback;
 use utils::zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use self::connection_handler::{WalConnectionEvent, WalReceiverConnection};
@@ -521,7 +521,7 @@ struct WalConnectionData {
     safekeeper_id: NodeId,
     connection: WalReceiverConnection,
     connection_init_time: NaiveDateTime,
-    last_wal_receiver_data: Option<(ZenithFeedback, NaiveDateTime)>,
+    last_wal_receiver_data: Option<(ReplicationFeedback, NaiveDateTime)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -846,7 +846,7 @@ mod tests {
         .await;
         let now = Utc::now().naive_utc();
         dummy_connection_data.last_wal_receiver_data = Some((
-            ZenithFeedback {
+            ReplicationFeedback {
                 current_timeline_size: 1,
                 ps_writelsn: 1,
                 ps_applylsn: current_lsn,
@@ -1017,7 +1017,7 @@ mod tests {
         let time_over_threshold =
             Utc::now().naive_utc() - lagging_wal_timeout - lagging_wal_timeout;
         dummy_connection_data.last_wal_receiver_data = Some((
-            ZenithFeedback {
+            ReplicationFeedback {
                 current_timeline_size: 1,
                 ps_writelsn: current_lsn.0,
                 ps_applylsn: 1,
