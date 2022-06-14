@@ -43,13 +43,6 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    #[cfg(test)]
-    pub fn new(tls_config: Arc<rustls::ServerConfig>) -> TlsConfig {
-        TlsConfig {
-            tls_config,
-            common_name: None,
-        }
-    }
     pub fn get_tls_config(self) -> Arc<rustls::ServerConfig> {
         self.tls_config
     }

@@ -271,10 +271,12 @@ mod tests {
     }
 
     /// Generate TLS certificates and build rustls configs for client and server.
-    fn generate_tls_config(hostname: &str) -> anyhow::Result<(ClientConfig<'_>, TlsConfig)> {
+    fn generate_tls_config(
+        hostname: &'static str,
+    ) -> anyhow::Result<(ClientConfig<'_>, TlsConfig)> {
         let (ca, cert, key) = generate_certs(hostname)?;
 
-        let server_config = {
+        let tls_config = {
             let config = rustls::ServerConfig::builder()
                 .with_safe_defaults()
                 .with_no_client_auth()
@@ -296,7 +298,13 @@ mod tests {
             ClientConfig { config, hostname }
         };
 
-        Ok((client_config, TlsConfig::new(server_config)))
+        Ok((
+            client_config,
+            TlsConfig {
+                tls_config,
+                common_name: Some(hostname),
+            },
+        ))
     }
 
     #[async_trait]
