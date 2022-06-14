@@ -11,8 +11,11 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Put data in vanilla pg
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
-    vanilla_pg.safe_psql("create table t as select generate_series(1,300000)")
-    assert vanilla_pg.safe_psql('select count(*) from t') == [(300000, )]
+    vanilla_pg.safe_psql('''create table t as select 'long string to consume some space' || g
+     from generate_series(1,30000000) g''')
+    assert vanilla_pg.safe_psql('select count(*) from t') == [(30000000, )]
+    # ensure that relation is larger than 1GB to test multisegment restore
+    assert vanilla_pg.safe_psql("select pg_relation_size('t')")[0][0] > 1024 * 1024 * 1024
 
     # Take basebackup
     basebackup_dir = os.path.join(test_output_dir, "basebackup")
@@ -62,4 +65,4 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
-    assert pg.safe_psql('select count(*) from t') == [(300000, )]
+    assert pg.safe_psql('select count(*) from t') == [(30000000, )]
