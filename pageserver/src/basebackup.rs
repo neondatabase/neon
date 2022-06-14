@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
@@ -170,50 +171,30 @@ where
     fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
         let nblocks = self.timeline.get_rel_size(tag, self.lsn)?;
 
-        let mut rel_seg_buf: Vec<u8> =
-            Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
-        let mut blknum = 0;
+        // Function that adds relation segment data to archive
+        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
+            let file_name = tag.to_segfile_name(segment_index as u32);
+            let header = new_tar_header(&file_name, data.len() as u64)?;
+            self.ar.append(&header, data.as_slice())?;
+            Ok(())
+        };
 
-        loop {
-            if nblocks > 0 {
+        // If the relation is empty, create an empty file
+        if nblocks == 0 {
+            add_file(0, &vec![])?;
+            return Ok(())
+        }
+
+        // Add a file for each chunk of blocks (aka segment)
+        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        for (seg, blocks) in chunks.into_iter().enumerate() {
+            let mut segment_data: Vec<u8> = vec![];
+            for blknum in blocks {
                 let img = self.timeline.get_rel_page_at_lsn(tag, blknum, self.lsn)?;
-
-                ensure!(img.len() == pg_constants::BLCKSZ as usize);
-
-                rel_seg_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
+                segment_data.extend_from_slice(&img[..]);
             }
 
-            if (blknum != 0 && blknum % pg_constants::RELSEG_SIZE == 0) || blknum == nblocks {
-                let segname = if tag.spcnode == pg_constants::GLOBALTABLESPACE_OID {
-                    format!(
-                        "global/{}",
-                        tag.to_segfile_name(blknum / pg_constants::RELSEG_SIZE)
-                    )
-                } else {
-                    format!(
-                        "base/{}/{}",
-                        tag.dbnode,
-                        tag.to_segfile_name(blknum / pg_constants::RELSEG_SIZE)
-                    )
-                };
-
-                let header = new_tar_header(&segname, rel_seg_buf.len() as u64)?;
-                self.ar.append(&header, rel_seg_buf.as_slice())?;
-                debug!(
-                    "Added to fullbackup relseg {} blknum {}/nblocks {}, len {}",
-                    segname,
-                    blknum,
-                    nblocks,
-                    rel_seg_buf.len()
-                );
-                rel_seg_buf.clear();
-            }
-
-            if blknum == nblocks {
-                break;
-            }
-
-            blknum += 1;
+            add_file(seg, &segment_data)?;
         }
 
         Ok(())
