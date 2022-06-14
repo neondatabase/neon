@@ -1,14 +1,11 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
-use std::str::FromStr;
 
 use crate::repository::Repository;
 use crate::tenant_mgr::TenantState;
 use crate::thread_mgr::ThreadKind;
 use crate::{tenant_mgr, thread_mgr};
 use anyhow::Result;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
 use tracing::*;
