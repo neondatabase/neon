@@ -14,8 +14,8 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self};
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use tokio::sync::mpsc::Sender;
 use tracing::*;
 
@@ -36,8 +36,6 @@ use crate::metrics::FullTimelineInfo;
 use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
-
-const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Replica status update + hot standby feedback
 #[derive(Debug, Clone, Copy)]
@@ -77,9 +75,6 @@ impl ReplicaState {
 struct SharedState {
     /// Safekeeper object
     sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
-    /// For receiving-sending wal cooperation
-    /// quorum commit LSN we've notified walsenders about
-    notified_commit_lsn: Lsn,
     /// State of replicas
     replicas: Vec<Option<ReplicaState>>,
     /// True when WAL backup launcher oversees the timeline, making sure WAL is
@@ -112,7 +107,6 @@ impl SharedState {
         let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
 
         Ok(Self {
-            notified_commit_lsn: Lsn(0),
             sk,
             replicas: Vec::new(),
             wal_backup_active: false,
@@ -131,7 +125,6 @@ impl SharedState {
         info!("timeline {} restored", zttid.timeline_id);
 
         Ok(Self {
-            notified_commit_lsn: Lsn(0),
             sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
             replicas: Vec::new(),
             wal_backup_active: false,
@@ -271,8 +264,6 @@ pub struct Timeline {
     /// For breeding receivers.
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
     mutex: Mutex<SharedState>,
-    /// conditional variable used to notify wal senders
-    cond: Condvar,
 }
 
 impl Timeline {
@@ -289,7 +280,6 @@ impl Timeline {
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
-            cond: Condvar::new(),
         }
     }
 
@@ -333,7 +323,7 @@ impl Timeline {
         let mut shared_state = self.mutex.lock().unwrap();
         if shared_state.num_computes == 0 {
             let replica_state = shared_state.replicas[replica_id].unwrap();
-            let stop = shared_state.notified_commit_lsn == Lsn(0) || // no data at all yet
+            let stop = shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
             if stop {
@@ -405,39 +395,6 @@ impl Timeline {
         })
     }
 
-    /// Timed wait for an LSN to be committed.
-    ///
-    /// Returns the last committed LSN, which will be at least
-    /// as high as the LSN waited for, or None if timeout expired.
-    ///
-    pub fn wait_for_lsn(&self, lsn: Lsn) -> Option<Lsn> {
-        let mut shared_state = self.mutex.lock().unwrap();
-        loop {
-            let commit_lsn = shared_state.notified_commit_lsn;
-            // This must be `>`, not `>=`.
-            if commit_lsn > lsn {
-                return Some(commit_lsn);
-            }
-            let result = self
-                .cond
-                .wait_timeout(shared_state, POLL_STATE_TIMEOUT)
-                .unwrap();
-            if result.1.timed_out() {
-                return None;
-            }
-            shared_state = result.0
-        }
-    }
-
-    // Notify caught-up WAL senders about new WAL data received
-    // TODO: replace-unify it with commit_lsn_watch.
-    fn notify_wal_senders(&self, shared_state: &mut MutexGuard<SharedState>) {
-        if shared_state.notified_commit_lsn < shared_state.sk.inmem.commit_lsn {
-            shared_state.notified_commit_lsn = shared_state.sk.inmem.commit_lsn;
-            self.cond.notify_all();
-        }
-    }
-
     pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
         self.commit_lsn_watch_rx.clone()
     }
@@ -462,8 +419,6 @@ impl Timeline {
                 }
             }
 
-            // Ping wal sender that new data might be available.
-            self.notify_wal_senders(&mut shared_state);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
@@ -524,7 +479,6 @@ impl Timeline {
                 return Ok(());
             }
             shared_state.sk.record_safekeeper_info(sk_info)?;
-            self.notify_wal_senders(&mut shared_state);
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }

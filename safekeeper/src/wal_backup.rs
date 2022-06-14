@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use etcd_broker::subscription_key::{
     NodeKind, OperationKind, SkOperationKind, SubscriptionKey, SubscriptionKind,
 };
+use tokio::io::AsyncRead;
 use tokio::task::JoinHandle;
 
 use std::cmp::min;
@@ -10,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use postgres_ffi::xlog_utils::{XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr, PG_TLI};
+use postgres_ffi::xlog_utils::{
+    XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr, MAX_SEND_SIZE, PG_TLI,
+};
 use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::fs::File;
 use tokio::runtime::Builder;
@@ -444,4 +447,50 @@ async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
     }?;
 
     Ok(())
+}
+
+pub async fn read_object(
+    file_path: PathBuf,
+    offset: u64,
+) -> (impl AsyncRead, JoinHandle<Result<()>>) {
+    let storage = REMOTE_STORAGE.get().expect("failed to get remote storage");
+
+    let (mut pipe_writer, pipe_reader) = tokio::io::duplex(MAX_SEND_SIZE);
+
+    let copy_result = tokio::spawn(async move {
+        let res = match storage.as_ref().unwrap() {
+            GenericRemoteStorage::Local(local_storage) => {
+                let source = local_storage.remote_object_id(&file_path)?;
+
+                info!(
+                    "local download about to start from {} at offset {}",
+                    source.display(),
+                    offset
+                );
+                local_storage
+                    .download_byte_range(&source, offset, None, &mut pipe_writer)
+                    .await
+            }
+            GenericRemoteStorage::S3(s3_storage) => {
+                let s3key = s3_storage.remote_object_id(&file_path)?;
+
+                info!(
+                    "S3 download about to start from {:?} at offset {}",
+                    s3key, offset
+                );
+                s3_storage
+                    .download_byte_range(&s3key, offset, None, &mut pipe_writer)
+                    .await
+            }
+        };
+
+        if let Err(e) = res {
+            error!("failed to download WAL segment from remote storage: {}", e);
+            Err(e)
+        } else {
+            Ok(())
+        }
+    });
+
+    (pipe_reader, copy_result)
 }

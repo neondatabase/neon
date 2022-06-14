@@ -502,7 +502,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, storage_type: str):
             cur.execute("insert into t select generate_series(1,250000), 'payload'")
     wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], '0/5000000')
 
-@pytest.mark.parametrize('storage_type', ['local_fs'])
+@pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
     neon_env_builder.num_safekeepers = 3
     if storage_type == 'local_fs':
@@ -537,9 +537,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
             cur.execute("insert into t values (1, 'payload')")
             expected_sum += 1
 
-            # TODO: implement s3 download in safekeepers
-
-            offloaded_seg_end = ['0/3000000', '0/5000000', '0/7000000']
+            offloaded_seg_end = ['0/3000000']
             for seg_end in offloaded_seg_end:
                 # roughly fills two segments
                 cur.execute("insert into t select generate_series(1,500000), 'payload'")
@@ -552,11 +550,12 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
                     wait_segment_offload(tenant_id, timeline_id, sk, seg_end)
 
             # advance remote_consistent_lsn to trigger WAL trimming
-            env.safekeepers[0].http_client().record_safekeeper_info(tenant_id, timeline_id, {'remote_consistent_lsn': 'FFFFFFFF/FEFFFFFF'})
+            # this LSN should be less than commit_lsn, so timeline will be active=true in safekeepers, to push etcd updates
+            env.safekeepers[0].http_client().record_safekeeper_info(tenant_id, timeline_id, {'remote_consistent_lsn': offloaded_seg_end[-1]})
 
             for sk in env.safekeepers:
-                # require WAL to be trimmed, so no more than 2 segments are left on disk
-                wait_wal_trim(tenant_id, timeline_id, sk, 16 * 2.5)
+                # require WAL to be trimmed, so no more than one segment is left on disk
+                wait_wal_trim(tenant_id, timeline_id, sk, 16 * 1.5)
 
     # replace pageserver with a fresh copy
     pg.stop_and_destroy()
@@ -575,12 +574,6 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
         with conn.cursor() as cur:
             cur.execute("select sum(key) from t")
             assert cur.fetchone()[0] == expected_sum
-
-    # # and ensure offloading still works
-    # with closing(pg.connect()) as conn:
-    #     with conn.cursor() as cur:
-    #         cur.execute("insert into t select generate_series(1,250000), 'payload'")
-    # wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], '0/5000000')
 
 
 class ProposerPostgres(PgProtocol):
