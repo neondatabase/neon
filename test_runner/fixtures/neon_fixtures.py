@@ -500,7 +500,7 @@ class NeonEnvBuilder:
             num_safekeepers: int = 1,
             # Use non-standard SK ids to check for various parsing bugs
             safekeepers_id_start: int = 0,
-            pageserver_auth_enabled: bool = False,
+            auth_enabled: bool = False,
             rust_log_override: Optional[str] = None,
             default_branch_name=DEFAULT_BRANCH_NAME):
         self.repo_dir = repo_dir
@@ -513,7 +513,7 @@ class NeonEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
-        self.pageserver_auth_enabled = pageserver_auth_enabled
+        self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
 
@@ -639,7 +639,7 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "ZenithJWT" if config.pageserver_auth_enabled else "Trust"
+        pageserver_auth_type = "ZenithJWT" if config.auth_enabled else "Trust"
 
         toml += textwrap.dedent(f"""
             [pageserver]
@@ -667,6 +667,10 @@ class NeonEnv:
                 pg_port = {port.pg}
                 http_port = {port.http}
                 sync = false # Disable fsyncs to make the tests go faster""")
+            if config.auth_enabled:
+                toml += textwrap.dedent(f"""
+                auth_enabled = true
+                """)
             if bool(self.remote_storage_users
                     & RemoteStorageUsers.SAFEKEEPER) and self.remote_storage is not None:
                 toml += textwrap.dedent(f"""
@@ -1197,7 +1201,7 @@ class NeonCli:
         log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
-        env_vars['ZENITH_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
         env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars['RUST_LOG'] = self.env.rust_log_override
@@ -1757,7 +1761,6 @@ class Safekeeper:
     env: NeonEnv
     port: SafekeeperPort
     id: int
-    auth_token: Optional[str] = None
     running: bool = False
 
     def start(self) -> 'Safekeeper':
@@ -1813,8 +1816,8 @@ class Safekeeper:
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self) -> SafekeeperHttpClient:
-        return SafekeeperHttpClient(port=self.port.http)
+    def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
+        return SafekeeperHttpClient(port=self.port.http, auth_token=auth_token)
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
@@ -1838,9 +1841,15 @@ class SafekeeperMetrics:
 
 
 class SafekeeperHttpClient(requests.Session):
-    def __init__(self, port: int):
+    HTTPError = requests.HTTPError
+
+    def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
+        self.auth_token = auth_token
+
+        if auth_token is not None:
+            self.headers['Authorization'] = f'Bearer {auth_token}'
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()

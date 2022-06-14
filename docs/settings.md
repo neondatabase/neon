@@ -154,7 +154,7 @@ The default distrib dir is `./tmp_install/`.
 #### workdir (-D)
 
 A directory in the file system, where pageserver will store its files.
-The default is `./.zenith/`.
+The default is `./.neon/`.
 
 This parameter has a special CLI alias (`-D`) and can not be overridden with regular `-c` way.
 

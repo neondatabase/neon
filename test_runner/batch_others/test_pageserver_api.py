@@ -114,7 +114,7 @@ def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.pageserver_auth_enabled = True
+    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
     management_token = env.auth_keys.generate_management_token()

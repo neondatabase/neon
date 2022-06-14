@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use etcd_broker::SkTimelineInfo;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
@@ -21,7 +21,7 @@ use tracing::*;
 
 use utils::{
     lsn::Lsn,
-    pq_proto::ZenithFeedback,
+    pq_proto::ReplicationFeedback,
     zid::{NodeId, ZTenantId, ZTenantTimelineId},
 };
 
@@ -48,8 +48,8 @@ pub struct ReplicaState {
     pub remote_consistent_lsn: Lsn,
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
-    /// Zenith specific feedback received from pageserver, if any
-    pub zenith_feedback: Option<ZenithFeedback>,
+    /// Replication specific feedback received from pageserver, if any
+    pub pageserver_feedback: Option<ReplicationFeedback>,
 }
 
 impl Default for ReplicaState {
@@ -68,7 +68,7 @@ impl ReplicaState {
                 xmin: u64::MAX,
                 catalog_xmin: u64::MAX,
             },
-            zenith_feedback: None,
+            pageserver_feedback: None,
         }
     }
 }
@@ -149,8 +149,12 @@ impl SharedState {
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action.
-    fn update_status(&mut self) -> bool {
-        self.active = self.is_active();
+    fn update_status(&mut self, ttid: ZTenantTimelineId) -> bool {
+        let is_active = self.is_active();
+        if self.active != is_active {
+            info!("timeline {} active={} now", ttid, is_active);
+        }
+        self.active = is_active;
         self.is_wal_backup_action_pending()
     }
 
@@ -187,6 +191,12 @@ impl SharedState {
         self.wal_backup_active
     }
 
+    // Can this safekeeper offload to s3? Recently joined safekeepers might not
+    // have necessary WAL.
+    fn can_wal_backup(&self) -> bool {
+        self.sk.state.local_start_lsn <= self.sk.inmem.backup_lsn
+    }
+
     fn get_wal_seg_size(&self) -> usize {
         self.sk.state.server.wal_seg_size as usize
     }
@@ -211,25 +221,25 @@ impl SharedState {
             // we need to know which pageserver compute node considers to be main.
             // See https://github.com/zenithdb/zenith/issues/1171
             //
-            if let Some(zenith_feedback) = state.zenith_feedback {
-                if let Some(acc_feedback) = acc.zenith_feedback {
-                    if acc_feedback.ps_writelsn < zenith_feedback.ps_writelsn {
+            if let Some(pageserver_feedback) = state.pageserver_feedback {
+                if let Some(acc_feedback) = acc.pageserver_feedback {
+                    if acc_feedback.ps_writelsn < pageserver_feedback.ps_writelsn {
                         warn!("More than one pageserver is streaming WAL for the timeline. Feedback resolving is not fully supported yet.");
-                        acc.zenith_feedback = Some(zenith_feedback);
+                        acc.pageserver_feedback = Some(pageserver_feedback);
                     }
                 } else {
-                    acc.zenith_feedback = Some(zenith_feedback);
+                    acc.pageserver_feedback = Some(pageserver_feedback);
                 }
 
                 // last lsn received by pageserver
                 // FIXME if multiple pageservers are streaming WAL, last_received_lsn must be tracked per pageserver.
                 // See https://github.com/zenithdb/zenith/issues/1171
-                acc.last_received_lsn = Lsn::from(zenith_feedback.ps_writelsn);
+                acc.last_received_lsn = Lsn::from(pageserver_feedback.ps_writelsn);
 
                 // When at least one pageserver has preserved data up to remote_consistent_lsn,
                 // safekeeper is free to delete it, so choose max of all pageservers.
                 acc.remote_consistent_lsn = max(
-                    Lsn::from(zenith_feedback.ps_applylsn),
+                    Lsn::from(pageserver_feedback.ps_applylsn),
                     acc.remote_consistent_lsn,
                 );
             }
@@ -291,7 +301,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes += 1;
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
@@ -308,7 +318,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes -= 1;
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if it is time to stop the offloading.
         if is_wal_backup_action_pending {
@@ -327,7 +337,7 @@ impl Timeline {
             (replica_state.remote_consistent_lsn != Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.
              replica_state.remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn);
             if stop {
-                shared_state.update_status();
+                shared_state.update_status(self.zttid);
                 return Ok(true);
             }
         }
@@ -339,6 +349,12 @@ impl Timeline {
     pub fn wal_backup_attend(&self) -> bool {
         let mut shared_state = self.mutex.lock().unwrap();
         shared_state.wal_backup_attend()
+    }
+
+    // Can this safekeeper offload to s3? Recently joined safekeepers might not
+    // have necessary WAL.
+    pub fn can_wal_backup(&self) -> bool {
+        self.mutex.lock().unwrap().can_wal_backup()
     }
 
     /// Deactivates the timeline, assuming it is being deleted.
@@ -441,8 +457,8 @@ impl Timeline {
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
                 let state = shared_state.get_replicas_state();
                 resp.hs_feedback = state.hs_feedback;
-                if let Some(zenith_feedback) = state.zenith_feedback {
-                    resp.zenith_feedback = zenith_feedback;
+                if let Some(pageserver_feedback) = state.pageserver_feedback {
+                    resp.pageserver_feedback = pageserver_feedback;
                 }
             }
 
@@ -509,7 +525,7 @@ impl Timeline {
             }
             shared_state.sk.record_safekeeper_info(sk_info)?;
             self.notify_wal_senders(&mut shared_state);
-            is_wal_backup_action_pending = shared_state.update_status();
+            is_wal_backup_action_pending = shared_state.update_status(self.zttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;

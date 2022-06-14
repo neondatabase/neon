@@ -4,7 +4,7 @@
 //! The functions here are responsible for locating the correct layer for the
 //! get/put call, tracing timeline branching history as needed.
 //!
-//! The files are stored in the .zenith/tenants/<tenantid>/timelines/<timelineid>
+//! The files are stored in the .neon/tenants/<tenantid>/timelines/<timelineid>
 //! directory. See layered_repository/README for how the files are managed.
 //! In addition to the layer files, there is a metadata file in the same
 //! directory that contains information about the timeline, in particular its
@@ -148,7 +148,7 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
-/// Parts of the `.zenith/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
+/// Parts of the `.neon/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 ///

@@ -1,9 +1,9 @@
-use etcd_broker::SkTimelineInfo;
-use hyper::{Body, Request, Response, StatusCode};
+use hyper::{Body, Request, Response, StatusCode, Uri};
 
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use serde::Serializer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -11,9 +11,11 @@ use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
 use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
 use crate::SafeKeeperConf;
+use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
+    auth::JwtAuth,
     http::{
-        endpoint,
+        endpoint::{self, auth_middleware, check_permission},
         error::ApiError,
         json::{json_request, json_response},
         request::{ensure_no_body, parse_request_param},
@@ -32,6 +34,7 @@ struct SafekeeperStatus {
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
     let conf = get_conf(&request);
     let status = SafekeeperStatus { id: conf.my_id };
     json_response(StatusCode::OK, status)
@@ -91,6 +94,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
+    check_permission(&request, Some(zttid.tenant_id))?;
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
     let (inmem, state) = tli.get_state();
@@ -125,6 +129,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         tenant_id: request_data.tenant_id,
         timeline_id: request_data.timeline_id,
     };
+    check_permission(&request, Some(zttid.tenant_id))?;
     GlobalTimelines::create(get_conf(&request), zttid, request_data.peer_ids)
         .map_err(ApiError::from_err)?;
 
@@ -145,6 +150,7 @@ async fn timeline_delete_force_handler(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
+    check_permission(&request, Some(zttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
@@ -160,6 +166,7 @@ async fn tenant_delete_force_handler(
     mut request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
@@ -178,6 +185,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
+    check_permission(&request, Some(zttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
     let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
@@ -188,15 +196,33 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
 }
 
 /// Safekeeper http router.
-pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
-    let router = endpoint::make_router();
+pub fn make_router(
+    conf: SafeKeeperConf,
+    auth: Option<Arc<JwtAuth>>,
+) -> RouterBuilder<hyper::Body, ApiError> {
+    let mut router = endpoint::make_router();
+    if auth.is_some() {
+        router = router.middleware(auth_middleware(|request| {
+            #[allow(clippy::mutable_key_type)]
+            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> =
+                Lazy::new(|| ["/v1/status"].iter().map(|v| v.parse().unwrap()).collect());
+            if ALLOWLIST_ROUTES.contains(request.uri()) {
+                None
+            } else {
+                // Option<Arc<JwtAuth>> is always provided as data below, hence unwrap().
+                request.data::<Option<Arc<JwtAuth>>>().unwrap().as_deref()
+            }
+        }))
+    }
     router
         .data(Arc::new(conf))
+        .data(auth)
         .get("/v1/status", status_handler)
         .get(
             "/v1/timeline/:tenant_id/:timeline_id",
             timeline_status_handler,
         )
+        // Will be used in the future instead of implicit timeline creation
         .post("/v1/timeline", timeline_create_handler)
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",

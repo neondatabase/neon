@@ -21,7 +21,7 @@ use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
     postgres_backend::PostgresBackend,
-    pq_proto::{BeMessage, FeMessage, WalSndKeepAlive, XLogDataBody, ZenithFeedback},
+    pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody},
     sock_split::ReadStream,
 };
 
@@ -29,7 +29,7 @@ use utils::{
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
 const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
 // zenith extension of replication protocol
-const ZENITH_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
+const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
 type FullTransactionId = u64;
 
@@ -122,15 +122,15 @@ impl ReplicationConn {
                             warn!("unexpected StandbyReply. Read-only postgres replicas are not supported in safekeepers yet.");
                             // timeline.update_replica_state(replica_id, Some(state));
                         }
-                        Some(ZENITH_STATUS_UPDATE_TAG_BYTE) => {
+                        Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
                             // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
                             let buf = Bytes::copy_from_slice(&m[9..]);
-                            let reply = ZenithFeedback::parse(buf);
+                            let reply = ReplicationFeedback::parse(buf);
 
-                            trace!("ZenithFeedback is {:?}", reply);
-                            // Only pageserver sends ZenithFeedback, so set the flag.
+                            trace!("ReplicationFeedback is {:?}", reply);
+                            // Only pageserver sends ReplicationFeedback, so set the flag.
                             // This replica is the source of information to resend to compute.
-                            state.zenith_feedback = Some(reply);
+                            state.pageserver_feedback = Some(reply);
 
                             timeline.update_replica_state(replica_id, state);
                         }
