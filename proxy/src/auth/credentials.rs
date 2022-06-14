@@ -8,10 +8,29 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum ClientCredsParseError {
-    #[error("Parameter `{0}` is missing in startup packet")]
+    #[error("Parameter `{0}` is missing in startup packet.")]
     MissingKey(&'static str),
+
+    #[error(
+        "Project name is not specified. \
+        EITHER please upgrade the postgres client library (libpq) for SNI support \
+        OR pass the project name as a parameter: '&options=project%3D<project-name>'."
+    )]
+    MissingSNIAndProjectName,
+
+    #[error("Inconsistent project name inferred from SNI ('{0}') and project option ('{1}').")]
+    InconsistentProjectNameAndSNI(String, String),
+
+    #[error("Common name is not set.")]
+    CommonNameNotSet,
+
+    #[error("SNI ('{1}') inconsistently formatted with respect to common name ('{0}'). SNI should be formatted as '<project-name>.<common-name>'.")]
+    InconsistentCommonNameAndSNI(&'static str, String),
+
+    #[error("Project name ('{0}') must contain only alphanumeric characters and hyphens ('-').")]
+    ProjectNameContainsIllegalChars(String),
 }
 
 impl UserFacingError for ClientCredsParseError {}
@@ -22,18 +41,7 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
-
-    // New console API requires SNI info to determine the cluster name.
-    // Other Auth backends don't need it.
-    pub sni_data: Option<String>,
-
-    // project_name is passed as argument from options from url.
-    // In case sni_data is missing: project_name is used to determine cluster name.
-    // In case sni_data is available: project_name and sni_data should match (otherwise throws an error).
-    pub project_name: Option<String>,
-
-    // common name is extracted from server.crt and used as help to determine project name from SNI.
-    pub common_name: Option<&'static str>,
+    pub project_name: String,
 }
 
 impl ClientCredentials {
@@ -42,7 +50,7 @@ impl ClientCredentials {
         self.user.ends_with("@zenith")
     }
 
-    pub fn construct(
+    pub fn parse(
         mut options: HashMap<String, String>,
         sni_data: Option<String>,
         common_name: Option<&'static str>,
@@ -56,50 +64,35 @@ impl ClientCredentials {
         let user = get_param("user")?;
         let dbname = get_param("database")?;
         let project_name = get_param("project").ok();
+        let project_name = get_project_name(&sni_data, &common_name, &project_name)?.to_string();
 
         Ok(Self {
             user,
             dbname,
-            sni_data,
             project_name,
-            common_name,
         })
     }
+
+    /// Use credentials to authenticate the user.
+    pub async fn authenticate(
+        self,
+        config: &ProxyConfig,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) -> super::Result<compute::NodeInfo> {
+        // This method is just a convenient facade for `handle_user`
+        super::backend::handle_user(config, client, self).await
+    }
 }
-
-#[derive(Debug, Error, PartialEq)]
-pub enum ProjectNameError {
-    #[error(
-        "Project name is not specified. \
-        EITHER please upgrade the postgres client library (libpq) for SNI support \
-        OR pass the project name as a parameter: '&options=project%3D<project-name>'."
-    )]
-    Missing,
-
-    #[error("Inconsistent project name inferred from SNI ('{0}') and project option ('{1}').")]
-    InconsistentProjectNameAndSNI(String, String),
-
-    #[error("Common name is not set.")]
-    CommonNameNotSet,
-
-    #[error("Inconsistent common name ('{0}') and SNI suffix (SNI: '{1}').")]
-    InconsistentCommonNameAndSNI(&'static str, String),
-
-    #[error("Project name ('{0}') must contain only alphanumeric characters and hyphens ('-').")]
-    ProjectNameContainsIllegalChars(String),
-}
-
-impl UserFacingError for ProjectNameError {}
 
 /// Inferring project name from sni_data.
 fn project_name_from_sni_data<'sni>(
     sni_data: &'sni str,
     common_name: &'static str,
-) -> Result<&'sni str, ProjectNameError> {
+) -> Result<&'sni str, ClientCredsParseError> {
     let common_name_with_dot = format!(".{common_name}");
     // check that ".{common_name_with_dot}" is the actual suffix in sni_data
     if !sni_data.ends_with(&common_name_with_dot) {
-        return Err(ProjectNameError::InconsistentCommonNameAndSNI(
+        return Err(ClientCredsParseError::InconsistentCommonNameAndSNI(
             common_name,
             sni_data.to_string(),
         ));
@@ -133,7 +126,7 @@ mod tests_for_project_name_from_sni_data {
         let sni_data = target_project_name.to_string() + wrong_common_name.as_str();
         assert_eq!(
             project_name_from_sni_data(sni_data.as_str(), common_name).err(),
-            Some(ProjectNameError::InconsistentCommonNameAndSNI(
+            Some(ClientCredsParseError::InconsistentCommonNameAndSNI(
                 common_name,
                 sni_data
             ))
@@ -146,7 +139,7 @@ fn get_project_name<'ret>(
     sni_data: &'ret Option<String>,
     common_name: &Option<&'static str>,
     project_name: &'ret Option<String>,
-) -> Result<&'ret str, ProjectNameError> {
+) -> Result<&'ret str, ClientCredsParseError> {
     // determine the project name from sni_data if it exists, otherwise from project_name.
     let ret = match sni_data {
         // if sni_data exists, use it to determine project name
@@ -154,14 +147,14 @@ fn get_project_name<'ret>(
             // extract common name. If unset, throw a CommonNameNotSet error.
             let common_name = match &common_name {
                 Some(common_name) => common_name,
-                None => return Err(ProjectNameError::CommonNameNotSet),
+                None => return Err(ClientCredsParseError::CommonNameNotSet),
             };
             // extract project name from sni.
             let project_name_from_sni = project_name_from_sni_data(sni_data, common_name)?;
             // check invariant: project name from options and from sni should match
             if let Some(project_name) = &project_name {
                 if !project_name_from_sni.eq(project_name) {
-                    return Err(ProjectNameError::InconsistentProjectNameAndSNI(
+                    return Err(ClientCredsParseError::InconsistentProjectNameAndSNI(
                         project_name_from_sni.to_string(),
                         project_name.to_string(),
                     ));
@@ -172,14 +165,14 @@ fn get_project_name<'ret>(
         // otherwise use project_option if it was manually set thought options parameter.
         None => project_name
             .as_ref()
-            .ok_or(ProjectNameError::Missing)?
+            .ok_or(ClientCredsParseError::MissingSNIAndProjectName)?
             .as_str(),
     };
 
     // checking that formatting invariant holds.
     // project name must contain only alphanumeric characters and hyphens.
     if !ret.chars().all(|x: char| x.is_alphanumeric() || x == '-') {
-        return Err(ProjectNameError::ProjectNameContainsIllegalChars(
+        return Err(ClientCredsParseError::ProjectNameContainsIllegalChars(
             ret.to_string(),
         ));
     }
@@ -219,7 +212,7 @@ mod tests_for_project_name_only {
                 let sni_data = target_project_name.to_string() + "." + common_name;
                 assert_eq!(
                     get_project_name(&Some(sni_data), &Some(common_name), &None).err(),
-                    Some(ProjectNameError::ProjectNameContainsIllegalChars(
+                    Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                         target_project_name
                     ))
                 );
@@ -261,7 +254,7 @@ mod tests_for_project_name_only {
                             &Some(target_project_name.to_string())
                         )
                         .err(),
-                        Some(ProjectNameError::ProjectNameContainsIllegalChars(
+                        Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                             target_project_name
                         ))
                     );
@@ -299,7 +292,7 @@ mod tests_for_project_name_only {
                 &Some(project_name_param.to_string())
             )
             .err(),
-            Some(ProjectNameError::InconsistentProjectNameAndSNI(
+            Some(ClientCredsParseError::InconsistentProjectNameAndSNI(
                 wrong_project_name.to_string(),
                 project_name_param.to_string()
             ))
@@ -320,7 +313,7 @@ mod tests_for_project_name_only {
             for project_name_param in &project_names {
                 assert_eq!(
                     get_project_name(&sni_data, &None, project_name_param).err(),
-                    Some(ProjectNameError::CommonNameNotSet)
+                    Some(ClientCredsParseError::CommonNameNotSet)
                 );
             }
         }
@@ -344,31 +337,12 @@ mod tests_for_project_name_only {
                 assert_eq!(
                     get_project_name(&sni_data.clone(), &Some(common_name), project_name_param)
                         .err(),
-                    Some(ProjectNameError::InconsistentCommonNameAndSNI(
+                    Some(ClientCredsParseError::InconsistentCommonNameAndSNI(
                         common_name,
                         sni_data.clone().unwrap()
                     ))
                 );
             }
         }
-    }
-}
-
-impl ClientCredentials {
-    /// Determine project name from SNI or from project_name parameter from options argument.
-    pub fn project_name(&self) -> Result<&str, ProjectNameError> {
-        get_project_name(&self.sni_data, &self.common_name, &self.project_name)
-    }
-}
-
-impl ClientCredentials {
-    /// Use credentials to authenticate the user.
-    pub async fn authenticate(
-        self,
-        config: &ProxyConfig,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> super::Result<compute::NodeInfo> {
-        // This method is just a convenient facade for `handle_user`
-        super::backend::handle_user(config, client, self).await
     }
 }

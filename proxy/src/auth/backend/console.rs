@@ -19,7 +19,7 @@ pub type Result<T> = std::result::Result<T, ConsoleAuthError>;
 #[derive(Debug, Error)]
 pub enum ConsoleAuthError {
     #[error(transparent)]
-    BadProjectName(#[from] auth::credentials::ProjectNameError),
+    BadProjectName(#[from] auth::credentials::ClientCredsParseError),
 
     // We shouldn't include the actual secret here.
     #[error("Bad authentication secret")]
@@ -84,7 +84,7 @@ impl<'a> Api<'a> {
         Ok(Self {
             endpoint,
             creds,
-            project: creds.project_name()?,
+            project: creds.project_name.as_str(),
         })
     }
 

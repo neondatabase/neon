@@ -157,7 +157,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 };
 
                 // Construct credentials
-                let creds = auth::ClientCredentials::construct(params, sni_data, common_name);
+                let creds = auth::ClientCredentials::parse(params, sni_data, common_name);
                 let creds = async { creds }.or_else(|e| stream.throw_error(e)).await?;
 
                 break Ok(Some((stream, creds)));
@@ -273,7 +273,8 @@ mod tests {
     /// Generate TLS certificates and build rustls configs for client and server.
     fn generate_tls_config(
         hostname: &'static str,
-    ) -> anyhow::Result<(ClientConfig<'_>, TlsConfig)> {
+        common_name: &'static str,
+    ) -> anyhow::Result<(ClientConfig<'static>, TlsConfig)> {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let tls_config = {
@@ -302,7 +303,7 @@ mod tests {
             client_config,
             TlsConfig {
                 tls_config,
-                common_name: Some(hostname),
+                common_name: Some(common_name),
             },
         ))
     }
@@ -378,7 +379,8 @@ mod tests {
     async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
         let (client, server) = tokio::io::duplex(1024);
 
-        let (_, server_config) = generate_tls_config("localhost")?;
+        let (_, server_config) =
+            generate_tls_config("handshake-tls-is-enforced-by-proxy.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let client_err = tokio_postgres::Config::new()
@@ -406,7 +408,8 @@ mod tests {
     async fn handshake_tls() -> anyhow::Result<()> {
         let (client, server) = tokio::io::duplex(1024);
 
-        let (client_config, server_config) = generate_tls_config("localhost")?;
+        let (client_config, server_config) =
+            generate_tls_config("handshake-tls.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let (_client, _conn) = tokio_postgres::Config::new()
@@ -428,6 +431,7 @@ mod tests {
         let (_client, _conn) = tokio_postgres::Config::new()
             .user("john_doe")
             .dbname("earth")
+            .options("project=handshake-raw")
             .ssl_mode(SslMode::Prefer)
             .connect_raw(server, NoTls)
             .await?;
@@ -489,7 +493,8 @@ mod tests {
     async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
         let (client, server) = tokio::io::duplex(1024);
 
-        let (client_config, server_config) = generate_tls_config("localhost")?;
+        let (client_config, server_config) =
+            generate_tls_config("scram-auth-good.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
             Some(server_config),
@@ -511,7 +516,8 @@ mod tests {
     async fn scram_auth_mock() -> anyhow::Result<()> {
         let (client, server) = tokio::io::duplex(1024);
 
-        let (client_config, server_config) = generate_tls_config("localhost")?;
+        let (client_config, server_config) =
+            generate_tls_config("scram-auth-mock.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
             Some(server_config),
