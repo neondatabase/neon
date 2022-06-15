@@ -74,8 +74,6 @@ pub enum AuthInfo {
 pub(super) struct Api<'a> {
     endpoint: &'a ApiUrl,
     creds: &'a ClientCredentials,
-    /// Cache project name, since we'll need it several times.
-    project: &'a str,
 }
 
 impl<'a> Api<'a> {
@@ -84,7 +82,6 @@ impl<'a> Api<'a> {
         Ok(Self {
             endpoint,
             creds,
-            project: creds.project_name.as_str(),
         })
     }
 
@@ -100,7 +97,7 @@ impl<'a> Api<'a> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
-            .append_pair("project", self.project)
+            .append_pair("project", self.creds.project_name.as_str())
             .append_pair("role", &self.creds.user);
 
         // TODO: use a proper logger
@@ -123,7 +120,7 @@ impl<'a> Api<'a> {
     async fn wake_compute(&self) -> Result<DatabaseInfo> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
-        url.query_pairs_mut().append_pair("project", self.project);
+        url.query_pairs_mut().append_pair("project", self.creds.project_name.as_str());
 
         // TODO: use a proper logger
         println!("cplane request: {url}");

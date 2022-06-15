@@ -380,7 +380,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (_, server_config) =
-            generate_tls_config("handshake-tls-is-enforced-by-proxy.localhost", "localhost")?;
+            generate_tls_config("generic-project-name.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let client_err = tokio_postgres::Config::new()
@@ -409,7 +409,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (client_config, server_config) =
-            generate_tls_config("handshake-tls.localhost", "localhost")?;
+            generate_tls_config("generic-project-name.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
         let (_client, _conn) = tokio_postgres::Config::new()
@@ -431,7 +431,7 @@ mod tests {
         let (_client, _conn) = tokio_postgres::Config::new()
             .user("john_doe")
             .dbname("earth")
-            .options("project=handshake-raw")
+            .options("project=generic-project-name")
             .ssl_mode(SslMode::Prefer)
             .connect_raw(server, NoTls)
             .await?;
@@ -494,7 +494,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (client_config, server_config) =
-            generate_tls_config("scram-auth-good.localhost", "localhost")?;
+            generate_tls_config("generic-project-name.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
             Some(server_config),
@@ -517,7 +517,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(1024);
 
         let (client_config, server_config) =
-            generate_tls_config("scram-auth-mock.localhost", "localhost")?;
+            generate_tls_config("generic-project-name.localhost", "localhost")?;
         let proxy = tokio::spawn(dummy_proxy(
             client,
             Some(server_config),
