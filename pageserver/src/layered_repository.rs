@@ -1023,8 +1023,6 @@ pub struct LayeredTimeline {
 
     layers: RwLock<LayerMap>,
 
-    last_freeze_at: AtomicLsn,
-
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
@@ -1349,8 +1347,6 @@ impl LayeredTimeline {
                 prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
             }),
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
-
-            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -1723,7 +1719,6 @@ impl LayeredTimeline {
             layers.frozen_layers.push_back(open_layer_rc);
             layers.open_layer = None;
             layers.next_open_layer_at = Some(end_lsn);
-            self.last_freeze_at.store(end_lsn);
         }
         drop(layers);
     }
@@ -1733,23 +1728,15 @@ impl LayeredTimeline {
     /// in the in-memory layer, and initiate flushing it if so.
     ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
-        let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_size = open_layer.size()?;
             drop(layers);
-            let distance = last_lsn.widening_sub(self.last_freeze_at.load());
-            if distance >= self.get_checkpoint_distance().into()
-                || open_layer_size > self.get_checkpoint_distance()
-            {
-                info!(
-                    "check_checkpoint_distance {}, last lsn {}, open layer size {}",
-                    distance, last_lsn, open_layer_size
-                );
+            if open_layer_size > self.get_checkpoint_distance() {
+                info!("check_checkpoint_distance {}", open_layer_size);
 
                 // Yes. Freeze the current in-memory layer.
                 self.freeze_inmem_layer(true);
-                self.last_freeze_at.store(last_lsn);
 
                 // Launch a thread to flush the frozen layer to disk, unless
                 // a thread was already running. (If the thread was running
@@ -2149,16 +2136,7 @@ impl LayeredTimeline {
         drop(layers);
 
         // Only compact if enough layers have accumulated.
-        // Also force compaction if L0 delta layers contains a lot of dup;icatd keys.
-        // As far as compaction can not split key ito two layers, at may cause generation of large layer files
-        // (up to compaction_threshold*checkpoint_distance).
-        if level0_deltas.is_empty()
-            || (level0_deltas.len() < self.get_compaction_threshold()
-                && level0_deltas
-                    .iter()
-                    .fold(0u64, |acc, l| acc + l.get_max_key_range().unwrap())
-                    < target_file_size)
-        {
+        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
             return Ok(());
         }
 
@@ -2230,6 +2208,20 @@ impl LayeredTimeline {
                 }
             });
 
+        // This iterator walks through all keys and is needed to calculate range used by each key
+        let mut all_keys_iter = deltas_to_compact
+            .iter()
+            .map(|l| l.key_iter())
+            .kmerge_by(|a, b| {
+                let (a_key, a_lsn, _) = a;
+                let (b_key, b_lsn, _) = b;
+                match a_key.cmp(b_key) {
+                    Ordering::Less => true,
+                    Ordering::Equal => a_lsn <= b_lsn,
+                    Ordering::Greater => false,
+                }
+            });
+
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
         //
@@ -2241,29 +2233,58 @@ impl LayeredTimeline {
         let mut new_layers = Vec::new();
         let mut prev_key: Option<Key> = None;
         let mut writer: Option<DeltaLayerWriter> = None;
+        let mut key_values_total_size = 0u64;
+        let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
+        let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         for x in all_values_iter {
             let (key, lsn, value) = x?;
-
-            if let Some(prev_key) = prev_key {
-                if key != prev_key && writer.is_some() {
-                    let size = writer.as_mut().unwrap().size();
-                    if size > target_file_size {
-                        new_layers.push(writer.take().unwrap().finish(prev_key.next())?);
+            let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
+            // We need to check key boundaries once we reach next key or end of layer with the same key
+            if !same_key || lsn == dup_end_lsn {
+                let mut next_key_size = 0u64;
+                // Determine size occupied by this key. We stop either at next key, either when size becomes larger than target_file_size
+                while let Some((next_key, next_lsn, next_size)) = all_keys_iter.next() {
+                    next_key_size = next_size;
+                    if key != next_key {
+                        dup_end_lsn = Lsn::INVALID;
+                        break;
+                    }
+                    if key_values_total_size + next_size > target_file_size {
+                        // split key between multiple layers: such layer can contain only single key
+                        dup_start_lsn = if dup_end_lsn.is_valid() {
+                            dup_end_lsn
+                        } else {
+                            lsn
+                        };
+                        dup_end_lsn = next_lsn;
+                        break;
+                    }
+                    key_values_total_size += next_size;
+                }
+                if writer.is_some() {
+                    let written_size = writer.as_mut().unwrap().size();
+                    // check if key cause layer overflow
+                    if written_size + key_values_total_size > target_file_size {
+                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
                         writer = None;
                     }
                 }
+                key_values_total_size = next_key_size;
             }
-
             if writer.is_none() {
                 writer = Some(DeltaLayerWriter::new(
                     self.conf,
                     self.timeline_id,
                     self.tenant_id,
                     key,
-                    lsn_range.clone(),
+                    if dup_start_lsn.is_valid() {
+                        // this is a layer containing slice of values of the same key
+                        dup_start_lsn..dup_end_lsn
+                    } else {
+                        lsn_range.clone()
+                    },
                 )?);
             }
-
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
             prev_key = Some(key);
         }
@@ -2295,12 +2316,12 @@ impl LayeredTimeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
+        for l in &deltas_to_compact {
             l.delete()?;
             if let Some(path) = l.local_path() {
                 layer_paths_do_delete.insert(path);
             }
-            layers.remove_historic(l);
+            layers.remove_historic(l.clone());
         }
         drop(layers);
 

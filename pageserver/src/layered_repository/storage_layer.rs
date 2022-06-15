@@ -4,7 +4,7 @@
 
 use crate::repository::{Key, Value};
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -139,15 +139,15 @@ pub trait Layer: Send + Sync {
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
 
+    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
+    /// It is used only for compaction and so is currently implemented only for DeltaLayer
+    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+        panic!("Not implemented")
+    }
+
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
-
-    /// Get maximal range of values for one key in this layer.
-    /// Right now it is implemented only for delta layer
-    fn get_max_key_range(&self) -> Result<u64> {
-        bail!("Not implemented")
-    }
 }

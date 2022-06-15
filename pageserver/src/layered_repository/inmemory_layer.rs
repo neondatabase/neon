@@ -233,6 +233,9 @@ impl Layer for InMemoryLayer {
 }
 
 impl InMemoryLayer {
+    ///
+    /// Get layer size on the disk
+    ///
     pub fn size(&self) -> Result<u64> {
         let inner = self.inner.read().unwrap();
         Ok(inner.file.size)

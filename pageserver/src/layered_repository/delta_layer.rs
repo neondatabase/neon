@@ -196,38 +196,6 @@ pub struct DeltaLayerInner {
 }
 
 impl Layer for DeltaLayer {
-    fn get_max_key_range(&self) -> Result<u64> {
-        let inner = self.load()?;
-
-        // Scan the page versions backwards, starting from `lsn`.
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-        let mut prev_key: Key = Key::MIN;
-        let mut max_range: u64 = 0;
-        let mut start_pos: u64 = 0;
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |delta_key, value| {
-                let key = DeltaKey::extract_key_from_buf(delta_key);
-                if key != prev_key {
-                    let curr_pos = BlobRef(value).pos();
-                    if curr_pos - start_pos > max_range {
-                        max_range = curr_pos - start_pos;
-                    }
-                    start_pos = curr_pos;
-                    prev_key = key;
-                }
-                true
-            },
-        )?;
-        Ok(max_range)
-    }
-
     fn get_tenant_id(&self) -> ZTenantId {
         self.tenantid
     }
@@ -345,6 +313,18 @@ impl Layer for DeltaLayer {
         match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
+        }
+    }
+
+    fn key_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a> {
+        let inner = match self.load() {
+            Ok(inner) => inner,
+            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
+        };
+
+        match DeltaKeyIter::new(inner) {
+            Ok(iter) => Box::new(iter),
+            Err(e) => panic!("Layer index is corrupted: {e:?}"),
         }
     }
 
@@ -852,5 +832,71 @@ impl<'a> DeltaValueIter<'a> {
         } else {
             Ok(None)
         }
+    }
+}
+///
+/// Iterator over all keys stored in a delta layer
+///
+/// FIXME: This creates a Vector to hold the offsets of all key-offset pairs.
+/// That takes up quite a lot of memory. Should do this in a more streaming
+/// fashion.
+///
+struct DeltaKeyIter {
+    all_offsets: Vec<(DeltaKey, BlobRef)>,
+    size: u64,
+    next_idx: usize,
+}
+
+impl Iterator for DeltaKeyIter {
+    type Item = (Key, Lsn, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_idx < self.all_offsets.len() {
+            let (delta_key, blob_ref) = &self.all_offsets[self.next_idx];
+
+            let key = delta_key.key();
+            let lsn = delta_key.lsn();
+
+            self.next_idx += 1;
+
+            let next_pos = if self.next_idx < self.all_offsets.len() {
+                self.all_offsets[self.next_idx].1.pos()
+            } else {
+                self.size
+            };
+            assert!(next_pos > blob_ref.pos());
+            Some((key, lsn, next_pos - blob_ref.pos()))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> DeltaKeyIter {
+    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+
+        let mut all_offsets: Vec<(DeltaKey, BlobRef)> = Vec::new();
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value| {
+                all_offsets.push((DeltaKey::from_slice(key), BlobRef(value)));
+                true
+            },
+        )?;
+
+        let iter = DeltaKeyIter {
+            all_offsets,
+            size: std::fs::metadata(&file.file.path)?.len(),
+            next_idx: 0,
+        };
+
+        Ok(iter)
     }
 }
