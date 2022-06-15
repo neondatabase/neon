@@ -230,8 +230,6 @@ pub fn shutdown_all_tenants() {
     drop(m);
 
     thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiverManager), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), None, None);
-    thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), None, None);
 
     // Ok, no background threads running anymore. Flush any remaining data in
     // memory to disk.
@@ -344,8 +342,6 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
                 Some(tenant_id),
                 None,
             );
-            thread_mgr::shutdown_threads(Some(ThreadKind::GarbageCollector), Some(tenant_id), None);
-            thread_mgr::shutdown_threads(Some(ThreadKind::Compactor), Some(tenant_id), None);
         }
     }
 

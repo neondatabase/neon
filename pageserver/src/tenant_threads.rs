@@ -95,7 +95,7 @@ pub fn init_tenant_task_pool() -> Result<()> {
     START_COMPACTION_LOOP.set(compaction_send).unwrap();
 
     thread_mgr::spawn(
-        ThreadKind::WalReceiverManager, // TODO
+        ThreadKind::TenantTaskManager,
         None,
         None,
         "WAL receiver manager main thread",
@@ -105,6 +105,7 @@ pub fn init_tenant_task_pool() -> Result<()> {
                 loop {
                     tokio::select! {
                         _ = thread_mgr::shutdown_watcher() => break,
+                        // TODO don't spawn if already running
                         tenantid = gc_recv.recv() => {
                             tokio::spawn(gc_loop(tenantid.unwrap()));
                         },
