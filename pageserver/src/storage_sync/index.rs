@@ -2,6 +2,7 @@
 //! Able to restore itself from the storage index parts, that are located in every timeline's remote directory and contain all data about
 //! remote timeline layers and its metadata.
 
+use std::ops::{Deref, DerefMut};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -14,7 +15,10 @@ use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
 
 use crate::{config::PageServerConf, layered_repository::metadata::TimelineMetadata};
-use utils::{lsn::Lsn, zid::ZTenantTimelineId};
+use utils::{
+    lsn::Lsn,
+    zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
+};
 
 /// A part of the filesystem path, that needs a root to become a path again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -41,38 +45,68 @@ impl RelativePath {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TenantEntry(HashMap<ZTimelineId, RemoteTimeline>);
+
+impl TenantEntry {
+    pub fn has_in_progress_downloads(&self) -> bool {
+        self.values()
+            .any(|remote_timeline| remote_timeline.awaits_download)
+    }
+}
+
+impl Deref for TenantEntry {
+    type Target = HashMap<ZTimelineId, RemoteTimeline>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for TenantEntry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<HashMap<ZTimelineId, RemoteTimeline>> for TenantEntry {
+    fn from(inner: HashMap<ZTimelineId, RemoteTimeline>) -> Self {
+        Self(inner)
+    }
+}
+
 /// An index to track tenant files that exist on the remote storage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RemoteTimelineIndex {
-    timeline_entries: HashMap<ZTenantTimelineId, RemoteTimeline>,
+    entries: HashMap<ZTenantId, TenantEntry>,
 }
 
 /// A wrapper to synchronize the access to the index, should be created and used before dealing with any [`RemoteTimelineIndex`].
+#[derive(Default)]
 pub struct RemoteIndex(Arc<RwLock<RemoteTimelineIndex>>);
 
 impl RemoteIndex {
-    pub fn empty() -> Self {
-        Self(Arc::new(RwLock::new(RemoteTimelineIndex {
-            timeline_entries: HashMap::new(),
-        })))
-    }
-
     pub fn from_parts(
         conf: &'static PageServerConf,
-        index_parts: HashMap<ZTenantTimelineId, IndexPart>,
+        index_parts: HashMap<ZTenantId, HashMap<ZTimelineId, IndexPart>>,
     ) -> anyhow::Result<Self> {
-        let mut timeline_entries = HashMap::new();
+        let mut entries: HashMap<ZTenantId, TenantEntry> = HashMap::new();
 
-        for (sync_id, index_part) in index_parts {
-            let timeline_path = conf.timeline_path(&sync_id.timeline_id, &sync_id.tenant_id);
-            let remote_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
-                .context("Failed to restore remote timeline data from index part")?;
-            timeline_entries.insert(sync_id, remote_timeline);
+        for (tenant_id, timelines) in index_parts {
+            for (timeline_id, index_part) in timelines {
+                let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
+                let remote_timeline =
+                    RemoteTimeline::from_index_part(&timeline_path, index_part)
+                        .context("Failed to restore remote timeline data from index part")?;
+
+                entries
+                    .entry(tenant_id)
+                    .or_default()
+                    .insert(timeline_id, remote_timeline);
+            }
         }
 
-        Ok(Self(Arc::new(RwLock::new(RemoteTimelineIndex {
-            timeline_entries,
-        }))))
+        Ok(Self(Arc::new(RwLock::new(RemoteTimelineIndex { entries }))))
     }
 
     pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, RemoteTimelineIndex> {
@@ -91,20 +125,50 @@ impl Clone for RemoteIndex {
 }
 
 impl RemoteTimelineIndex {
-    pub fn timeline_entry(&self, id: &ZTenantTimelineId) -> Option<&RemoteTimeline> {
-        self.timeline_entries.get(id)
+    pub fn timeline_entry(
+        &self,
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        }: &ZTenantTimelineId,
+    ) -> Option<&RemoteTimeline> {
+        self.entries.get(tenant_id)?.get(timeline_id)
     }
 
-    pub fn timeline_entry_mut(&mut self, id: &ZTenantTimelineId) -> Option<&mut RemoteTimeline> {
-        self.timeline_entries.get_mut(id)
+    pub fn timeline_entry_mut(
+        &mut self,
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        }: &ZTenantTimelineId,
+    ) -> Option<&mut RemoteTimeline> {
+        self.entries.get_mut(tenant_id)?.get_mut(timeline_id)
     }
 
-    pub fn add_timeline_entry(&mut self, id: ZTenantTimelineId, entry: RemoteTimeline) {
-        self.timeline_entries.insert(id, entry);
+    pub fn add_timeline_entry(
+        &mut self,
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        }: ZTenantTimelineId,
+        entry: RemoteTimeline,
+    ) {
+        self.entries
+            .entry(tenant_id)
+            .or_default()
+            .insert(timeline_id, entry);
     }
 
-    pub fn all_sync_ids(&self) -> impl Iterator<Item = ZTenantTimelineId> + '_ {
-        self.timeline_entries.keys().copied()
+    pub fn tenant_entry(&self, tenant_id: &ZTenantId) -> Option<&TenantEntry> {
+        self.entries.get(tenant_id)
+    }
+
+    pub fn tenant_entry_mut(&mut self, tenant_id: &ZTenantId) -> Option<&mut TenantEntry> {
+        self.entries.get_mut(tenant_id)
+    }
+
+    pub fn add_tenant_entry(&mut self, tenant_id: ZTenantId) -> &mut TenantEntry {
+        self.entries.entry(tenant_id).or_default()
     }
 
     pub fn set_awaits_download(

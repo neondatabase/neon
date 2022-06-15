@@ -165,14 +165,14 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
 }
 
 pub enum LocalTimelineUpdate {
-    Detach(ZTenantTimelineId),
+    Detach(ZTenantTimelineId, std::sync::mpsc::Sender<()>),
     Attach(ZTenantTimelineId, Arc<DatadirTimelineImpl>),
 }
 
 impl std::fmt::Debug for LocalTimelineUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Detach(ttid) => f.debug_tuple("Remove").field(ttid).finish(),
+            Self::Detach(ttid, _) => f.debug_tuple("Remove").field(ttid).finish(),
             Self::Attach(ttid, _) => f.debug_tuple("Add").field(ttid).finish(),
         }
     }
@@ -182,32 +182,31 @@ impl std::fmt::Debug for LocalTimelineUpdate {
 pub fn apply_timeline_sync_status_updates(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
-    sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
+    tenant_id: ZTenantId,
+    sync_status_updates: HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
 ) {
     if sync_status_updates.is_empty() {
         debug!("no sync status updates to apply");
         return;
     }
     info!(
-        "Applying sync status updates for {} timelines",
+        "Applying sync status updates for tenant {tenant_id} {} timelines",
         sync_status_updates.len()
     );
     debug!("Sync status updates: {sync_status_updates:?}");
 
-    for (tenant_id, status_updates) in sync_status_updates {
-        let repo = match load_local_repo(conf, tenant_id, remote_index) {
-            Ok(repo) => repo,
-            Err(e) => {
-                error!("Failed to load repo for tenant {tenant_id} Error: {e:?}",);
-                continue;
-            }
-        };
-        match apply_timeline_remote_sync_status_updates(&repo, status_updates) {
-            Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
-            Err(e) => error!(
-                "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
-            ),
+    let repo = match load_local_repo(conf, tenant_id, remote_index) {
+        Ok(repo) => repo,
+        Err(e) => {
+            error!("Failed to load repo for tenant {tenant_id} Error: {e:?}");
+            return;
         }
+    };
+    match apply_timeline_remote_sync_status_updates(&repo, sync_status_updates) {
+        Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
+        Err(e) => error!(
+            "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
+        ),
     }
 }
 
@@ -387,29 +386,49 @@ pub fn get_local_timeline_with_load(
     }
 }
 
-pub fn detach_timeline(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> anyhow::Result<()> {
-    // shutdown the timeline threads (this shuts down the walreceiver)
-    thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
+pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> anyhow::Result<()> {
+    set_tenant_state(tenant_id, TenantState::Stopping)?;
+    // shutdown the tenant and timeline threads: gc, compaction, page service threads)
+    thread_mgr::shutdown_threads(None, Some(tenant_id), None);
 
-    match tenants_state::write_tenants().get_mut(&tenant_id) {
-        Some(tenant) => {
-            tenant
-                .repo
-                .detach_timeline(timeline_id)
-                .context("Failed to detach inmem tenant timeline")?;
-            tenant.local_timelines.remove(&timeline_id);
+    // FIXME should we protect somehow from starting new threads/walreceivers when tenant is in stopping state?
+    // send stop signal to wal receiver and collect join handles while holding the lock
+    let walreceiver_join_handles = {
+        let tenants = tenants_state::write_tenants();
+        let tenant = tenants.get(&tenant_id).context("tenant not found")?;
+        let mut walreceiver_join_handles = Vec::with_capacity(tenant.local_timelines.len());
+        for timeline_id in tenant.local_timelines.keys() {
+            let (sender, receiver) = std::sync::mpsc::channel::<()>();
             tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach(
-                ZTenantTimelineId::new(tenant_id, timeline_id),
+                ZTenantTimelineId::new(tenant_id, *timeline_id),
+                sender,
             ));
+            walreceiver_join_handles.push((*timeline_id, receiver));
         }
-        None => bail!("Tenant {tenant_id} not found in local tenant state"),
+        // drop the tenants lock
+        walreceiver_join_handles
+    };
+
+    // wait for wal receivers to stop without holding the lock, because walreceiver
+    // will attempt to change tenant state which is protected by the same global tenants lock.
+    // TODO do we need a timeout here? how to handle it?
+    // recv_timeout is broken: https://github.com/rust-lang/rust/issues/94518#issuecomment-1057440631
+    // need to use crossbeam-channel
+    for (timeline_id, join_handle) in walreceiver_join_handles {
+        info!("waiting for wal receiver to shutdown timeline_id {timeline_id}");
+        join_handle.recv().context("failed to join walreceiver")?;
+        info!("wal receiver shutdown confirmed timeline_id {timeline_id}");
     }
 
-    let local_timeline_directory = conf.timeline_path(&timeline_id, &tenant_id);
+    tenants_state::write_tenants().remove(&tenant_id);
+
+    // If removal fails there will be no way to successfully retry detach,
+    // because tenant no longer exists in in memory map. And it needs to be removed from it
+    // before we remove files because it contains references to repository
+    // which references ephemeral files which are deleted on drop. So if we keep these references
+    // code will attempt to remove files which no longer exist. This can be fixed by having shutdown
+    // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
+    let local_timeline_directory = conf.tenant_path(&tenant_id);
     std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
         format!(
             "Failed to remove local timeline directory '{}'",

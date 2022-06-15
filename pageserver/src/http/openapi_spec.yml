@@ -170,7 +170,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
     parameters:
       - name: tenant_id
@@ -186,12 +185,27 @@ paths:
           type: string
           format: hex
     post:
-      description: Attach remote timeline
+      description: Deprecated
       responses:
-        "200":
-          description: Timeline attaching scheduled
+        "410":
+          description: GONE
+
+
+  /v1/tenant/{tenant_id}/attach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Deprecated
+      responses:
+        "202":
+          description: Tenant attaching scheduled
         "400":
-          description: Error when no tenant id found in path or no timeline id
+          description: Error when no tenant id found in path parameters
           content:
             application/json:
               schema:
@@ -215,7 +229,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "409":
-          description: Timeline download is already in progress
+          description: Tenant download is already in progress
           content:
             application/json:
               schema:
@@ -226,7 +240,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
     parameters:
@@ -243,12 +256,26 @@ paths:
           type: string
           format: hex
     post:
-      description: Detach local timeline
+      description: Deprecated
+      responses:
+        "410":
+          description: GONE
+
+  /v1/tenant/{tenant_id}/detach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Detach local tenant
       responses:
         "200":
-          description: Timeline detached
+          description: Tenant detached
         "400":
-          description: Error when no tenant id found in path or no timeline id
+          description: Error when no tenant id found in path parameters
           content:
             application/json:
               schema:

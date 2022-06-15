@@ -331,19 +331,19 @@ impl Repository for LayeredRepository {
     /// metrics collection.
     fn gc_iteration(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        let timeline_str = target_timelineid
+        let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
         STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
+                self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
             })
     }
 
@@ -407,28 +407,6 @@ impl Repository for LayeredRepository {
             timeline.checkpoint(CheckpointConfig::Flush)?;
         }
 
-        Ok(())
-    }
-
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
-        let mut timelines = self.timelines.lock().unwrap();
-        // check no child timelines, because detach will remove files, which will brake child branches
-        // FIXME this can still be violated because we do not guarantee
-        //   that all ancestors are downloaded/attached to the same pageserver
-        let num_children = timelines
-            .iter()
-            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
-            .count();
-
-        ensure!(
-            num_children == 0,
-            "Cannot detach timeline which has child timelines"
-        );
-
-        ensure!(
-            timelines.remove(&timeline_id).is_some(),
-            "Cannot detach timeline {timeline_id} that is not available locally"
-        );
         Ok(())
     }
 
@@ -839,13 +817,13 @@ impl LayeredRepository {
     //   we do.
     fn gc_iteration_internal(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timelineid)
+            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timeline_id)
                 .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -859,6 +837,12 @@ impl LayeredRepository {
         let mut timeline_ids = Vec::new();
         let mut timelines = self.timelines.lock().unwrap();
 
+        if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+            if timelines.get(target_timeline_id).is_none() {
+                bail!("gc target timeline does not exist")
+            }
+        };
+
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
@@ -867,7 +851,7 @@ impl LayeredRepository {
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
                 // If target_timeline is specified, we only need to know branchpoints of its children
-                if let Some(timelineid) = target_timelineid {
+                if let Some(timelineid) = target_timeline_id {
                     if ancestor_timeline_id == &timelineid {
                         all_branchpoints
                             .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
@@ -882,7 +866,7 @@ impl LayeredRepository {
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
-        for timelineid in timeline_ids.into_iter() {
+        for timeline_id in timeline_ids.into_iter() {
             if thread_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
@@ -891,12 +875,12 @@ impl LayeredRepository {
 
             // Timeline is known to be local and loaded.
             let timeline = self
-                .get_timeline_load_internal(timelineid, &mut *timelines)?
+                .get_timeline_load_internal(timeline_id, &mut *timelines)?
                 .expect("checked above that timeline is local and loaded");
 
             // If target_timeline is specified, only GC it
-            if let Some(target_timelineid) = target_timelineid {
-                if timelineid != target_timelineid {
+            if let Some(target_timelineid) = target_timeline_id {
+                if timeline_id != target_timelineid {
                     continue;
                 }
             }
@@ -905,8 +889,8 @@ impl LayeredRepository {
                 drop(timelines);
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
-                        Included((timelineid, Lsn(0))),
-                        Included((timelineid, Lsn(u64::MAX))),
+                        Included((timeline_id, Lsn(0))),
+                        Included((timeline_id, Lsn(u64::MAX))),
                     ))
                     .map(|&x| x.1)
                     .collect();
@@ -916,7 +900,7 @@ impl LayeredRepository {
                 // used in tests, so we want as deterministic results as possible.
                 if checkpoint_before_gc {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
-                    info!("timeline {} checkpoint_before_gc done", timelineid);
+                    info!("timeline {} checkpoint_before_gc done", timeline_id);
                 }
                 timeline.update_gc_info(branchpoints, cutoff, pitr);
                 let result = timeline.gc()?;

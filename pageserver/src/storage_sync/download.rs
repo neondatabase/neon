@@ -1,10 +1,14 @@
 //! Timeline synchronization logic to fetch the layer files from remote storage into pageserver's local directory.
 
-use std::{collections::HashSet, fmt::Debug, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    path::Path,
+};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use remote_storage::{path_with_suffix_extension, RemoteStorage};
+use remote_storage::{path_with_suffix_extension, RemoteObjectName, RemoteStorage};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -14,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
-use utils::zid::ZTenantTimelineId;
+use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use super::{
     index::{IndexPart, RemoteTimeline},
@@ -22,6 +26,105 @@ use super::{
 };
 
 pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
+
+/// FIXME: Needs cleanup. Currently it swallows errors. Here we need to ensure that
+/// we successfully downloaded all metadata parts for one tenant.
+/// And successful includes absence of index_part in the remote. Because it is valid situation
+/// when timeline was just created and pageserver restarted before upload of index part was completed.
+/// But currently RemoteStorage interface does not provide this knowledge because it uses
+/// anyhow::Error as an error type. So this needs a refactoring.
+///
+/// In other words we need to yield only complete sets of tenant timelines.
+/// Failure for one timeline of a tenant should exclude whole tenant from returned hashmap.
+/// So there are two requirements: keep everything in one futures unordered
+/// to allow higher concurrency. Mark tenants as failed independently.
+/// That requires some bookeeping.
+pub async fn try_download_index_parts<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    keys: HashSet<ZTenantTimelineId>,
+) -> HashMap<ZTenantId, HashMap<ZTimelineId, IndexPart>>
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+{
+    let mut index_parts: HashMap<ZTenantId, HashMap<ZTimelineId, IndexPart>> = HashMap::new();
+
+    let mut part_downloads = keys
+        .into_iter()
+        .map(|id| async move { (id, download_index_part(conf, storage, id).await) })
+        .collect::<FuturesUnordered<_>>();
+
+    while let Some((id, part_upload_result)) = part_downloads.next().await {
+        match part_upload_result {
+            Ok(index_part) => {
+                debug!("Successfully fetched index part for {id}");
+                index_parts
+                    .entry(id.tenant_id)
+                    .or_default()
+                    .insert(id.timeline_id, index_part);
+            }
+            Err(e) => error!("Failed to fetch index part for {id}: {e}"),
+        }
+    }
+
+    index_parts
+}
+
+pub async fn download_tenant_index_parts<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<HashMap<ZTimelineId, IndexPart>>
+where
+    P: RemoteObjectName + Debug + Send + Sync + 'static,
+    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+{
+    let tenant_path = conf.timelines_path(&tenant_id);
+    let tenant_storage_path = storage.remote_object_id(&tenant_path).with_context(|| {
+        format!(
+            "Failed to get tenant storage path for local path '{}'",
+            tenant_path.display()
+        )
+    })?;
+    let timelines = storage
+        .list_prefixes(Some(tenant_storage_path))
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to list tenant storage path to get remote timelines to download: {}",
+                tenant_id
+            )
+        })?;
+
+    let mut sync_ids = HashSet::new();
+
+    for timeline_remote_storage_key in timelines {
+        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
+        })?;
+
+        let timeline_id: ZTimelineId = object_name
+            .parse()
+            .with_context(|| {
+                format!("failed to parse object name into timeline id for tenant {tenant_id} '{object_name}'")
+            })?;
+
+        sync_ids.insert(ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        });
+    }
+
+    let index_parts = try_download_index_parts(conf, storage, sync_ids)
+        .await
+        .remove(&tenant_id)
+        .ok_or(anyhow::anyhow!(
+            "Missing tenant index parts. This is a bug."
+        ))?;
+
+    Ok(index_parts)
+}
 
 /// Retrieves index data from the remote storage for a given timeline.
 pub async fn download_index_part<P, S>(

@@ -202,7 +202,7 @@ pub fn create_repo(
             // anymore, but I think that could still happen.
             let wal_redo_manager = Arc::new(crate::walredo::DummyRedoManager {});
 
-            (wal_redo_manager as _, RemoteIndex::empty())
+            (wal_redo_manager as _, RemoteIndex::default())
         }
     };
 
