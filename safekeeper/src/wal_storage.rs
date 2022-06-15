@@ -549,7 +549,6 @@ impl WalReader {
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        // Take the `File` from `wal_file`, or open a new file.
         let mut wal_segment = match self.wal_segment.take() {
             Some(reader) => reader,
             None => self.open_segment().await?,
@@ -565,8 +564,8 @@ impl WalReader {
         let send_size = wal_segment.read(buf).await?;
         self.pos += send_size as u64;
 
-        // Decide whether to reuse this file. If we don't set wal_file here
-        // a new file will be opened next time.
+        // Decide whether to reuse this file. If we don't set wal_segment here
+        // a new reader will be opened next time.
         if self.pos.segment_offset(self.wal_seg_size) != 0 {
             self.wal_segment = Some(wal_segment);
         }
