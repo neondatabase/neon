@@ -611,7 +611,7 @@ impl WalReader {
             return Ok(Box::pin(reader));
         }
 
-        Err(anyhow!("WAL segment is not found"))
+        bail!("WAL segment is not found")
     }
 
     /// Helper function for opening a wal file.
