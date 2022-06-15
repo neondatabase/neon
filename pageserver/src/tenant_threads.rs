@@ -62,6 +62,9 @@ async fn compaction_loop_ext(tenantid: ZTenantId) -> Result<()> {
 static START_GC_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
 static START_COMPACTION_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
 
+/// Spawn a task that will periodically schedule garbage collection until
+/// the tenant becomes inactive. This should be called on tenant
+/// activation.
 pub fn start_gc_loop(tenantid: ZTenantId) -> Result<()> {
     START_GC_LOOP
         .get()
@@ -71,6 +74,9 @@ pub fn start_gc_loop(tenantid: ZTenantId) -> Result<()> {
     Ok(())
 }
 
+/// Spawn a task that will periodically schedule compaction until
+/// the tenant becomes inactive. This should be called on tenant
+/// activation.
 pub fn start_compaction_loop(tenantid: ZTenantId) -> Result<()> {
     START_COMPACTION_LOOP
         .get()
