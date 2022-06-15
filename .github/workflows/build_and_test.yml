@@ -14,7 +14,6 @@ jobs:
 
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
-      options: --user 1000
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
@@ -64,7 +63,6 @@ jobs:
 
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
-      options: --user 1000
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
 
@@ -120,6 +118,7 @@ jobs:
 
       - name: Run cargo test
         run: |
+          export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
             CARGO_FLAGS=
@@ -132,6 +131,7 @@ jobs:
 
       - name: Install rust binaries
         run: |
+          export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
           elif [[ $BUILD_TYPE == "release" ]]; then
@@ -175,6 +175,7 @@ jobs:
 
       - name: Merge coverage data
         run: |
+          export HOME=/home/runner
           # This will speed up workspace uploads
           if [[ $BUILD_TYPE == "debug" ]]; then
             scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage merge
@@ -198,7 +199,6 @@ jobs:
         rust_toolchain: [ 1.58 ]
     container:
       image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
-      options: --user 1000
     steps:
 #      - name: Fix permissions
 #        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
@@ -224,3 +224,29 @@ jobs:
 
       - name: Run mypy to check types
         run: poetry run mypy .
+
+  pg_regress-tests:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+    container:
+      image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest regress tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_pg_regress
+          needs_postgres_source: false
+
+
