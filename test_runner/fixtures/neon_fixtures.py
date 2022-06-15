@@ -1373,12 +1373,13 @@ def pg_bin(test_output_dir: str) -> PgBin:
 
 
 class VanillaPostgres(PgProtocol):
-    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
+    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int, init=True):
         super().__init__(host='localhost', port=port, dbname='postgres')
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
-        self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
+        if init:
+            self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
 
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
