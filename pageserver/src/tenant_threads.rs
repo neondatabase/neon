@@ -14,8 +14,8 @@ use utils::zid::ZTenantId;
 ///
 /// Compaction thread's main loop
 ///
-pub fn compact_loop(tenantid: ZTenantId) -> Result<()> {
-    if let Err(err) = compact_loop_ext(tenantid) {
+pub async fn compaction_loop(tenantid: ZTenantId) -> Result<()> {
+    if let Err(err) = compaction_loop_ext(tenantid).await {
         error!("compact loop terminated with error: {:?}", err);
         Err(err)
     } else {
@@ -23,7 +23,7 @@ pub fn compact_loop(tenantid: ZTenantId) -> Result<()> {
     }
 }
 
-fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
+async fn compaction_loop_ext(tenantid: ZTenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
@@ -36,7 +36,19 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
 
         // Compact timelines
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-        repo.compaction_iteration()?;
+        let compaction_result =
+            tokio::task::spawn_blocking(move || repo.compaction_iteration()).await;
+        match compaction_result {
+            Ok(Ok(())) => {
+                // success, do nothing
+            }
+            Ok(Err(e)) => {
+                anyhow::bail!(e.context("Compaction failed"));
+            }
+            Err(e) => {
+                anyhow::bail!("Compaction join error {}", e);
+            }
+        }
     }
 
     trace!(
@@ -48,9 +60,19 @@ fn compact_loop_ext(tenantid: ZTenantId) -> Result<()> {
 }
 
 static START_GC_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
+static START_COMPACTION_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
 
 pub fn start_gc_loop(tenantid: ZTenantId) -> Result<()> {
     START_GC_LOOP
+        .get()
+        .unwrap()
+        .blocking_send(tenantid)
+        .unwrap();
+    Ok(())
+}
+
+pub fn start_compaction_loop(tenantid: ZTenantId) -> Result<()> {
+    START_COMPACTION_LOOP
         .get()
         .unwrap()
         .blocking_send(tenantid)
@@ -66,8 +88,11 @@ pub fn init_tenant_task_pool() -> Result<()> {
         .enable_all()
         .build()?;
 
-    let (send, mut recv) = mpsc::channel::<ZTenantId>(100);
-    START_GC_LOOP.set(send).unwrap();
+    let (gc_send, mut gc_recv) = mpsc::channel::<ZTenantId>(100);
+    START_GC_LOOP.set(gc_send).unwrap();
+
+    let (compaction_send, mut compaction_recv) = mpsc::channel::<ZTenantId>(100);
+    START_COMPACTION_LOOP.set(compaction_send).unwrap();
 
     thread_mgr::spawn(
         ThreadKind::WalReceiverManager, // TODO
@@ -80,8 +105,11 @@ pub fn init_tenant_task_pool() -> Result<()> {
                 loop {
                     tokio::select! {
                         _ = thread_mgr::shutdown_watcher() => break,
-                        tenantid = recv.recv() => {
+                        tenantid = gc_recv.recv() => {
                             tokio::spawn(gc_loop(tenantid.unwrap()));
+                        },
+                        tenantid = compaction_recv.recv() => {
+                            tokio::spawn(compaction_loop(tenantid.unwrap()));
                         },
                     }
                 }
@@ -119,12 +147,10 @@ pub async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
                     // Gc success, do nothing
                 }
                 Ok(Err(e)) => {
-                    error!("Gc failed: {}", e);
-                    // TODO maybe also don't reschedule on error?
+                    anyhow::bail!(e.context("Gc failed"));
                 }
                 Err(e) => {
-                    error!("Gc failed: {}", e);
-                    // TODO maybe also don't reschedule on error?
+                    anyhow::bail!("Gc join error {}", e);
                 }
             }
         }

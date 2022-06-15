@@ -330,23 +330,8 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
         }
         (TenantState::Idle, TenantState::Active) => {
             info!("activating tenant {tenant_id}");
-            let compactor_spawn_result = thread_mgr::spawn(
-                ThreadKind::Compactor,
-                Some(tenant_id),
-                None,
-                "Compactor thread",
-                false,
-                move || crate::tenant_threads::compact_loop(tenant_id),
-            );
-            if compactor_spawn_result.is_err() {
-                let mut m = tenants_state::write_tenants();
-                m.get_mut(&tenant_id)
-                    .with_context(|| format!("Tenant not found for id {tenant_id}"))?
-                    .state = old_state;
-                drop(m);
-            }
-            compactor_spawn_result?;
 
+            crate::tenant_threads::start_compaction_loop(tenant_id)?;
             crate::tenant_threads::start_gc_loop(tenant_id)?;
         }
         (TenantState::Idle, TenantState::Stopping) => {
