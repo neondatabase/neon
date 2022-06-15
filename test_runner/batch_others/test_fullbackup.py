@@ -27,11 +27,7 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     pgmain = env.postgres.create_start('test_fullbackup')
     log.info("postgres is running on 'test_fullbackup' branch")
 
-    main_pg_conn = pgmain.connect()
-    main_cur = main_pg_conn.cursor()
-
-    main_cur.execute("SHOW neon.timeline_id")
-    timeline = main_cur.fetchone()[0]
+    timeline = pgmain.safe_psql("SHOW neon.timeline_id")[0][0]
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
