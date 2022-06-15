@@ -264,7 +264,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
             info!("Processing timeline update: {update:?}");
             match update {
                 // Timeline got detached, stop all related tasks and remove public timeline data.
-                LocalTimelineUpdate::Detach(id) => {
+                LocalTimelineUpdate::Detach(id, join_sender) => {
                     match local_timeline_wal_receivers.get_mut(&id.tenant_id) {
                         Some(wal_receivers) => {
                             if let hash_map::Entry::Occupied(o) = wal_receivers.entry(id.timeline_id) {
@@ -280,6 +280,11 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                     };
                     {
                         WAL_RECEIVER_ENTRIES.write().await.remove(&id);
+                        if let Err(e) = join_sender.send(()) {
+                            warn!("cannot send wal_receiver shutdown confirmation {e}")
+                        } else {
+                            info!("confirm walreceiver shutdown for {id}");
+                        }
                     }
                 }
                 // Timeline got attached, retrieve all necessary information to start its broker loop and maintain this loop endlessly.

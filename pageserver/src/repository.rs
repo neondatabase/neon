@@ -260,9 +260,6 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    /// detaches timeline-related in-memory data.
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
-
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
     fn get_remote_index(&self) -> &RemoteIndex;
 }
@@ -537,7 +534,7 @@ pub mod repo_harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
-                RemoteIndex::empty(),
+                RemoteIndex::default(),
                 false,
             );
             // populate repo with locally available timelines

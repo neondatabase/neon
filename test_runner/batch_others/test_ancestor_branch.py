@@ -105,16 +105,3 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     branch2_cur.execute('SELECT count(*) FROM foo')
     assert branch2_cur.fetchone() == (300000, )
-
-
-def test_ancestor_branch_detach(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_detach_parent", "empty")
-
-    env.neon_cli.create_branch("test_ancestor_branch_detach_branch1",
-                               "test_ancestor_branch_detach_parent")
-
-    ps_http = env.pageserver.http_client()
-    with pytest.raises(NeonPageserverApiException, match="Failed to detach inmem tenant timeline"):
-        ps_http.timeline_detach(env.initial_tenant, parent_timeline_id)
