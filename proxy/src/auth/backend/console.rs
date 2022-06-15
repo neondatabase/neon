@@ -79,10 +79,7 @@ pub(super) struct Api<'a> {
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
     pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self {
-            endpoint,
-            creds,
-        })
+        Ok(Self { endpoint, creds })
     }
 
     /// Authenticate the existing user or throw an error.
@@ -120,7 +117,8 @@ impl<'a> Api<'a> {
     async fn wake_compute(&self) -> Result<DatabaseInfo> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
-        url.query_pairs_mut().append_pair("project", self.creds.project_name.as_str());
+        url.query_pairs_mut()
+            .append_pair("project", self.creds.project_name.as_str());
 
         // TODO: use a proper logger
         println!("cplane request: {url}");
