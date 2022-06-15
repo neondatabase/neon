@@ -2,11 +2,14 @@ from contextlib import closing
 from datetime import datetime
 import os
 import pytest
+import time
+from uuid import UUID
 
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.utils import lsn_to_hex
+from fixtures.benchmark_fixture import MetricReport
 
 
 @pytest.mark.parametrize('with_safekeepers', [False, True])
@@ -42,6 +45,56 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers:
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000, )
+
+
+def test_tenant_threads(neon_env_builder, zenbenchmark):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    def get_num_threads() -> int:
+        metrics = env.pageserver.http_client().get_metrics()
+        parsed = parse_metrics(metrics)
+        threads = parsed.query_one("process_threads").value
+        return threads
+
+    threads_before = get_num_threads()
+    zenbenchmark.record("threads_before", threads_before, "", report=MetricReport.LOWER_IS_BETTER)
+
+    tenants = env.pageserver.http_client().tenant_list()
+    num_tenants = len(tenants)
+    num_active = len([t for t in tenants if t["state"] == "Active"])
+    zenbenchmark.record("tenants_before", num_tenants, "", report=MetricReport.LOWER_IS_BETTER)
+    zenbenchmark.record("active_before", num_active, "", report=MetricReport.LOWER_IS_BETTER)
+
+    for i in range(20):
+        print(f"creating tenant {i}")
+        name = f"test_tenant_threads_{i}"
+        tenant, _ = env.neon_cli.create_tenant()
+
+
+        timeline = env.neon_cli.create_timeline(name, tenant_id=tenant)
+        pg = env.postgres.create_start(name, tenant_id=tenant)
+        pg.safe_psql("select 1;")
+        pg.stop()
+        env.pageserver.http_client().timeline_detach(tenant, timeline)
+
+        remaining_timelines = [
+            UUID(r["timeline_id"])
+            for r in env.pageserver.http_client().timeline_list(tenant)
+        ]
+        for t in remaining_timelines:
+            env.pageserver.http_client().timeline_detach(tenant, t)
+
+    time.sleep(5)
+
+    threads_after = get_num_threads()
+    zenbenchmark.record("threads_before", threads_after, "", report=MetricReport.LOWER_IS_BETTER)
+
+    tenants = env.pageserver.http_client().tenant_list()
+    num_tenants = len(tenants)
+    num_active = len([t for t in tenants if t["state"] == "Active"])
+    zenbenchmark.record("tenants_after", num_tenants, "", report=MetricReport.LOWER_IS_BETTER)
+    zenbenchmark.record("active_after", num_active, "", report=MetricReport.LOWER_IS_BETTER)
 
 
 def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
