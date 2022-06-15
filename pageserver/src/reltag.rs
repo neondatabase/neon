@@ -76,11 +76,6 @@ impl fmt::Display for RelTag {
 }
 
 impl RelTag {
-    /// Formats:
-    /// <oid>
-    /// <oid>_<fork name>
-    /// <oid>.<segment number>
-    /// <oid>_<fork name>.<segment number>
     pub fn to_segfile_name(&self, segno: u32) -> String {
         let mut name = if self.spcnode == pg_constants::GLOBALTABLESPACE_OID {
             "global/".to_string()
