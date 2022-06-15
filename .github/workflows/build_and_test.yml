@@ -43,7 +43,7 @@ jobs:
 
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
-        run: tar -C tmp_install/ -cf ./pg.tgz .
+        run: tar -C tmp_install/ -czf ./pg.tgz .
       - name: Upload postgres artifact
         uses: actions/upload-artifact@v3
         with:
@@ -182,7 +182,7 @@ jobs:
           fi
 
       - name: Prepare neon artifact
-        run: tar -C /tmp/zenith/ -cf ./neon.tgz .
+        run: tar -C /tmp/zenith/ -czf ./neon.tgz .
 
       - name: Upload neon binaries
         uses: actions/upload-artifact@v3
