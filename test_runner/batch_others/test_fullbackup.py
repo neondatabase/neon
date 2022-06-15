@@ -7,7 +7,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor
 from fixtures.neon_fixtures import pg_distrib_dir
 import os
-from fixtures.utils import mkdir_if_needed
+from fixtures.utils import mkdir_if_needed, subprocess_capture
 import shutil
 import getpass
 import pwd
@@ -17,6 +17,7 @@ num_rows = 1000
 
 # Ensure that regular postgres can start from fullbackup
 def test_fullbackup(neon_env_builder: NeonEnvBuilder,
+                    vanilla_pg,
                     pg_bin: PgBin,
                     port_distributor: PortDistributor):
 
@@ -46,27 +47,16 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     restored_conf_path = os.path.join(restored_dir_path, "postgresql.conf")
     os.mkdir(restored_dir_path, 0o750)
 
-    cmd = rf"""
-        {psql_path}                                    \
-            --no-psqlrc                                \
-            postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'fullbackup {env.initial_tenant.hex} {timeline} {lsn}'  \
-         | tar -x -C {restored_dir_path}
-    """
-
-    log.info(f"Running command: {cmd}")
-
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
     psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
-    result = subprocess.run(cmd, env=psql_env, capture_output=True, text=True, shell=True)
 
-    # Print captured stdout/stderr if fullbackup cmd failed.
-    if result.returncode != 0:
-        log.error('fullbackup shell command failed with:')
-        log.error(result.stdout)
-        log.error(result.stderr)
-    assert result.returncode == 0
+    # Get and unpack fullbackup from pageserver
+    query = f"fullbackup {env.initial_tenant.hex} {timeline} {lsn}"
+    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
+    result_basepath = pg_bin.run_capture(cmd, env=psql_env)
+    tar_output_file = result_basepath + ".stdout"
+    subprocess_capture(env.repo_dir, ["tar", "-xf", tar_output_file, "-C", restored_dir_path])
 
     port = port_distributor.get_port()
     with open(restored_conf_path, 'w') as f:
@@ -76,23 +66,14 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     # fullbackup returns neon specific pg_control and first WAL segment
     # use resetwal to overwrite it
     pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, 'pg_resetwal')
-    cmd = rf"""{pg_resetwal_path} -D {restored_dir_path}"""
-    log.info(f"Running command: {cmd}")
-    result = subprocess.run(cmd, env=psql_env, capture_output=True, text=True, shell=True)
+    cmd = [pg_resetwal_path, "-D", restored_dir_path]
+    pg_bin.run_capture(cmd, env=psql_env)
 
     # now start the postgres and ensure that we can read the data
     pg_ctl_path = os.path.join(pg_bin.pg_bin_path, 'pg_ctl')
     restored_dir_logfile = os.path.join(env.repo_dir, "logfile_restored_datadir")
-    cmd = rf"""{pg_ctl_path} start -D {restored_dir_path} -o '-p {port}' -l {restored_dir_logfile}"""
-    log.info(f"Running command: {cmd}")
-    result = subprocess.run(cmd, env=psql_env, capture_output=True, text=True, shell=True)
-
-    # Print captured stdout/stderr if pg_ctl cmd failed.
-    if result.returncode != 0:
-        log.error('pg_ctl shell command failed with:')
-        log.error(result.stdout)
-        log.error(result.stderr)
-    assert result.returncode == 0
+    cmd = [pg_ctl_path, "start", "-D", restored_dir_path, "-o", f"-p {port}", "-l", restored_dir_logfile]
+    pg_bin.run_capture(cmd, env=psql_env)
 
     with psycopg2.connect(dbname="postgres", user="cloud_admin", host='localhost',
                           port=f"{port}") as conn:
