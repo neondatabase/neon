@@ -114,6 +114,7 @@ jobs:
           export RUSTC_WRAPPER=cachepot
           export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+          export HOME=/home/runner
           "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
           cachepot -s
 
