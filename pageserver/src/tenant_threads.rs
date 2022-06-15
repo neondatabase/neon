@@ -12,9 +12,9 @@ use tracing::*;
 use utils::zid::ZTenantId;
 
 ///
-/// Compaction thread's main loop
+/// Compaction task's main loop
 ///
-pub async fn compaction_loop(tenantid: ZTenantId) -> Result<()> {
+async fn compaction_loop(tenantid: ZTenantId) -> Result<()> {
     if let Err(err) = compaction_loop_ext(tenantid).await {
         error!("compact loop terminated with error: {:?}", err);
         Err(err)
@@ -31,8 +31,8 @@ async fn compaction_loop_ext(tenantid: ZTenantId) -> Result<()> {
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
         let compaction_period = repo.get_compaction_period();
 
-        std::thread::sleep(compaction_period);
-        trace!("compaction thread for tenant {} waking up", tenantid);
+        tokio::time::sleep(compaction_period).await;
+        trace!("compaction loop for tenant {} waking up", tenantid);
 
         // Compact timelines
         let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
@@ -52,7 +52,7 @@ async fn compaction_loop_ext(tenantid: ZTenantId) -> Result<()> {
     }
 
     trace!(
-        "compaction thread stopped for tenant {} state is {:?}",
+        "compaction loop stopped for tenant {} state is {:?}",
         tenantid,
         tenant_mgr::get_tenant_state(tenantid)
     );
@@ -80,11 +80,13 @@ pub fn start_compaction_loop(tenantid: ZTenantId) -> Result<()> {
     Ok(())
 }
 
+/// Spawn the TenantTaskManager
+/// This needs to be called before start_gc_loop or start_compaction_loop
 pub fn init_tenant_task_pool() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("tenant-task-worker")
-        .worker_threads(40)
-        .max_blocking_threads(100)
+        .worker_threads(40)  // Way more than necessary
+        .max_blocking_threads(100)  // Way more than necessary
         .enable_all()
         .build()?;
 
@@ -125,7 +127,7 @@ pub fn init_tenant_task_pool() -> Result<()> {
 ///
 /// GC thread's main loop
 ///
-pub async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
+async fn gc_loop(tenantid: ZTenantId) -> Result<()> {
     loop {
         if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
             break;
