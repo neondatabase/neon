@@ -91,8 +91,8 @@ pub fn start_compaction_loop(tenantid: ZTenantId) -> Result<()> {
 pub fn init_tenant_task_pool() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("tenant-task-worker")
-        .worker_threads(40)  // Way more than necessary
-        .max_blocking_threads(100)  // Way more than necessary
+        .worker_threads(40) // Way more than necessary
+        .max_blocking_threads(100) // Way more than necessary
         .enable_all()
         .build()?;
 
