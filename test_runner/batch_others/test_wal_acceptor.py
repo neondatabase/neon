@@ -437,12 +437,14 @@ def wait_segment_offload(tenant_id, timeline_id, live_sk, seg_end):
                 f"timed out waiting {elapsed:.0f}s for segment ending at {seg_end} get offloaded")
         time.sleep(0.5)
 
+
 def wait_wal_trim(tenant_id, timeline_id, sk, target_size):
     started_at = time.time()
     http_cli = sk.http_client()
     while True:
         tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-        sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), tenant_id, timeline_id)) / 1024 / 1024
+        sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), tenant_id,
+                                                timeline_id)) / 1024 / 1024
         log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size:.2f}MB status={tli_status}")
 
         if sk_wal_size <= target_size:
@@ -451,7 +453,8 @@ def wait_wal_trim(tenant_id, timeline_id, sk, target_size):
         elapsed = time.time() - started_at
         if elapsed > 20:
             raise RuntimeError(
-                f"timed out waiting {elapsed:.0f}s for sk_id={sk.id} to trim WAL to {target_size:.2f}MB, current size is {sk_wal_size:.2f}MB")
+                f"timed out waiting {elapsed:.0f}s for sk_id={sk.id} to trim WAL to {target_size:.2f}MB, current size is {sk_wal_size:.2f}MB"
+            )
         time.sleep(0.5)
 
 
@@ -502,6 +505,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, storage_type: str):
             cur.execute("insert into t select generate_series(1,250000), 'payload'")
     wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], '0/5000000')
 
+
 @pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
     neon_env_builder.num_safekeepers = 3
@@ -541,7 +545,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
             for seg_end in offloaded_seg_end:
                 # roughly fills two segments
                 cur.execute("insert into t select generate_series(1,500000), 'payload'")
-                expected_sum += 500000 * 500001 / 2
+                expected_sum += 500000 * 500001 // 2
 
                 cur.execute("select sum(key) from t")
                 assert cur.fetchone()[0] == expected_sum
@@ -551,7 +555,8 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
 
             # advance remote_consistent_lsn to trigger WAL trimming
             # this LSN should be less than commit_lsn, so timeline will be active=true in safekeepers, to push etcd updates
-            env.safekeepers[0].http_client().record_safekeeper_info(tenant_id, timeline_id, {'remote_consistent_lsn': offloaded_seg_end[-1]})
+            env.safekeepers[0].http_client().record_safekeeper_info(
+                tenant_id, timeline_id, {'remote_consistent_lsn': offloaded_seg_end[-1]})
 
             for sk in env.safekeepers:
                 # require WAL to be trimmed, so no more than one segment is left on disk
