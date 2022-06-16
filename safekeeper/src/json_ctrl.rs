@@ -124,7 +124,7 @@ fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: L
         term,
         start_streaming_at: lsn,
         term_history: history,
-        timeline_start_lsn: Lsn(0),
+        timeline_start_lsn: lsn,
     });
 
     spg.timeline.get().process_msg(&proposer_elected_request)?;
