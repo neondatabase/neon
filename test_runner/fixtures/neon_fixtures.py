@@ -1395,12 +1395,12 @@ class VanillaPostgres(PgProtocol):
         if log_path is None:
             log_path = os.path.join(self.pgdatadir, "pg.log")
 
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, '-l', log_path, 'start'])
+        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
         self.running = False
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
+        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, 'stop'])
 
     def get_subdir_size(self, subdir) -> int:
         """Return size of pgdatadir subdirectory in bytes."""

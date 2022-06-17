@@ -2,7 +2,6 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! a zenith Timeline.
 //!
-use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -10,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use tracing::*;
+use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
@@ -19,8 +19,8 @@ use crate::walingest::WalIngest;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
+use postgres_ffi::Oid;
 use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
-use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
 
 ///
@@ -36,100 +36,29 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
+    // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
+    // Then fishing out pg_control would be unnecessary
     let mut modification = tline.begin_modification(lsn);
     modification.init_empty()?;
 
-    // Scan 'global'
-    let mut relfiles: Vec<PathBuf> = Vec::new();
-    for direntry in fs::read_dir(path.join("global"))? {
-        let direntry = direntry?;
-        match direntry.file_name().to_str() {
-            None => continue,
+    // Import all but pg_wal
+    let all_but_wal = WalkDir::new(path)
+        .into_iter()
+        .filter_entry(|entry| !entry.path().ends_with("pg_wal"));
+    for entry in all_but_wal {
+        let entry = entry.unwrap();
+        let metadata = entry.metadata().unwrap();
+        if metadata.is_file() {
+            let absolute_path = entry.path();
+            let relative_path = absolute_path.strip_prefix(path)?;
 
-            Some("pg_control") => {
-                pg_control = Some(import_control_file(&mut modification, &direntry.path())?);
-            }
-            Some("pg_filenode.map") => {
-                import_relmap_file(
-                    &mut modification,
-                    pg_constants::GLOBALTABLESPACE_OID,
-                    0,
-                    &direntry.path(),
-                )?;
-            }
-
-            // Load any relation files into the page server (but only after the other files)
-            _ => relfiles.push(direntry.path()),
-        }
-    }
-    for relfile in relfiles {
-        import_relfile(
-            &mut modification,
-            &relfile,
-            pg_constants::GLOBALTABLESPACE_OID,
-            0,
-        )?;
-    }
-
-    // Scan 'base'. It contains database dirs, the database OID is the filename.
-    // E.g. 'base/12345', where 12345 is the database OID.
-    for direntry in fs::read_dir(path.join("base"))? {
-        let direntry = direntry?;
-
-        //skip all temporary files
-        if direntry.file_name().to_string_lossy() == "pgsql_tmp" {
-            continue;
-        }
-
-        let dboid = direntry.file_name().to_string_lossy().parse::<u32>()?;
-
-        let mut relfiles: Vec<PathBuf> = Vec::new();
-        for direntry in fs::read_dir(direntry.path())? {
-            let direntry = direntry?;
-            match direntry.file_name().to_str() {
-                None => continue,
-
-                Some("PG_VERSION") => {
-                    //modification.put_dbdir_creation(pg_constants::DEFAULTTABLESPACE_OID, dboid)?;
-                }
-                Some("pg_filenode.map") => import_relmap_file(
-                    &mut modification,
-                    pg_constants::DEFAULTTABLESPACE_OID,
-                    dboid,
-                    &direntry.path(),
-                )?,
-
-                // Load any relation files into the page server
-                _ => relfiles.push(direntry.path()),
+            let file = File::open(absolute_path)?;
+            let len = metadata.len() as usize;
+            if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
+                pg_control = Some(control_file);
             }
         }
-        for relfile in relfiles {
-            import_relfile(
-                &mut modification,
-                &relfile,
-                pg_constants::DEFAULTTABLESPACE_OID,
-                dboid,
-            )?;
-        }
     }
-    for entry in fs::read_dir(path.join("pg_xact"))? {
-        let entry = entry?;
-        import_slru_file(&mut modification, SlruKind::Clog, &entry.path())?;
-    }
-    for entry in fs::read_dir(path.join("pg_multixact").join("members"))? {
-        let entry = entry?;
-        import_slru_file(&mut modification, SlruKind::MultiXactMembers, &entry.path())?;
-    }
-    for entry in fs::read_dir(path.join("pg_multixact").join("offsets"))? {
-        let entry = entry?;
-        import_slru_file(&mut modification, SlruKind::MultiXactOffsets, &entry.path())?;
-    }
-    for entry in fs::read_dir(path.join("pg_twophase"))? {
-        let entry = entry?;
-        let xid = u32::from_str_radix(&entry.path().to_string_lossy(), 16)?;
-        import_twophase_file(&mut modification, xid, &entry.path())?;
-    }
-    // TODO: Scan pg_tblspc
 
     // We're done importing all the data files.
     modification.commit()?;
@@ -156,18 +85,6 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     )?;
 
     Ok(())
-}
-
-fn import_relfile<R: Repository>(
-    modification: &mut DatadirModification<R>,
-    path: &Path,
-    spcoid: Oid,
-    dboid: Oid,
-) -> anyhow::Result<()> {
-    let file = File::open(path)?;
-    let len = file.metadata().unwrap().len() as usize;
-
-    import_rel(modification, path, spcoid, dboid, file, len)
 }
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
@@ -246,79 +163,6 @@ fn import_rel<R: Repository, Reader: Read>(
     Ok(())
 }
 
-/// Import a relmapper (pg_filenode.map) file into the repository
-fn import_relmap_file<R: Repository>(
-    modification: &mut DatadirModification<R>,
-    spcnode: Oid,
-    dbnode: Oid,
-    path: &Path,
-) -> Result<()> {
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    // read the whole file
-    file.read_to_end(&mut buffer)?;
-
-    trace!("importing relmap file {}", path.display());
-
-    modification.put_relmap_file(spcnode, dbnode, Bytes::copy_from_slice(&buffer[..]))?;
-    Ok(())
-}
-
-/// Import a twophase state file (pg_twophase/<xid>) into the repository
-fn import_twophase_file<R: Repository>(
-    modification: &mut DatadirModification<R>,
-    xid: TransactionId,
-    path: &Path,
-) -> Result<()> {
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    // read the whole file
-    file.read_to_end(&mut buffer)?;
-
-    trace!("importing non-rel file {}", path.display());
-
-    modification.put_twophase_file(xid, Bytes::copy_from_slice(&buffer[..]))?;
-    Ok(())
-}
-
-///
-/// Import pg_control file into the repository.
-///
-/// The control file is imported as is, but we also extract the checkpoint record
-/// from it and store it separated.
-fn import_control_file<R: Repository>(
-    modification: &mut DatadirModification<R>,
-    path: &Path,
-) -> Result<ControlFileData> {
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    // read the whole file
-    file.read_to_end(&mut buffer)?;
-
-    trace!("importing control file {}", path.display());
-
-    // Import it as ControlFile
-    modification.put_control_file(Bytes::copy_from_slice(&buffer[..]))?;
-
-    // Extract the checkpoint record and import it separately.
-    let pg_control = ControlFileData::decode(&buffer)?;
-    let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
-    modification.put_checkpoint(checkpoint_bytes)?;
-
-    Ok(pg_control)
-}
-
-fn import_slru_file<R: Repository>(
-    modification: &mut DatadirModification<R>,
-    slru: SlruKind,
-    path: &Path,
-) -> Result<()> {
-    let file = File::open(path)?;
-    let len = file.metadata().unwrap().len() as usize;
-    import_slru(modification, slru, path, file, len)
-}
-
-///
 /// Import an SLRU segment file
 ///
 fn import_slru<R: Repository, Reader: Read>(
@@ -663,11 +507,13 @@ pub fn import_file<R: Repository, Reader: Read>(
         writer.finish_write(prev_lsn);
 
         info!("imported zenith signal {}", prev_lsn);
+    } else if file_path.starts_with("pg_tblspc") {
+        // TODO Backups exported from neon won't have pg_tblspc, but we will need
+        // this to import arbitrary postgres databases.
+        bail!("Importing pg_tblspc is not implemented");
     } else {
         info!("ignored");
     }
-
-    // TODO: pg_tblspc ??
 
     Ok(None)
 }

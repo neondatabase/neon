@@ -569,9 +569,13 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
         import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
-        datadir_timeline
-            .tline
-            .checkpoint(CheckpointConfig::Forced)?;
+
+        // Flush data to disk, then upload to s3
+        info!("flushing layers");
+        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+
+        // TODO Wait for s3 upload to complete
+        // info!("uploading layers");
 
         info!("done");
         Ok(())
@@ -604,6 +608,13 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
         import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
+
+        // Flush data to disk, then upload to s3
+        info!("flushing layers");
+        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+
+        // TODO Wait for s3 upload to complete
+        // info!("uploading layers");
 
         info!("done");
         Ok(())
