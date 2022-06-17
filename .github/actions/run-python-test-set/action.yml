@@ -5,6 +5,8 @@ inputs:
   # Select the type of Rust build. Must be "release" or "debug".
   build_type:
     required: true
+  rust_toolchain:
+    required: true
   # This parameter is required, to prevent the mistake of running all tests in one job.
   test_selection:
     required: true
@@ -28,7 +30,7 @@ runs:
     - name: Get Neon artifact for restoration
       uses: actions/download-artifact@v3
       with:
-        name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+        name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
         path: ./neon-artifact/
 
     - name: Extract Neon artifact
