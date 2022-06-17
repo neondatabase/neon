@@ -485,13 +485,15 @@ pub fn import_file<R: Repository, Reader: Read>(
         let bytes = read_all_bytes(reader)?;
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
         info!("imported twophase file");
+    } else if file_path.starts_with("pg_tblspc") {
+        // TODO Backups exported from neon won't have pg_tblspc, but we will need
+        // this to import arbitrary postgres databases.
+        bail!("Importing pg_tblspc is not implemented");
     } else if file_path.starts_with("pg_wal") {
         panic!("found wal file in base section");
     } else {
         info!("ignored");
     }
-
-    // TODO: pg_tblspc ??
 
     Ok(None)
 }
