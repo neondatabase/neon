@@ -569,6 +569,9 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
         import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
+        datadir_timeline
+            .tline
+            .checkpoint(CheckpointConfig::Forced)?;
 
         info!("done");
         Ok(())

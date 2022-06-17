@@ -14,6 +14,7 @@ use tracing::*;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
+use crate::repository::Timeline;
 use crate::walingest::WalIngest;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
@@ -450,6 +451,8 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
+    let mut pg_control: Option<ControlFileData> = None;
+
     // Import base
     for base_tar_entry in tar::Archive::new(reader).entries()? {
         let entry = base_tar_entry.unwrap();
@@ -462,7 +465,10 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                 // let mut buffer = Vec::new();
                 // entry.read_to_end(&mut buffer).unwrap();
 
-                import_file(&mut modification, file_path.as_ref(), entry, len)?;
+                if let Some(res) = import_file(&mut modification, file_path.as_ref(), entry, len)? {
+                    // We found the pg_control file.
+                    pg_control = Some(res);
+                }
             }
             tar::EntryType::Directory => {
                 info!("directory {:?}", file_path);
@@ -475,6 +481,18 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
             }
         }
     }
+
+    // sanity check:
+    // ensure that pg_control is loaded and check LSN of the checkpoint record
+    let pg_control = pg_control.context("pg_control file not found")?;
+    ensure!(
+        pg_control.state == DBState_DB_SHUTDOWNED,
+        "Postgres cluster was not shut down cleanly"
+    );
+    ensure!(
+        pg_control.checkPointCopy.redo == base_lsn.0,
+        "unexpected checkpoint REDO pointer: "
+    );
 
     modification.commit()?;
     Ok(())
@@ -641,7 +659,19 @@ pub fn import_file<R: Repository, Reader: Read>(
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
         info!("imported twophase file");
     } else if file_path.starts_with("pg_wal") {
-        panic!("found wal file in base section");
+        info!("found wal file in base section. ignore it");
+    } else if file_path.starts_with("zenith.signal") {
+        // Parse zenith signal file to set correct previous LSN
+        let bytes = read_all_bytes(reader)?;
+        // zenith.signal format is "PREV LSN: prev_lsn"
+        let zenith_signal = std::str::from_utf8(&bytes).unwrap();
+        let zenith_signal = zenith_signal.split(':').collect::<Vec<_>>();
+        let prev_lsn = zenith_signal[1].trim().parse::<Lsn>().unwrap();
+
+        let writer = modification.tline.tline.writer();
+        writer.finish_write(prev_lsn);
+
+        info!("imported zenith signal {}", prev_lsn);
     } else {
         info!("ignored");
     }

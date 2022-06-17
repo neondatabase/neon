@@ -5,6 +5,10 @@ import os
 import shutil
 from pathlib import Path
 import json
+from fixtures.utils import subprocess_capture
+from fixtures.log_helper import log
+from contextlib import closing
+from fixtures.neon_fixtures import pg_distrib_dir
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -50,7 +54,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         "--tenant-id",
         tenant.hex,
         "--timeline-id",
-        timeline.hex,
+        timeline,
         "--node-name",
         node_name,
         "--base-lsn",
@@ -66,3 +70,76 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
     assert pg.safe_psql('select count(*) from t') == [(30000000, )]
+
+
+def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
+
+    num_rows = 3000
+    neon_env_builder.num_safekeepers = 1
+    neon_env_builder
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch('test_import_from_pageserver')
+    pgmain = env.postgres.create_start('test_import_from_pageserver')
+    log.info("postgres is running on 'test_import_from_pageserver' branch")
+
+    timeline = pgmain.safe_psql("SHOW neon.timeline_id")[0][0]
+
+    with closing(pgmain.connect()) as conn:
+        with conn.cursor() as cur:
+            # data loading may take a while, so increase statement timeout
+            cur.execute("SET statement_timeout='300s'")
+            cur.execute(f'''CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
+                        from generate_series(1,{num_rows}) g''')
+            cur.execute("CHECKPOINT")
+
+            cur.execute('SELECT pg_current_wal_insert_lsn()')
+            lsn = cur.fetchone()[0]
+            log.info(f"start_backup_lsn = {lsn}")
+
+    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
+    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
+    psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
+
+    # Get a fullbackup from pageserver
+    query = f"fullbackup { env.initial_tenant.hex} {timeline} {lsn}"
+    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
+    result_basepath = pg_bin.run_capture(cmd, env=psql_env)
+    tar_output_file = result_basepath + ".stdout"
+
+    # Stop the first pageserver instance, erase all its data
+    env.postgres.stop_all()
+    env.pageserver.stop()
+
+    dir_to_clear = Path(env.repo_dir) / 'tenants'
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
+
+    #start the pageserver again
+    env.pageserver.start()
+
+    # Import using another tenantid, because we use the same pageserver.
+    # TODO Create another pageserver to maeke test more realistic.
+    tenant = uuid4()
+
+    # Import to pageserver
+    node_name = "import_from_pageserver"
+    env.neon_cli.create_tenant(tenant)
+    env.neon_cli.raw_cli([
+        "timeline",
+        "import",
+        "--tenant-id",
+        tenant.hex,
+        "--timeline-id",
+        timeline,
+        "--node-name",
+        node_name,
+        "--base-lsn",
+        lsn,
+        "--base-tarfile",
+        os.path.join(tar_output_file),
+    ])
+
+    # Check it worked
+    pg = env.postgres.create_start(node_name, tenant_id=tenant)
+    assert pg.safe_psql('select count(*) from tbl') == [(num_rows, )]
