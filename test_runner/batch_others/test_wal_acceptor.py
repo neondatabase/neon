@@ -562,6 +562,16 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
                 # require WAL to be trimmed, so no more than one segment is left on disk
                 wait_wal_trim(tenant_id, timeline_id, sk, 16 * 1.5)
 
+            cur.execute('SELECT pg_current_wal_flush_lsn()')
+            last_lsn = cur.fetchone()[0]
+
+    pageserver_lsn = env.pageserver.http_client().timeline_detail(
+        uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
+    lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
+    log.info(
+        f'Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb'
+    )
+
     # replace pageserver with a fresh copy
     pg.stop_and_destroy()
     env.pageserver.stop()
@@ -571,8 +581,33 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
     log.info(f'Copying fresh pageserver state from {pageserver_fresh_copy}')
     shutil.move(pageserver_fresh_copy, pageserver_tenants_dir)
 
-    # start everything, verify data
+    # start pageserver and wait for replay
     env.pageserver.start()
+    wait_lsn_timeout = 60 * 3
+    started_at = time.time()
+    last_debug_print = 0.0
+
+    while True:
+        elapsed = time.time() - started_at
+        if elapsed > wait_lsn_timeout:
+            raise RuntimeError(f'Timed out waiting for WAL redo')
+
+        pageserver_lsn = env.pageserver.http_client().timeline_detail(
+            uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
+        lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
+
+        if time.time() > last_debug_print + 10 or lag <= 0:
+            last_debug_print = time.time()
+            log.info(f'Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb')
+
+        if lag <= 0:
+            break
+
+        time.sleep(1)
+
+    log.info(f'WAL redo took {elapsed} s')
+
+    # verify data
     pg.create_start('test_s3_wal_replay')
 
     with closing(pg.connect()) as conn:
