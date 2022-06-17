@@ -157,7 +157,8 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 };
 
                 // Construct credentials
-                let creds = auth::ClientCredentials::parse(params, sni_data, common_name);
+                let creds =
+                    auth::ClientCredentials::parse(params, sni_data.as_deref(), common_name);
                 let creds = async { creds }.or_else(|e| stream.throw_error(e)).await?;
 
                 break Ok(Some((stream, creds)));

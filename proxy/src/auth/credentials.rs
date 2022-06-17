@@ -27,7 +27,7 @@ pub enum ClientCredsParseError {
     CommonNameNotSet,
 
     #[error("SNI ('{1}') inconsistently formatted with respect to common name ('{0}'). SNI should be formatted as '<project-name>.<common-name>'.")]
-    InconsistentCommonNameAndSNI(&'static str, String),
+    InconsistentCommonNameAndSNI(String, String),
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphens ('-').")]
     ProjectNameContainsIllegalChars(String),
@@ -52,8 +52,8 @@ impl ClientCredentials {
 
     pub fn parse(
         mut options: HashMap<String, String>,
-        sni_data: Option<String>,
-        common_name: Option<&'static str>,
+        sni_data: Option<&str>,
+        common_name: Option<&str>,
     ) -> Result<Self, ClientCredsParseError> {
         let mut get_param = |key| {
             options
@@ -64,7 +64,7 @@ impl ClientCredentials {
         let user = get_param("user")?;
         let dbname = get_param("database")?;
         let project_name = get_param("project").ok();
-        let project_name = get_project_name(&sni_data, &common_name, &project_name)?.to_string();
+        let project_name = get_project_name(sni_data, common_name, project_name.as_deref())?;
 
         Ok(Self {
             user,
@@ -85,20 +85,23 @@ impl ClientCredentials {
 }
 
 /// Inferring project name from sni_data.
-fn project_name_from_sni_data<'sni>(
-    sni_data: &'sni str,
-    common_name: &'static str,
-) -> Result<&'sni str, ClientCredsParseError> {
+fn project_name_from_sni_data(
+    sni_data: &str,
+    common_name: &str,
+) -> Result<String, ClientCredsParseError> {
     let common_name_with_dot = format!(".{common_name}");
     // check that ".{common_name_with_dot}" is the actual suffix in sni_data
     if !sni_data.ends_with(&common_name_with_dot) {
         return Err(ClientCredsParseError::InconsistentCommonNameAndSNI(
-            common_name,
+            common_name.to_string(),
             sni_data.to_string(),
         ));
     }
     // return sni_data without the common name suffix.
-    Ok(sni_data.strip_suffix(&common_name_with_dot).unwrap())
+    Ok(sni_data
+        .strip_suffix(&common_name_with_dot)
+        .unwrap()
+        .to_string())
 }
 
 #[cfg(test)]
@@ -109,10 +112,10 @@ mod tests_for_project_name_from_sni_data {
     fn passing() {
         let target_project_name = "my-project-123";
         let common_name = "localtest.me";
-        let sni_data = target_project_name.to_string() + "." + common_name;
+        let sni_data = format!("{target_project_name}.{common_name}");
         assert_eq!(
             project_name_from_sni_data(sni_data.as_str(), common_name).ok(),
-            Some(target_project_name)
+            Some(target_project_name.to_string())
         );
     }
 
@@ -122,12 +125,12 @@ mod tests_for_project_name_from_sni_data {
         let common_name = "localtest.me";
         let wrong_suffix = "wrongtest.me";
         assert_eq!(common_name.len(), wrong_suffix.len());
-        let wrong_common_name = ".wrong".to_string() + wrong_suffix;
-        let sni_data = target_project_name.to_string() + wrong_common_name.as_str();
+        let wrong_common_name = format!("wrong{wrong_suffix}");
+        let sni_data = format!("{target_project_name}.{wrong_common_name}");
         assert_eq!(
             project_name_from_sni_data(sni_data.as_str(), common_name).err(),
             Some(ClientCredsParseError::InconsistentCommonNameAndSNI(
-                common_name,
+                common_name.to_string(),
                 sni_data
             ))
         );
@@ -135,46 +138,35 @@ mod tests_for_project_name_from_sni_data {
 }
 
 /// Determine project name from SNI or from project_name parameter from options argument.
-fn get_project_name<'ret>(
-    sni_data: &'ret Option<String>,
-    common_name: &Option<&'static str>,
-    project_name: &'ret Option<String>,
-) -> Result<&'ret str, ClientCredsParseError> {
+fn get_project_name(
+    sni_data: Option<&str>,
+    common_name: Option<&str>,
+    project_name: Option<&str>,
+) -> Result<String, ClientCredsParseError> {
     // determine the project name from sni_data if it exists, otherwise from project_name.
     let ret = match sni_data {
-        // if sni_data exists, use it to determine project name
         Some(sni_data) => {
-            // extract common name. If unset, throw a CommonNameNotSet error.
-            let common_name = match &common_name {
-                Some(common_name) => common_name,
-                None => return Err(ClientCredsParseError::CommonNameNotSet),
-            };
-            // extract project name from sni.
+            let common_name = common_name.ok_or(ClientCredsParseError::CommonNameNotSet)?;
             let project_name_from_sni = project_name_from_sni_data(sni_data, common_name)?;
             // check invariant: project name from options and from sni should match
             if let Some(project_name) = &project_name {
                 if !project_name_from_sni.eq(project_name) {
                     return Err(ClientCredsParseError::InconsistentProjectNameAndSNI(
-                        project_name_from_sni.to_string(),
+                        project_name_from_sni,
                         project_name.to_string(),
                     ));
                 }
             }
             project_name_from_sni
         }
-        // otherwise use project_option if it was manually set thought options parameter.
         None => project_name
-            .as_ref()
             .ok_or(ClientCredsParseError::MissingSNIAndProjectName)?
-            .as_str(),
+            .to_string(),
     };
 
-    // checking that formatting invariant holds.
-    // project name must contain only alphanumeric characters and hyphens.
+    // check formatting invariant: project name must contain only alphanumeric characters and hyphens.
     if !ret.chars().all(|x: char| x.is_alphanumeric() || x == '-') {
-        return Err(ClientCredsParseError::ProjectNameContainsIllegalChars(
-            ret.to_string(),
-        ));
+        return Err(ClientCredsParseError::ProjectNameContainsIllegalChars(ret));
     }
 
     Ok(ret)
@@ -188,10 +180,10 @@ mod tests_for_project_name_only {
     fn passing_from_sni_data_only() {
         let target_project_name = "my-project-123";
         let common_name = "localtest.me";
-        let sni_data = target_project_name.to_string() + "." + common_name;
+        let sni_data = format!("{target_project_name}.{common_name}");
         assert_eq!(
-            get_project_name(&Some(sni_data), &Some(common_name), &None).ok(),
-            Some(target_project_name)
+            get_project_name(Some(&sni_data), Some(common_name), None).ok(),
+            Some(target_project_name.to_string())
         );
     }
 
@@ -206,12 +198,11 @@ mod tests_for_project_name_only {
             if !(illegal_char.is_alphanumeric() || illegal_char == '-')
                 && illegal_char.to_string().len() == 1
             {
-                let target_project_name = project_name_prefix.to_string()
-                    + illegal_char.to_string().as_str()
-                    + project_name_suffix;
-                let sni_data = target_project_name.to_string() + "." + common_name;
+                let target_project_name =
+                    format!("{project_name_prefix}{illegal_char}{project_name_suffix}");
+                let sni_data = format!("{target_project_name}.{common_name}");
                 assert_eq!(
-                    get_project_name(&Some(sni_data), &Some(common_name), &None).err(),
+                    get_project_name(Some(&sni_data), Some(common_name), None).err(),
                     Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                         target_project_name
                     ))
@@ -226,8 +217,8 @@ mod tests_for_project_name_only {
         let common_names = [Some("localtest.me"), None];
         for common_name in common_names {
             assert_eq!(
-                get_project_name(&None, &common_name, &Some(target_project_name.to_string())).ok(),
-                Some(target_project_name)
+                get_project_name(None, common_name, Some(target_project_name)).ok(),
+                Some(target_project_name.to_string())
             );
         }
     }
@@ -244,16 +235,11 @@ mod tests_for_project_name_only {
                 if !(illegal_char.is_alphanumeric() || illegal_char == '-')
                     && illegal_char.to_string().len() == 1
                 {
-                    let target_project_name = project_name_prefix.to_string()
-                        + illegal_char.to_string().as_str()
-                        + project_name_suffix;
+                    let target_project_name =
+                        format!("{project_name_prefix}{illegal_char}{project_name_suffix}");
                     assert_eq!(
-                        get_project_name(
-                            &None,
-                            &common_name,
-                            &Some(target_project_name.to_string())
-                        )
-                        .err(),
+                        get_project_name(None, common_name, Some(target_project_name.as_str()))
+                            .err(),
                         Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                             target_project_name
                         ))
@@ -267,15 +253,15 @@ mod tests_for_project_name_only {
     fn passing_from_sni_data_and_project_name() {
         let target_project_name = "my-project-123";
         let common_name = "localtest.me";
-        let sni_data = target_project_name.to_string() + "." + common_name;
+        let sni_data = format!("{target_project_name}.{common_name}");
         assert_eq!(
             get_project_name(
-                &Some(sni_data),
-                &Some(common_name),
-                &Some(target_project_name.to_string())
+                Some(&sni_data),
+                Some(common_name),
+                Some(target_project_name)
             )
             .ok(),
-            Some(target_project_name)
+            Some(target_project_name.to_string())
         );
     }
 
@@ -284,14 +270,9 @@ mod tests_for_project_name_only {
         let project_name_param = "my-project-123";
         let wrong_project_name = "not-my-project-123";
         let common_name = "localtest.me";
-        let sni_data = wrong_project_name.to_string() + "." + common_name;
+        let sni_data = format!("{wrong_project_name}.{common_name}");
         assert_eq!(
-            get_project_name(
-                &Some(sni_data),
-                &Some(common_name),
-                &Some(project_name_param.to_string())
-            )
-            .err(),
+            get_project_name(Some(&sni_data), Some(common_name), Some(project_name_param)).err(),
             Some(ClientCredsParseError::InconsistentProjectNameAndSNI(
                 wrong_project_name.to_string(),
                 project_name_param.to_string()
@@ -305,14 +286,14 @@ mod tests_for_project_name_only {
         let wrong_project_name = "not-my-project-123";
         let common_name = "localtest.me";
         let sni_datas = [
-            Some(wrong_project_name.to_string() + common_name),
-            Some(target_project_name.to_string() + common_name),
+            Some(format!("{wrong_project_name}.{common_name}")),
+            Some(format!("{target_project_name}.{common_name}")),
         ];
-        let project_names = [None, Some(target_project_name.to_string())];
+        let project_names = [None, Some(target_project_name)];
         for sni_data in sni_datas {
-            for project_name_param in &project_names {
+            for project_name_param in project_names {
                 assert_eq!(
-                    get_project_name(&sni_data, &None, project_name_param).err(),
+                    get_project_name(sni_data.as_deref(), None, project_name_param).err(),
                     Some(ClientCredsParseError::CommonNameNotSet)
                 );
             }
@@ -326,20 +307,20 @@ mod tests_for_project_name_only {
         let common_name = "localtest.me";
         let wrong_suffix = "wrongtest.me";
         assert_eq!(common_name.len(), wrong_suffix.len());
-        let wrong_common_name = ".wrong".to_string() + wrong_suffix;
+        let wrong_common_name = format!("wrong{wrong_suffix}");
         let sni_datas = [
-            Some(wrong_project_name.to_string() + wrong_common_name.as_str()),
-            Some(target_project_name.to_string() + wrong_common_name.as_str()),
+            Some(format!("{wrong_project_name}.{wrong_common_name}")),
+            Some(format!("{target_project_name}.{wrong_common_name}")),
         ];
-        let project_names = [None, Some(target_project_name.to_string())];
-        for sni_data in sni_datas {
-            for project_name_param in &project_names {
+        let project_names = [None, Some(target_project_name)];
+        for project_name_param in project_names {
+            for sni_data in &sni_datas {
                 assert_eq!(
-                    get_project_name(&sni_data.clone(), &Some(common_name), project_name_param)
+                    get_project_name(sni_data.as_deref(), Some(common_name), project_name_param)
                         .err(),
                     Some(ClientCredsParseError::InconsistentCommonNameAndSNI(
-                        common_name,
-                        sni_data.clone().unwrap()
+                        common_name.to_string(),
+                        sni_data.clone().unwrap().to_string()
                     ))
                 );
             }
