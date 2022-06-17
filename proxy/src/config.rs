@@ -87,15 +87,8 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     let common_name = {
         let almost_common_name = pem.parse_x509()?.tbs_certificate.subject.to_string();
         let expected_prefix = "CN=*.";
-        let option_common_name = almost_common_name.strip_prefix(expected_prefix);
-        let common_name = match option_common_name {
-            Some(common_name) => {
-                let leaked_str = common_name.to_string();
-                Some(leaked_str)
-            }
-            None => None,
-        };
-        common_name
+        let common_name = almost_common_name.strip_prefix(expected_prefix);
+        common_name.map(str::to_string)
     };
 
     Ok(TlsConfig {
