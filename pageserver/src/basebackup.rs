@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
@@ -21,7 +22,7 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::reltag::SlruKind;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
@@ -39,11 +40,12 @@ where
     timeline: &'a Arc<DatadirTimelineImpl>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
-
+    full_backup: bool,
     finished: bool,
 }
 
-// Create basebackup with non-rel data in it. Omit relational data.
+// Create basebackup with non-rel data in it.
+// Only include relational data if 'full_backup' is true.
 //
 // Currently we use empty lsn in two cases:
 //  * During the basebackup right after timeline creation
@@ -58,6 +60,7 @@ where
         write: W,
         timeline: &'a Arc<DatadirTimelineImpl>,
         req_lsn: Option<Lsn>,
+        full_backup: bool,
     ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
@@ -94,8 +97,8 @@ where
         };
 
         info!(
-            "taking basebackup lsn={}, prev_lsn={}",
-            backup_lsn, backup_prev
+            "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
+            backup_lsn, backup_prev, full_backup
         );
 
         Ok(Basebackup {
@@ -103,6 +106,7 @@ where
             timeline,
             lsn: backup_lsn,
             prev_record_lsn: backup_prev,
+            full_backup,
             finished: false,
         })
     }
@@ -140,6 +144,13 @@ where
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
             self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
+
+            // Gather and send relational files in each database if full backup is requested.
+            if self.full_backup {
+                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn)? {
+                    self.add_rel(rel)?;
+                }
+            }
         }
         for xid in self.timeline.list_twophase_files(self.lsn)? {
             self.add_twophase_file(xid)?;
@@ -154,6 +165,38 @@ where
         self.ar.finish()?;
         self.finished = true;
         debug!("all tarred up!");
+        Ok(())
+    }
+
+    fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+        let nblocks = self.timeline.get_rel_size(tag, self.lsn)?;
+
+        // Function that adds relation segment data to archive
+        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
+            let file_name = tag.to_segfile_name(segment_index as u32);
+            let header = new_tar_header(&file_name, data.len() as u64)?;
+            self.ar.append(&header, data.as_slice())?;
+            Ok(())
+        };
+
+        // If the relation is empty, create an empty file
+        if nblocks == 0 {
+            add_file(0, &vec![])?;
+            return Ok(());
+        }
+
+        // Add a file for each chunk of blocks (aka segment)
+        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        for (seg, blocks) in chunks.into_iter().enumerate() {
+            let mut segment_data: Vec<u8> = vec![];
+            for blknum in blocks {
+                let img = self.timeline.get_rel_page_at_lsn(tag, blknum, self.lsn)?;
+                segment_data.extend_from_slice(&img[..]);
+            }
+
+            add_file(seg, &segment_data)?;
+        }
+
         Ok(())
     }
 
@@ -312,21 +355,24 @@ where
         pg_control.checkPointCopy = checkpoint;
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
-        // add zenith.signal file
-        let mut zenith_signal = String::new();
-        if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.tline.get_ancestor_lsn() {
-                write!(zenith_signal, "PREV LSN: none")?;
+        // Postgres doesn't recognize the zenith.signal file and doesn't need it.
+        if !self.full_backup {
+            // add zenith.signal file
+            let mut zenith_signal = String::new();
+            if self.prev_record_lsn == Lsn(0) {
+                if self.lsn == self.timeline.tline.get_ancestor_lsn() {
+                    write!(zenith_signal, "PREV LSN: none")?;
+                } else {
+                    write!(zenith_signal, "PREV LSN: invalid")?;
+                }
             } else {
-                write!(zenith_signal, "PREV LSN: invalid")?;
+                write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
             }
-        } else {
-            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+            self.ar.append(
+                &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
+                zenith_signal.as_bytes(),
+            )?;
         }
-        self.ar.append(
-            &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
-            zenith_signal.as_bytes(),
-        )?;
 
         //send pg_control
         let pg_control_bytes = pg_control.encode();

@@ -3,7 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from typing import Any, List, Optional
+from typing import Any, List
 from fixtures.log_helper import log
 
 
