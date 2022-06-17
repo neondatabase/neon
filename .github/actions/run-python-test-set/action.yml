@@ -32,6 +32,7 @@ runs:
         path: ./neon-artifact/
 
     - name: Extract Neon artifact
+      shell: bash -ex {0}
       run: |
         mkdir -p /tmp/zenith/
         tar -xf ./neon-artifact/neon.tgz -C /tmp/zenith/
@@ -52,16 +53,18 @@ runs:
         key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
+      shell: bash -ex {0}
       run: ./scripts/pysync
 
     - name: Run pytest
-      environment:
-        - ZENITH_BIN: /tmp/zenith/bin
-        - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
-        - TEST_OUTPUT: /tmp/test_output
+      env:
+        ZENITH_BIN: /tmp/zenith/bin
+        POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
+        TEST_OUTPUT: /tmp/test_output
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
-        - PLATFORM: github-actions-selfhosted
+        PLATFORM: github-actions-selfhosted
+      shell: bash -ex {0}
       run: |
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR
@@ -119,6 +122,7 @@ runs:
       # CircleCI artifacts are preserved one file at a time, so skipping
       # this step isn't a good idea. If you want to extract the
       # pageserver state, perhaps a tarball would be a better idea.
+      shell: bash -ex {0}
       run: |
         du -sh /tmp/test_output/*
         find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
