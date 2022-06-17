@@ -69,5 +69,6 @@ def test_fullbackup(zenith_env_builder: ZenithEnvBuilder,
             f"port={port}",
         ])
         vanilla_pg.start()
-        num_rows_found = vanilla_pg.safe_psql('select count(*) from tbl;', user="cloud_admin")[0][0]
+        num_rows_found = vanilla_pg.safe_psql('select count(*) from tbl;',
+                                              username="zenith_admin")[0][0]
         assert num_rows == num_rows_found
