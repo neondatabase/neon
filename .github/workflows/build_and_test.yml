@@ -216,3 +216,76 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
+  pg_regress-tests:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+    container:
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest regress tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_pg_regress
+          needs_postgres_source: false
+
+  other-tests:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+    container:
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest other tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_others
+          needs_postgres_source: false
+
+  benchmarks:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ release ]
+        rust_toolchain: [ 1.58 ]
+    container:
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest benchmarks
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: performance
+          needs_postgres_source: false
+          run_in_parallel: false
+          # save_perf_report: true

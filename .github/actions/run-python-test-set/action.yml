@@ -1,0 +1,126 @@
+name: 'Run python test'
+description: 'Runs a Neon python test set, performing all the required preparations before'
+
+inputs:
+  # Select the type of Rust build. Must be "release" or "debug".
+  build_type:
+    required: true
+  # This parameter is required, to prevent the mistake of running all tests in one job.
+  test_selection:
+    required: true
+  # Arbitrary parameters to pytest. For example "-s" to prevent capturing stdout/stderr
+  extra_params:
+    required: false
+    default: ''
+  needs_postgres_source:
+    required: false
+    default: 'false'
+  run_in_parallel:
+    required: false
+    default: 'true'
+  save_perf_report:
+    required: false
+    default: 'false'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Get Neon artifact for restoration
+      uses: actions/download-artifact@v3
+      with:
+        name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+        path: ./neon-artifact/
+
+    - name: Extract Neon artifact
+      run: |
+        mkdir -p /tmp/zenith/
+        tar -xf ./neon-artifact/neon.tgz -C /tmp/zenith/
+        rm -rf ./neon-artifact/
+
+    - name: Checkout
+      #checkout postgres only if needs_postgres_source
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+        fetch-depth: 1
+
+    - name: Cache poetry deps
+      id: cache_poetry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      run: ./scripts/pysync
+
+    - name: Run pytest
+      environment:
+        - ZENITH_BIN: /tmp/zenith/bin
+        - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
+        - TEST_OUTPUT: /tmp/test_output
+        # this variable will be embedded in perf test report
+        # and is needed to distinguish different environments
+        - PLATFORM: github-actions-selfhosted
+      run: |
+        PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
+        rm -rf $PERF_REPORT_DIR
+
+        TEST_SELECTION="test_runner/${{ inputs.test_selection }}"
+        EXTRA_PARAMS="${{ inputs.extra_params }}"
+        if [ -z "$TEST_SELECTION" ]; then
+          echo "test_selection must be set"
+          exit 1
+        fi
+        if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
+          EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+        fi
+        if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
+          if [[ "$GITHUB_REF" == "main" ]]; then
+            mkdir -p "$PERF_REPORT_DIR"
+            EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
+          fi
+        fi
+
+        # export GITHUB_SHA=$CIRCLE_SHA1
+
+        if [[ "${{ inputs.build_type }}" == "debug" ]]; then
+          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+        elif [[ "${{ inputs.build_type }}" == "release" ]]; then
+          cov_prefix=()
+        fi
+
+        # Run the tests.
+        #
+        # The junit.xml file allows CircleCI to display more fine-grained test information
+        # in its "Tests" tab in the results page.
+        # --verbose prints name of each test (helpful when there are
+        # multiple tests in one file)
+        # -rA prints summary in the end
+        # -n4 uses four processes to run tests via pytest-xdist
+        # -s is not used to prevent pytest from capturing output, because tests are running
+        # in parallel and logs are mixed between different tests
+        "${cov_prefix[@]}" ./scripts/pytest \
+          --junitxml=$TEST_OUTPUT/junit.xml \
+          --tb=short \
+          --verbose \
+          -m "not remote_cluster" \
+          -rA $TEST_SELECTION $EXTRA_PARAMS
+
+        if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
+          if [[ "$GITHUB_REF" == "main" ]]; then
+            export REPORT_FROM="$PERF_REPORT_DIR"
+            export REPORT_TO=local
+            scripts/generate_and_push_perf_report.sh
+          fi
+        fi
+
+    - name: Delete all data but logs
+      # CircleCI artifacts are preserved one file at a time, so skipping
+      # this step isn't a good idea. If you want to extract the
+      # pageserver state, perhaps a tarball would be a better idea.
+      run: |
+        du -sh /tmp/test_output/*
+        find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
+        du -sh /tmp/test_output/*
+
