@@ -29,7 +29,7 @@ Pageserver consists of:
 ## Running local installation
 
 
-#### building on Linux
+#### Installing dependencies on Linux
 1. Install build dependencies and other useful packages
 
 * On Ubuntu or Debian this set of packages should be sufficient to build the code:
@@ -49,14 +49,7 @@ dnf install flex bison readline-devel zlib-devel openssl-devel \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-3. Build neon and patched postgres
-```sh
-git clone --recursive https://github.com/neondatabase/neon.git
-cd neon
-make -j`nproc`
-```
-
-#### building on OSX (12.3.1)
+#### Installing dependencies on OSX (12.3.1)
 1. Install XCode and dependencies
 ```
 xcode-select --install
@@ -76,9 +69,12 @@ brew install libpq
 brew link --force libpq
 ```
 
-4. Build neon and patched postgres
+#### Building on Linux and OSX
+
+1. Build neon and patched postgres
 ```
 # Note: The path to the neon sources can not contain a space.
+
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
