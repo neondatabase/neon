@@ -1,3 +1,4 @@
+import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
 from uuid import UUID, uuid4
 import tarfile
@@ -11,6 +12,7 @@ from contextlib import closing
 from fixtures.neon_fixtures import pg_distrib_dir
 
 
+@pytest.mark.timeout(600)
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     # Put data in vanilla pg
     vanilla_pg.start()
@@ -72,6 +74,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     assert pg.safe_psql('select count(*) from t') == [(30000000, )]
 
 
+@pytest.mark.timeout(600)
 def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
 
     num_rows = 3000
