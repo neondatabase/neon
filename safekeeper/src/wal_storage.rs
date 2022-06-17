@@ -512,7 +512,7 @@ pub struct WalReader {
     wal_segment: Option<Pin<Box<dyn AsyncRead>>>,
 
     enable_remote_read: bool,
-    // S3 will be used to read WAL is LSN it not available locally
+    // S3 will be used to read WAL if LSN is not available locally
     local_start_lsn: Lsn,
 }
 
