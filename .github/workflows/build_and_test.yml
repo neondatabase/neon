@@ -13,13 +13,10 @@ jobs:
         rust_toolchain: [ 1.58 ]
 
     container:
-      image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
-#      - name: Fix permissions
-#        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
-
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -62,14 +59,11 @@ jobs:
         rust_toolchain: [ 1.58 ]
 
     container:
-      image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
 
     steps:
-#      - name: Fix permissions
-#        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
-
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -110,8 +104,8 @@ jobs:
           export CARGO_INCREMENTAL=0
           export CACHEPOT_BUCKET=zenith-rust-cachepot
           export RUSTC_WRAPPER=cachepot
-          export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-          export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+          export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+          export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           export HOME=/home/runner
           "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
           cachepot -s
@@ -198,11 +192,8 @@ jobs:
       matrix:
         rust_toolchain: [ 1.58 ]
     container:
-      image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
+      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     steps:
-#      - name: Fix permissions
-#        run: sudo chown -R $(id -u) /__w/ && sudo chmod -R a+rwx /__w/
-
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -224,29 +215,4 @@ jobs:
 
       - name: Run mypy to check types
         run: poetry run mypy .
-
-  pg_regress-tests:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ build-neon ]
-    strategy:
-      matrix:
-        build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
-    container:
-      image: sergeyneon/rust-build:${{ matrix.rust_toolchain }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
-
-      - name: Pytest regress tests
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: batch_pg_regress
-          needs_postgres_source: false
-
 
