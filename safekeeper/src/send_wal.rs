@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::net::Shutdown;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 use std::{str, thread};
+
+use tokio::sync::watch::Receiver;
+use tokio::time::timeout;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
@@ -191,100 +193,143 @@ impl ReplicationConn {
                 }
             })?;
 
-        let mut wal_seg_size: usize;
-        loop {
-            wal_seg_size = spg.timeline.get().get_state().1.server.wal_seg_size as usize;
-            if wal_seg_size == 0 {
-                error!("Cannot start replication before connecting to wal_proposer");
-                sleep(Duration::from_secs(1));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(async move {
+            let (_, persisted_state) = spg.timeline.get().get_state();
+            if persisted_state.server.wal_seg_size == 0
+                || persisted_state.timeline_start_lsn == Lsn(0)
+            {
+                bail!("Cannot start replication before connecting to walproposer");
+            }
+
+            let wal_end = spg.timeline.get().get_end_of_wal();
+            // Walproposer gets special handling: safekeeper must give proposer all
+            // local WAL till the end, whether committed or not (walproposer will
+            // hang otherwise). That's because walproposer runs the consensus and
+            // synchronizes safekeepers on the most advanced one.
+            //
+            // There is a small risk of this WAL getting concurrently garbaged if
+            // another compute rises which collects majority and starts fixing log
+            // on this safekeeper itself. That's ok as (old) proposer will never be
+            // able to commit such WAL.
+            let stop_pos: Option<Lsn> = if spg.appname == Some("wal_proposer_recovery".to_string())
+            {
+                Some(wal_end)
             } else {
+                None
+            };
+
+            info!("Start replication from {:?} till {:?}", start_pos, stop_pos);
+
+            // switch to copy
+            pgb.write_message(&BeMessage::CopyBothResponse)?;
+
+            let mut end_pos = Lsn(0);
+
+            let mut wal_reader = WalReader::new(
+                spg.conf.timeline_dir(&spg.timeline.get().zttid),
+                &persisted_state,
+                start_pos,
+                spg.conf.wal_backup_enabled,
+            )?;
+
+            // buffer for wal sending, limited by MAX_SEND_SIZE
+            let mut send_buf = vec![0u8; MAX_SEND_SIZE];
+
+            // watcher for commit_lsn updates
+            let mut commit_lsn_watch_rx = spg.timeline.get().get_commit_lsn_watch_rx();
+
+            loop {
+                if let Some(stop_pos) = stop_pos {
+                    if start_pos >= stop_pos {
+                        break; /* recovery finished */
+                    }
+                    end_pos = stop_pos;
+                } else {
+                    /* Wait until we have some data to stream */
+                    let lsn = wait_for_lsn(&mut commit_lsn_watch_rx, start_pos).await?;
+
+                    if let Some(lsn) = lsn {
+                        end_pos = lsn;
+                    } else {
+                        // TODO: also check once in a while whether we are walsender
+                        // to right pageserver.
+                        if spg.timeline.get().stop_walsender(replica_id)? {
+                            // Shut down, timeline is suspended.
+                            // TODO create proper error type for this
+                            bail!("end streaming to {:?}", spg.appname);
+                        }
+
+                        // timeout expired: request pageserver status
+                        pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
+                            sent_ptr: end_pos.0,
+                            timestamp: get_current_timestamp(),
+                            request_reply: true,
+                        }))
+                        .context("Failed to send KeepAlive message")?;
+                        continue;
+                    }
+                }
+
+                let send_size = end_pos.checked_sub(start_pos).unwrap().0 as usize;
+                let send_size = min(send_size, send_buf.len());
+
+                let send_buf = &mut send_buf[..send_size];
+
+                // read wal into buffer
+                let send_size = wal_reader.read(send_buf).await?;
+                let send_buf = &send_buf[..send_size];
+
+                // Write some data to the network socket.
+                pgb.write_message(&BeMessage::XLogData(XLogDataBody {
+                    wal_start: start_pos.0,
+                    wal_end: end_pos.0,
+                    timestamp: get_current_timestamp(),
+                    data: send_buf,
+                }))
+                .context("Failed to send XLogData")?;
+
+                start_pos += send_size as u64;
+                trace!("sent WAL up to {}", start_pos);
+            }
+
+            Ok(())
+        })
+    }
+}
+
+const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+// Wait until we have commit_lsn > lsn or timeout expires. Returns latest commit_lsn.
+async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> Result<Option<Lsn>> {
+    let commit_lsn: Lsn = *rx.borrow();
+    if commit_lsn > lsn {
+        return Ok(Some(commit_lsn));
+    }
+
+    let res = timeout(POLL_STATE_TIMEOUT, async move {
+        let mut commit_lsn;
+        loop {
+            rx.changed().await?;
+            commit_lsn = *rx.borrow();
+            if commit_lsn > lsn {
                 break;
             }
         }
-        let wal_end = spg.timeline.get().get_end_of_wal();
-        // Walproposer gets special handling: safekeeper must give proposer all
-        // local WAL till the end, whether committed or not (walproposer will
-        // hang otherwise). That's because walproposer runs the consensus and
-        // synchronizes safekeepers on the most advanced one.
-        //
-        // There is a small risk of this WAL getting concurrently garbaged if
-        // another compute rises which collects majority and starts fixing log
-        // on this safekeeper itself. That's ok as (old) proposer will never be
-        // able to commit such WAL.
-        let stop_pos: Option<Lsn> = if spg.appname == Some("wal_proposer_recovery".to_string()) {
-            Some(wal_end)
-        } else {
-            None
-        };
-        info!("Start replication from {:?} till {:?}", start_pos, stop_pos);
 
-        // switch to copy
-        pgb.write_message(&BeMessage::CopyBothResponse)?;
+        Ok(commit_lsn)
+    })
+    .await;
 
-        let mut end_pos = Lsn(0);
-
-        let mut wal_reader = WalReader::new(
-            spg.conf.timeline_dir(&spg.timeline.get().zttid),
-            wal_seg_size,
-            start_pos,
-        );
-
-        // buffer for wal sending, limited by MAX_SEND_SIZE
-        let mut send_buf = vec![0u8; MAX_SEND_SIZE];
-
-        loop {
-            if let Some(stop_pos) = stop_pos {
-                if start_pos >= stop_pos {
-                    break; /* recovery finished */
-                }
-                end_pos = stop_pos;
-            } else {
-                /* Wait until we have some data to stream */
-                let lsn = spg.timeline.get().wait_for_lsn(start_pos);
-
-                if let Some(lsn) = lsn {
-                    end_pos = lsn;
-                } else {
-                    // TODO: also check once in a while whether we are walsender
-                    // to right pageserver.
-                    if spg.timeline.get().stop_walsender(replica_id)? {
-                        // Shut down, timeline is suspended.
-                        // TODO create proper error type for this
-                        bail!("end streaming to {:?}", spg.appname);
-                    }
-
-                    // timeout expired: request pageserver status
-                    pgb.write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                        sent_ptr: end_pos.0,
-                        timestamp: get_current_timestamp(),
-                        request_reply: true,
-                    }))
-                    .context("Failed to send KeepAlive message")?;
-                    continue;
-                }
-            }
-
-            let send_size = end_pos.checked_sub(start_pos).unwrap().0 as usize;
-            let send_size = min(send_size, send_buf.len());
-
-            let send_buf = &mut send_buf[..send_size];
-
-            // read wal into buffer
-            let send_size = wal_reader.read(send_buf)?;
-            let send_buf = &send_buf[..send_size];
-
-            // Write some data to the network socket.
-            pgb.write_message(&BeMessage::XLogData(XLogDataBody {
-                wal_start: start_pos.0,
-                wal_end: end_pos.0,
-                timestamp: get_current_timestamp(),
-                data: send_buf,
-            }))
-            .context("Failed to send XLogData")?;
-
-            start_pos += send_size as u64;
-            trace!("sent WAL up to {}", start_pos);
-        }
-        Ok(())
+    match res {
+        // success
+        Ok(Ok(commit_lsn)) => Ok(Some(commit_lsn)),
+        // error inside closure
+        Ok(Err(err)) => Err(err),
+        // timeout
+        Err(_) => Ok(None),
     }
 }
