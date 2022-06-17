@@ -59,8 +59,14 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         keys.pop().map(rustls::PrivateKey).unwrap()
     };
 
+    // read PEM file at cert_path.
+    let pem_file = std::fs::File::open(cert_path)?;
+    let pem_buffer_reader = std::io::BufReader::new(pem_file);
+    let pem = x509_parser::pem::Pem::read(pem_buffer_reader)
+        .context("TLS cert file")?
+        .0;
     let cert_chain = {
-        let cert_chain_bytes = std::fs::read(cert_path).context("TLS cert file")?;
+        let cert_chain_bytes = &pem.contents;
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
             .context("couldn't read TLS certificate chain")?
             .into_iter()
@@ -79,13 +85,7 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     // determine common name from tls-cert (-c server.crt param).
     // used in asserting project name formatting invariant.
     let common_name = {
-        let file = std::fs::File::open(cert_path)?;
-        let almost_common_name = x509_parser::pem::Pem::read(std::io::BufReader::new(file))?
-            .0
-            .parse_x509()?
-            .tbs_certificate
-            .subject
-            .to_string();
+        let almost_common_name = pem.parse_x509()?.tbs_certificate.subject.to_string();
         let expected_prefix = "CN=*.";
         let option_common_name = almost_common_name.strip_prefix(expected_prefix);
         let common_name = match option_common_name {
