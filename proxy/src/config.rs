@@ -60,8 +60,8 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     };
 
     // read PEM file at cert_path.
-    let cert_file = std::fs::File::open(cert_path)
-        .context("Failed to open TLS cert file at '{cert_path}.'")?;
+    let cert_file =
+        std::fs::File::open(cert_path).context("Failed to open TLS cert file at '{cert_path}.'")?;
     let buffer_reader = std::io::BufReader::new(cert_file);
     let pem = x509_parser::pem::Pem::read(buffer_reader)
         .context("Failed to read from buffer reader of cert file at '{cert_path'}")?
