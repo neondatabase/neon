@@ -564,18 +564,18 @@ impl PageServerHandler {
 
         // TODO leave clean state on error
 
+        // Import basebackup provided via CopyData
+        info!("importing basebackup");
+        pgb.write_message(&BeMessage::CopyInResponse)?;
+        let reader = CopyInReader::new(pgb);
+        import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
+
         // Flush data to disk, then upload to s3
         info!("flushing layers");
         datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
 
         // TODO Wait for s3 upload to complete
         // info!("uploading layers");
-
-        // Import basebackup provided via CopyData
-        info!("importing basebackup");
-        pgb.write_message(&BeMessage::CopyInResponse)?;
-        let reader = CopyInReader::new(pgb);
-        import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
 
         info!("done");
         Ok(())

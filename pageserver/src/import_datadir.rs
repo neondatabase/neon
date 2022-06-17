@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
+use crate::repository::Timeline;
 use crate::walingest::WalIngest;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
@@ -162,7 +163,6 @@ fn import_rel<R: Repository, Reader: Read>(
     Ok(())
 }
 
-///
 /// Import an SLRU segment file
 ///
 fn import_slru<R: Repository, Reader: Read>(
@@ -295,6 +295,8 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
+    let mut pg_control: Option<ControlFileData> = None;
+
     // Import base
     for base_tar_entry in tar::Archive::new(reader).entries()? {
         let entry = base_tar_entry.unwrap();
@@ -307,7 +309,10 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                 // let mut buffer = Vec::new();
                 // entry.read_to_end(&mut buffer).unwrap();
 
-                import_file(&mut modification, file_path.as_ref(), entry, len)?;
+                if let Some(res) = import_file(&mut modification, file_path.as_ref(), entry, len)? {
+                    // We found the pg_control file.
+                    pg_control = Some(res);
+                }
             }
             tar::EntryType::Directory => {
                 info!("directory {:?}", file_path);
@@ -320,6 +325,9 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
             }
         }
     }
+
+    // sanity check: ensure that pg_control is loaded
+    let _pg_control = pg_control.context("pg_control file not found")?;
 
     modification.commit()?;
     Ok(())
@@ -485,12 +493,24 @@ pub fn import_file<R: Repository, Reader: Read>(
         let bytes = read_all_bytes(reader)?;
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
         info!("imported twophase file");
+    } else if file_path.starts_with("pg_wal") {
+        info!("found wal file in base section. ignore it");
+    } else if file_path.starts_with("zenith.signal") {
+        // Parse zenith signal file to set correct previous LSN
+        let bytes = read_all_bytes(reader)?;
+        // zenith.signal format is "PREV LSN: prev_lsn"
+        let zenith_signal = std::str::from_utf8(&bytes).unwrap();
+        let zenith_signal = zenith_signal.split(':').collect::<Vec<_>>();
+        let prev_lsn = zenith_signal[1].trim().parse::<Lsn>().unwrap();
+
+        let writer = modification.tline.tline.writer();
+        writer.finish_write(prev_lsn);
+
+        info!("imported zenith signal {}", prev_lsn);
     } else if file_path.starts_with("pg_tblspc") {
         // TODO Backups exported from neon won't have pg_tblspc, but we will need
         // this to import arbitrary postgres databases.
         bail!("Importing pg_tblspc is not implemented");
-    } else if file_path.starts_with("pg_wal") {
-        panic!("found wal file in base section");
     } else {
         info!("ignored");
     }
