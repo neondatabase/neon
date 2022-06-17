@@ -755,6 +755,7 @@ impl PageServerHandler {
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
         tenantid: ZTenantId,
+        full_backup: bool,
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
@@ -777,7 +778,7 @@ impl PageServerHandler {
         {
             let mut writer = CopyDataSink { pgb };
 
-            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -880,7 +881,33 @@ impl postgres_backend::Handler for PageServerHandler {
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid, false)?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        // same as basebackup, but result includes relational data as well
+        else if query_string.starts_with("fullbackup ") {
+            let (_, params_raw) = query_string.split_at("fullbackup ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            ensure!(
+                params.len() == 3,
+                "invalid param number for fullbackup command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            self.check_permission(Some(tenantid))?;
+
+            // Lsn is required for fullbackup, because otherwise we would not know
+            // at which lsn to upload this backup.
+            //
+            // The caller is responsible for providing a valid lsn
+            // and using it in the subsequent import.
+            let lsn = Some(Lsn::from_str(params[2])?);
+
+            // Check that the timeline exists
+            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid, true)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
 import requests
@@ -1373,12 +1373,14 @@ def pg_bin(test_output_dir: str) -> PgBin:
 
 
 class VanillaPostgres(PgProtocol):
-    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int):
+    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int, init=True):
         super().__init__(host='localhost', port=port, dbname='postgres')
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
-        self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
+        if init:
+            self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
+        self.configure([f"port = {port}\n"])
 
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
@@ -1413,10 +1415,12 @@ class VanillaPostgres(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def vanilla_pg(test_output_dir: str) -> Iterator[VanillaPostgres]:
+def vanilla_pg(test_output_dir: str,
+               port_distributor: PortDistributor) -> Iterator[VanillaPostgres]:
     pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
     pg_bin = PgBin(test_output_dir)
-    with VanillaPostgres(pgdatadir, pg_bin, 5432) as vanilla_pg:
+    port = port_distributor.get_port()
+    with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
         yield vanilla_pg
 
 
@@ -1462,7 +1466,7 @@ def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, port: int):
+    def __init__(self, port: int, pg_port: int):
         super().__init__(host="127.0.0.1",
                          user="proxy_user",
                          password="pytest2",
@@ -1471,9 +1475,10 @@ class NeonProxy(PgProtocol):
         self.http_port = 7001
         self.host = "127.0.0.1"
         self.port = port
+        self.pg_port = pg_port
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
-    def start_static(self, addr="127.0.0.1:5432") -> None:
+    def start(self) -> None:
         assert self._popen is None
 
         # Start proxy
@@ -1482,7 +1487,8 @@ class NeonProxy(PgProtocol):
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.port}"])
         args.extend(["--auth-backend", "postgres"])
-        args.extend(["--auth-endpoint", "postgres://proxy_auth:pytest1@localhost:5432/postgres"])
+        args.extend(
+            ["--auth-endpoint", f"postgres://proxy_auth:pytest1@localhost:{self.pg_port}/postgres"])
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1501,14 +1507,16 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def static_proxy(vanilla_pg) -> Iterator[NeonProxy]:
+def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
     vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-    with NeonProxy(4432) as proxy:
-        proxy.start_static()
+    port = port_distributor.get_port()
+    pg_port = vanilla_pg.default_options['port']
+    with NeonProxy(port, pg_port) as proxy:
+        proxy.start()
         yield proxy
 
 
