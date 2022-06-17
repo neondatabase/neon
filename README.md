@@ -77,9 +77,15 @@ brew link --force libpq
 ```
 
 4. Build neon and patched postgres
-```sh
+```
+# Note: The path to the neon sources can not contain a space.
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
+
+# The preferred and default is to make a debug build. This will create a 
+# demonstrably slower build than a release build. If you want to use a release
+# build, utilize "`BUILD_TYPE=release make -j`nproc``" 
+
 make -j`nproc`
 ```
 
@@ -209,7 +215,7 @@ Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, wh
 To get more familiar with this aspect, refer to:
 
 - [Neon glossary](/docs/glossary.md)
-- [PostgreSQL glossary](https://www.postgresql.org/docs/13/glossary.html)
+- [PostgreSQL glossary](https://www.postgresql.org/docs/14/glossary.html)
 - Other PostgreSQL documentation and sources (Neon fork sources can be found [here](https://github.com/neondatabase/postgres))
 
 ## Join the development
