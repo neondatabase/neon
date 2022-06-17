@@ -482,17 +482,8 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
         }
     }
 
-    // sanity check:
-    // ensure that pg_control is loaded and check LSN of the checkpoint record
-    let pg_control = pg_control.context("pg_control file not found")?;
-    ensure!(
-        pg_control.state == DBState_DB_SHUTDOWNED,
-        "Postgres cluster was not shut down cleanly"
-    );
-    ensure!(
-        pg_control.checkPointCopy.redo == base_lsn.0,
-        "unexpected checkpoint REDO pointer: "
-    );
+    // sanity check: ensure that pg_control is loaded
+    let _pg_control = pg_control.context("pg_control file not found")?;
 
     modification.commit()?;
     Ok(())

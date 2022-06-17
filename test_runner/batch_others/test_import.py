@@ -54,7 +54,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         "--tenant-id",
         tenant.hex,
         "--timeline-id",
-        timeline,
+        timeline.hex,
         "--node-name",
         node_name,
         "--base-lsn",
