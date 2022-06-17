@@ -529,6 +529,15 @@ impl PageServerNode {
         Ok(timeline_info_response)
     }
 
+    /// Import a basebackup prepared using either:
+    /// a) `pg_basebackup -F tar`, or
+    /// b) The `fullbackup` pageserver endpoint
+    ///
+    /// # Arguments
+    /// * `tenant_id` - tenant to import into. Created if not exists
+    /// * `timeline_id` - id to assign to imported timeline
+    /// * `base` - (start lsn of basebackup, path to `base.tar` file)
+    /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
     pub fn timeline_import(
         &self,
         tenant_id: ZTenantId,
