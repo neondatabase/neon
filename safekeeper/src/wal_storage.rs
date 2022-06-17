@@ -561,7 +561,7 @@ impl WalReader {
 
         // Read some data from the file.
         let buf = &mut buf[0..send_size];
-        let send_size = wal_segment.read(buf).await?;
+        let send_size = wal_segment.read_exact(buf).await?;
         self.pos += send_size as u64;
 
         // Decide whether to reuse this file. If we don't set wal_segment here
