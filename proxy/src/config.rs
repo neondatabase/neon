@@ -38,13 +38,13 @@ pub struct ProxyConfig {
 
 #[derive(Clone)]
 pub struct TlsConfig {
-    pub tls_config: Arc<rustls::ServerConfig>,
-    pub common_name: Option<&'static str>,
+    pub config: Arc<rustls::ServerConfig>,
+    pub common_name: Option<String>,
 }
 
 impl TlsConfig {
-    pub fn get_tls_config(self) -> Arc<rustls::ServerConfig> {
-        self.tls_config
+    pub fn to_server_config(&self) -> Arc<rustls::ServerConfig> {
+        self.config.clone()
     }
 }
 
@@ -90,8 +90,7 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         let option_common_name = almost_common_name.strip_prefix(expected_prefix);
         let common_name = match option_common_name {
             Some(common_name) => {
-                let leaked_str: &'static str =
-                    Box::<str>::leak(common_name.to_string().into_boxed_str());
+                let leaked_str = common_name.to_string();
                 Some(leaked_str)
             }
             None => None,
@@ -100,7 +99,7 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     };
 
     Ok(TlsConfig {
-        tls_config: config.into(),
+        config: config.into(),
         common_name,
     })
 }

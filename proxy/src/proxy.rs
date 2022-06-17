@@ -81,7 +81,7 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
-    let tls = config.tls_config.clone();
+    let tls = config.tls_config.as_ref();
     let (stream, creds) = match handshake(stream, tls, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -99,17 +99,13 @@ async fn handle_client(
 /// we also take an extra care of propagating only the select handshake errors to client.
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
-    mut tls: Option<TlsConfig>,
+    mut tls: Option<&TlsConfig>,
     cancel_map: &CancelMap,
 ) -> anyhow::Result<Option<(PqStream<Stream<S>>, auth::ClientCredentials)>> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
-    let common_name = tls.as_ref().map(|tls| tls.common_name);
-    let common_name = match common_name {
-        Some(common_name) => common_name,
-        None => None,
-    };
+    let common_name = tls.and_then(|cfg| cfg.common_name.as_deref());
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -128,8 +124,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
-                        stream =
-                            PqStream::new(stream.into_inner().upgrade(tls.get_tls_config()).await?);
+                        stream = PqStream::new(
+                            stream.into_inner().upgrade(tls.to_server_config()).await?,
+                        );
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -158,7 +155,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                 // Construct credentials
                 let creds =
-                    auth::ClientCredentials::parse(params, sni_data.as_deref(), common_name);
+                    auth::ClientCredentials::parse(params, sni_data.as_deref(), common_name.as_deref());
                 let creds = async { creds }.or_else(|e| stream.throw_error(e)).await?;
 
                 break Ok(Some((stream, creds)));
@@ -303,8 +300,8 @@ mod tests {
         Ok((
             client_config,
             TlsConfig {
-                tls_config,
-                common_name: Some(common_name),
+                config: tls_config,
+                common_name: Some(common_name.to_string()),
             },
         ))
     }
@@ -361,7 +358,7 @@ mod tests {
         auth: impl TestAuth + Send,
     ) -> anyhow::Result<()> {
         let cancel_map = CancelMap::default();
-        let (mut stream, _creds) = handshake(client, tls, &cancel_map)
+        let (mut stream, _creds) = handshake(client, tls.as_ref(), &cancel_map)
             .await?
             .context("handshake failed")?;
 
