@@ -627,7 +627,7 @@ impl WalReader {
             .await
             .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
             .map_err(|e| {
-                error!("{}", e);
+                warn!("{}", e);
                 e
             })
     }

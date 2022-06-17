@@ -2,7 +2,6 @@
 //! with the "START_REPLICATION" message.
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::SafeKeeperState;
 use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context, Result};
@@ -18,7 +17,7 @@ use std::time::Duration;
 use std::{str, thread};
 
 use tokio::sync::watch::Receiver;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
@@ -199,17 +198,11 @@ impl ReplicationConn {
             .build()?;
 
         runtime.block_on(async move {
-            let persisted_state: SafeKeeperState;
-            loop {
-                let (_, state) = spg.timeline.get().get_state();
-                if state.server.wal_seg_size == 0 || state.timeline_start_lsn == Lsn(0) {
-                    error!("Cannot start replication before connecting to wal_proposer");
-                    sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-
-                persisted_state = state;
-                break;
+            let (_, persisted_state) = spg.timeline.get().get_state();
+            if persisted_state.server.wal_seg_size == 0
+                || persisted_state.timeline_start_lsn == Lsn(0)
+            {
+                bail!("Cannot start replication before connecting to walproposer");
             }
 
             let wal_end = spg.timeline.get().get_end_of_wal();
