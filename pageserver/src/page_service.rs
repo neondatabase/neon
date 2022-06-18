@@ -925,6 +925,13 @@ impl postgres_backend::Handler for PageServerHandler {
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
+            // Assumes the tenant already exists on this pageserver.
+            //
+            // Example import command:
+            // 1. Get start/end LSN from backup_manifest file
+            // 2. Run:
+            // cat my_backup/base.tar | psql -h $PAGESERVER \
+            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);
