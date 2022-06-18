@@ -570,6 +570,12 @@ impl PageServerHandler {
         let reader = CopyInReader::new(pgb);
         import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
 
+        // TODO check checksum
+        // Meanwhile you can verify client-side by taking fullbackup
+        // and checking that it matches in size with what was imported.
+        // It wouldn't work if base came from vanilla postgres though,
+        // since we discard some log files.
+
         // Flush data to disk, then upload to s3
         info!("flushing layers");
         datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;

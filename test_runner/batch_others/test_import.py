@@ -179,4 +179,5 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     new_tar_output_file = result_basepath + ".stdout"
 
     # Check it's the same as the first fullbackup
+    # TODO pageserver should be checking checksum
     assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)

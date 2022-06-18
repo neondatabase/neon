@@ -112,6 +112,8 @@ where
     }
 
     pub fn send_tarball(mut self) -> anyhow::Result<()> {
+        // TODO include checksum
+
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
