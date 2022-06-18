@@ -12,8 +12,6 @@ jobs:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
 
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
     steps:
@@ -58,8 +56,6 @@ jobs:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
 
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
 
@@ -191,8 +187,6 @@ jobs:
     strategy:
       matrix:
         rust_toolchain: [ 1.58 ]
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -223,8 +217,6 @@ jobs:
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -247,8 +239,6 @@ jobs:
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -271,8 +261,6 @@ jobs:
       matrix:
         build_type: [ release ]
         rust_toolchain: [ 1.58 ]
-    container:
-      image: neondatabase/rust-build:${{ matrix.rust_toolchain }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
