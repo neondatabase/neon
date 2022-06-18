@@ -85,7 +85,7 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run cargo build
         run: |
