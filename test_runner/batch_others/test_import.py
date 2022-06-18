@@ -25,6 +25,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Take basebackup
     basebackup_dir = os.path.join(test_output_dir, "basebackup")
+    base_tar = os.path.join(basebackup_dir, "base.tar")
+    wal_tar = os.path.join(basebackup_dir, "pg_wal.tar")
     os.mkdir(basebackup_dir)
     vanilla_pg.safe_psql("CHECKPOINT")
     pg_bin.run([
@@ -37,6 +39,13 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         basebackup_dir,
     ])
 
+    # Make corrupt base tar with missing files
+    # TODO try deleting less obvious files. This deletes pg_control,
+    #      which is essential and we explicitly check for its existence.
+    corrupt_base_tar = os.path.join(basebackup_dir, "corrupt-base.tar")
+    cmd = ["tar", "-cvf", corrupt_base_tar, "--exclude", "base/.*", base_tar]
+    subprocess_capture(str(test_output_dir), cmd)
+
     # Get start_lsn and end_lsn
     with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
         manifest = json.load(f)
@@ -47,27 +56,40 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     tenant = uuid4()
     timeline = uuid4()
 
-    # Import to pageserver
+    # Set up pageserver for import
     env = neon_env_builder.init_start()
     env.neon_cli.create_tenant(tenant)
-    env.neon_cli.raw_cli([
-        "timeline",
-        "import",
-        "--tenant-id",
-        tenant.hex,
-        "--timeline-id",
-        timeline.hex,
-        "--node-name",
-        node_name,
-        "--base-lsn",
-        start_lsn,
-        "--base-tarfile",
-        os.path.join(basebackup_dir, "base.tar"),
-        "--end-lsn",
-        end_lsn,
-        "--wal-tarfile",
-        os.path.join(basebackup_dir, "pg_wal.tar"),
-    ])
+
+    def import_tar(base, wal):
+        env.neon_cli.raw_cli([
+            "timeline",
+            "import",
+            "--tenant-id",
+            tenant.hex,
+            "--timeline-id",
+            timeline.hex,
+            "--node-name",
+            node_name,
+            "--base-lsn",
+            start_lsn,
+            "--base-tarfile",
+            base,
+            "--end-lsn",
+            end_lsn,
+            "--wal-tarfile",
+            wal,
+        ])
+
+    # Importing corrupt backup fails
+    with pytest.raises(Exception):
+        import_tar(corrupt_base_tar, wal_tar)
+
+    # Clean up
+    # TODO it should clean itself
+    env.pageserver.http_client().timeline_detach(tenant, timeline)
+
+    # Importing correct backup works
+    import_tar(base_tar, wal_tar)
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
