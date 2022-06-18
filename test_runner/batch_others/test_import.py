@@ -39,12 +39,15 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         basebackup_dir,
     ])
 
-    # Make corrupt base tar with missing files
-    # TODO try deleting less obvious files. This deletes pg_control,
-    #      which is essential and we explicitly check for its existence.
-    corrupt_base_tar = os.path.join(basebackup_dir, "corrupt-base.tar")
-    cmd = ["tar", "-cvf", corrupt_base_tar, "--exclude", "base/.*", base_tar]
-    subprocess_capture(str(test_output_dir), cmd)
+    # Make corrupt base tar with missing pg_control
+    unpacked_base = os.path.join(basebackup_dir, "unpacked-base")
+    corrupt_base_tar = os.path.join(unpacked_base, "corrupt-base.tar")
+    os.mkdir(unpacked_base, 0o750)
+    subprocess_capture(str(test_output_dir), ["tar", "-xf", base_tar, "-C", unpacked_base])
+    os.remove(os.path.join(unpacked_base, "global/pg_control"))
+    subprocess_capture(str(test_output_dir),
+                       ["tar", "-cf", "corrupt-base.tar"] + os.listdir(unpacked_base),
+                       cwd=unpacked_base)
 
     # Get start_lsn and end_lsn
     with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
