@@ -621,6 +621,8 @@ impl PageServerHandler {
         let reader = CopyInReader::new(pgb);
         import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
 
+        ensure!(datadir_timeline.tline.get_last_record_lsn() == end_lsn);
+
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.

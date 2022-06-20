@@ -1,5 +1,6 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_upload, wait_for_last_record_lsn
+from fixtures.utils import lsn_from_hex, lsn_to_hex
 from uuid import UUID, uuid4
 import tarfile
 import os
@@ -18,10 +19,10 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
     vanilla_pg.safe_psql('''create table t as select 'long string to consume some space' || g
-     from generate_series(1,30000000) g''')
-    assert vanilla_pg.safe_psql('select count(*) from t') == [(30000000, )]
+     from generate_series(1,300000) g''')
+    assert vanilla_pg.safe_psql('select count(*) from t') == [(300000, )]
     # ensure that relation is larger than 1GB to test multisegment restore
-    assert vanilla_pg.safe_psql("select pg_relation_size('t')")[0][0] > 1024 * 1024 * 1024
+    # assert vanilla_pg.safe_psql("select pg_relation_size('t')")[0][0] > 1024 * 1024 * 1024
 
     # Take basebackup
     basebackup_dir = os.path.join(test_output_dir, "basebackup")
@@ -61,7 +62,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Set up pageserver for import
     env = neon_env_builder.init_start()
-    env.neon_cli.create_tenant(tenant)
+    neon_env_builder.enable_local_fs_remote_storage()
+    env.pageserver.http_client().tenant_create(tenant)
 
     def import_tar(base, wal):
         env.neon_cli.raw_cli([
@@ -89,14 +91,20 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Clean up
     # TODO it should clean itself
-    env.pageserver.http_client().timeline_detach(tenant, timeline)
+    client = env.pageserver.http_client()
+    client.timeline_detach(tenant, timeline)
 
     # Importing correct backup works
     import_tar(base_tar, wal_tar)
 
+    # Wait for data to land in s3
+    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
+    wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(end_lsn))
+    # wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
+
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
-    assert pg.safe_psql('select count(*) from t') == [(30000000, )]
+    assert pg.safe_psql('select count(*) from t') == [(300000, )]
 
 
 @pytest.mark.timeout(600)
@@ -152,7 +160,8 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
 
     # Import to pageserver
     node_name = "import_from_pageserver"
-    env.neon_cli.create_tenant(tenant)
+    client = env.pageserver.http_client()
+    client.tenant_create(tenant)
     env.neon_cli.raw_cli([
         "timeline",
         "import",
@@ -167,6 +176,10 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
         "--base-tarfile",
         os.path.join(tar_output_file),
     ])
+
+    # Wait for data to land in s3
+    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
+    wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
