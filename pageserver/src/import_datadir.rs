@@ -46,8 +46,8 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
         .into_iter()
         .filter_entry(|entry| !entry.path().ends_with("pg_wal"));
     for entry in all_but_wal {
-        let entry = entry.unwrap();
-        let metadata = entry.metadata().unwrap();
+        let entry = entry?;
+        let metadata = entry.metadata().expect("error getting dir entry metadata");
         if metadata.is_file() {
             let absolute_path = entry.path();
             let relative_path = absolute_path.strip_prefix(path)?;
@@ -99,11 +99,14 @@ fn import_rel<R: Repository, Reader: Read>(
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
 
-    let (relnode, forknum, segno) = parse_relfilename(&path.file_name().unwrap().to_string_lossy())
-        .map_err(|e| {
-            warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
-            e
-        })?;
+    let filename = &path
+        .file_name()
+        .expect("missing rel filename")
+        .to_string_lossy();
+    let (relnode, forknum, segno) = parse_relfilename(filename).map_err(|e| {
+        warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
+        e
+    })?;
 
     let mut buf: [u8; 8192] = [0u8; 8192];
 
@@ -175,7 +178,11 @@ fn import_slru<R: Repository, Reader: Read>(
     trace!("importing slru file {}", path.display());
 
     let mut buf: [u8; 8192] = [0u8; 8192];
-    let segno = u32::from_str_radix(&path.file_name().unwrap().to_string_lossy(), 16)?;
+    let filename = &path
+        .file_name()
+        .expect("missing slru filename")
+        .to_string_lossy();
+    let segno = u32::from_str_radix(filename, 16)?;
 
     ensure!(len % pg_constants::BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
     let nblocks = len / pg_constants::BLCKSZ as usize;
@@ -299,16 +306,13 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
 
     // Import base
     for base_tar_entry in tar::Archive::new(reader).entries()? {
-        let entry = base_tar_entry.unwrap();
+        let entry = base_tar_entry?;
         let header = entry.header();
         let len = header.entry_size()? as usize;
-        let file_path = header.path().unwrap().into_owned();
+        let file_path = header.path()?.into_owned();
 
         match header.entry_type() {
             tar::EntryType::Regular => {
-                // let mut buffer = Vec::new();
-                // entry.read_to_end(&mut buffer).unwrap();
-
                 if let Some(res) = import_file(&mut modification, file_path.as_ref(), entry, len)? {
                     // We found the pg_control file.
                     pg_control = Some(res);
@@ -351,13 +355,16 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
         let bytes = {
             let entry = pg_wal_entries_iter.next().expect("expected more wal")?;
             let header = entry.header();
-            let file_path = header.path().unwrap().into_owned();
+            let file_path = header.path()?.into_owned();
 
             match header.entry_type() {
                 tar::EntryType::Regular => {
                     // FIXME: assume postgresql tli 1 for now
                     let expected_filename = XLogFileName(1, segno, pg_constants::WAL_SEGMENT_SIZE);
-                    let file_name = file_path.file_name().unwrap().to_string_lossy();
+                    let file_name = file_path
+                        .file_name()
+                        .expect("missing wal filename")
+                        .to_string_lossy();
                     ensure!(expected_filename == file_name);
 
                     debug!("processing wal file {:?}", file_path);
@@ -397,9 +404,9 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
     // Log any extra unused files
     for e in &mut pg_wal_entries_iter {
-        let entry = e.unwrap();
+        let entry = e?;
         let header = entry.header();
-        let file_path = header.path().unwrap().into_owned();
+        let file_path = header.path()?.into_owned();
         info!("skipping {:?}", file_path);
     }
 
@@ -418,7 +425,12 @@ pub fn import_file<R: Repository, Reader: Read>(
         let spcnode = pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
-        match file_path.file_name().unwrap().to_string_lossy().as_ref() {
+        match file_path
+            .file_name()
+            .expect("missing filename")
+            .to_string_lossy()
+            .as_ref()
+        {
             "pg_control" => {
                 let bytes = read_all_bytes(reader)?;
 
@@ -450,12 +462,16 @@ pub fn import_file<R: Repository, Reader: Read>(
         let dbnode: u32 = file_path
             .iter()
             .nth(1)
-            .unwrap()
+            .expect("invalid file path, expected dbnode")
             .to_string_lossy()
-            .parse()
-            .unwrap();
+            .parse()?;
 
-        match file_path.file_name().unwrap().to_string_lossy().as_ref() {
+        match file_path
+            .file_name()
+            .expect("missing base filename")
+            .to_string_lossy()
+            .as_ref()
+        {
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader)?;
                 modification.put_relmap_file(spcnode, dbnode, bytes)?;
@@ -485,7 +501,11 @@ pub fn import_file<R: Repository, Reader: Read>(
         import_slru(modification, slru, file_path, reader, len)?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
-        let xid = u32::from_str_radix(&file_path.file_name().unwrap().to_string_lossy(), 16)?;
+        let file_name = &file_path
+            .file_name()
+            .expect("missing twophase filename")
+            .to_string_lossy();
+        let xid = u32::from_str_radix(file_name, 16)?;
 
         let bytes = read_all_bytes(reader)?;
         modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
@@ -496,9 +516,9 @@ pub fn import_file<R: Repository, Reader: Read>(
         // Parse zenith signal file to set correct previous LSN
         let bytes = read_all_bytes(reader)?;
         // zenith.signal format is "PREV LSN: prev_lsn"
-        let zenith_signal = std::str::from_utf8(&bytes).unwrap();
+        let zenith_signal = std::str::from_utf8(&bytes)?;
         let zenith_signal = zenith_signal.split(':').collect::<Vec<_>>();
-        let prev_lsn = zenith_signal[1].trim().parse::<Lsn>().unwrap();
+        let prev_lsn = zenith_signal[1].trim().parse::<Lsn>()?;
 
         let writer = modification.tline.tline.writer();
         writer.finish_write(prev_lsn);
