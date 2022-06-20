@@ -559,10 +559,15 @@ impl PageServerHandler {
         let mut datadir_timeline =
             DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
 
-        // TODO mark timeline as not ready until it reaches end_lsn?
-        // This would prevent compute node from connecting to it and writing conflicting wal.
+        // TODO mark timeline as not ready until it reaches end_lsn.
+        // We might have some wal to import as well, and we should prevent compute
+        // from connecting before that and writing conflicting wal.
+        //
+        // This is not relevant for pageserver->pageserver migrations, since there's
+        // no wal to import. But should be fixed if we want to import from postgres.
 
-        // TODO leave clean state on error
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
 
         // Import basebackup provided via CopyData
         info!("importing basebackup");
@@ -601,13 +606,14 @@ impl PageServerHandler {
 
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let timeline = repo.get_timeline_load(timeline_id)?;
+        ensure!(timeline.get_last_record_lsn() == start_lsn);
+
         let repartition_distance = repo.get_checkpoint_distance();
         let mut datadir_timeline =
             DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
 
-        // TODO ensure start_lsn matches current lsn
-
-        // TODO leave clean state on error
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
 
         // Import wal provided via CopyData
         info!("importing wal");
@@ -615,7 +621,9 @@ impl PageServerHandler {
         let reader = CopyInReader::new(pgb);
         import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
 
-        // Flush data to disk, then upload to s3
+        // Flush data to disk, then upload to s3. No need for a forced checkpoint.
+        // We only want to persist the data, and it doesn't matter if it's in the
+        // shape of deltas or images.
         info!("flushing layers");
         datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
 
