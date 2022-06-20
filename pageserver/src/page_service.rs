@@ -287,8 +287,8 @@ impl<'a> Read for CopyInReader<'a> {
         }
 
         // Shutting down
-        // TODO is this fine?
-        Ok(0)
+        let msg = "Importer thread was shut down";
+        Err(io::Error::new(io::ErrorKind::Other, msg))
     }
 }
 
