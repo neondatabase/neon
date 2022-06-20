@@ -38,6 +38,7 @@ humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_with = "1.12.0"
+tantivy-bitpacker = "0.1.1"
 humantime-serde = "1.1.1"
 
 pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }

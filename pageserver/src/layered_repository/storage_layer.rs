@@ -52,6 +52,7 @@ where
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, ZenithWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
+    pub img_src_is_cache: bool,
 }
 
 /// Return value from Layer::get_page_reconstruct_data

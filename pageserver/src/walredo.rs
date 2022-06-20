@@ -42,7 +42,10 @@ use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
-use crate::walrecord::ZenithWalRecord;
+use crate::walrecord::{
+    ClearVisibilityMapFlags, ClogSetAborted, ClogSetCommitted, MultixactMembersCreate,
+    MultixactOffsetCreate, Postgres, ZenithWalRecord,
+};
 use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
@@ -73,12 +76,15 @@ pub trait WalRedoManager: Send + Sync {
     /// The caller passes an old page image, and WAL records that should be
     /// applied over it. The return value is a new page image, after applying
     /// the reords.
+    ///
+    /// img_was_cache is for helping debug potential cache-related issues.
     fn request_redo(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
+        img_was_cache: bool,
     ) -> Result<Bytes, WalRedoError>;
 }
 
@@ -95,6 +101,7 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
         _lsn: Lsn,
         _base_img: Option<Bytes>,
         _records: Vec<(Lsn, ZenithWalRecord)>,
+        _img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         Err(WalRedoError::InvalidState)
     }
@@ -142,10 +149,10 @@ fn can_apply_in_zenith(rec: &ZenithWalRecord) -> bool {
     // Postgres WAL records. But everything else is handled in zenith.
     #[allow(clippy::match_like_matches_macro)]
     match rec {
-        ZenithWalRecord::Postgres {
+        ZenithWalRecord::Postgres(Postgres {
             will_init: _,
             rec: _,
-        } => false,
+        }) => false,
         _ => true,
     }
 }
@@ -180,6 +187,7 @@ impl WalRedoManager for PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: Vec<(Lsn, ZenithWalRecord)>,
+        img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         if records.is_empty() {
             error!("invalid WAL redo request with no records");
@@ -202,6 +210,7 @@ impl WalRedoManager for PostgresRedoManager {
                         img,
                         &records[batch_start..i],
                         self.conf.wal_redo_timeout,
+                        img_source_was_cache,
                     )
                 };
                 img = Some(result?);
@@ -220,6 +229,7 @@ impl WalRedoManager for PostgresRedoManager {
                 img,
                 &records[batch_start..],
                 self.conf.wal_redo_timeout,
+                img_source_was_cache,
             )
         }
     }
@@ -248,6 +258,7 @@ impl PostgresRedoManager {
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
+        img_source_was_cache: bool,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
 
@@ -268,7 +279,7 @@ impl PostgresRedoManager {
         // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
         let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
+            .apply_wal_records(buf_tag, base_img.clone(), records, wal_redo_timeout)
             .map_err(WalRedoError::IoError);
 
         let end_time = Instant::now();
@@ -289,6 +300,19 @@ impl PostgresRedoManager {
                 records.len(),
                 lsn
             );
+            error!("records: {:#?}", records);
+            if let Some(img) = base_img {
+                let source = if img_source_was_cache {
+                    "Cache"
+                } else {
+                    "Layer"
+                };
+
+                error!("base_image ({}): 0x{:#X}", source, &img);
+            } else {
+                error!("no base image")
+            }
+
             let process = process_guard.take().unwrap();
             process.kill();
         }
@@ -344,18 +368,18 @@ impl PostgresRedoManager {
         record: &ZenithWalRecord,
     ) -> Result<(), WalRedoError> {
         match record {
-            ZenithWalRecord::Postgres {
+            ZenithWalRecord::Postgres(Postgres {
                 will_init: _,
                 rec: _,
-            } => {
+            }) => {
                 error!("tried to pass postgres wal record to zenith WAL redo");
                 return Err(WalRedoError::InvalidRequest);
             }
-            ZenithWalRecord::ClearVisibilityMapFlags {
+            ZenithWalRecord::ClearVisibilityMapFlags(ClearVisibilityMapFlags {
                 new_heap_blkno,
                 old_heap_blkno,
                 flags,
-            } => {
+            }) => {
                 // sanity check that this is modifying the correct relation
                 let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert!(
@@ -393,7 +417,7 @@ impl PostgresRedoManager {
             }
             // Non-relational WAL records are handled here, with custom code that has the
             // same effects as the corresponding Postgres WAL redo function.
-            ZenithWalRecord::ClogSetCommitted { xids, timestamp } => {
+            ZenithWalRecord::ClogSetCommitted(ClogSetCommitted { xids, timestamp }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -443,7 +467,7 @@ impl PostgresRedoManager {
                     );
                 }
             }
-            ZenithWalRecord::ClogSetAborted { xids } => {
+            ZenithWalRecord::ClogSetAborted(ClogSetAborted { xids }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -474,7 +498,7 @@ impl PostgresRedoManager {
                     transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
                 }
             }
-            ZenithWalRecord::MultixactOffsetCreate { mid, moff } => {
+            ZenithWalRecord::MultixactOffsetCreate(MultixactOffsetCreate { mid, moff }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -507,7 +531,7 @@ impl PostgresRedoManager {
 
                 LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
             }
-            ZenithWalRecord::MultixactMembersCreate { moff, members } => {
+            ZenithWalRecord::MultixactMembersCreate(MultixactMembersCreate { moff, members }) => {
                 let (slru_kind, segno, blknum) =
                     key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
                 assert_eq!(
@@ -728,10 +752,10 @@ impl PostgresRedoProcess {
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
-            if let ZenithWalRecord::Postgres {
+            if let ZenithWalRecord::Postgres(Postgres {
                 will_init: _,
                 rec: postgres_rec,
-            } = rec
+            }) = rec
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {

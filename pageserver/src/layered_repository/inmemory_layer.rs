@@ -12,6 +12,7 @@ use crate::layered_repository::ephemeral_file::EphemeralFile;
 use crate::layered_repository::storage_layer::{
     Layer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::lineage;
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
@@ -120,7 +121,8 @@ impl Layer for InMemoryLayer {
         reconstruct_state: &mut ValueReconstructState,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
-        let mut need_image = true;
+        // Is the request fully served by this layer?
+        let mut is_base = false;
 
         let inner = self.inner.read().unwrap();
 
@@ -142,9 +144,12 @@ impl Layer for InMemoryLayer {
                         reconstruct_state.records.push((*entry_lsn, rec));
                         if will_init {
                             // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
+                            is_base = true;
                             break;
                         }
+                    }
+                    Value::NonInitiatingLineage(_) | Value::InitiatingLineage(_) => {
+                        bail!("Lineage LSN ranges are not handled correctly in VecMap slice_range, and thus should not exist there")
                     }
                 }
             }
@@ -154,7 +159,10 @@ impl Layer for InMemoryLayer {
 
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
-        if need_image {
+        // We only care about our result within the LSN range requested by the
+        // caller, and don't care about reconstruct_state.img being
+        // pre-populated - we may have a better (newer) base image.
+        if !is_base {
             Ok(ValueReconstructResult::Continue)
         } else {
             Ok(ValueReconstructResult::Complete)
@@ -219,6 +227,19 @@ impl Layer for InMemoryLayer {
                             rec.will_init(),
                             wal_desc
                         )?;
+                    }
+                    Ok(Value::InitiatingLineage(lin)) => {
+                        let lin_desc = lineage::describe_lineage(&lin);
+                        write!(
+                            &mut desc,
+                            " lin {} bytes initiating: {}",
+                            buf.len(),
+                            lin_desc
+                        )?;
+                    }
+                    Ok(Value::NonInitiatingLineage(lin)) => {
+                        let lin_desc = lineage::describe_lineage(&lin);
+                        write!(&mut desc, " lin {} bytes non-init: {}", buf.len(), lin_desc)?;
                     }
                     Err(err) => {
                         write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;

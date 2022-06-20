@@ -3,6 +3,8 @@
 
 #![allow(clippy::manual_range_contains)]
 
+extern crate core;
+
 /// `Lsn` type implements common tasks on Log Sequence Numbers
 pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive
@@ -23,6 +25,10 @@ pub mod connstring;
 
 // helper functions for creating and fsyncing directories/trees
 pub mod crashsafe_dir;
+
+// Incremental encoding of increasing LSNs -- compression and decompression.
+// Internally uses tantivy_bitpacker.
+pub mod bitpacker;
 
 // common authentication routines
 pub mod auth;
