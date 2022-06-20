@@ -199,9 +199,8 @@ impl ReplicationConn {
 
         runtime.block_on(async move {
             let (_, persisted_state) = spg.timeline.get().get_state();
-            if persisted_state.server.wal_seg_size == 0
-                || persisted_state.timeline_start_lsn == Lsn(0)
-            {
+            // add persisted_state.timeline_start_lsn == Lsn(0) check
+            if persisted_state.server.wal_seg_size == 0 {
                 bail!("Cannot start replication before connecting to walproposer");
             }
 
