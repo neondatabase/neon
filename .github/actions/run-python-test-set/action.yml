@@ -36,8 +36,8 @@ runs:
     - name: Extract Neon artifact
       shell: bash -ex {0}
       run: |
-        mkdir -p /tmp/zenith/
-        tar -xf ./neon-artifact/neon.tgz -C /tmp/zenith/
+        mkdir -p /tmp/neon/
+        tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
         rm -rf ./neon-artifact/
 
     - name: Checkout
@@ -119,14 +119,3 @@ runs:
             scripts/generate_and_push_perf_report.sh
           fi
         fi
-
-    - name: Delete all data but logs
-      # CircleCI artifacts are preserved one file at a time, so skipping
-      # this step isn't a good idea. If you want to extract the
-      # pageserver state, perhaps a tarball would be a better idea.
-      shell: bash -ex {0}
-      run: |
-        du -sh /tmp/test_output/*
-        find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
-        du -sh /tmp/test_output/*
-
