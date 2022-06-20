@@ -61,8 +61,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     timeline = uuid4()
 
     # Set up pageserver for import
-    env = neon_env_builder.init_start()
     neon_env_builder.enable_local_fs_remote_storage()
+    env = neon_env_builder.init_start()
     env.pageserver.http_client().tenant_create(tenant)
 
     def import_tar(base, wal):
@@ -100,7 +100,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Wait for data to land in s3
     env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
     wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(end_lsn))
-    # wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
+    wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
@@ -112,7 +112,7 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
 
     num_rows = 3000
     neon_env_builder.num_safekeepers = 1
-    neon_env_builder
+    neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch('test_import_from_pageserver')
@@ -178,8 +178,9 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     ])
 
     # Wait for data to land in s3
-    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
-    wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
+    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline}")
+    wait_for_last_record_lsn(client, tenant, UUID(timeline), lsn_from_hex(lsn))
+    wait_for_upload(client, tenant, UUID(timeline), lsn_from_hex(lsn))
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)

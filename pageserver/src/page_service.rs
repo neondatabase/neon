@@ -621,7 +621,8 @@ impl PageServerHandler {
         let reader = CopyInReader::new(pgb);
         import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
 
-        ensure!(datadir_timeline.tline.get_last_record_lsn() == end_lsn);
+        // TODO Does it make sense to overshoot?
+        ensure!(datadir_timeline.tline.get_last_record_lsn() >= end_lsn);
 
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
@@ -954,7 +955,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenant = ZTenantId::from_str(params[0])?;
             let timeline = ZTimelineId::from_str(params[1])?;
             let base_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[3])?;
 
             self.check_permission(Some(tenant))?;
 
@@ -968,7 +969,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenant = ZTenantId::from_str(params[0])?;
             let timeline = ZTimelineId::from_str(params[1])?;
             let start_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[3])?;
 
             self.check_permission(Some(tenant))?;
 
