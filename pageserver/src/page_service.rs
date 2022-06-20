@@ -585,9 +585,6 @@ impl PageServerHandler {
         info!("flushing layers");
         datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
 
-        // TODO Wait for s3 upload to complete
-        // info!("uploading layers");
-
         info!("done");
         Ok(())
     }
@@ -629,9 +626,6 @@ impl PageServerHandler {
         // shape of deltas or images.
         info!("flushing layers");
         datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
-
-        // TODO Wait for s3 upload to complete
-        // info!("uploading layers");
 
         info!("done");
         Ok(())
@@ -944,6 +938,9 @@ impl postgres_backend::Handler for PageServerHandler {
             // Import the `base` section (everything but the wal) of a basebackup.
             // Assumes the tenant already exists on this pageserver.
             //
+            // Files are scheduled to be persisted to remote storage, and the
+            // caller should poll the http api to check when that is done.
+            //
             // Example import command:
             // 1. Get start/end LSN from backup_manifest file
             // 2. Run:
@@ -963,6 +960,9 @@ impl postgres_backend::Handler for PageServerHandler {
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import wal ") {
             // Import the `pg_wal` section of a basebackup.
+            //
+            // Files are scheduled to be persisted to remote storage, and the
+            // caller should poll the http api to check when that is done.
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             ensure!(params.len() == 4);

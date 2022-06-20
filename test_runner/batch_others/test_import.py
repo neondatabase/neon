@@ -21,8 +21,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     vanilla_pg.safe_psql('''create table t as select 'long string to consume some space' || g
      from generate_series(1,300000) g''')
     assert vanilla_pg.safe_psql('select count(*) from t') == [(300000, )]
-    # ensure that relation is larger than 1GB to test multisegment restore
-    # assert vanilla_pg.safe_psql("select pg_relation_size('t')")[0][0] > 1024 * 1024 * 1024
 
     # Take basebackup
     basebackup_dir = os.path.join(test_output_dir, "basebackup")
@@ -98,7 +96,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     import_tar(base_tar, wal_tar)
 
     # Wait for data to land in s3
-    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
     wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(end_lsn))
     wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
 
@@ -178,7 +175,6 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     ])
 
     # Wait for data to land in s3
-    env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline}")
     wait_for_last_record_lsn(client, tenant, UUID(timeline), lsn_from_hex(lsn))
     wait_for_upload(client, tenant, UUID(timeline), lsn_from_hex(lsn))
 
