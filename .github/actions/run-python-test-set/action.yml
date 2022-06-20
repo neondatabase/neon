@@ -60,8 +60,8 @@ runs:
 
     - name: Run pytest
       env:
-        ZENITH_BIN: /tmp/zenith/bin
-        POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
+        ZENITH_BIN: /tmp/neon/bin
+        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
         TEST_OUTPUT: /tmp/test_output
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
@@ -90,7 +90,7 @@ runs:
         # export GITHUB_SHA=$CIRCLE_SHA1
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
-          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
         elif [[ "${{ inputs.build_type }}" == "release" ]]; then
           cov_prefix=()
         fi

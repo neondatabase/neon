@@ -90,7 +90,7 @@ jobs:
       - name: Run cargo build
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
             CARGO_FLAGS=
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
@@ -110,7 +110,7 @@ jobs:
         run: |
           export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
             CARGO_FLAGS=
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
@@ -123,7 +123,7 @@ jobs:
         run: |
           export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
           fi
@@ -138,41 +138,41 @@ jobs:
             jq -r '.executable | select(. != null)'
           )
 
-          mkdir -p /tmp/zenith/bin
-          mkdir -p /tmp/zenith/test_bin
-          mkdir -p /tmp/zenith/etc
+          mkdir -p /tmp/neon/bin
+          mkdir -p /tmp/neon/test_bin
+          mkdir -p /tmp/neon/etc
 
           # Install target binaries
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
-            DST=/tmp/zenith/bin/$bin
+            DST=/tmp/neon/bin/$bin
             cp $SRC $DST
-            echo $DST >> /tmp/zenith/etc/binaries.list
+            echo $DST >> /tmp/neon/etc/binaries.list
           done
 
           # Install test executables (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
             for bin in $test_exe_paths; do
               SRC=$bin
-              DST=/tmp/zenith/test_bin/$(basename $bin)
+              DST=/tmp/neon/test_bin/$(basename $bin)
               cp $SRC $DST
-              echo $DST >> /tmp/zenith/etc/binaries.list
+              echo $DST >> /tmp/neon/etc/binaries.list
             done
           fi
 
       - name: Install postgres binaries
-        run: cp -a tmp_install /tmp/zenith/pg_install
+        run: cp -a tmp_install /tmp/neon/pg_install
 
       - name: Merge coverage data
         run: |
           export HOME=/home/runner
           # This will speed up workspace uploads
           if [[ $BUILD_TYPE == "debug" ]]; then
-            scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/zenith/coverage merge
+            scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage merge
           fi
 
       - name: Prepare neon artifact
-        run: tar -C /tmp/zenith/ -czf ./neon.tgz .
+        run: tar -C /tmp/neon/ -czf ./neon.tgz .
 
       - name: Upload neon binaries
         uses: actions/upload-artifact@v3
