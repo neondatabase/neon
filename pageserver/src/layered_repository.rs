@@ -1023,6 +1023,8 @@ pub struct LayeredTimeline {
 
     layers: RwLock<LayerMap>,
 
+    last_freeze_at: AtomicLsn,
+
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
@@ -1347,6 +1349,8 @@ impl LayeredTimeline {
                 prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
             }),
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
+
+            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -1719,6 +1723,7 @@ impl LayeredTimeline {
             layers.frozen_layers.push_back(open_layer_rc);
             layers.open_layer = None;
             layers.next_open_layer_at = Some(end_lsn);
+            self.last_freeze_at.store(end_lsn);
         }
         drop(layers);
     }
@@ -1728,15 +1733,25 @@ impl LayeredTimeline {
     /// in the in-memory layer, and initiate flushing it if so.
     ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
+        let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_size = open_layer.size()?;
             drop(layers);
-            if open_layer_size > self.get_checkpoint_distance() {
-                info!("check_checkpoint_distance {}", open_layer_size);
+            let distance = last_lsn.widening_sub(self.last_freeze_at.load());
+            // Checkpointing of open layer is triggered both by layer size and LSN range
+            // because lst one determines how much WAL the safekeepers need to store.
+            if distance >= self.get_checkpoint_distance().into()
+                || open_layer_size > self.get_checkpoint_distance()
+            {
+                info!(
+                    "check_checkpoint_distance {}, layer size {}",
+                    distance, open_layer_size
+                );
 
                 // Yes. Freeze the current in-memory layer.
                 self.freeze_inmem_layer(true);
+                self.last_freeze_at.store(last_lsn);
 
                 // Launch a thread to flush the frozen layer to disk, unless
                 // a thread was already running. (If the thread was running
