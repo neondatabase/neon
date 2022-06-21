@@ -41,7 +41,7 @@ runs:
         rm -rf ./neon-artifact/
 
     - name: Checkout
-      #checkout postgres only if needs_postgres_source
+      if: inputs.needs_postgres_source == 'true'
       uses: actions/checkout@v3
       with:
         submodules: true
@@ -86,8 +86,6 @@ runs:
             EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
           fi
         fi
-
-        # export GITHUB_SHA=$CIRCLE_SHA1
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
