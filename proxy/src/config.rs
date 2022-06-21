@@ -1,6 +1,5 @@
 use crate::url::ApiUrl;
 use anyhow::{bail, ensure, Context};
-use std::io::Read;
 use std::{str::FromStr, sync::Arc};
 
 #[derive(Debug)]
@@ -54,20 +53,14 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     let key = {
         let key_bytes = std::fs::read(key_path).context("TLS key file")?;
         let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-            .context("couldn't read TLS keys")?;
+            .context(format!("Failed to read TLS keys at '{key_path}'"))?;
 
         ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
         keys.pop().map(rustls::PrivateKey).unwrap()
     };
 
-    let cert_chain_bytes = {
-        let mut cert_file = std::fs::File::open(cert_path)
-            .context(format!("Failed to open TLS cert file at '{cert_path}'."))?;
-        let mut cert_chain_bytes = Vec::new();
-        let _ = cert_file.read_to_end(&mut cert_chain_bytes)?;
-        cert_chain_bytes
-    };
-
+    let cert_chain_bytes = std::fs::read(cert_path)
+        .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
     let cert_chain = {
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
             .context(format!(
