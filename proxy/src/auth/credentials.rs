@@ -114,7 +114,7 @@ mod tests_for_project_name_from_sni_data {
         let common_name = "localtest.me";
         let sni_data = format!("{target_project_name}.{common_name}");
         assert_eq!(
-            project_name_from_sni_data(sni_data.as_str(), common_name).ok(),
+            project_name_from_sni_data(&sni_data, common_name).ok(),
             Some(target_project_name.to_string())
         );
     }
@@ -128,7 +128,7 @@ mod tests_for_project_name_from_sni_data {
         let wrong_common_name = format!("wrong{wrong_suffix}");
         let sni_data = format!("{target_project_name}.{wrong_common_name}");
         assert_eq!(
-            project_name_from_sni_data(sni_data.as_str(), common_name).err(),
+            project_name_from_sni_data(&sni_data, common_name).err(),
             Some(ClientCredsParseError::InconsistentCommonNameAndSNI(
                 common_name.to_string(),
                 sni_data
@@ -238,7 +238,7 @@ mod tests_for_project_name_only {
                     let target_project_name =
                         format!("{project_name_prefix}{illegal_char}{project_name_suffix}");
                     assert_eq!(
-                        get_project_name(None, common_name, Some(target_project_name.as_str()))
+                        get_project_name(None, common_name, Some(&target_project_name))
                             .err(),
                         Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                             target_project_name
