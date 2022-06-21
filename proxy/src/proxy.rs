@@ -269,10 +269,10 @@ mod tests {
     }
 
     /// Generate TLS certificates and build rustls configs for client and server.
-    fn generate_tls_config(
-        hostname: &'static str,
-        common_name: &'static str,
-    ) -> anyhow::Result<(ClientConfig<'static>, TlsConfig)> {
+    fn generate_tls_config<'a>(
+        hostname: &'a str,
+        common_name: &'a str,
+    ) -> anyhow::Result<(ClientConfig<'a>, TlsConfig)> {
         let (ca, cert, key) = generate_certs(hostname)?;
 
         let tls_config = {
@@ -297,13 +297,12 @@ mod tests {
             ClientConfig { config, hostname }
         };
 
-        Ok((
-            client_config,
-            TlsConfig {
-                config: tls_config,
-                common_name: Some(common_name.to_string()),
-            },
-        ))
+        let tls_config = TlsConfig {
+            config: tls_config,
+            common_name: Some(common_name.to_string()),
+        };
+
+        Ok((client_config, tls_config))
     }
 
     #[async_trait]

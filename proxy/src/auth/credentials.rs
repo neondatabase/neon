@@ -26,7 +26,10 @@ pub enum ClientCredsParseError {
     #[error("Common name is not set.")]
     CommonNameNotSet,
 
-    #[error("SNI ('{1}') inconsistently formatted with respect to common name ('{0}'). SNI should be formatted as '<project-name>.<common-name>'.")]
+    #[error(
+        "SNI ('{1}') inconsistently formatted with respect to common name ('{0}'). \
+        SNI should be formatted as '<project-name>.<common-name>'."
+    )]
     InconsistentCommonNameAndSNI(String, String),
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphens ('-').")]
@@ -238,8 +241,7 @@ mod tests_for_project_name_only {
                     let target_project_name =
                         format!("{project_name_prefix}{illegal_char}{project_name_suffix}");
                     assert_eq!(
-                        get_project_name(None, common_name, Some(&target_project_name))
-                            .err(),
+                        get_project_name(None, common_name, Some(&target_project_name)).err(),
                         Some(ClientCredsParseError::ProjectNameContainsIllegalChars(
                             target_project_name
                         ))
