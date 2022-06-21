@@ -242,15 +242,15 @@ impl Repository for LayeredRepository {
         );
         timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
 
+        // Insert if not exists
         let timeline = Arc::new(timeline);
-        let r = timelines.insert(
-            timelineid,
-            LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
-        );
-        ensure!(
-            r.is_none(),
-            "assertion failure, inserted duplicate timeline"
-        );
+        match timelines.entry(timelineid) {
+            Entry::Occupied(_) => bail!("Timeline already exists"),
+            Entry::Vacant(vacant) => {
+                vacant.insert(LayeredTimelineEntry::Loaded(Arc::clone(&timeline)))
+            }
+        };
+
         Ok(timeline)
     }
 

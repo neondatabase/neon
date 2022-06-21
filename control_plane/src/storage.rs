@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
@@ -491,6 +492,56 @@ impl PageServerNode {
             .json::<Option<TimelineInfo>>()?;
 
         Ok(timeline_info_response)
+    }
+
+    /// Import a basebackup prepared using either:
+    /// a) `pg_basebackup -F tar`, or
+    /// b) The `fullbackup` pageserver endpoint
+    ///
+    /// # Arguments
+    /// * `tenant_id` - tenant to import into. Created if not exists
+    /// * `timeline_id` - id to assign to imported timeline
+    /// * `base` - (start lsn of basebackup, path to `base.tar` file)
+    /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
+    pub fn timeline_import(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        base: (Lsn, PathBuf),
+        pg_wal: Option<(Lsn, PathBuf)>,
+    ) -> anyhow::Result<()> {
+        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+
+        // Init base reader
+        let (start_lsn, base_tarfile_path) = base;
+        let base_tarfile = File::open(base_tarfile_path)?;
+        let mut base_reader = BufReader::new(base_tarfile);
+
+        // Init wal reader if necessary
+        let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
+            let wal_tarfile = File::open(wal_tarfile_path)?;
+            let wal_reader = BufReader::new(wal_tarfile);
+            (end_lsn, Some(wal_reader))
+        } else {
+            (start_lsn, None)
+        };
+
+        // Import base
+        let import_cmd =
+            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let mut writer = client.copy_in(&import_cmd)?;
+        io::copy(&mut base_reader, &mut writer)?;
+        writer.finish()?;
+
+        // Import wal if necessary
+        if let Some(mut wal_reader) = wal_reader {
+            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+            let mut writer = client.copy_in(&import_cmd)?;
+            io::copy(&mut wal_reader, &mut writer)?;
+            writer.finish()?;
+        }
+
+        Ok(())
     }
 }
 

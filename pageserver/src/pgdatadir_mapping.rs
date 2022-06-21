@@ -749,6 +749,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     /// Extend relation
+    /// If new size is smaller, do nothing.
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
 
@@ -756,10 +757,13 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
 
-        let buf = nblocks.to_le_bytes();
-        self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+        // only extend relation here. never decrease the size
+        if nblocks > old_size {
+            let buf = nblocks.to_le_bytes();
+            self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        self.pending_nblocks += nblocks as isize - old_size as isize;
+            self.pending_nblocks += nblocks as isize - old_size as isize;
+        }
         Ok(())
     }
 
