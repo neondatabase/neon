@@ -1,5 +1,6 @@
 use crate::url::ApiUrl;
 use anyhow::{bail, ensure, Context};
+use std::io::Read;
 use std::{str::FromStr, sync::Arc};
 
 #[derive(Debug)]
@@ -59,17 +60,19 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
         keys.pop().map(rustls::PrivateKey).unwrap()
     };
 
-    // read PEM file at cert_path.
-    let cert_file =
-        std::fs::File::open(cert_path).context("Failed to open TLS cert file at '{cert_path}.'")?;
-    let buffer_reader = std::io::BufReader::new(cert_file);
-    let pem = x509_parser::pem::Pem::read(buffer_reader)
-        .context("Failed to read from buffer reader of cert file at '{cert_path'}")?
-        .0;
+    let cert_chain_bytes = {
+        let mut cert_file = std::fs::File::open(cert_path)
+            .context(format!("Failed to open TLS cert file at '{cert_path}'."))?;
+        let mut cert_chain_bytes = Vec::new();
+        let _ = cert_file.read_to_end(&mut cert_chain_bytes)?;
+        cert_chain_bytes
+    };
+
     let cert_chain = {
-        let cert_chain_bytes = &pem.contents;
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-            .context("couldn't read TLS certificate chain")?
+            .context(format!(
+                "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
+            ))?
             .into_iter()
             .map(rustls::Certificate)
             .collect()
@@ -86,6 +89,11 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
     // determine common name from tls-cert (-c server.crt param).
     // used in asserting project name formatting invariant.
     let common_name = {
+        let pem = x509_parser::pem::parse_x509_pem(&cert_chain_bytes)
+            .context(format!(
+                "Failed to parse PEM object from bytes from file at '{cert_path}'."
+            ))?
+            .1;
         let almost_common_name = pem.parse_x509()?.tbs_certificate.subject.to_string();
         let expected_prefix = "CN=*.";
         let common_name = almost_common_name.strip_prefix(expected_prefix);
