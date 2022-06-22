@@ -19,7 +19,7 @@ pub type Result<T> = std::result::Result<T, ConsoleAuthError>;
 #[derive(Debug, Error)]
 pub enum ConsoleAuthError {
     #[error(transparent)]
-    BadProjectName(#[from] auth::credentials::ProjectNameError),
+    BadProjectName(#[from] auth::credentials::ClientCredsParseError),
 
     // We shouldn't include the actual secret here.
     #[error("Bad authentication secret")]
@@ -74,18 +74,12 @@ pub enum AuthInfo {
 pub(super) struct Api<'a> {
     endpoint: &'a ApiUrl,
     creds: &'a ClientCredentials,
-    /// Cache project name, since we'll need it several times.
-    project: &'a str,
 }
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
     pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self {
-            endpoint,
-            creds,
-            project: creds.project_name()?,
-        })
+        Ok(Self { endpoint, creds })
     }
 
     /// Authenticate the existing user or throw an error.
@@ -100,7 +94,7 @@ impl<'a> Api<'a> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
-            .append_pair("project", self.project)
+            .append_pair("project", &self.creds.project_name)
             .append_pair("role", &self.creds.user);
 
         // TODO: use a proper logger
@@ -123,7 +117,8 @@ impl<'a> Api<'a> {
     async fn wake_compute(&self) -> Result<DatabaseInfo> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
-        url.query_pairs_mut().append_pair("project", self.project);
+        url.query_pairs_mut()
+            .append_pair("project", &self.creds.project_name);
 
         // TODO: use a proper logger
         println!("cplane request: {url}");
