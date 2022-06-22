@@ -101,10 +101,6 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
-@pytest.mark.skip(
-    reason=
-    "needs to replace callmemaybe call with better idea how to migrate timelines between pageservers"
-)
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                            port_distributor: PortDistributor,
@@ -208,10 +204,11 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         # TODO (rodionov) use attach to start replication
         with pg_cur(PgProtocol(host='localhost', port=new_pageserver_pg_port)) as cur:
             # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'"
-            safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} ztenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
-            cur.execute("callmemaybe {} {} {}".format(tenant.hex,
-                                                      timeline.hex,
-                                                      safekeeper_connstring))
+            # safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} ztenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
+            # cur.execute("callmemaybe {} {} {}".format(tenant.hex,
+            #                                           timeline.hex,
+            #                                           safekeeper_connstring))
+            pass
 
         tenant_pg.stop()
 
