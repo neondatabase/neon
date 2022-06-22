@@ -198,18 +198,6 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                                 lsn_from_hex(timeline_detail['local']['disk_consistent_lsn']),
                                 0.03)
 
-        # callmemaybe to start replication from safekeeper to the new pageserver
-        # when there is no load there is a clean checkpoint and no wal delta
-        # needs to be streamed to the new pageserver
-        # TODO (rodionov) use attach to start replication
-        with pg_cur(PgProtocol(host='localhost', port=new_pageserver_pg_port)) as cur:
-            # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'"
-            # safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} ztenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
-            # cur.execute("callmemaybe {} {} {}".format(tenant.hex,
-            #                                           timeline.hex,
-            #                                           safekeeper_connstring))
-            pass
-
         tenant_pg.stop()
 
         # rewrite neon cli config to use new pageserver for basebackup to start new compute
