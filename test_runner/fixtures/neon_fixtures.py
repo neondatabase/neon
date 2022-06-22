@@ -500,6 +500,8 @@ class NeonEnvBuilder:
             num_safekeepers: int = 1,
             # Use non-standard SK ids to check for various parsing bugs
             safekeepers_id_start: int = 0,
+            # fsync is disabled by default to make the tests go faster
+            safekeepers_enable_fsync: bool = False,
             auth_enabled: bool = False,
             rust_log_override: Optional[str] = None,
             default_branch_name=DEFAULT_BRANCH_NAME):
@@ -513,6 +515,7 @@ class NeonEnvBuilder:
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
+        self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
@@ -666,7 +669,7 @@ class NeonEnv:
                 id = {id}
                 pg_port = {port.pg}
                 http_port = {port.http}
-                sync = false # Disable fsyncs to make the tests go faster""")
+                sync = {'true' if config.safekeepers_enable_fsync else 'false'}""")
             if config.auth_enabled:
                 toml += textwrap.dedent(f"""
                 auth_enabled = true
@@ -1395,12 +1398,12 @@ class VanillaPostgres(PgProtocol):
         if log_path is None:
             log_path = os.path.join(self.pgdatadir, "pg.log")
 
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, '-l', log_path, 'start'])
+        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
         self.running = False
-        self.pg_bin.run_capture(['pg_ctl', '-D', self.pgdatadir, 'stop'])
+        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, 'stop'])
 
     def get_subdir_size(self, subdir) -> int:
         """Return size of pgdatadir subdirectory in bytes."""

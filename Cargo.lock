@@ -1921,6 +1921,7 @@ dependencies = [
  "tracing",
  "url",
  "utils",
+ "walkdir",
  "workspace_hack",
 ]
 

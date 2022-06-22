@@ -112,6 +112,8 @@ where
     }
 
     pub fn send_tarball(mut self) -> anyhow::Result<()> {
+        // TODO include checksum
+
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
@@ -355,24 +357,21 @@ where
         pg_control.checkPointCopy = checkpoint;
         pg_control.state = pg_constants::DB_SHUTDOWNED;
 
-        // Postgres doesn't recognize the zenith.signal file and doesn't need it.
-        if !self.full_backup {
-            // add zenith.signal file
-            let mut zenith_signal = String::new();
-            if self.prev_record_lsn == Lsn(0) {
-                if self.lsn == self.timeline.tline.get_ancestor_lsn() {
-                    write!(zenith_signal, "PREV LSN: none")?;
-                } else {
-                    write!(zenith_signal, "PREV LSN: invalid")?;
-                }
+        // add zenith.signal file
+        let mut zenith_signal = String::new();
+        if self.prev_record_lsn == Lsn(0) {
+            if self.lsn == self.timeline.tline.get_ancestor_lsn() {
+                write!(zenith_signal, "PREV LSN: none")?;
             } else {
-                write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+                write!(zenith_signal, "PREV LSN: invalid")?;
             }
-            self.ar.append(
-                &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
-                zenith_signal.as_bytes(),
-            )?;
+        } else {
+            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
         }
+        self.ar.append(
+            &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
+            zenith_signal.as_bytes(),
+        )?;
 
         //send pg_control
         let pg_control_bytes = pg_control.encode();

@@ -531,10 +531,8 @@ impl WalReader {
             );
         }
 
-        if state.server.wal_seg_size == 0
-            || state.timeline_start_lsn == Lsn(0)
-            || state.local_start_lsn == Lsn(0)
-        {
+        // TODO: add state.timeline_start_lsn == Lsn(0) check
+        if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
             bail!("state uninitialized, no data to read");
         }
 
