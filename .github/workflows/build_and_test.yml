@@ -1,0 +1,276 @@
+name: build_and_test
+on: [ push ]
+defaults:
+  run:
+    shell: bash -ex {0}
+
+jobs:
+  build-postgres:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v3
+        with:
+          path: tmp_install/
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: COPT='-Werror' mold -run make postgres -j$(nproc)
+
+      # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
+      - name: Prepare postgres artifact
+        run: tar -C tmp_install/ -czf ./pg.tgz .
+      - name: Upload postgres artifact
+        uses: actions/upload-artifact@v3
+        with:
+          retention-days: 7
+          if-no-files-found: error
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          path: ./pg.tgz
+
+
+  build-neon:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-postgres ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Get postgres artifact for restoration
+        uses: actions/download-artifact@v3
+        with:
+          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          path: ./postgres-artifact/
+      - name: Extract postgres artifact
+        run: |
+          mkdir ./tmp_install/
+          tar -xf ./postgres-artifact/pg.tgz -C ./tmp_install/
+          rm -rf ./postgres-artifact/
+
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run cargo build
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+            CARGO_FLAGS="--release --features profiling"
+          fi
+
+          export CACHEPOT_BUCKET=zenith-rust-cachepot
+          export RUSTC_WRAPPER=cachepot
+          export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+          export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+          export HOME=/home/runner
+          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          cachepot -s
+
+      - name: Run cargo test
+        run: |
+          export HOME=/home/runner
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+            CARGO_FLAGS=
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+            CARGO_FLAGS=--release
+          fi
+          
+          "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+
+      - name: Install rust binaries
+        run: |
+          export HOME=/home/runner
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=()
+          fi
+
+          binaries=$(
+            "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+            jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+          )
+
+          test_exe_paths=$(
+            "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+            jq -r '.executable | select(. != null)'
+          )
+
+          mkdir -p /tmp/neon/bin
+          mkdir -p /tmp/neon/test_bin
+          mkdir -p /tmp/neon/etc
+
+          # Install target binaries
+          for bin in $binaries; do
+            SRC=target/$BUILD_TYPE/$bin
+            DST=/tmp/neon/bin/$bin
+            cp $SRC $DST
+            echo $DST >> /tmp/neon/etc/binaries.list
+          done
+
+          # Install test executables (for code coverage)
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            for bin in $test_exe_paths; do
+              SRC=$bin
+              DST=/tmp/neon/test_bin/$(basename $bin)
+              cp $SRC $DST
+              echo $DST >> /tmp/neon/etc/binaries.list
+            done
+          fi
+
+      - name: Install postgres binaries
+        run: cp -a tmp_install /tmp/neon/pg_install
+
+      - name: Merge coverage data
+        run: |
+          export HOME=/home/runner
+          # This will speed up workspace uploads
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage merge
+          fi
+
+      - name: Prepare neon artifact
+        run: tar -C /tmp/neon/ -czf ./neon.tgz .
+
+      - name: Upload neon binaries
+        uses: actions/upload-artifact@v3
+        with:
+          retention-days: 7
+          if-no-files-found: error
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: ./neon.tgz
+
+  check-codestyle-python:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    strategy:
+      matrix:
+        rust_toolchain: [ 1.58 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Run yapf to ensure code format
+        run: poetry run yapf --recursive --diff .
+
+      - name: Run mypy to check types
+        run: poetry run mypy .
+
+  pg_regress-tests:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest regress tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_pg_regress
+          needs_postgres_source: true
+
+  other-tests:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        rust_toolchain: [ 1.58 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest other tests
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: batch_others
+
+  benchmarks:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    strategy:
+      matrix:
+        build_type: [ release ]
+        rust_toolchain: [ 1.58 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 2
+
+      - name: Pytest benchmarks
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ matrix.build_type }}
+          rust_toolchain: ${{ matrix.rust_toolchain }}
+          test_selection: performance
+          run_in_parallel: false
+          # save_perf_report: true
