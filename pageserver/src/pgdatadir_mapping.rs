@@ -123,6 +123,19 @@ impl<R: Repository> DatadirTimeline<R> {
         self.tline.get(key, lsn)
     }
 
+    // Get size of a database
+    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+        let mut total_blocks = 0;
+
+        let rels = self.list_rels(spcnode, dbnode, lsn)?;
+
+        for rel in rels {
+            let n_blocks = self.get_rel_size(rel, lsn)?;
+            total_blocks += n_blocks as usize;
+        }
+        Ok(total_blocks)
+    }
+
     /// Get size of a relation file
     pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
         ensure!(tag.relnode != 0, "invalid relnode");
@@ -667,6 +680,10 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
+        let req_lsn = self.tline.get_last_record_lsn();
+
+        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn)?;
+
         // Remove entry from dbdir
         let buf = self.get(DBDIR_KEY)?;
         let mut dir = DbDirectory::des(&buf)?;
@@ -680,7 +697,8 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
             );
         }
 
-        // FIXME: update pending_nblocks
+        // Update logical database size.
+        self.pending_nblocks -= total_blocks as isize;
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
