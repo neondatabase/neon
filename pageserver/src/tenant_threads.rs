@@ -129,13 +129,14 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             // TODO cancel all running tasks
                             break
                         },
-                        // TODO don't spawn if already running
                         tenantid = gc_recv.recv() => {
                             let tenantid = tenantid.expect("Gc task channel closed unexpectedly");
+                            // TODO cancel existing loop, if any.
                             tokio::spawn(gc_loop(tenantid));
                         },
                         tenantid = compaction_recv.recv() => {
                             let tenantid = tenantid.expect("Compaction task channel closed unexpectedly");
+                            // TODO cancel existing loop, if any.
                             tokio::spawn(compaction_loop(tenantid));
                         },
                     }
