@@ -7,7 +7,7 @@ use crate::repository::Repository;
 use crate::tenant_mgr::TenantState;
 use crate::thread_mgr::ThreadKind;
 use crate::{tenant_mgr, thread_mgr};
-use anyhow;
+use anyhow::{self, Context};
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc::{self, Sender};
 use tracing::*;
@@ -75,9 +75,10 @@ static START_COMPACTION_LOOP: OnceCell<Sender<ZTenantId>> = OnceCell::new();
 pub fn start_gc_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
     START_GC_LOOP
         .get()
-        .expect("failed to get START_GC_LOOP")
+        .context("Failed to get START_GC_LOOP")?
         .blocking_send(tenantid)
-        .expect("Failed to send to START_GC_LOOP channel");
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("Failed to send to START_GC_LOOP channel")?;
     Ok(())
 }
 
@@ -87,9 +88,10 @@ pub fn start_gc_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
 pub fn start_compaction_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
     START_COMPACTION_LOOP
         .get()
-        .expect("failed to get START_COMPACTION_LOOP")
+        .context("failed to get START_COMPACTION_LOOP")?
         .blocking_send(tenantid)
-        .expect("failed to send to START_COMPACTION_LOOP");
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to send to START_COMPACTION_LOOP")?;
     Ok(())
 }
 
