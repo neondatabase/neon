@@ -13,6 +13,7 @@ use super::xlog_utils::*;
 use super::XLogLongPageHeaderData;
 use super::XLogPageHeaderData;
 use super::XLogRecord;
+use super::XLOG_PAGE_MAGIC;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
 use log::*;
@@ -67,6 +68,45 @@ impl WalStreamDecoder {
         self.inputbuf.extend_from_slice(buf);
     }
 
+    fn validate_page_header(&self, hdr: &XLogPageHeaderData) -> Result<(), WalDecodeError> {
+        let validate_impl = || {
+            if hdr.xlp_magic != XLOG_PAGE_MAGIC as u16 {
+                return Err(format!(
+                    "invalid xlog page header: xlp_magic={}, expected {}",
+                    hdr.xlp_magic, XLOG_PAGE_MAGIC
+                ));
+            }
+            if hdr.xlp_pageaddr != self.lsn.0 {
+                return Err(format!(
+                    "invalid xlog page header: xlp_pageaddr={}, expected {}",
+                    hdr.xlp_pageaddr, self.lsn
+                ));
+            }
+            if self.contlen == 0 {
+                if hdr.xlp_info & XLP_FIRST_IS_CONTRECORD != 0 {
+                    return Err(
+                        "invalid xlog page header: unexpected XLP_FIRST_IS_CONTRECORD".into(),
+                    );
+                }
+            } else {
+                if hdr.xlp_info & XLP_FIRST_IS_CONTRECORD == 0 {
+                    return Err(
+                        "invalid xlog page header: XLP_FIRST_IS_CONTRECORD expected, not found"
+                            .into(),
+                    );
+                }
+            }
+            if hdr.xlp_rem_len != self.contlen {
+                return Err(format!(
+                    "invalid xlog page header: xlp_rem_len={}, expected {}",
+                    hdr.xlp_rem_len, self.contlen
+                ));
+            }
+            Ok(())
+        };
+        validate_impl().map_err(|msg| WalDecodeError { msg, lsn: self.lsn })
+    }
+
     /// Attempt to decode another WAL record from the input that has been fed to the
     /// decoder so far.
     ///
@@ -106,13 +146,7 @@ impl WalStreamDecoder {
                     }
                 })?;
 
-                if hdr.std.xlp_pageaddr != self.lsn.0 {
-                    return Err(WalDecodeError {
-                        msg: "invalid xlog segment header".into(),
-                        lsn: self.lsn,
-                    });
-                }
-                // TODO: verify the remaining fields in the header
+                self.validate_page_header(&hdr.std)?;
 
                 self.lsn += XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
                 continue;
@@ -128,13 +162,7 @@ impl WalStreamDecoder {
                     }
                 })?;
 
-                if hdr.xlp_pageaddr != self.lsn.0 {
-                    return Err(WalDecodeError {
-                        msg: "invalid xlog page header".into(),
-                        lsn: self.lsn,
-                    });
-                }
-                // TODO: verify the remaining fields in the header
+                self.validate_page_header(&hdr)?;
 
                 self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
                 continue;
