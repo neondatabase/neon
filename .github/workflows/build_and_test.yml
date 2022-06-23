@@ -8,6 +8,7 @@ jobs:
   build-postgres:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
+      fail-fast: false
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
@@ -52,6 +53,7 @@ jobs:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-postgres ]
     strategy:
+      fail-fast: false
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
@@ -115,7 +117,7 @@ jobs:
             cov_prefix=()
             CARGO_FLAGS=--release
           fi
-          
+
           "${cov_prefix[@]}" cargo test $CARGO_FLAGS
 
       - name: Install rust binaries
@@ -181,38 +183,11 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
           path: ./neon.tgz
 
-  check-codestyle-python:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    strategy:
-      matrix:
-        rust_toolchain: [ 1.58 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Run yapf to ensure code format
-        run: poetry run yapf --recursive --diff .
-
-      - name: Run mypy to check types
-        run: poetry run mypy .
-
   pg_regress-tests:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
+      fail-fast: false
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
@@ -235,6 +210,7 @@ jobs:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
+      fail-fast: false
       matrix:
         build_type: [ debug, release ]
         rust_toolchain: [ 1.58 ]
@@ -256,6 +232,7 @@ jobs:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
+      fail-fast: false
       matrix:
         build_type: [ release ]
         rust_toolchain: [ 1.58 ]
