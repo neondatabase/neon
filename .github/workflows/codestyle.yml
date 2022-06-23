@@ -1,10 +1,14 @@
-name: Build and Test
+name: Check code style and build
 
 on:
   push:
     branches:
     - main
   pull_request:
+
+defaults:
+  run:
+    shell: bash -ex {0}
 
 jobs:
   check-codestyle-rust:
@@ -97,7 +101,7 @@ jobs:
         run: cargo build --all --all-targets
 
   check-codestyle-python:
-    runs-on: ubuntu-latest
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3

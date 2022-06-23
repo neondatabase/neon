@@ -1,5 +1,11 @@
-name: build_and_test
-on: [ push ]
+name: Test
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+
 defaults:
   run:
     shell: bash -ex {0}
@@ -103,13 +109,11 @@ jobs:
           export RUSTC_WRAPPER=cachepot
           export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
           export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          export HOME=/home/runner
           "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
           cachepot -s
 
       - name: Run cargo test
         run: |
-          export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
             CARGO_FLAGS=
@@ -122,7 +126,6 @@ jobs:
 
       - name: Install rust binaries
         run: |
-          export HOME=/home/runner
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
           elif [[ $BUILD_TYPE == "release" ]]; then
@@ -139,38 +142,33 @@ jobs:
             jq -r '.executable | select(. != null)'
           )
 
-          mkdir -p /tmp/neon/bin
-          mkdir -p /tmp/neon/test_bin
-          mkdir -p /tmp/neon/etc
+          mkdir -p /tmp/neon/bin/
+          mkdir -p /tmp/neon/test_bin/
+          mkdir -p /tmp/neon/etc/
+          mkdir -p /tmp/neon/coverage/
 
           # Install target binaries
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
             DST=/tmp/neon/bin/$bin
-            cp $SRC $DST
-            echo $DST >> /tmp/neon/etc/binaries.list
+            cp "$SRC" "$DST"
           done
 
-          # Install test executables (for code coverage)
+          # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
+            for bin in $binaries; do
+              echo "/tmp/neon/bin/$bin" >> /tmp/neon/coverage/binaries.list
+            done
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
-              cp $SRC $DST
-              echo $DST >> /tmp/neon/etc/binaries.list
+              cp "$SRC" $DST"
+              echo "$DST" >> /tmp/neon/coverage/binaries.list
             done
           fi
 
       - name: Install postgres binaries
         run: cp -a tmp_install /tmp/neon/pg_install
-
-      - name: Merge coverage data
-        run: |
-          export HOME=/home/runner
-          # This will speed up workspace uploads
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage merge
-          fi
 
       - name: Prepare neon artifact
         run: tar -C /tmp/neon/ -czf ./neon.tgz .
@@ -182,6 +180,12 @@ jobs:
           if-no-files-found: error
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
           path: ./neon.tgz
+
+      # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
+      - name: Merge and upload coverage data
+        if: matrix.build_type == 'debug'
+        uses: ./.github/actions/save-coverage-data
+
 
   pg_regress-tests:
     runs-on: [ self-hosted, Linux, k8s-runner ]
@@ -206,6 +210,10 @@ jobs:
           test_selection: batch_pg_regress
           needs_postgres_source: true
 
+      - name: Merge and upload coverage data
+        if: matrix.build_type == 'debug'
+        uses: ./.github/actions/save-coverage-data
+
   other-tests:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
@@ -227,6 +235,10 @@ jobs:
           build_type: ${{ matrix.build_type }}
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_others
+
+      - name: Merge and upload coverage data
+        if: matrix.build_type == 'debug'
+        uses: ./.github/actions/save-coverage-data
 
   benchmarks:
     runs-on: [ self-hosted, Linux, k8s-runner ]
@@ -250,4 +262,107 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: performance
           run_in_parallel: false
-          # save_perf_report: true
+          save_perf_report: true
+
+      - name: Merge and upload coverage data
+        if: matrix.build_type == 'debug'
+        uses: ./.github/actions/save-coverage-data
+
+  coverage-report:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ benchmarks, other-tests, pg_regress-tests ]
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug ]
+        rust_toolchain: [ 1.58 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Get Neon artifact for restoration
+        uses: actions/download-artifact@v3
+        with:
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: ./neon-artifact/
+
+      - name: Extract Neon artifact
+        run: |
+          mkdir -p /tmp/neon/
+          tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
+          rm -rf ./neon-artifact/
+
+      - name: Restore coverage data
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage-data-artifact
+          path: /tmp/neon/coverage/
+
+      - name: Build coverage report
+        run: |
+          COMMIT_URL=https://github.com/neondatabase/neon/commit/${{ github.sha }}
+
+          scripts/coverage \
+            --dir=/tmp/neon/coverage report \
+            --input-objects=/tmp/neon/coverage/binaries.list \
+            --commit-url=$COMMIT_URL \
+            --format=github
+
+      - name: Upload coverage report
+        run: |
+          REPORT_URL=https://neondatabase.github.io/neon-coverage-data/${{ github.sha }}
+          COMMIT_URL=https://github.com/neondatabase/neon/commit/${{ github.sha }}
+
+          scripts/git-upload \
+            --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/neondatabase/neon-coverage-data.git \
+            --message="Add code coverage for $COMMIT_URL" \
+            copy /tmp/neon/coverage/report ${{ github.sha }} # COPY FROM TO_RELATIVE
+
+          # Add link to the coverage report to the commit
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"success\",
+              \"context\": \"neon-coverage\",
+              \"description\": \"Coverage report is ready\",
+              \"target_url\": \"$REPORT_URL\"
+            }"
+
+  trigger-e2e-tests:
+   runs-on: [ self-hosted, Linux, k8s-runner ]
+   needs: [ build-neon ]
+   steps:
+     - name: Set PR's status to pending and request a remote CI test
+       run: |
+         REMOTE_REPO="${{ github.repository_owner }}/cloud"
+
+         curl -f -X POST \
+         https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+         -H "Accept: application/vnd.github.v3+json" \
+         --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+         --data \
+           "{
+             \"state\": \"pending\",
+             \"context\": \"neon-cloud-e2e\",
+             \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+           }"
+
+         curl -f -X POST \
+         https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
+         -H "Accept: application/vnd.github.v3+json" \
+         --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+         --data \
+           "{
+             \"ref\": \"main\",
+             \"inputs\": {
+               \"ci_job_name\": \"neon-cloud-e2e\",
+               \"commit_hash\": \"${{ github.sha }}\",
+               \"remote_repo\": \"${{ github.repository }}\"
+             }
+           }"
