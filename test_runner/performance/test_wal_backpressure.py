@@ -80,6 +80,7 @@ def start_heavy_write_workload(env: PgCompare, n_tables: int, scale: int, num_it
             thread.join()
 
 
+@pytest.mark.timeout(1000)
 @pytest.mark.parametrize("n_tables", [5])
 @pytest.mark.parametrize("scale", get_scales_matrix(5))
 @pytest.mark.parametrize("num_iters", [10])
