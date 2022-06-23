@@ -123,7 +123,7 @@ impl<R: Repository> DatadirTimeline<R> {
         self.tline.get(key, lsn)
     }
 
-    // Get size of a database
+    // Get size of a database in blocks
     pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
         let mut total_blocks = 0;
 
