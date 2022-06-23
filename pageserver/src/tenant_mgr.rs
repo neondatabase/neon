@@ -329,6 +329,8 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
         (TenantState::Idle, TenantState::Active) => {
             info!("activating tenant {tenant_id}");
 
+            // Spawn gc and compaction loops. The loops will shut themselves
+            // down when they notice that the tenant is inactive.
             crate::tenant_threads::start_compaction_loop(tenant_id)?;
             crate::tenant_threads::start_gc_loop(tenant_id)?;
         }
