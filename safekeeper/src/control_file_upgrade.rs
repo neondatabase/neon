@@ -239,6 +239,18 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
+    } else if version == 5 {
+        info!("reading safekeeper control file version {}", version);
+        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        if oldstate.timeline_start_lsn != Lsn(0) {
+            return Ok(oldstate);
+        }
+
+        // set special timeline_start_lsn because we don't know the real one
+        oldstate.timeline_start_lsn = Lsn(1);
+        oldstate.local_start_lsn = Lsn(1);
+
+        return Ok(oldstate);
     }
     bail!("unsupported safekeeper control file version {}", version)
 }
