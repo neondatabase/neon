@@ -4,6 +4,7 @@ from dataclasses import field
 from enum import Flag, auto
 import textwrap
 from cached_property import cached_property
+import abc
 import asyncpg
 import os
 import boto3
@@ -908,14 +909,89 @@ TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline
                                      re.MULTILINE)
 
 
-class NeonCli:
+class AbstractNeonCli(abc.ABC):
+    """
+    A typed wrapper around an arbitrary Neon CLI tool.
+    Supports a way to run arbitrary command directly via CLI.
+    Do not use directly, use specific subclasses instead.
+    """
+    def __init__(self, env: NeonEnv):
+        self.env = env
+
+    COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
+
+    def raw_cli(self,
+                arguments: List[str],
+                extra_env_vars: Optional[Dict[str, str]] = None,
+                check_return_code=True) -> 'subprocess.CompletedProcess[str]':
+        """
+        Run the command with the specified arguments.
+
+        Arguments must be in list form, e.g. ['pg', 'create']
+
+        Return both stdout and stderr, which can be accessed as
+
+        >>> result = env.neon_cli.raw_cli(...)
+        >>> assert result.stderr == ""
+        >>> log.info(result.stdout)
+
+        If `check_return_code`, on non-zero exit code logs failure and raises.
+        """
+
+        assert type(arguments) == list
+        assert type(self.COMMAND) == str
+
+        bin_neon = os.path.join(str(neon_binpath), self.COMMAND)
+
+        args = [bin_neon] + arguments
+        log.info('Running command "{}"'.format(' '.join(args)))
+        log.info(f'Running in "{self.env.repo_dir}"')
+
+        env_vars = os.environ.copy()
+        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
+        if self.env.rust_log_override is not None:
+            env_vars['RUST_LOG'] = self.env.rust_log_override
+        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+            env_vars[extra_env_key] = extra_env_value
+
+        # Pass coverage settings
+        var = 'LLVM_PROFILE_FILE'
+        val = os.environ.get(var)
+        if val:
+            env_vars[var] = val
+
+        # Intercept CalledProcessError and print more info
+        res = subprocess.run(args,
+                             env=env_vars,
+                             check=False,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        if not res.returncode:
+            log.info(f"Run success: {res.stdout}")
+        elif check_return_code:
+            # this way command output will be in recorded and shown in CI in failure message
+            msg = f"""\
+            Run {res.args} failed:
+              stdout: {res.stdout}
+              stderr: {res.stderr}
+            """
+            log.info(msg)
+            raise Exception(msg) from subprocess.CalledProcessError(res.returncode,
+                                                                    res.args,
+                                                                    res.stdout,
+                                                                    res.stderr)
+        return res
+
+
+class NeonCli(AbstractNeonCli):
     """
     A typed wrapper around the `neon` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
-    def __init__(self, env: NeonEnv):
-        self.env = env
-        pass
+
+    COMMAND = 'neon_local'
 
     def create_tenant(self,
                       tenant_id: Optional[uuid.UUID] = None,
@@ -1186,69 +1262,26 @@ class NeonCli:
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
-    def raw_cli(self,
-                arguments: List[str],
-                extra_env_vars: Optional[Dict[str, str]] = None,
-                check_return_code=True) -> 'subprocess.CompletedProcess[str]':
-        """
-        Run "neon" with the specified arguments.
 
-        Arguments must be in list form, e.g. ['pg', 'create']
+class WalGenerate(AbstractNeonCli):
+    """
+    A typed wrapper around the `wal_generate` CLI tool.
+    Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
+    """
 
-        Return both stdout and stderr, which can be accessed as
+    COMMAND = 'wal_generate'
 
-        >>> result = env.neon_cli.raw_cli(...)
-        >>> assert result.stderr == ""
-        >>> log.info(result.stdout)
+    def postgres_config(self) -> List[str]:
+        res = self.raw_cli(["print-postgres-config"])
+        res.check_returncode()
+        return res.stdout.split('\n')
 
-        If `check_return_code`, on non-zero exit code logs failure and raises.
-        """
-
-        assert type(arguments) == list
-
-        bin_neon = os.path.join(str(neon_binpath), 'neon_local')
-
-        args = [bin_neon] + arguments
-        log.info('Running command "{}"'.format(' '.join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
-
-        env_vars = os.environ.copy()
-        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
-        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-        if self.env.rust_log_override is not None:
-            env_vars['RUST_LOG'] = self.env.rust_log_override
-        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
-            env_vars[extra_env_key] = extra_env_value
-
-        # Pass coverage settings
-        var = 'LLVM_PROFILE_FILE'
-        val = os.environ.get(var)
-        if val:
-            env_vars[var] = val
-
-        # Intercept CalledProcessError and print more info
-        res = subprocess.run(args,
-                             env=env_vars,
-                             check=False,
-                             universal_newlines=True,
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
-        if not res.returncode:
-            log.info(f"Run success: {res.stdout}")
-        elif check_return_code:
-            # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run {res.args} failed:
-              stdout: {res.stdout}
-              stderr: {res.stderr}
-            """
-            log.info(msg)
-            raise Exception(msg) from subprocess.CalledProcessError(res.returncode,
-                                                                    res.args,
-                                                                    res.stdout,
-                                                                    res.stderr)
-
-        return res
+    def in_existing(self, type: str, connection: str) -> int:
+        res = self.raw_cli(["in-existing", type, connection])
+        res.check_returncode()
+        m = re.fullmatch(r'end_of_wal = (.*)\n', res.stdout)
+        assert m
+        return lsn_from_hex(m.group(1))
 
 
 class NeonPageserver(PgProtocol):
