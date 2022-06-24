@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.parametrize('wal_type',
                          [
                              'simple',
+                             'last_wal_record_xlog_switch',
                              'last_wal_record_crossing_segment',
                              'wal_record_crossing_segment_followed_by_small_one',
                          ])
