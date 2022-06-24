@@ -80,7 +80,6 @@ pub fn start_gc_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
         .get()
         .context("Failed to get START_GC_LOOP")?
         .blocking_send(tenantid)
-        .map_err(|e| anyhow::anyhow!(e))
         .context("Failed to send to START_GC_LOOP channel")?;
     Ok(())
 }
@@ -93,7 +92,6 @@ pub fn start_compaction_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
         .get()
         .context("failed to get START_COMPACTION_LOOP")?
         .blocking_send(tenantid)
-        .map_err(|e| anyhow::anyhow!(e))
         .context("failed to send to START_COMPACTION_LOOP")?;
     Ok(())
 }
