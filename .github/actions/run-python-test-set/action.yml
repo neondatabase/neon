@@ -121,3 +121,20 @@ runs:
             scripts/generate_and_push_perf_report.sh
           fi
         fi
+
+    - name: Delete all data but logs
+      shell: bash -ex {0}
+      if: always()
+      run: |
+        du -sh /tmp/test_output/*
+        find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
+        du -sh /tmp/test_output/*
+
+    - name: Upload python test logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        retention-days: 7
+        if-no-files-found: error
+        name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
+        path: /tmp/test_output/

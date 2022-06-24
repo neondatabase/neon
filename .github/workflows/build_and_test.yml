@@ -169,7 +169,7 @@ jobs:
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
-              cp "$SRC" $DST"
+              cp "$SRC" "$DST"
               echo "$DST" >> /tmp/neon/coverage/binaries.list
             done
           fi
@@ -270,14 +270,12 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: true
-
-      - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
-        uses: ./.github/actions/save-coverage-data
+      # XXX: no coverage data handling here, since benchmarks are run on release builds,
+      # while coverage is currently collected for the debug ones
 
   coverage-report:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ benchmarks, other-tests, pg_regress-tests ]
+    needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
       matrix:
