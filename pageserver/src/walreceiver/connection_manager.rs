@@ -133,20 +133,22 @@ async fn connection_manager_loop_step(
                     },
                 };
 
-                if let Some(connection_update) = connection_update {
-                    match &mut walreceiver_state.wal_connection {
-                        Some(wal_connection) => {
-                            wal_connection.latest_connection_update = connection_update;
+                match &mut walreceiver_state.wal_connection {
+                    Some(wal_connection) => {
+                        if let Some(wal_connection_update) = connection_update {
+                            wal_connection.latest_connection_update = wal_connection_update;
+                        }
 
-                            let attempts_entry = walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0);
-                            if reset_connection_attempts {
-                                *attempts_entry = 0;
-                            } else {
-                                *attempts_entry += 1;
-                            }
-                        },
-                        None => error!("Received connection update for WAL connection that is not active, update: {wal_connection_update:?}"),
-                    }
+                        let attempts_entry = walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0);
+                        if reset_connection_attempts {
+                            *attempts_entry = 0;
+                        } else {
+                            *attempts_entry += 1;
+                        }
+                    },
+                    None => if let Some(wal_connection_update) = connection_update {
+                        error!("Received connection update for WAL connection that is not active, update: {wal_connection_update:?}");
+                    },
                 }
             },
 
