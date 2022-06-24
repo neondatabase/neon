@@ -10,6 +10,13 @@ defaults:
   run:
     shell: bash -ex {0}
 
+concurrency:
+   group: ${{ github.workflow }}-${{ github.ref }}
+   cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+
 jobs:
   build-postgres:
     runs-on: [ self-hosted, Linux, k8s-runner ]
