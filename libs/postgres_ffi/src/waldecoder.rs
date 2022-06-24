@@ -24,7 +24,6 @@ use utils::lsn::Lsn;
 pub struct WalStreamDecoder {
     lsn: Lsn,
 
-    startlsn: Lsn, // LSN where this record starts
     contlen: u32,
     padlen: u32,
 
@@ -50,7 +49,6 @@ impl WalStreamDecoder {
         WalStreamDecoder {
             lsn,
 
-            startlsn: Lsn(0),
             contlen: 0,
             padlen: 0,
 
@@ -176,7 +174,6 @@ impl WalStreamDecoder {
 
                 // peek xl_tot_len at the beginning of the record.
                 // FIXME: assumes little-endian
-                self.startlsn = self.lsn;
                 let xl_tot_len = (&self.inputbuf[0..4]).get_u32_le();
                 if (xl_tot_len as usize) < XLOG_SIZE_OF_XLOG_RECORD {
                     return Err(WalDecodeError {
