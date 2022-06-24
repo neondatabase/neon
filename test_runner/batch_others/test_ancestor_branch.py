@@ -105,3 +105,26 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     branch2_cur.execute('SELECT count(*) FROM foo')
     assert branch2_cur.fetchone() == (300000, )
+
+
+def test_ancestor_branch_delete(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_delete_parent", "empty")
+
+    leaf_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_delete_branch1",
+                                                  "test_ancestor_branch_delete_parent")
+
+    ps_http = env.pageserver.http_client()
+    with pytest.raises(NeonPageserverApiException,
+                       match="Failed to delete tenant timeline from repo"):
+        ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)
+
+    ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
+    # check 404
+    with pytest.raises(NeonPageserverApiException,
+                       match="is not found neither locally nor remotely"):
+        ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
+
+    # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
+    ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)

@@ -159,6 +159,19 @@ impl RemoteTimelineIndex {
             .insert(timeline_id, entry);
     }
 
+    pub fn remove_timeline_entry(
+        &mut self,
+        ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        }: ZTenantTimelineId,
+    ) -> Option<RemoteTimeline> {
+        self.entries
+            .entry(tenant_id)
+            .or_default()
+            .remove(&timeline_id)
+    }
+
     pub fn tenant_entry(&self, tenant_id: &ZTenantId) -> Option<&TenantEntry> {
         self.entries.get(tenant_id)
     }
@@ -169,6 +182,10 @@ impl RemoteTimelineIndex {
 
     pub fn add_tenant_entry(&mut self, tenant_id: ZTenantId) -> &mut TenantEntry {
         self.entries.entry(tenant_id).or_default()
+    }
+
+    pub fn remove_tenant_entry(&mut self, tenant_id: &ZTenantId) -> Option<TenantEntry> {
+        self.entries.remove(tenant_id)
     }
 
     pub fn set_awaits_download(

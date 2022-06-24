@@ -795,6 +795,27 @@ class NeonPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def tenant_list(self) -> List[Dict[Any, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
+
+    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant",
+            json={
+                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
+            },
+        )
+        self.verbose_error(res)
+        if res.status_code == 409:
+            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
+        new_tenant_id = res.json()
+        assert isinstance(new_tenant_id, str)
+        return uuid.UUID(new_tenant_id)
+
     def tenant_attach(self, tenant_id: uuid.UUID):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/attach")
         self.verbose_error(res)
@@ -802,6 +823,13 @@ class NeonPageserverHttpClient(requests.Session):
     def tenant_detach(self, tenant_id: uuid.UUID):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/detach")
         self.verbose_error(res)
+
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
     def timeline_create(
         self,
@@ -827,34 +855,6 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_list(self) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
-            json={
-                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
-            },
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
-        new_tenant_id = res.json()
-        assert isinstance(new_tenant_id, str)
-        return uuid.UUID(new_tenant_id)
-
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
@@ -862,6 +862,14 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_delete(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
         return res_json
 
     def wal_receiver_get(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:

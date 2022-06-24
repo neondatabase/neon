@@ -122,6 +122,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    delete:
+      description: "Attempts to delete specified timeline. On 500 errors should be retried"
+      responses:
+        "200":
+          description: Ok
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/wal_receiver:
     parameters:
@@ -190,7 +219,6 @@ paths:
         "410":
           description: GONE
 
-
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -200,7 +228,7 @@ paths:
           type: string
           format: hex
     post:
-      description: Deprecated
+      description: Schedules attach operation to happen in the background for given tenant
       responses:
         "202":
           description: Tenant attaching scheduled
@@ -298,7 +326,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
