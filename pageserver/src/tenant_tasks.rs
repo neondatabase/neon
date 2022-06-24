@@ -11,13 +11,21 @@ use crate::{tenant_mgr, thread_mgr};
 use anyhow::{self, Context};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use once_cell::sync::OnceCell;
+use metrics::{register_int_counter_vec, IntCounterVec};
+use once_cell::sync::{Lazy, OnceCell};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::*;
 use utils::zid::ZTenantId;
 
-// TODO metrics
+static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "tenant_task_events",
+        "Number of task start/stop/fail events.",
+        &["event"],
+    )
+    .expect("Failed to register tenant_task_events metric")
+});
 
 ///
 /// Compaction task's main loop
@@ -145,6 +153,9 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             let (cancel_send, cancel_recv) = watch::channel(());
                             let handle = tokio::spawn(gc_loop(tenantid, cancel_recv)
                                 .instrument(trace_span!("gc loop", tenant = %tenantid)));
+
+                            // Update metrics, remember handle + cancellation channel
+                            TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
                             futures.push(handle);
                             if let Some(old_cancel_send) = gc_loops.insert(tenantid, cancel_send) {
                                 old_cancel_send.send(()).ok();
@@ -157,6 +168,9 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             let (cancel_send, cancel_recv) = watch::channel(());
                             let handle = tokio::spawn(compaction_loop(tenantid, cancel_recv)
                                 .instrument(trace_span!("compaction loop", tenant = %tenantid)));
+
+                            // Update metrics, remember handle + cancellation channel
+                            TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
                             futures.push(handle);
                             if let Some(old_cancel_send) = compaction_loops.insert(tenantid, cancel_send) {
                                 old_cancel_send.send(()).ok();
@@ -165,9 +179,19 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                         result = futures.next() => {
                             // Log any errors and panics
                             match result {
-                                Some(Ok(Ok(()))) => {},
-                                Some(Ok(Err(e))) => error!("loop error {}", e),
-                                Some(Err(e)) => error!("loop join error {}", e),
+                                Some(Ok(Ok(()))) => {
+                                    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
+                                },
+                                Some(Ok(Err(e))) => {
+                                    TENANT_TASK_EVENTS.with_label_values(&["fail"]).inc();
+                                    // TODO which tenant failed?
+                                    error!("loop error {}", e)
+                                },
+                                Some(Err(e)) => {
+                                    TENANT_TASK_EVENTS.with_label_values(&["fail"]).inc();
+                                    // TODO which tenant failed?
+                                    error!("loop join error {}", e)
+                                },
                                 None => {},
                             };
                         },
