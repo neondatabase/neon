@@ -1,16 +1,10 @@
-import subprocess
 from contextlib import closing
 
-import psycopg2.extras
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
 from fixtures.neon_fixtures import pg_distrib_dir
 import os
-from fixtures.utils import mkdir_if_needed, subprocess_capture
-import shutil
-import getpass
-import pwd
+from fixtures.utils import subprocess_capture
 
 num_rows = 1000
 
@@ -46,19 +40,20 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
 
     # Get and unpack fullbackup from pageserver
-    restored_dir_path = os.path.join(env.repo_dir, "restored_datadir")
+    restored_dir_path = env.repo_dir / "restored_datadir"
     os.mkdir(restored_dir_path, 0o750)
     query = f"fullbackup {env.initial_tenant.hex} {timeline} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
-    subprocess_capture(str(env.repo_dir), ["tar", "-xf", tar_output_file, "-C", restored_dir_path])
+    subprocess_capture(str(env.repo_dir),
+                       ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)])
 
     # HACK
     # fullbackup returns neon specific pg_control and first WAL segment
     # use resetwal to overwrite it
     pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, 'pg_resetwal')
-    cmd = [pg_resetwal_path, "-D", restored_dir_path]
+    cmd = [pg_resetwal_path, "-D", str(restored_dir_path)]
     pg_bin.run_capture(cmd, env=psql_env)
 
     # Restore from the backup and find the data we inserted

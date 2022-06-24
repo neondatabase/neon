@@ -1,6 +1,6 @@
 import os
+from pathlib import Path
 
-from fixtures.utils import mkdir_if_needed
 from fixtures.neon_fixtures import (NeonEnv,
                                     check_restored_datadir_content,
                                     base_dir,
@@ -8,7 +8,7 @@ from fixtures.neon_fixtures import (NeonEnv,
 from fixtures.log_helper import log
 
 
-def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir, pg_bin, capsys):
+def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_neon_regress", "empty")
@@ -17,9 +17,8 @@ def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir, pg_bin, capsys)
     pg.safe_psql('CREATE DATABASE regression')
 
     # Create some local directories for pg_regress to run in.
-    runpath = os.path.join(test_output_dir, 'regress')
-    mkdir_if_needed(runpath)
-    mkdir_if_needed(os.path.join(runpath, 'testtablespace'))
+    runpath = test_output_dir / 'regress'
+    (runpath / 'testtablespace').mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
     # This test runs neon specific tests

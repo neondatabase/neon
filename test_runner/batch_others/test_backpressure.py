@@ -1,11 +1,9 @@
 from contextlib import closing, contextmanager
 import psycopg2.extras
 import pytest
-from fixtures.neon_fixtures import PgProtocol, NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
-import os
 import time
-import asyncpg
 from fixtures.neon_fixtures import Postgres
 import threading
 
