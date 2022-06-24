@@ -331,6 +331,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
+            // TODO maybe use tokio::sync::watch instead?
             crate::tenant_threads::start_compaction_loop(tenant_id)?;
             crate::tenant_threads::start_gc_loop(tenant_id)?;
         }
