@@ -1,6 +1,7 @@
 use anyhow::*;
 use core::time::Duration;
 use log::*;
+use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
 use std::cmp::Ordering;
@@ -21,6 +22,16 @@ pub struct PostgresServer {
     _unix_socket_dir: TempDir,
     client_config: postgres::Config,
 }
+
+pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec![
+        "wal_keep_size=50MB",            // Ensure old WAL is not removed
+        "shared_preload_libraries=neon", // can only be loaded at startup
+        // Disable background processes as much as possible
+        "wal_writer_delay=10s",
+        "autovacuum=off",
+    ]
+});
 
 impl Conf {
     fn pg_bin_dir(&self) -> PathBuf {
@@ -85,12 +96,8 @@ impl Conf {
             .arg(unix_socket_dir_path.as_os_str())
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(&["-c", "wal_keep_size=50MB"]) // Ensure old WAL is not removed
             .args(&["-c", "logging_collector=on"]) // stderr will mess up with tests output
-            .args(&["-c", "shared_preload_libraries=neon"]) // can only be loaded at startup
-            // Disable background processes as much as possible
-            .args(&["-c", "wal_writer_delay=10s"])
-            .args(&["-c", "autovacuum=off"])
+            .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .stderr(Stdio::from(log_file))
             .spawn()?;
         let server = PostgresServer {
@@ -181,11 +188,15 @@ pub trait PostgresClientExt: postgres::GenericClient {
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-fn generate_internal<C: postgres::GenericClient>(
-    client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
-) -> Result<PgLsn> {
+pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result<()> {
     client.execute("create extension if not exists neon_test_utils", &[])?;
+
+    let wal_keep_size: String = client.query_one("SHOW wal_keep_size", &[])?.get(0);
+    ensure!(wal_keep_size == "50MB");
+    let wal_writer_delay: String = client.query_one("SHOW wal_writer_delay", &[])?.get(0);
+    ensure!(wal_writer_delay == "10s");
+    let autovacuum: String = client.query_one("SHOW autovacuum", &[])?.get(0);
+    ensure!(autovacuum == "off");
 
     let wal_segment_size = client.query_one(
         "select cast(setting as bigint) as setting, unit \
@@ -200,6 +211,15 @@ fn generate_internal<C: postgres::GenericClient>(
         wal_segment_size.get::<_, i64>("setting") == 16 * 1024 * 1024,
         "Unexpected wal_segment_size in bytes"
     );
+
+    Ok(())
+}
+
+fn generate_internal<C: postgres::GenericClient>(
+    client: &mut C,
+    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
+) -> Result<PgLsn> {
+    ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
     info!("LSN initial = {}", initial_lsn);
