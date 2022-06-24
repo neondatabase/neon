@@ -19,15 +19,6 @@ use utils::zid::ZTenantId;
 /// Compaction task's main loop
 ///
 async fn compaction_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
-    if let Err(err) = compaction_loop_ext(tenantid).await {
-        error!("compact loop terminated with error: {:?}", err);
-        Err(err)
-    } else {
-        Ok(())
-    }
-}
-
-async fn compaction_loop_ext(tenantid: ZTenantId) -> anyhow::Result<()> {
     loop {
         trace!("compaction loop for tenant {} waking up", tenantid);
 
@@ -167,7 +158,7 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
 }
 
 ///
-/// GC thread's main loop
+/// GC task's main loop
 ///
 async fn gc_loop(tenantid: ZTenantId) -> anyhow::Result<()> {
     loop {
