@@ -263,7 +263,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // start profiler (if enabled)
     let profiler_guard = profiling::init_profiler(conf);
 
-    pageserver::tenant_threads::init_tenant_task_pool()?;
+    pageserver::tenant_tasks::init_tenant_task_pool()?;
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
