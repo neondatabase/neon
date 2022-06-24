@@ -226,10 +226,10 @@ impl WalStreamDecoder {
             self.padlen = self.lsn.calc_padding(8u32) as u32;
         }
 
-        // Always align resulting LSN on 0x8 boundary -- that is important for getPage()
-        // and WalReceiver integration. Since this code is used both for WalReceiver and
-        // initial WAL import let's force alignment right here.
-        let result = (self.lsn.align(), recordbuf);
+        // We should return LSN of the next record, not the last byte of this record or
+        // the byte immediately after. Note that this handles both XLOG_SWITCH and usual
+        // records, the former "spans" until the next WAL segment (see test_xlog_switch).
+        let result = (self.lsn + self.padlen as u64, recordbuf);
         Ok(Some(result))
     }
 }

@@ -250,6 +250,25 @@ pub fn generate_simple(client: &mut impl postgres::GenericClient) -> Result<PgLs
     })
 }
 
+pub fn generate_last_wal_record_xlog_switch(
+    client: &mut impl postgres::GenericClient,
+) -> Result<PgLsn> {
+    // Do not use generate_internal because here we end up with flush_lsn exactly on
+    // the segment boundary and insert_lsn after the initial page header, which is unusual.
+    ensure_server_config(client)?;
+
+    client.execute("CREATE table t(x int)", &[])?;
+    let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+    let next_segment = PgLsn::from(0x0200_0000);
+    ensure!(
+        after_xlog_switch <= next_segment,
+        "XLOG_SWITCH message ended after the expected segment boundary: {} > {}",
+        after_xlog_switch,
+        next_segment
+    );
+    Ok(next_segment)
+}
+
 fn generate_single_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
