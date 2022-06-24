@@ -1,13 +1,13 @@
 import os
+from pathlib import Path
 import pytest
-from fixtures.utils import mkdir_if_needed
 from fixtures.neon_fixtures import NeonEnv, base_dir, pg_distrib_dir
 
 
 # The isolation tests run for a long time, especially in debug mode,
 # so use a larger-than-default timeout.
 @pytest.mark.timeout(1800)
-def test_isolation(neon_simple_env: NeonEnv, test_output_dir, pg_bin, capsys):
+def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_isolation", "empty")
@@ -17,9 +17,8 @@ def test_isolation(neon_simple_env: NeonEnv, test_output_dir, pg_bin, capsys):
     pg.safe_psql('CREATE DATABASE isolation_regression')
 
     # Create some local directories for pg_isolation_regress to run in.
-    runpath = os.path.join(test_output_dir, 'regress')
-    mkdir_if_needed(runpath)
-    mkdir_if_needed(os.path.join(runpath, 'testtablespace'))
+    runpath = test_output_dir / 'regress'
+    (runpath / 'testtablespace').mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
     build_path = os.path.join(pg_distrib_dir, 'build/src/test/isolation')

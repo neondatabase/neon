@@ -1,4 +1,3 @@
-import subprocess
 from contextlib import closing
 
 import psycopg2.extras

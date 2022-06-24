@@ -1,8 +1,6 @@
 import pytest
-from contextlib import closing
 
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.log_helper import log
 
 
 #

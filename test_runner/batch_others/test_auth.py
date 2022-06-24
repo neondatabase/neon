@@ -1,8 +1,6 @@
 from contextlib import closing
-from typing import Iterator
-from uuid import UUID, uuid4
+from uuid import uuid4
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserverApiException
-from requests.exceptions import HTTPError
 import pytest
 
 

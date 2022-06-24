@@ -35,12 +35,7 @@ from typing_extensions import Literal
 import requests
 import backoff  # type: ignore
 
-from .utils import (etcd_path,
-                    get_self_dir,
-                    mkdir_if_needed,
-                    subprocess_capture,
-                    lsn_from_hex,
-                    lsn_to_hex)
+from .utils import (etcd_path, get_self_dir, subprocess_capture, lsn_from_hex, lsn_to_hex)
 from fixtures.log_helper import log
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -127,7 +122,7 @@ def pytest_configure(config):
         top_output_dir = env_test_output
     else:
         top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
-    mkdir_if_needed(top_output_dir)
+    pathlib.Path(top_output_dir).mkdir(exist_ok=True)
 
     # Find the postgres installation.
     global pg_distrib_dir
@@ -1316,7 +1311,7 @@ def append_pageserver_param_overrides(
 
 class PgBin:
     """ A helper class for executing postgres binaries """
-    def __init__(self, log_dir: str):
+    def __init__(self, log_dir: Path):
         self.log_dir = log_dir
         self.pg_bin_path = os.path.join(str(pg_distrib_dir), 'bin')
         self.env = os.environ.copy()
@@ -1367,22 +1362,27 @@ class PgBin:
         self._fixpath(command)
         log.info('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
-        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
+        return subprocess_capture(str(self.log_dir),
+                                  command,
+                                  env=env,
+                                  cwd=cwd,
+                                  check=True,
+                                  **kwargs)
 
 
 @pytest.fixture(scope='function')
-def pg_bin(test_output_dir: str) -> PgBin:
+def pg_bin(test_output_dir: Path) -> PgBin:
     return PgBin(test_output_dir)
 
 
 class VanillaPostgres(PgProtocol):
-    def __init__(self, pgdatadir: str, pg_bin: PgBin, port: int, init=True):
+    def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init=True):
         super().__init__(host='localhost', port=port, dbname='postgres')
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(['initdb', '-D', pgdatadir])
+            self.pg_bin.run_capture(['initdb', '-D', str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
     def configure(self, options: List[str]):
@@ -1398,12 +1398,13 @@ class VanillaPostgres(PgProtocol):
         if log_path is None:
             log_path = os.path.join(self.pgdatadir, "pg.log")
 
-        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, '-l', log_path, 'start'])
+        self.pg_bin.run_capture(
+            ['pg_ctl', '-w', '-D', str(self.pgdatadir), '-l', log_path, 'start'])
 
     def stop(self):
         assert self.running
         self.running = False
-        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', self.pgdatadir, 'stop'])
+        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', str(self.pgdatadir), 'stop'])
 
     def get_subdir_size(self, subdir) -> int:
         """Return size of pgdatadir subdirectory in bytes."""
@@ -1418,9 +1419,9 @@ class VanillaPostgres(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def vanilla_pg(test_output_dir: str,
+def vanilla_pg(test_output_dir: Path,
                port_distributor: PortDistributor) -> Iterator[VanillaPostgres]:
-    pgdatadir = os.path.join(test_output_dir, "pgdata-vanilla")
+    pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
@@ -1457,7 +1458,7 @@ class RemotePostgres(PgProtocol):
 
 
 @pytest.fixture(scope='function')
-def remote_pg(test_output_dir: str) -> Iterator[RemotePostgres]:
+def remote_pg(test_output_dir: Path) -> Iterator[RemotePostgres]:
     pg_bin = PgBin(test_output_dir)
 
     connstr = os.getenv("BENCHMARK_CONNSTR")
@@ -1980,11 +1981,13 @@ class Etcd:
             self.handle.wait()
 
 
-def get_test_output_dir(request: Any) -> str:
+def get_test_output_dir(request: Any) -> pathlib.Path:
     """ Compute the working directory for an individual test. """
     test_name = request.node.name
-    test_dir = os.path.join(str(top_output_dir), test_name)
+    test_dir = pathlib.Path(top_output_dir) / test_name
     log.info(f'get_test_output_dir is {test_dir}')
+    # make mypy happy
+    assert isinstance(test_dir, pathlib.Path)
     return test_dir
 
 
@@ -1998,14 +2001,14 @@ def get_test_output_dir(request: Any) -> str:
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope='function', autouse=True)
-def test_output_dir(request: Any) -> str:
+def test_output_dir(request: Any) -> pathlib.Path:
     """ Create the working directory for an individual test. """
 
     # one directory per test
     test_dir = get_test_output_dir(request)
     log.info(f'test_output_dir is {test_dir}')
     shutil.rmtree(test_dir, ignore_errors=True)
-    mkdir_if_needed(test_dir)
+    test_dir.mkdir()
     return test_dir
 
 
@@ -2051,7 +2054,7 @@ def should_skip_file(filename: str) -> bool:
 #
 # Test helpers
 #
-def list_files_to_compare(pgdata_dir: str):
+def list_files_to_compare(pgdata_dir: pathlib.Path):
     pgdata_files = []
     for root, _file, filenames in os.walk(pgdata_dir):
         for filename in filenames:
@@ -2068,7 +2071,7 @@ def list_files_to_compare(pgdata_dir: str):
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(test_output_dir: str, env: NeonEnv, pg: Postgres):
+def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Postgres):
 
     # Get the timeline ID. We need it for the 'basebackup' command
     with closing(pg.connect()) as conn:
@@ -2080,8 +2083,8 @@ def check_restored_datadir_content(test_output_dir: str, env: NeonEnv, pg: Postg
     pg.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = os.path.join(env.repo_dir, f"{pg.node_name}_restored_datadir")
-    mkdir_if_needed(restored_dir_path)
+    restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
+    restored_dir_path.mkdir(exist_ok=True)
 
     pg_bin = PgBin(test_output_dir)
     psql_path = os.path.join(pg_bin.pg_bin_path, 'psql')
@@ -2108,7 +2111,7 @@ def check_restored_datadir_content(test_output_dir: str, env: NeonEnv, pg: Postg
 
     # list files we're going to compare
     assert pg.pgdata_dir
-    pgdata_files = list_files_to_compare(pg.pgdata_dir)
+    pgdata_files = list_files_to_compare(pathlib.Path(pg.pgdata_dir))
     restored_files = list_files_to_compare(restored_dir_path)
 
     # check that file sets are equal
