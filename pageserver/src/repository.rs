@@ -7,7 +7,6 @@ use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fmt::Display;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
@@ -182,20 +181,6 @@ impl Value {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum TimelineSyncStatusUpdate {
-    Downloaded,
-}
-
-impl Display for TimelineSyncStatusUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            TimelineSyncStatusUpdate::Downloaded => "Downloaded",
-        };
-        f.write_str(s)
-    }
-}
-
 ///
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
@@ -204,11 +189,7 @@ pub trait Repository: Send + Sync {
 
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()>;
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
@@ -260,7 +241,10 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
+    /// removes timeline-related in-memory data
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()>;
+
+    /// Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
     fn get_remote_index(&self) -> &RemoteIndex;
 }
 
@@ -550,10 +534,7 @@ pub mod repo_harness {
                     .parse()
                     .unwrap();
 
-                repo.apply_timeline_remote_sync_status_update(
-                    timeline_id,
-                    TimelineSyncStatusUpdate::Downloaded,
-                )?;
+                repo.attach_timeline(timeline_id)?;
             }
 
             Ok(repo)

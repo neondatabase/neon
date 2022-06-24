@@ -353,21 +353,44 @@ async fn try_download_tenant_index(
     Ok(Some(remote_timelines))
 }
 
-async fn timeline_detach_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    json_response(StatusCode::GONE, ())
+async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let state = get_state(&request);
+    tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        tenant_mgr::delete_timeline(tenant_id, timeline_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    let mut remote_index = state.remote_index.write().await;
+    remote_index.remove_timeline_entry(ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    });
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let state = get_state(&request);
+    let conf = state.conf;
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
-        let state = get_state(&request);
-        tenant_mgr::detach_tenant(state.conf, tenant_id)
+        tenant_mgr::detach_tenant(conf, tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
+
+    let mut remote_index = state.remote_index.write().await;
+    remote_index.remove_tenant_entry(&tenant_id);
 
     json_response(StatusCode::OK, ())
 }
@@ -540,6 +563,10 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
         )
+        .delete(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
+            timeline_delete_handler,
+        )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
             wal_receiver_get_handler,
@@ -550,7 +577,7 @@ pub fn make_router(
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
-            timeline_detach_handler,
+            timeline_delete_handler,
         )
         .any(handler_404))
 }

@@ -122,8 +122,9 @@ impl S3ObjectKey {
 impl RemoteObjectName for S3ObjectKey {
     /// Turn a/b/c or a/b/c/ into c
     fn object_name(&self) -> Option<&str> {
-        // corner case
-        if &self.0 == "/" {
+        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
+        // see https://github.com/rust-lang/rust/issues/88674
+        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
             return None;
         }
 

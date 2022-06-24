@@ -39,7 +39,7 @@ pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 /// So there are two requirements: keep everything in one futures unordered
 /// to allow higher concurrency. Mark tenants as failed independently.
 /// That requires some bookeeping.
-pub async fn try_download_index_parts<P, S>(
+pub async fn download_index_parts<P, S>(
     conf: &'static PageServerConf,
     storage: &S,
     keys: HashSet<ZTenantTimelineId>,
@@ -116,7 +116,7 @@ where
         });
     }
 
-    let index_parts = try_download_index_parts(conf, storage, sync_ids)
+    let index_parts = download_index_parts(conf, storage, sync_ids)
         .await
         .remove(&tenant_id)
         .ok_or(anyhow::anyhow!(
@@ -127,7 +127,7 @@ where
 }
 
 /// Retrieves index data from the remote storage for a given timeline.
-pub async fn download_index_part<P, S>(
+async fn download_index_part<P, S>(
     conf: &'static PageServerConf,
     storage: &S,
     sync_id: ZTenantTimelineId,

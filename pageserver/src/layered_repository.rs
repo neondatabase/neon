@@ -38,9 +38,7 @@ use crate::keyspace::KeySpace;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
-};
+use crate::repository::{GcResult, Repository, RepositoryTimeline, Timeline, TimelineWriter};
 use crate::repository::{Key, Value};
 use crate::tenant_mgr;
 use crate::thread_mgr;
@@ -410,28 +408,61 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()> {
-        debug!(
-            "apply_timeline_remote_sync_status_update timeline_id: {} update: {:?}",
-            timeline_id, timeline_sync_status_update
+    // in order to be retriable detach needs to be idempotent
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+        // in order to be retriable detach needs to be idempotent
+        let mut timelines = self.timelines.lock().unwrap();
+
+        // Ensure that there are no child timelines **attached to that pageserver**,
+        // because detach removes files, which will brake child branches
+        let num_children = timelines
+            .iter()
+            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
+            .count();
+
+        ensure!(
+            num_children == 0,
+            "Cannot detach timeline which has child timelines"
         );
-        match timeline_sync_status_update {
-            TimelineSyncStatusUpdate::Downloaded => {
-                match self.timelines.lock().unwrap().entry(timeline_id) {
-                    Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
-                    Entry::Vacant(entry) => {
-                        // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                        let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
-                        // finally we make newly downloaded timeline visible to repository
-                        entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
-                    },
-                };
-            }
-        }
+        let timeline_entry = match timelines.entry(timeline_id) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(_) => bail!("timeline not found"),
+        };
+
+        // try to acquire gc and compaction locks to prevent errors from missing files
+        let _gc_guard = self
+            .gc_cs
+            .try_lock()
+            .map_err(|e| anyhow::anyhow!("cannot acquire gc lock {e}"))?;
+
+        let compaction_guard = timeline_entry.get().compaction_guard()?;
+
+        let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+            format!(
+                "Failed to remove local timeline directory '{}'",
+                local_timeline_directory.display()
+            )
+        })?;
+        info!("detach removed files");
+
+        drop(compaction_guard);
+        timeline_entry.remove();
+
+        Ok(())
+    }
+
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+        debug!("attach timeline_id: {}", timeline_id,);
+        match self.timelines.lock().unwrap().entry(timeline_id) {
+            Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
+            Entry::Vacant(entry) => {
+                // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
+                let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
+                // finally we make newly downloaded timeline visible to repository
+                entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
+            },
+        };
         Ok(())
     }
 
@@ -479,6 +510,18 @@ impl LayeredTimelineEntry {
             LayeredTimelineEntry::Unloaded { .. } => {
                 anyhow::bail!("timeline is unloaded")
             }
+        }
+    }
+
+    fn compaction_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
+        match self {
+            LayeredTimelineEntry::Loaded(timeline) => timeline
+                .compaction_cs
+                .try_lock()
+                .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+                .map(Some),
+
+            LayeredTimelineEntry::Unloaded { .. } => Ok(None),
         }
     }
 }
