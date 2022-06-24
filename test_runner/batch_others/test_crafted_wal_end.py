@@ -10,6 +10,7 @@ import pytest
                          [
                              'simple',
                              'last_wal_record_xlog_switch',
+                             'last_wal_record_xlog_switch_ends_on_page_boundary',
                              'last_wal_record_crossing_segment',
                              'wal_record_crossing_segment_followed_by_small_one',
                          ])
