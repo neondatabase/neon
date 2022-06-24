@@ -247,6 +247,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         }
 
         // set special timeline_start_lsn because we don't know the real one
+        info!("setting timeline_start_lsn and local_start_lsn to Lsn(1)");
         oldstate.timeline_start_lsn = Lsn(1);
         oldstate.local_start_lsn = Lsn(1);
 
