@@ -3762,6 +3762,7 @@ dependencies = [
  "log",
  "once_cell",
  "postgres",
+ "postgres_ffi",
  "tempfile",
 ]
 

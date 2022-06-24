@@ -14,6 +14,7 @@ fn main() -> Result<()> {
         .possible_values([
             "simple",
             "last_wal_record_xlog_switch",
+            "last_wal_record_xlog_switch_ends_on_page_boundary",
             "last_wal_record_crossing_segment",
             "wal_record_crossing_segment_followed_by_small_one",
         ])
@@ -59,6 +60,9 @@ fn main() -> Result<()> {
         let lsn = match arg_matches.value_of("type").unwrap() {
             "simple" => generate_simple(client)?,
             "last_wal_record_xlog_switch" => generate_last_wal_record_xlog_switch(client)?,
+            "last_wal_record_xlog_switch_ends_on_page_boundary" => {
+                generate_last_wal_record_xlog_switch_ends_on_page_boundary(client)?
+            }
             "last_wal_record_crossing_segment" => {
                 generate_last_wal_record_crossing_segment(client)?
             }
