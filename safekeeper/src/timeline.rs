@@ -625,6 +625,8 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
+        let _enter = info_span!("", timeline = %zttid.tenant_id).entered();
+
         let mut state = TIMELINES_STATE.lock().unwrap();
 
         match state.timelines.get(&zttid) {
