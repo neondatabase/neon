@@ -19,6 +19,11 @@
 //! layer, and offsets to the other parts. The "index" is a B-tree,
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
+//!
+//! Each page image is compressed with ZStandard. See Compression section
+//! in the delta_layer.rs for more discussion. Difference from a delta
+//! layer is that we don't currently use a dictionary for image layers.
+use crate::config;
 use crate::config::PageServerConf;
 use crate::layered_repository::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::layered_repository::block_io::{BlockBuf, BlockReader, FileBlockReader};
@@ -91,6 +96,35 @@ impl From<&ImageLayer> for Summary {
 }
 
 ///
+/// Struct representing reference to BLOB in the file. In an image layer,
+/// each blob is an image of the page. It can be compressed or not, and
+/// that is stored in low bit of the BlobRef.
+///
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+struct BlobRef(u64);
+
+/// Flag indicating that this blob is compressed
+const BLOB_COMPRESSED: u64 = 1;
+
+impl BlobRef {
+    pub fn compressed(&self) -> bool {
+        (self.0 & BLOB_COMPRESSED) != 0
+    }
+
+    pub fn pos(&self) -> u64 {
+        self.0 >> 1
+    }
+
+    pub fn new(pos: u64, compressed: bool) -> BlobRef {
+        let mut blob_ref = pos << 1;
+        if compressed {
+            blob_ref |= BLOB_COMPRESSED;
+        }
+        BlobRef(blob_ref)
+    }
+}
+
+///
 /// ImageLayer is the in-memory data structure associated with an on-disk image
 /// file.  We keep an ImageLayer in memory for each file, in the LayerMap. If a
 /// layer is in "loaded" state, we have a copy of the index in memory, in 'inner'.
@@ -119,6 +153,13 @@ pub struct ImageLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+}
+
+impl ImageLayerInner {
+    fn create_decompressor(&self) -> Result<zstd::bulk::Decompressor<'_>> {
+        let decompressor = zstd::bulk::Decompressor::new()?;
+        Ok(decompressor)
+    }
 }
 
 impl Layer for ImageLayer {
@@ -160,20 +201,33 @@ impl Layer for ImageLayer {
 
         let inner = self.load()?;
 
+        let mut decompressor = inner.create_decompressor()?;
+
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf)? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.filename().display(),
-                    offset
-                )
-            })?;
-            let value = Bytes::from(blob);
+        if let Some(value) = tree_reader.get(&keybuf)? {
+            let blob_ref = BlobRef(value);
+            let blob_content =
+                file.block_cursor()
+                    .read_blob(blob_ref.pos())
+                    .with_context(|| {
+                        format!(
+                            "failed to read value from data file {} at offset {}",
+                            self.filename().display(),
+                            blob_ref.pos()
+                        )
+                    })?;
+
+            let uncompressed_bytes = if blob_ref.compressed() {
+                decompressor.decompress(&blob_content, PAGE_SZ)?
+            } else {
+                blob_content
+            };
+
+            let value = Bytes::from(uncompressed_bytes);
 
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
@@ -219,7 +273,17 @@ impl Layer for ImageLayer {
         tree_reader.dump()?;
 
         tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-            println!("key: {} offset {}", hex::encode(key), value);
+            let blob_ref = BlobRef(value);
+            println!(
+                "key: {} offset {}{}",
+                hex::encode(key),
+                blob_ref.pos(),
+                if blob_ref.compressed() {
+                    " (compressed)"
+                } else {
+                    ""
+                }
+            );
             true
         })?;
 
@@ -423,6 +487,8 @@ pub struct ImageLayerWriter {
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    compressor: Option<zstd::bulk::Compressor<'static>>,
 }
 
 impl ImageLayerWriter {
@@ -454,6 +520,12 @@ impl ImageLayerWriter {
         let block_buf = BlockBuf::new();
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
+        // TODO: use a dictionary
+        let compressor = {
+            let compressor = zstd::bulk::Compressor::new(config::ZSTD_COMPRESSION_LEVEL)?;
+            Some(compressor)
+        };
+
         let writer = ImageLayerWriter {
             conf,
             path,
@@ -463,6 +535,7 @@ impl ImageLayerWriter {
             lsn,
             tree: tree_builder,
             blob_writer,
+            compressor,
         };
 
         Ok(writer)
@@ -475,11 +548,37 @@ impl ImageLayerWriter {
     ///
     pub fn put_image(&mut self, key: Key, img: &[u8]) -> Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
 
+        let mut blob_content = img;
+        let mut compressed = false;
+
+        // Try to compress the blob
+        let compressed_bytes;
+        if blob_content.len() <= PAGE_SZ {
+            if let Some(ref mut compressor) = self.compressor {
+                compressed_bytes = compressor.compress(blob_content)?;
+
+                // If compressed version is not any smaller than the original,
+                // store it uncompressed. This not just an optimization, the
+                // the decompression assumes that too. That simplifies the
+                // decompression, because you don't need to jump through any
+                // hoops to determine how large a buffer you need to hold the
+                // decompression result.
+                if compressed_bytes.len() < blob_content.len() {
+                    blob_content = &compressed_bytes;
+                    compressed = true;
+                }
+            }
+        }
+
+        // Write it to the file
+        let off = self.blob_writer.write_blob(blob_content)?;
+        let blob_ref = BlobRef::new(off, compressed);
+
+        // And store the reference in the B-tree
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, off)?;
+        self.tree.append(&keybuf, blob_ref.0)?;
 
         Ok(())
     }
