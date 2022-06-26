@@ -104,32 +104,31 @@ async fn connection_manager_loop_step(
 
             Some(wal_connection_update) = async {
                 match walreceiver_state.wal_connection.as_mut() {
-                    Some(wal_connection) => {
-                        let receiver = &mut wal_connection.connection_task.events_receiver;
-                        Some(match receiver.changed().await {
-                            Ok(()) => receiver.borrow().clone(),
-                            Err(_cancellation_error) => TaskEvent::End(Ok(())),
-                        })
-                    }
+                    Some(wal_connection) => Some(wal_connection.connection_task.next_task_event().await),
                     None => None,
                 }
             } => {
-                let (connection_update, reset_connection_attempts) = match &wal_connection_update {
-                    TaskEvent::Started => (Some(Utc::now().naive_utc()), true),
-                    TaskEvent::NewEvent(replication_feedback) => (Some(DateTime::<Local>::from(replication_feedback.ps_replytime).naive_utc()), true),
+                let mut reset_connection_attempts = true;
+                let connection_update = match &wal_connection_update {
+                    TaskEvent::Started => Some(Utc::now().naive_utc()),
+                    TaskEvent::NewEvent(replication_feedback) => Some(DateTime::<Local>::from(replication_feedback.ps_replytime).naive_utc()),
                     TaskEvent::End(end_result) => {
-                        let should_reset_connection_attempts = match end_result {
+                        match end_result {
                             Ok(()) => {
                                 debug!("WAL receiving task finished");
-                                true
                             },
                             Err(e) => {
                                 warn!("WAL receiving task failed: {e}");
-                                false
+                                reset_connection_attempts = false;
                             },
                         };
                         walreceiver_state.wal_connection = None;
-                        (None, should_reset_connection_attempts)
+                        None
+                    },
+                    TaskEvent::Cancelled => {
+                        debug!("WAL receiving task got cancelled");
+                        walreceiver_state.wal_connection = None;
+                        None
                     },
                 };
 

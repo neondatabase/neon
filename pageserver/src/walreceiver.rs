@@ -188,6 +188,7 @@ pub enum TaskEvent<E> {
     Started,
     NewEvent(E),
     End(Result<(), String>),
+    Cancelled,
 }
 
 impl<E: Clone> TaskHandle<E> {
@@ -213,6 +214,33 @@ impl<E: Clone> TaskHandle<E> {
             handle,
             events_receiver,
             cancellation,
+        }
+    }
+
+    async fn next_task_event(&mut self) -> TaskEvent<E> {
+        macro_rules! join_on_task_handle {
+            ($handle:expr) => {
+                async {
+                    match $handle.await {
+                        Ok(()) => TaskEvent::End(Ok(())),
+                        Err(e) => {
+                            if e.is_panic() {
+                                TaskEvent::End(Err(format!("WAL receiver task panicked: {e}")))
+                            } else {
+                                TaskEvent::Cancelled
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        select! {
+            next_task_event = self.events_receiver.changed() => match next_task_event {
+                Ok(()) => self.events_receiver.borrow().clone(),
+                Err(_task_channel_part_dropped) => join_on_task_handle!(&mut self.handle).await,
+            },
+            task_completion_result = join_on_task_handle!(&mut self.handle) => task_completion_result,
         }
     }
 
