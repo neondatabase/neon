@@ -53,7 +53,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf etcd
+brew install protobuf etcd openssl
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -191,7 +191,7 @@ postgres=# select * from t;
 
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
-make # builds also postgres and installs it to ./tmp_install
+make # builds also postgres and installs it to ./tmp_insftall
 ./scripts/pytest
 ```
 
