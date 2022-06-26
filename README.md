@@ -191,7 +191,7 @@ postgres=# select * from t;
 
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
-make # builds also postgres and installs it to ./tmp_insftall
+make # builds also postgres and installs it to ./tmp_insftal
 ./scripts/pytest
 ```
 
