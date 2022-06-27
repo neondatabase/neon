@@ -24,8 +24,7 @@ pub fn create_writablity_check_data(client: &mut Client) -> Result<()> {
 }
 
 pub async fn check_writability(compute: &Arc<ComputeNode>) -> Result<()> {
-    let connstr = &compute.connstr;
-    let (client, connection) = tokio_postgres::connect(connstr, NoTls).await?;
+    let (client, connection) = tokio_postgres::connect(compute.connstr.as_str(), NoTls).await?;
     if client.is_closed() {
         return Err(anyhow!("connection to postgres closed"));
     }
