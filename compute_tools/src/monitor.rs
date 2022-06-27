@@ -13,11 +13,11 @@ const MONITOR_CHECK_INTERVAL: u64 = 500; // milliseconds
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
 // XXX: the only expected panic is at `RwLock` unwrap().
-fn watch_compute_activity(compute: &Arc<ComputeNode>) {
+fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let connstr = compute.connstr.clone();
+    let connstr = compute.connstr.as_str();
     // Define `client` outside of the loop to reuse existing connection if it's active.
-    let mut client = Client::connect(&connstr, NoTls);
+    let mut client = Client::connect(connstr, NoTls);
     let timeout = time::Duration::from_millis(MONITOR_CHECK_INTERVAL);
 
     info!("watching Postgres activity at {}", connstr);
@@ -32,7 +32,7 @@ fn watch_compute_activity(compute: &Arc<ComputeNode>) {
                     info!("connection to postgres closed, trying to reconnect");
 
                     // Connection is closed, reconnect and try again.
-                    client = Client::connect(&connstr, NoTls);
+                    client = Client::connect(connstr, NoTls);
                     continue;
                 }
 
@@ -93,7 +93,7 @@ fn watch_compute_activity(compute: &Arc<ComputeNode>) {
                 debug!("cannot connect to postgres: {}, retrying", e);
 
                 // Establish a new connection and try again.
-                client = Client::connect(&connstr, NoTls);
+                client = Client::connect(connstr, NoTls);
             }
         }
     }
