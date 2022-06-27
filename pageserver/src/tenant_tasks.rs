@@ -37,10 +37,20 @@ async fn compaction_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
         // Run blocking part of the task
         let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
+            // Break if tenant is not active
             if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
                 return Ok(ControlFlow::Break(()));
             }
+
+            // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            // TODO do this inside repo.compaction_iteration instead.
+            let _guard = match repo.file_lock.try_read() {
+                Ok(g) => g,
+                Err(_) => return Ok(ControlFlow::Break(())),
+            };
+
+            // Run compaction
             let compaction_period = repo.get_compaction_period();
             repo.compaction_iteration()?;
             Ok(ControlFlow::Continue(compaction_period))
@@ -140,14 +150,17 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                 loop {
                     tokio::select! {
                         _ = thread_mgr::shutdown_watcher() => {
-                            // TODO do this from thread_mgr? Extend it to work with tasks?
+                            // Send cancellation to all tasks
                             for (_, cancel) in gc_loops.drain() {
                                 cancel.send(()).ok();
                             }
                             for (_, cancel) in compaction_loops.drain() {
                                 cancel.send(()).ok();
                             }
-                            // TODO wait for tasks to die?
+
+                            // Exit after all tasks finish
+                            // TODO log any errors
+                            while let Some(_) = futures.next().await { }
                             break;
                         },
                         tenantid = gc_recv.recv() => {
@@ -212,13 +225,22 @@ async fn gc_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
         // Run blocking part of the task
         let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
+            // Break if tenant is not active
             if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
                 return Ok(ControlFlow::Break(()));
             }
+
+            // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
+            // TODO do this inside repo.gc_iteration instead.
+            let _guard = match repo.file_lock.try_read() {
+                Ok(g) => g,
+                Err(_) => return Ok(ControlFlow::Break(())),
+            };
+
+            // Run gc
             let gc_period = repo.get_gc_period();
             let gc_horizon = repo.get_gc_horizon();
-
             if gc_horizon > 0 {
                 repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
             }

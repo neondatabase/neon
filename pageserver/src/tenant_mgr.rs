@@ -345,6 +345,10 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
                 Some(tenant_id),
                 None,
             );
+
+            // Wait until all gc/compaction tasks finish
+            let repo = get_repository_for_tenant(tenant_id)?;
+            let _guard = repo.file_lock.write().unwrap();
         }
     }
 
