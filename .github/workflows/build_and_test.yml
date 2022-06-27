@@ -290,6 +290,16 @@ jobs:
           submodules: true
           fetch-depth: 1
 
+      - name: Restore cargo deps cache
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+
       - name: Get Neon artifact for restoration
         uses: actions/download-artifact@v3
         with:
@@ -320,10 +330,10 @@ jobs:
             --commit-url=$COMMIT_URL \
             --format=github
 
-          REPORT_URL=https://${{ github.repository_owner }}.github.io/neon-coverage-data/$COMMIT_SHA
+          REPORT_URL=https://${{ github.repository_owner }}.github.io/zenith-coverage-data/$COMMIT_SHA
 
           scripts/git-upload \
-            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/neon-coverage-data.git \
+            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
             --message="Add code coverage for $COMMIT_URL" \
             copy /tmp/neon/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
 
