@@ -191,7 +191,7 @@ use metrics::{
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use self::download::download_index_parts;
-pub use self::download::download_tenant_index_parts;
+pub use self::download::gather_tenant_timelines_index_parts;
 pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
 lazy_static! {

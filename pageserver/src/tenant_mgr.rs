@@ -401,31 +401,7 @@ pub fn get_local_timeline_with_load(
 }
 
 pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
-    // shutdown the timeline threads (this shuts down the walreceiver)
-    // FIXME it does not shut down wal receiver
-
-    // Things needed to be done
-    // *. check no ancestors
-    // *. remove from repo map
-    // *. remove from global tenant timelines map
-    // -- no new connections can see the timeline
-    // *. shutdown threads
-    // *. join walreceiver (any flushing thread?)
-    // *. delete files while ensuring that no gc or compaction is in progress
-    // 7. should we checkpoint before detach? That can be harmful during relocation,
-    //      because it will upload to s3 something that other pageserver didnt see
-    // TODO put falpoints at every step. Iterate over failpoints
-    //  in detach test and check that timeline is either attached or detached
-    // verify with a try to start a compute
-    // TODO adjust remote_index
-    // what is harder, write whole tenant detach correctly, or fix the timeline based one.
-
-    // TODO bail on active page_service threads?
-    // TODO what about inprogress downloads or uploads?
-    // can it be idempotent?
-    // FAILPOINTS: broken repo.detach_timeline
-    //             broken wal_receiver
-    //             broken rmdir
+    // shutdown the timeline tasks (this shuts down the walreceiver)
 
     let (sender, receiver) = std::sync::mpsc::channel::<()>();
     tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
@@ -433,12 +409,12 @@ pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow
         join_confirmation_sender: sender,
     });
 
-    info!("waiting for wal receiver to shutdown");
+    debug!("waiting for wal receiver to shutdown");
     let _ = receiver.recv();
-    info!("wal receiver shutdown confirmed");
-    info!("waiting for threads to shutdown");
+    debug!("wal receiver shutdown confirmed");
+    debug!("waiting for threads to shutdown");
     thread_mgr::shutdown_threads(None, None, Some(timeline_id));
-    info!("thread shutdown completed");
+    debug!("thread shutdown completed");
     match tenants_state::write_tenants().get_mut(&tenant_id) {
         Some(tenant) => {
             tenant

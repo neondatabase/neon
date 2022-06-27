@@ -282,7 +282,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     drop(index_accessor);
 
     // download index parts for every tenant timeline
-    let remote_timelines = match try_download_tenant_index(state, tenant_id).await {
+    let remote_timelines = match gather_tenant_timelines_index_parts(state, tenant_id).await {
         Ok(Some(remote_timelines)) => remote_timelines,
         Ok(None) => return Err(ApiError::NotFound("Unknown remote tenant".to_string())),
         Err(e) => {
@@ -323,19 +323,23 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn try_download_tenant_index(
+/// Note: is expensive from s3 access perspective,
+/// for details see comment to `storage_sync::gather_tenant_timelines_index_parts`
+async fn gather_tenant_timelines_index_parts(
     state: &State,
     tenant_id: ZTenantId,
 ) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
     let index_parts = match state.remote_storage.as_ref() {
         Some(GenericRemoteStorage::Local(local_storage)) => {
-            storage_sync::download_tenant_index_parts(state.conf, local_storage, tenant_id).await
+            storage_sync::gather_tenant_timelines_index_parts(state.conf, local_storage, tenant_id)
+                .await
         }
         // FIXME here s3 storage contains its own limits, that are separate from sync storage thread ones
         //       because it is a different instance. We can move this limit to some global static
         //       or use one instance everywhere.
         Some(GenericRemoteStorage::S3(s3_storage)) => {
-            storage_sync::download_tenant_index_parts(state.conf, s3_storage, tenant_id).await
+            storage_sync::gather_tenant_timelines_index_parts(state.conf, s3_storage, tenant_id)
+                .await
         }
         None => return Ok(None),
     }
