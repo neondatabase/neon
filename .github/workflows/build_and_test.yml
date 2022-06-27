@@ -323,7 +323,7 @@ jobs:
           REPORT_URL=https://${{ github.repository_owner }}.github.io/neon-coverage-data/$COMMIT_SHA
 
           scripts/git-upload \
-            --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/${{ github.repository_owner }}/neon-coverage-data.git \
+            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/neon-coverage-data.git \
             --message="Add code coverage for $COMMIT_URL" \
             copy /tmp/neon/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
 
