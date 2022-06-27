@@ -286,7 +286,7 @@ jobs:
           # no_output_timeout, specified here.
           no_output_timeout: 10m
           environment:
-            - ZENITH_BIN: /tmp/zenith/bin
+            - NEON_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
             - TEST_OUTPUT: /tmp/test_output
             # this variable will be embedded in perf test report
@@ -688,50 +688,6 @@ jobs:
             helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
             helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
 
-  # Trigger a new remote CI job
-  remote-ci-trigger:
-    docker:
-      - image: cimg/base:2021.04
-    parameters:
-      remote_repo:
-        type: string
-    environment:
-      REMOTE_REPO: << parameters.remote_repo >>
-    steps:
-      - run:
-          name: Set PR's status to pending
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-
-            curl -f -X POST \
-            https://api.github.com/repos/$LOCAL_REPO/statuses/$CIRCLE_SHA1 \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"state\": \"pending\",
-                \"context\": \"neon-cloud-e2e\",
-                \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
-              }"
-      - run:
-          name: Request a remote CI test
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-
-            curl -f -X POST \
-            https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"ref\": \"main\",
-                \"inputs\": {
-                  \"ci_job_name\": \"neon-cloud-e2e\",
-                  \"commit_hash\": \"$CIRCLE_SHA1\",
-                  \"remote_repo\": \"$LOCAL_REPO\"
-                }
-              }"
-
 workflows:
   build_and_test:
     jobs:
@@ -880,14 +836,3 @@ workflows:
                 - release
           requires:
             - docker-image-release
-      - remote-ci-trigger:
-          # Context passes credentials for gh api
-          context: CI_ACCESS_TOKEN
-          remote_repo: "neondatabase/cloud"
-          requires:
-            # XXX: Successful build doesn't mean everything is OK, but
-            # the job to be triggered takes so much time to complete (~22 min)
-            # that it's better not to wait for the commented-out steps
-            - build-neon-release
-            # - pg_regress-tests-release
-            # - other-tests-release

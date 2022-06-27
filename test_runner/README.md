@@ -45,7 +45,7 @@ If you want to run all tests that have the string "bench" in their names:
 
 Useful environment variables:
 
-`ZENITH_BIN`: The directory where zenith binaries can be found.
+`NEON_BIN`: The directory where neon binaries can be found.
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.

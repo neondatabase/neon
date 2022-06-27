@@ -46,9 +46,9 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/proxy      /usr/local/bin
 
 COPY --from=pg-build /pg/tmp_install/         /usr/local/
 COPY --from=pg-build /postgres_install.tar.gz /data/
