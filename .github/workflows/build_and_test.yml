@@ -16,6 +16,12 @@ concurrency:
 
 env:
   RUST_BACKTRACE: 1
+  COPT: '-Werror'
+  AWS_ACCESS_KEY_ID: ${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}
+  CACHEPOT_BUCKET: zenith-rust-cachepot
+  RUSTC_WRAPPER: cachepot
+
 
 jobs:
   build-postgres:
@@ -112,10 +118,6 @@ jobs:
             CARGO_FLAGS="--release --features profiling"
           fi
 
-          export CACHEPOT_BUCKET=zenith-rust-cachepot
-          export RUSTC_WRAPPER=cachepot
-          export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
           cachepot -s
 
