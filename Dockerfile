@@ -1,5 +1,5 @@
 # Build Postgres
-FROM zimg/rust:1.58 AS pg-build
+FROM neondatabase/rust:1.58 AS pg-build
 WORKDIR /pg
 
 USER root
@@ -14,7 +14,7 @@ RUN set -e \
     && tar -C tmp_install -czf /postgres_install.tar.gz .
 
 # Build zenith binaries
-FROM zimg/rust:1.58 AS build
+FROM neondatabase/rust:1.58 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
@@ -46,9 +46,9 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/project/target/release/proxy      /usr/local/bin
 
 COPY --from=pg-build /pg/tmp_install/         /usr/local/
 COPY --from=pg-build /postgres_install.tar.gz /data/
