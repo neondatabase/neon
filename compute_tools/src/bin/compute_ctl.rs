@@ -33,7 +33,7 @@ use std::process::exit;
 use std::sync::{Arc, RwLock};
 use std::{thread, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use log::{error, info};
@@ -45,6 +45,7 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::pg_helpers::*;
 use compute_tools::spec::*;
+use url::Url;
 
 fn main() -> Result<()> {
     // TODO: re-use `utils::logging` later
@@ -131,7 +132,7 @@ fn main() -> Result<()> {
 
     let compute_state = ComputeNode {
         start_time: Utc::now(),
-        connstr: connstr.to_string(),
+        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         spec,

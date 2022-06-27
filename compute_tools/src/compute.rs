@@ -35,7 +35,8 @@ use crate::spec::*;
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
     pub start_time: DateTime<Utc>,
-    pub connstr: String,
+    // Url type maintains proper escaping
+    pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
     pub spec: ComputeSpec,
@@ -268,21 +269,25 @@ impl ComputeNode {
         // In this case we need to connect with old `zenith_admin`name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
-        let mut client = match Client::connect(&self.connstr, NoTls) {
+        let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
             Err(e) => {
                 info!(
                     "cannot connect to postgres: {}, retrying with `zenith_admin` username",
                     e
                 );
-                let zenith_admin_connstr = self.connstr.replacen("cloud_admin", "zenith_admin", 1);
+                let mut zenith_admin_connstr = self.connstr.clone();
 
-                let mut client = Client::connect(&zenith_admin_connstr, NoTls)?;
+                zenith_admin_connstr
+                    .set_username("zenith_admin")
+                    .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
+
+                let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
                 client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
 
                 // reconnect with connsting with expected name
-                Client::connect(&self.connstr, NoTls)?
+                Client::connect(self.connstr.as_str(), NoTls)?
             }
             Ok(client) => client,
         };
