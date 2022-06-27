@@ -109,6 +109,7 @@ async fn connection_manager_loop_step(
                 }
             } => {
                 let mut reset_connection_attempts = true;
+                let mut reset_connection = false;
                 let connection_update = match &wal_connection_update {
                     TaskEvent::Started => Some(Utc::now().naive_utc()),
                     TaskEvent::NewEvent(replication_feedback) => Some(DateTime::<Local>::from(replication_feedback.ps_replytime).naive_utc()),
@@ -122,12 +123,12 @@ async fn connection_manager_loop_step(
                                 reset_connection_attempts = false;
                             },
                         };
-                        walreceiver_state.wal_connection = None;
+                        reset_connection = true;
                         None
                     },
                     TaskEvent::Cancelled => {
                         debug!("WAL receiving task got cancelled");
-                        walreceiver_state.wal_connection = None;
+                        reset_connection = true;
                         None
                     },
                 };
@@ -148,6 +149,9 @@ async fn connection_manager_loop_step(
                     None => if let Some(wal_connection_update) = connection_update {
                         error!("Received connection update for WAL connection that is not active, update: {wal_connection_update:?}");
                     },
+                }
+                if reset_connection {
+                    walreceiver_state.wal_connection = None;
                 }
             },
 
