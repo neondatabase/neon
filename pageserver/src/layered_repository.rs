@@ -337,12 +337,16 @@ impl Repository for LayeredRepository {
         // compactions.  We don't want to block everything else while the
         // compaction runs.
         let timelines = self.timelines.lock().unwrap();
-        let timelines_to_compact = timelines
+        let mut timelines_to_compact = timelines
             .iter()
             .map(|(timelineid, timeline)| (*timelineid, timeline.clone()))
             .collect::<Vec<_>>();
         drop(timelines);
 
+        // Sort to prevent deadlock
+        timelines_to_compact.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Compact all timelines in order
         for (timelineid, timeline) in &timelines_to_compact {
             let _entered =
                 info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
