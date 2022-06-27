@@ -114,40 +114,31 @@ async fn connection_manager_loop_step(
                     None => None,
                 }
             } => {
-                let (connection_update, reset_connection_attempts) = match &wal_connection_update {
-                    TaskEvent::Started => (Some(Utc::now().naive_utc()), true),
-                    TaskEvent::NewEvent(replication_feedback) => (Some(DateTime::<Local>::from(replication_feedback.ps_replytime).naive_utc()), true),
+                let wal_connection = walreceiver_state.wal_connection.as_mut().unwrap();
+                match &wal_connection_update {
+                    TaskEvent::Started => {
+                        wal_connection.latest_connection_update = Utc::now().naive_utc();
+                        // we are good, reset attempts counter
+                        walreceiver_state.wal_connection_attempts.remove(&wal_connection.sk_id);
+                    }
+                    TaskEvent::NewEvent(replication_feedback) => {
+                        wal_connection.latest_connection_update = DateTime::<Local>::from(replication_feedback.ps_replytime).naive_utc();
+                        walreceiver_state.wal_connection_attempts.remove(&wal_connection.sk_id);
+                    }
                     TaskEvent::End(end_result) => {
-                        let should_reset_connection_attempts = match end_result {
+                        match end_result {
                             Ok(()) => {
                                 debug!("WAL receiving task finished");
-                                true
                             },
                             Err(e) => {
                                 warn!("WAL receiving task failed: {e}");
-                                false
+                                let attempts_entry = walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0);
+                                *attempts_entry += 1;
                             },
                         };
                         walreceiver_state.wal_connection = None;
-                        (None, should_reset_connection_attempts)
                     },
                 };
-
-                if let Some(connection_update) = connection_update {
-                    match &mut walreceiver_state.wal_connection {
-                        Some(wal_connection) => {
-                            wal_connection.latest_connection_update = connection_update;
-
-                            let attempts_entry = walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0);
-                            if reset_connection_attempts {
-                                *attempts_entry = 0;
-                            } else {
-                                *attempts_entry += 1;
-                            }
-                        },
-                        None => error!("Received connection update for WAL connection that is not active, update: {wal_connection_update:?}"),
-                    }
-                }
             },
 
             broker_update = broker_subscription.value_updates.recv() => {
@@ -333,6 +324,7 @@ impl WalreceiverState {
             .get(&new_sk_id)
             .copied()
             .unwrap_or(0);
+        info!("conn attempt is {}", connection_attempt);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 exponential_backoff(
@@ -363,6 +355,7 @@ impl WalreceiverState {
 
     /// Adds another etcd timeline into the state, if its more recent than the one already added there for the same key.
     fn register_timeline_update(&mut self, timeline_update: BrokerUpdate<SkTimelineInfo>) {
+        info!("got update {:?}", timeline_update.value);
         match self
             .wal_stream_candidates
             .entry(timeline_update.key.node_id)
@@ -401,6 +394,7 @@ impl WalreceiverState {
     /// Both thresholds are configured per tenant.
     fn next_connection_candidate(&mut self) -> Option<NewWalConnectionCandidate> {
         self.cleanup_old_candidates();
+        // info!("considering among {:?}", self.wal_stream_candidates);
 
         match &self.wal_connection {
             Some(existing_wal_connection) => {
