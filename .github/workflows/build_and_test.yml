@@ -308,9 +308,11 @@ jobs:
           name: coverage-data-artifact
           path: /tmp/neon/coverage/
 
-      - name: Build coverage report
+      - name: Build and upload coverage report
         run: |
-          COMMIT_URL=https://github.com/neondatabase/neon/commit/${{ github.sha }}
+          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+          COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
 
           scripts/coverage \
             --dir=/tmp/neon/coverage report \
@@ -318,19 +320,16 @@ jobs:
             --commit-url=$COMMIT_URL \
             --format=github
 
-      - name: Upload coverage report
-        run: |
-          REPORT_URL=https://neondatabase.github.io/neon-coverage-data/${{ github.sha }}
-          COMMIT_URL=https://github.com/neondatabase/neon/commit/${{ github.sha }}
+          REPORT_URL=https://${{ github.repository_owner }}.github.io/neon-coverage-data/$COMMIT_SHA
 
           scripts/git-upload \
-            --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/neondatabase/neon-coverage-data.git \
+            --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/${{ github.repository_owner }}/neon-coverage-data.git \
             --message="Add code coverage for $COMMIT_URL" \
-            copy /tmp/neon/coverage/report ${{ github.sha }} # COPY FROM TO_RELATIVE
+            copy /tmp/neon/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
 
           # Add link to the coverage report to the commit
           curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
           -H "Accept: application/vnd.github.v3+json" \
           --user "${{ secrets.CI_ACCESS_TOKEN }}" \
           --data \
@@ -347,10 +346,13 @@ jobs:
    steps:
      - name: Set PR's status to pending and request a remote CI test
        run: |
+         COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+         COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+
          REMOTE_REPO="${{ github.repository_owner }}/cloud"
 
          curl -f -X POST \
-         https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+         https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
          -H "Accept: application/vnd.github.v3+json" \
          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
          --data \
@@ -369,7 +371,7 @@ jobs:
              \"ref\": \"main\",
              \"inputs\": {
                \"ci_job_name\": \"neon-cloud-e2e\",
-               \"commit_hash\": \"${{ github.sha }}\",
+               \"commit_hash\": \"$COMMIT_SHA\",
                \"remote_repo\": \"${{ github.repository }}\"
              }
            }"
