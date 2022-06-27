@@ -411,10 +411,8 @@ impl WalreceiverState {
             Some(existing_wal_connection) => {
                 let connected_sk_node = existing_wal_connection.sk_id;
 
-                let (new_sk_id, new_safekeeper_etcd_data, new_wal_producer_connstr) = self
-                    .applicable_connection_candidates()
-                    .filter(|&(sk_id, _, _)| sk_id != connected_sk_node)
-                    .max_by_key(|(_, info, _)| info.commit_lsn)?;
+                let (new_sk_id, new_safekeeper_etcd_data, new_wal_producer_connstr) =
+                    self.select_connection_candidate(Some(connected_sk_node))?;
 
                 let now = Utc::now().naive_utc();
                 if let Ok(latest_interaciton) =
@@ -467,9 +465,8 @@ impl WalreceiverState {
                 }
             }
             None => {
-                let (new_sk_id, _, new_wal_producer_connstr) = self
-                    .applicable_connection_candidates()
-                    .max_by_key(|(_, info, _)| info.commit_lsn)?;
+                let (new_sk_id, _, new_wal_producer_connstr) =
+                    self.select_connection_candidate(None)?;
                 return Some(NewWalConnectionCandidate {
                     safekeeper_id: new_sk_id,
                     wal_producer_connstr: new_wal_producer_connstr,
@@ -479,6 +476,38 @@ impl WalreceiverState {
         }
 
         None
+    }
+
+    fn select_connection_candidate(
+        &self,
+        node_to_omit: Option<NodeId>,
+    ) -> Option<(NodeId, &SkTimelineInfo, String)> {
+        let mut smallest_assempts_count = u32::MAX;
+        let mut candidates = Vec::new();
+
+        for (sk_id, timeline_info, wal_producer_connstr) in self
+            .applicable_connection_candidates()
+            .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
+        {
+            let candidate_connection_attempts = self
+                .wal_connection_attempts
+                .get(&sk_id)
+                .copied()
+                .unwrap_or(0);
+            match candidate_connection_attempts.cmp(&smallest_assempts_count) {
+                std::cmp::Ordering::Greater => continue,
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Less => {
+                    candidates.clear();
+                    smallest_assempts_count = candidate_connection_attempts;
+                }
+            }
+            candidates.push((sk_id, timeline_info, wal_producer_connstr));
+        }
+
+        candidates
+            .into_iter()
+            .max_by_key(|(_, info, _)| info.commit_lsn)
     }
 
     fn applicable_connection_candidates(
