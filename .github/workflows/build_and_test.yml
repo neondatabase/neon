@@ -54,7 +54,7 @@ jobs:
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: COPT='-Werror' mold -run make postgres -j$(nproc)
+        run: mold -run make postgres -j$(nproc)
 
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
@@ -319,6 +319,9 @@ jobs:
         with:
           name: coverage-data-artifact
           path: /tmp/coverage/
+
+      - name: Merge coverage data
+        run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
       - name: Build and upload coverage report
         run: |
