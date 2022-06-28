@@ -1350,6 +1350,7 @@ pub fn create_test_timeline<R: Repository>(
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
+    drop(m);
     Ok(Arc::new(tline))
 }
 
