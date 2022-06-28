@@ -329,9 +329,12 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
         (TenantState::Idle, TenantState::Active) => {
             info!("activating tenant {tenant_id}");
 
+            // Unfreeze the repo, allowing gc/compaction jobs to run
+            let repo = get_repository_for_tenant(tenant_id)?;
+            *repo.frozen.write().unwrap() = false;
+
             // Spawn gc and compaction loops. The loops will shut themselves
-            // down when they notice that the tenant is inactive.
-            // TODO maybe use tokio::sync::watch instead?
+            // down when tenant becomes idle and repo becomes frozen.
             crate::tenant_tasks::start_compaction_loop(tenant_id)?;
             crate::tenant_tasks::start_gc_loop(tenant_id)?;
         }
@@ -346,9 +349,9 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
                 None,
             );
 
-            // Wait until all gc/compaction tasks finish
+            // Freeze the repo, waiting for existing gc/compaction to finish
             let repo = get_repository_for_tenant(tenant_id)?;
-            let _guard = repo.file_lock.write().unwrap();
+            *repo.frozen.write().unwrap() = true;
         }
     }
 

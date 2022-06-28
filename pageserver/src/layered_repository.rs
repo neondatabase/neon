@@ -39,7 +39,8 @@ use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
+    GcResult, RepoIoError, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate,
+    TimelineWriter,
 };
 use crate::repository::{Key, Value};
 use crate::tenant_mgr;
@@ -158,12 +159,10 @@ pub struct LayeredRepository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
-    // Allows us to gracefully cancel operations that edit the directory
-    // that backs this layered repository. Usage:
+    // Freezing the repo disallows any writes to its directory.
     //
-    // Use `let _guard = file_lock.try_read()` while writing any files.
-    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
-    pub file_lock: RwLock<()>,
+    // Any writers must hold frozen.try_read() while writing.
+    pub frozen: RwLock<bool>,
 
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
@@ -326,19 +325,38 @@ impl Repository for LayeredRepository {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult> {
+    ) -> Result<GcResult, RepoIoError> {
         let timeline_str = target_timelineid
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
+
+        // Make sure repo is not frozen
+        let guard = match self.frozen.try_read() {
+            Ok(g) => g,
+            Err(_) => return Err(RepoIoError::RepoFreezingError),
+        };
+        if *guard {
+            return Err(RepoIoError::RepoFrozenError);
+        }
 
         STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
             })
+            .map_err(|err| err.into())
     }
 
-    fn compaction_iteration(&self) -> Result<()> {
+    fn compaction_iteration(&self) -> Result<(), RepoIoError> {
+        // Make sure repo is not frozen
+        let guard = match self.frozen.try_read() {
+            Ok(g) => g,
+            Err(_) => return Err(RepoIoError::RepoFreezingError),
+        };
+        if *guard {
+            return Err(RepoIoError::RepoFrozenError);
+        }
+
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -692,7 +710,7 @@ impl LayeredRepository {
     ) -> LayeredRepository {
         LayeredRepository {
             tenant_id,
-            file_lock: RwLock::new(()),
+            frozen: RwLock::new(false),
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),

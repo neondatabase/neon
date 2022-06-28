@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use crate::repository::Repository;
-use crate::tenant_mgr::TenantState;
+use crate::repository::{RepoIoError, Repository};
 use crate::thread_mgr::ThreadKind;
 use crate::{tenant_mgr, thread_mgr};
 use anyhow::{self, Context};
@@ -37,23 +36,15 @@ async fn compaction_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
         // Run blocking part of the task
         let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
-            // Break if tenant is not active
-            if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
-                return Ok(ControlFlow::Break(()));
-            }
-
-            // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            // TODO do this inside repo.compaction_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
-
-            // Run compaction
             let compaction_period = repo.get_compaction_period();
-            repo.compaction_iteration()?;
-            Ok(ControlFlow::Continue(compaction_period))
+            match repo.compaction_iteration() {
+                Ok(_) => Ok(ControlFlow::Continue(compaction_period)),
+                Err(RepoIoError::RepoFreezingError | RepoIoError::RepoFrozenError) => {
+                    Ok(ControlFlow::Break(()))
+                }
+                Err(RepoIoError::Other(e)) => Err(e),
+            }
         })
         .await;
 
@@ -234,26 +225,18 @@ async fn gc_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
 
         // Run blocking part of the task
         let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
-            // Break if tenant is not active
-            if tenant_mgr::get_tenant_state(tenantid) != Some(TenantState::Active) {
-                return Ok(ControlFlow::Break(()));
-            }
-
-            // Break if we're not allowed to write to disk
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
-            // TODO do this inside repo.gc_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
-
-            // Run gc
             let gc_period = repo.get_gc_period();
             let gc_horizon = repo.get_gc_horizon();
             if gc_horizon > 0 {
-                repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
+                match repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false) {
+                    Ok(_) => return Ok(ControlFlow::Continue(gc_period)),
+                    Err(RepoIoError::RepoFreezingError | RepoIoError::RepoFrozenError) => {
+                        return Ok(ControlFlow::Break(()))
+                    }
+                    Err(RepoIoError::Other(e)) => return Err(e),
+                }
             }
-
             Ok(ControlFlow::Continue(gc_period))
         })
         .await;

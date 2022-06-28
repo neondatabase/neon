@@ -196,6 +196,19 @@ impl Display for TimelineSyncStatusUpdate {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RepoIoError {
+    #[error("Cannot write to repo path while repo is frozen")]
+    RepoFrozenError,
+
+    #[error("Cannot write to repo path while repo is being frozen")]
+    RepoFreezingError,
+
+    /// Unstructured anyhow error
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 ///
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
@@ -252,13 +265,13 @@ pub trait Repository: Send + Sync {
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
-    ) -> Result<GcResult>;
+    ) -> Result<GcResult, RepoIoError>;
 
     /// Perform one compaction iteration.
     /// This function is periodically called by compactor thread.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    fn compaction_iteration(&self) -> Result<()>;
+    fn compaction_iteration(&self) -> Result<(), RepoIoError>;
 
     /// detaches timeline-related in-memory data.
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
