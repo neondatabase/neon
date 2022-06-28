@@ -7,7 +7,6 @@ from performance.test_perf_pgbench import get_scales_matrix
 from performance.test_wal_backpressure import record_read_latency
 
 
-
 def start_write_workload(pg: Postgres, scale: int = 10):
     with pg.connect().cursor() as cur:
         cur.execute(f"create table big as select generate_series(1,{scale*100_000})")
