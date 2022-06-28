@@ -20,7 +20,7 @@ env:
   AWS_ACCESS_KEY_ID: ${{ secrets.CACHEPOT_AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY }}
   CACHEPOT_BUCKET: zenith-rust-cachepot
-  RUSTC_WRAPPER: cachepot
+  RUSTC_WRAPPER: ""
 
 
 jobs:
