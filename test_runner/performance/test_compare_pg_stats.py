@@ -1,5 +1,5 @@
 import os
-import statistics
+import time
 from typing import List
 
 import time
@@ -112,41 +112,7 @@ def test_compare_pg_stats_wal_with_pgbench_default(neon_with_baseline: PgCompare
         env.flush()
 
 
-@pytest.mark.parametrize("duration", get_durations_matrix(5))
-def test_compare_pg_stats_ro_with_simple_read(neon_with_baseline: PgCompare,
-                                              duration: int,
-                                              pg_stats_ro: List[PgStatTable]):
-    env = neon_with_baseline
-
-    # initialize test table
-    with env.pg.connect().cursor() as cur:
-        cur.execute("CREATE TABLE foo as select generate_series(1,100000)")
-
-    start = time.time()
-
-    read_latencies = []
-    with env.record_pg_stats(pg_stats_ro):
-        with env.pg.connect().cursor() as cur:
-            while time.time() - start < duration:
-                t = time.time()
-                cur.execute("SELECT * from foo")
-                read_latencies.append(time.time() - t)
-
-    env.zenbenchmark.record("read_latency_max",
-                            max(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("read_latency_avg",
-                            statistics.mean(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("read_latency_stdev",
-                            statistics.stdev(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
-
-
-@pytest.mark.parametrize("duration", get_durations_matrix(10))
+@pytest.mark.parametrize("duration", get_durations_matrix(30))
 def test_compare_pg_stats_wo_with_simple_write(neon_compare: NeonCompare,
                                                duration: int,
                                                pg_stats_wo: List[PgStatTable]):
@@ -160,4 +126,4 @@ def test_compare_pg_stats_wo_with_simple_write(neon_compare: NeonCompare,
     with env.record_pg_stats(pg_stats_wo):
         with env.pg.connect().cursor() as cur:
             while time.time() - start < duration:
-                cur.execute("INSERT INTO foo SELECT FROM generate_series(1,100000)")
+                cur.execute("INSERT INTO foo SELECT FROM generate_series(1,1000)")
