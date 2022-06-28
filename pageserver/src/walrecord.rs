@@ -96,6 +96,7 @@ impl DecodedBkpBlock {
     }
 }
 
+#[derive(Default)]
 pub struct DecodedWALRecord {
     pub xl_xid: TransactionId,
     pub xl_info: u8,
@@ -505,7 +506,10 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
-pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeError> {
+pub fn decode_wal_record(
+    record: Bytes,
+    decoded: &mut DecodedWALRecord,
+) -> Result<(), DeserializeError> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
@@ -534,7 +538,9 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
     let mut blocks_total_len: u32 = 0;
     let mut main_data_len = 0;
     let mut datatotal: u32 = 0;
-    let mut blocks: Vec<DecodedBkpBlock> = Vec::new();
+    if !decoded.blocks.is_empty() {
+        decoded.blocks.clear();
+    }
 
     // 2. Decode the headers.
     // XLogRecordBlockHeaders if any,
@@ -713,7 +719,7 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
                     blk.blkno
                 );
 
-                blocks.push(blk);
+                decoded.blocks.push(blk);
             }
 
             _ => {
@@ -724,7 +730,7 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
 
     // 3. Decode blocks.
     let mut ptr = record.len() - buf.remaining();
-    for blk in blocks.iter_mut() {
+    for blk in decoded.blocks.iter_mut() {
         if blk.has_image {
             blk.bimg_offset = ptr as u32;
             ptr += blk.bimg_len as usize;
@@ -744,14 +750,13 @@ pub fn decode_wal_record(record: Bytes) -> Result<DecodedWALRecord, DeserializeE
         assert_eq!(buf.remaining(), main_data_len as usize);
     }
 
-    Ok(DecodedWALRecord {
-        xl_xid: xlogrec.xl_xid,
-        xl_info: xlogrec.xl_info,
-        xl_rmid: xlogrec.xl_rmid,
-        record,
-        blocks,
-        main_data_offset,
-    })
+    decoded.xl_xid = xlogrec.xl_xid;
+    decoded.xl_info = xlogrec.xl_info;
+    decoded.xl_rmid = xlogrec.xl_rmid;
+    decoded.record = record;
+    decoded.main_data_offset = main_data_offset;
+
+    Ok(())
 }
 
 ///

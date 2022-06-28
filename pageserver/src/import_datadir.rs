@@ -16,6 +16,7 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
 use crate::repository::Timeline;
 use crate::walingest::WalIngest;
+use crate::walrecord::DecodedWALRecord;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
@@ -268,10 +269,12 @@ fn import_wal<R: Repository>(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
+        let mut modification = tline.begin_modification(last_lsn);
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let mut modification = tline.begin_modification(lsn);
-                walingest.ingest_record(recdata, lsn, &mut modification)?;
+                modification.lsn = lsn;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -384,10 +387,12 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
+        let mut modification = tline.begin_modification(last_lsn);
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let mut modification = tline.begin_modification(lsn);
-                walingest.ingest_record(recdata, lsn, &mut modification)?;
+                modification.lsn = lsn;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

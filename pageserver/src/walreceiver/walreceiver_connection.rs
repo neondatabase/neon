@@ -23,6 +23,7 @@ use crate::{
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
+    walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
@@ -153,19 +154,19 @@ pub async fn handle_walreceiver_connection(
                 // let mut n_records = 0;
                 // timer = std::time::Instant::now();
                 {
+                    let mut decoded = DecodedWALRecord::default();
                     let mut modification = timeline.begin_modification(last_rec_lsn);
 
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                        let _enter = info_span!("processing record", lsn = %lsn).entered();
+                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        modification.clear();
                         modification.lsn = lsn;
-                        walingest.ingest_record(recdata, lsn, &mut modification)?;
+                        walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
 
                         fail_point!("walreceiver-after-ingest");
 

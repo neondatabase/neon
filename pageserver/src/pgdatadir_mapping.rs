@@ -546,12 +546,6 @@ pub struct DatadirModification<'a, R: Repository> {
 }
 
 impl<'a, R: Repository> DatadirModification<'a, R> {
-    pub fn clear(&mut self) {
-        self.pending_updates.clear();
-        self.pending_deletions.clear();
-        self.pending_nblocks = 0;
-    }
-
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -914,14 +908,15 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
     ///
-    pub fn commit(&self) -> Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         let pending_nblocks = self.pending_nblocks;
+        self.pending_nblocks = 0;
 
-        for (key, value) in &self.pending_updates {
-            self.writer.put(key.clone(), self.lsn, value.clone())?;
+        for (key, value) in self.pending_updates.drain() {
+            self.writer.put(key, self.lsn, value)?;
         }
-        for key_range in &self.pending_deletions {
-            self.writer.delete(key_range.clone(), self.lsn)?;
+        for key_range in self.pending_deletions.drain(..) {
+            self.writer.delete(key_range, self.lsn)?;
         }
 
         self.writer.finish_write(self.lsn);

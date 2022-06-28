@@ -81,8 +81,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         recdata: Bytes,
         lsn: Lsn,
         modification: &mut DatadirModification<R>,
+        decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
-        let mut decoded = decode_wal_record(recdata).context("failed decoding wal record")?;
+        decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
+
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
 
@@ -96,7 +98,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
             || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
         {
-            self.ingest_heapam_record(&mut buf, modification, &mut decoded)?;
+            self.ingest_heapam_record(&mut buf, modification, decoded)?;
         }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
@@ -211,7 +213,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             }
         } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
             let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(modification, &xlrec, &decoded)?;
+            self.ingest_relmap_page(modification, &xlrec, decoded)?;
         } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_NEXTOID {
@@ -246,7 +248,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
-            self.ingest_decoded_block(modification, lsn, &decoded, blk)?;
+            self.ingest_decoded_block(modification, lsn, decoded, blk)?;
         }
 
         // If checkpoint data was updated, store the new version in the repository
