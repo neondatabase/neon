@@ -159,8 +159,17 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             }
 
                             // Exit after all tasks finish
-                            // TODO log any errors
-                            while let Some(_) = futures.next().await { }
+                            while let Some(result) = futures.next().await {
+                                match result {
+                                    Ok(()) => {
+                                        TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
+                                    },
+                                    Err(e) => {
+                                        TENANT_TASK_EVENTS.with_label_values(&["panic"]).inc();
+                                        error!("loop join error {}", e)
+                                    },
+                                }
+                            }
                             break;
                         },
                         tenantid = gc_recv.recv() => {
