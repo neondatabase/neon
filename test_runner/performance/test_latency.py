@@ -6,7 +6,6 @@ import timeit
 from random import randint
 
 import pytest
-from batch_others.test_backpressure import pg_cur
 from fixtures import log_helper
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
@@ -17,7 +16,7 @@ from performance.test_wal_backpressure import record_read_latency
 
 
 def start_write_workload(pg: Postgres, scale: int = 10):
-    with pg_cur(pg) as cur:
+    with pg.connect().cursor() as cur:
         cur.execute(f"create table big as select generate_series(1,{scale*100_000})")
 
 
@@ -26,10 +25,10 @@ def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare
     env = neon_with_baseline
     pg = env.pg
 
-    with pg_cur(pg) as cur:
+    with pg.connect().cursor() as cur:
         cur.execute(f"create table small as select generate_series(1,{scale*100_000})")
 
     write_thread = threading.Thread(target=start_write_workload, args=(pg, scale * 100))
     write_thread.start()
 
-    record_read_latency(env, write_thread, "SELECT count(*) from small")
+    record_read_latency(env, lambda: write_thread.is_alive(), "SELECT count(*) from small")
