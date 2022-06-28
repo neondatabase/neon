@@ -78,9 +78,9 @@ brew link --force libpq
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
-# The preferred and default is to make a debug build. This will create a 
+# The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. If you want to use a release
-# build, utilize "`BUILD_TYPE=release make -j`nproc``" 
+# build, utilize "`BUILD_TYPE=release make -j`nproc``"
 
 make -j`nproc`
 ```
@@ -219,3 +219,5 @@ To get more familiar with this aspect, refer to:
 - Read `CONTRIBUTING.md` to learn about project code style and practices.
 - To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html
+
+.
