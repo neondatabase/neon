@@ -2,10 +2,8 @@ import os
 import time
 from typing import List
 
-import time
 import pytest
-from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.compare_fixtures import PgCompare
 from fixtures.pg_stats import PgStatTable
 
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
@@ -30,14 +28,8 @@ def test_compare_pg_stats_rw_with_pgbench_default(neon_with_baseline: PgCompare,
     env.flush()
 
     with env.record_pg_stats(pg_stats_rw):
-        env.pg_bin.run_capture([
-            'pgbench',
-            f'-T{duration}',
-            f'--random-seed={seed}',
-            '-Mprepared',
-            '-r',
-            env.pg.connstr()
-        ])
+        env.pg_bin.run_capture(
+            ['pgbench', f'-T{duration}', f'--random-seed={seed}', '-Mprepared', env.pg.connstr()])
         env.flush()
 
 
@@ -60,7 +52,6 @@ def test_compare_pg_stats_wo_with_pgbench_simple_update(neon_with_baseline: PgCo
             '-N',
             f'-T{duration}',
             f'--random-seed={seed}',
-            '-r',
             '-Mprepared',
             env.pg.connstr()
         ])
@@ -70,12 +61,12 @@ def test_compare_pg_stats_wo_with_pgbench_simple_update(neon_with_baseline: PgCo
 @pytest.mark.parametrize("seed", get_seeds_matrix())
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix(5))
-def test_compare_pg_stats_ro_with_pgbench_select_only(neon_compare: NeonCompare,
+def test_compare_pg_stats_ro_with_pgbench_select_only(neon_with_baseline: PgCompare,
                                                       seed: int,
                                                       scale: int,
                                                       duration: int,
                                                       pg_stats_ro: List[PgStatTable]):
-    env = neon_compare
+    env = neon_with_baseline
     # initialize pgbench
     env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', env.pg.connstr()])
     env.flush()
@@ -87,7 +78,6 @@ def test_compare_pg_stats_ro_with_pgbench_select_only(neon_compare: NeonCompare,
             f'-T{duration}',
             f'--random-seed={seed}',
             '-Mprepared',
-            '-r',
             env.pg.connstr()
         ])
         env.flush()
