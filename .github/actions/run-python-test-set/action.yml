@@ -92,7 +92,7 @@ runs:
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
-          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
         elif [[ "${{ inputs.build_type }}" == "release" ]]; then
           cov_prefix=()
         fi
