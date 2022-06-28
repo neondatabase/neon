@@ -13,7 +13,7 @@ from fixtures.compare_fixtures import PgCompare
 from fixtures.neon_fixtures import Postgres
 
 from performance.test_perf_pgbench import get_scales_matrix
-from performance.test_backpressure import record_read_latency
+from batch_othertest_backpressure import record_read_latency
 
 
 def start_write_workload(pg: Postgres, scale: int = 10):
