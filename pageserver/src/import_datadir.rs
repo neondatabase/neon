@@ -62,6 +62,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     // We're done importing all the data files.
     modification.commit()?;
+    drop(modification);
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -269,7 +270,8 @@ fn import_wal<R: Repository>(
         let mut nrecords = 0;
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                let mut modification = tline.begin_modification(lsn);
+                walingest.ingest_record(recdata, lsn, &mut modification)?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -384,7 +386,8 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                let mut modification = tline.begin_modification(lsn);
+                walingest.ingest_record(recdata, lsn, &mut modification)?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

@@ -99,6 +99,7 @@ impl<R: Repository> DatadirTimeline<R> {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            writer: self.tline.writer(),
         }
     }
 
@@ -532,7 +533,7 @@ pub struct DatadirModification<'a, R: Repository> {
     /// in the state in 'tline' yet.
     pub tline: &'a DatadirTimeline<R>,
 
-    lsn: Lsn,
+    pub lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
@@ -540,9 +541,17 @@ pub struct DatadirModification<'a, R: Repository> {
     pending_updates: HashMap<Key, Value>,
     pending_deletions: Vec<Range<Key>>,
     pending_nblocks: isize,
+
+    writer: Box<dyn TimelineWriter<'a> + 'a>,
 }
 
 impl<'a, R: Repository> DatadirModification<'a, R> {
+    pub fn clear(&mut self) {
+        self.pending_updates.clear();
+        self.pending_deletions.clear();
+        self.pending_nblocks = 0;
+    }
+
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -905,19 +914,17 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
     ///
-    pub fn commit(self) -> Result<()> {
-        let writer = self.tline.tline.writer();
-
+    pub fn commit(&self) -> Result<()> {
         let pending_nblocks = self.pending_nblocks;
 
-        for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, value)?;
+        for (key, value) in &self.pending_updates {
+            self.writer.put(key.clone(), self.lsn, value.clone())?;
         }
-        for key_range in self.pending_deletions {
-            writer.delete(key_range.clone(), self.lsn)?;
+        for key_range in &self.pending_deletions {
+            self.writer.delete(key_range.clone(), self.lsn)?;
         }
 
-        writer.finish_write(self.lsn);
+        self.writer.finish_write(self.lsn);
 
         if pending_nblocks != 0 {
             self.tline.current_logical_size.fetch_add(

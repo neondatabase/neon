@@ -150,20 +150,34 @@ pub async fn handle_walreceiver_connection(
 
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+                // let mut n_records = 0;
+                // timer = std::time::Instant::now();
+                {
+                    let mut modification = timeline.begin_modification(last_rec_lsn);
 
-                    // It is important to deal with the aligned records as lsn in getPage@LSN is
-                    // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hitting a deadlock.
-                    ensure!(lsn.is_aligned());
+                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                        let _enter = info_span!("processing record", lsn = %lsn).entered();
 
-                    walingest.ingest_record(&timeline, recdata, lsn)?;
+                        // It is important to deal with the aligned records as lsn in getPage@LSN is
+                        // aligned and can be several bytes bigger. Without this alignment we are
+                        // at risk of hitting a deadlock.
+                        ensure!(lsn.is_aligned());
 
-                    fail_point!("walreceiver-after-ingest");
+                        modification.clear();
+                        modification.lsn = lsn;
+                        walingest.ingest_record(recdata, lsn, &mut modification)?;
 
-                    last_rec_lsn = lsn;
+                        fail_point!("walreceiver-after-ingest");
+
+                        last_rec_lsn = lsn;
+
+                        // n_records += 1;
+                    }
                 }
+                // info!(
+                //     "Processing {n_records} records took {}us",
+                //     timer.elapsed().as_micros()
+                // );
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {endlsn}");
