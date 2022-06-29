@@ -1,0 +1,41 @@
+{
+  "pins" : [
+    {
+      "identity" : "bluesocket",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/IBM-Swift/BlueSocket.git",
+      "state" : {
+        "revision" : "dd924c3bc2c1c144c42b8dda3896f1a03115ded4",
+        "version" : "2.0.2"
+      }
+    },
+    {
+      "identity" : "bluesslservice",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/IBM-Swift/BlueSSLService",
+      "state" : {
+        "revision" : "c249988fb748749739144e7f554710552acdc0bd",
+        "version" : "2.0.1"
+      }
+    },
+    {
+      "identity" : "postgresclientkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/codewinsdotcom/PostgresClientKit.git",
+      "state" : {
+        "branch" : "v1.4.3",
+        "revision" : "beafedaea6dc9f04712e9a8547b77f47c406a47e"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "6b2aa2748a7881eebb9f84fb10c01293e15b52ca",
+        "version" : "0.5.0"
+      }
+    }
+  ],
+  "version" : 2
+}
