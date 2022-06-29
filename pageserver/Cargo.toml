@@ -63,6 +63,8 @@ workspace_hack = { version = "0.1", path = "../workspace_hack" }
 close_fds = "0.3.2"
 walkdir = "2.3.2"
 
+parking_lot = "0.12.1"
+
 [dev-dependencies]
 hex-literal = "0.3"
 tempfile = "3.2"
