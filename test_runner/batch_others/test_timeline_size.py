@@ -8,6 +8,7 @@ import time
 
 def test_timeline_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
+    # Branch at the point where only 100 rows were inserted
     new_timeline_id = env.neon_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
@@ -22,6 +23,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
         with conn.cursor() as cur:
             cur.execute("SHOW neon.timeline_id")
 
+            # Create table, and insert the first 100 rows
             cur.execute("CREATE TABLE foo (t text)")
             cur.execute("""
                 INSERT INTO foo
@@ -34,51 +36,6 @@ def test_timeline_size(neon_simple_env: NeonEnv):
             assert local_details["current_logical_size"] == local_details[
                 "current_logical_size_non_incremental"]
             cur.execute("TRUNCATE foo")
-
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
-            local_details = res['local']
-            assert local_details["current_logical_size"] == local_details[
-                "current_logical_size_non_incremental"]
-
-
-def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch('test_timeline_size', 'empty')
-
-    client = env.pageserver.http_client()
-    timeline_details = assert_local(client, env.initial_tenant, new_timeline_id)
-    assert timeline_details['local']['current_logical_size'] == timeline_details['local'][
-        'current_logical_size_non_incremental']
-
-    pgmain = env.postgres.create_start("test_timeline_size")
-    log.info("postgres is running on 'test_timeline_size' branch")
-
-    with closing(pgmain.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SHOW neon.timeline_id")
-
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
-            local_details = res['local']
-            assert local_details["current_logical_size"] == local_details[
-                "current_logical_size_non_incremental"]
-
-            cur.execute('CREATE DATABASE foodb')
-            with closing(pgmain.connect(dbname='foodb')) as conn:
-                with conn.cursor() as cur2:
-
-                    cur2.execute("CREATE TABLE foo (t text)")
-                    cur2.execute("""
-                        INSERT INTO foo
-                            SELECT 'long string to consume some space' || g
-                            FROM generate_series(1, 10) g
-                    """)
-
-                    res = assert_local(client, env.initial_tenant, new_timeline_id)
-                    local_details = res['local']
-                    assert local_details["current_logical_size"] == local_details[
-                        "current_logical_size_non_incremental"]
-
-            cur.execute('DROP DATABASE foodb')
 
             res = assert_local(client, env.initial_tenant, new_timeline_id)
             local_details = res['local']

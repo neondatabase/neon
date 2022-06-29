@@ -28,7 +28,7 @@ use utils::{
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 6;
+pub const SK_FORMAT_VERSION: u32 = 5;
 const SK_PROTOCOL_VERSION: u32 = 2;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 

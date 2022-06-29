@@ -11,7 +11,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self};
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -445,9 +445,9 @@ impl Timeline {
     }
 
     /// Prepare public safekeeper info for reporting.
-    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
+    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> anyhow::Result<SkTimelineInfo> {
         let shared_state = self.mutex.lock().unwrap();
-        SkTimelineInfo {
+        Ok(SkTimelineInfo {
             last_log_term: Some(shared_state.sk.get_epoch()),
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
@@ -460,7 +460,7 @@ impl Timeline {
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
             safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
             backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
-        }
+        })
     }
 
     /// Update timeline state with peer safekeeper data.
@@ -625,8 +625,6 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
-        let _enter = info_span!("", timeline = %zttid.tenant_id).entered();
-
         let mut state = TIMELINES_STATE.lock().unwrap();
 
         match state.timelines.get(&zttid) {
@@ -669,7 +667,7 @@ impl GlobalTimelines {
     }
 
     /// Get ZTenantTimelineIDs of all active timelines.
-    pub fn get_active_timelines() -> HashSet<ZTenantTimelineId> {
+    pub fn get_active_timelines() -> Vec<ZTenantTimelineId> {
         let state = TIMELINES_STATE.lock().unwrap();
         state
             .timelines

@@ -289,7 +289,6 @@ impl ComputeNode {
 
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
-        handle_role_deletions(self, &mut client)?;
         handle_grants(&self.spec, &mut client)?;
         create_writablity_check_data(&mut client)?;
 

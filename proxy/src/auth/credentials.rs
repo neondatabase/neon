@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[derive(Debug, Error, PartialEq, Eq, Clone)]
+#[derive(Debug, Error, PartialEq)]
 pub enum ClientCredsParseError {
     #[error("Parameter `{0}` is missing in startup packet.")]
     MissingKey(&'static str),
@@ -44,7 +44,7 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials {
     pub user: String,
     pub dbname: String,
-    pub project_name: Result<String, ClientCredsParseError>,
+    pub project_name: String,
 }
 
 impl ClientCredentials {
@@ -67,7 +67,7 @@ impl ClientCredentials {
         let user = get_param("user")?;
         let dbname = get_param("database")?;
         let project_name = get_param("project").ok();
-        let project_name = get_project_name(sni_data, common_name, project_name.as_deref());
+        let project_name = get_project_name(sni_data, common_name, project_name.as_deref())?;
 
         Ok(Self {
             user,

@@ -1,5 +1,5 @@
 //! Actual Postgres connection handler to stream WAL to the server.
-
+//! Runs as a separate, cancellable Tokio task.
 use std::{
     str::FromStr,
     sync::Arc,
@@ -10,29 +10,113 @@ use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
 use fail::fail_point;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
+use utils::{
+    lsn::Lsn,
+    pq_proto::ReplicationFeedback,
+    zid::{NodeId, ZTenantTimelineId},
+};
 
-use super::TaskEvent;
 use crate::{
     http::models::WalReceiverEntry,
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
 };
-use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
-/// Opens a conneciton to the given wal producer and streams the WAL, sending progress messages during streaming.
-pub async fn handle_walreceiver_connection(
+#[derive(Debug, Clone)]
+pub enum WalConnectionEvent {
+    Started,
+    NewWal(ReplicationFeedback),
+    End(Result<(), String>),
+}
+
+/// A wrapper around standalone Tokio task, to poll its updates or cancel the task.
+#[derive(Debug)]
+pub struct WalReceiverConnection {
+    handle: tokio::task::JoinHandle<()>,
+    cancellation: watch::Sender<()>,
+    events_receiver: watch::Receiver<WalConnectionEvent>,
+}
+
+impl WalReceiverConnection {
+    /// Initializes the connection task, returning a set of handles on top of it.
+    /// The task is started immediately after the creation, fails if no connection is established during the timeout given.
+    pub fn open(
+        id: ZTenantTimelineId,
+        safekeeper_id: NodeId,
+        wal_producer_connstr: String,
+        connect_timeout: Duration,
+    ) -> Self {
+        let (cancellation, mut cancellation_receiver) = watch::channel(());
+        let (events_sender, events_receiver) = watch::channel(WalConnectionEvent::Started);
+
+        let handle = tokio::spawn(
+            async move {
+                let connection_result = handle_walreceiver_connection(
+                    id,
+                    &wal_producer_connstr,
+                    &events_sender,
+                    &mut cancellation_receiver,
+                    connect_timeout,
+                )
+                .await
+                .map_err(|e| {
+                    format!("Walreceiver connection for id {id} failed with error: {e:#}")
+                });
+
+                match &connection_result {
+                    Ok(()) => {
+                        debug!("Walreceiver connection for id {id} ended successfully")
+                    }
+                    Err(e) => warn!("{e}"),
+                }
+                events_sender
+                    .send(WalConnectionEvent::End(connection_result))
+                    .ok();
+            }
+            .instrument(info_span!("safekeeper_handle", sk = %safekeeper_id)),
+        );
+
+        Self {
+            handle,
+            cancellation,
+            events_receiver,
+        }
+    }
+
+    /// Polls for the next WAL receiver event, if there's any available since the last check.
+    /// Blocks if there's no new event available, returns `None` if no new events will ever occur.
+    /// Only the last event is returned, all events received between observatins are lost.
+    pub async fn next_event(&mut self) -> Option<WalConnectionEvent> {
+        match self.events_receiver.changed().await {
+            Ok(()) => Some(self.events_receiver.borrow().clone()),
+            Err(_cancellation_error) => None,
+        }
+    }
+
+    /// Gracefully aborts current WAL streaming task, waiting for the current WAL streamed.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.cancellation.send(()).ok();
+        let handle = &mut self.handle;
+        handle
+            .await
+            .context("Failed to join on a walreceiver connection task")?;
+        Ok(())
+    }
+}
+
+async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
     wal_producer_connstr: &str,
-    events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
-    mut cancellation: watch::Receiver<()>,
+    events_sender: &watch::Sender<WalConnectionEvent>,
+    cancellation: &mut watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
@@ -130,6 +214,8 @@ pub async fn handle_walreceiver_connection(
 
     while let Some(replication_message) = {
         select! {
+            // check for shutdown first
+            biased;
             _ = cancellation.changed() => {
                 info!("walreceiver interrupted");
                 None
@@ -258,7 +344,7 @@ pub async fn handle_walreceiver_connection(
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
                 .await?;
-            if let Err(e) = events_sender.send(TaskEvent::NewEvent(zenith_status_update)) {
+            if let Err(e) = events_sender.send(WalConnectionEvent::NewWal(zenith_status_update)) {
                 warn!("Wal connection event listener dropped, aborting the connection: {e}");
                 return Ok(());
             }

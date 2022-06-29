@@ -1,7 +1,6 @@
 [pageservers]
 #zenith-us-stage-ps-1 console_region_id=27
 zenith-us-stage-ps-2 console_region_id=27
-zenith-us-stage-ps-3 console_region_id=27
 
 [safekeepers]
 zenith-us-stage-sk-4 console_region_id=27

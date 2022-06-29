@@ -1,4 +1,4 @@
-name: Check code style and build
+name: Build and Test
 
 on:
   push:
@@ -6,27 +6,15 @@ on:
     - main
   pull_request:
 
-defaults:
-  run:
-    shell: bash -ex {0}
-
-concurrency:
-   group: ${{ github.workflow }}-${{ github.ref }}
-   cancel-in-progress: true
-
-env:
-  RUST_BACKTRACE: 1
-
 jobs:
-  check-codestyle-rust:
+  regression-check:
     strategy:
-      fail-fast: false
       matrix:
         # If we want to duplicate this job for different
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
-    timeout-minutes: 50
+    timeout-minutes: 30
     name: run regression test suite
     runs-on: ${{ matrix.os }}
 
@@ -104,30 +92,5 @@ jobs:
       - name: Run cargo clippy
         run: ./run_clippy.sh
 
-      - name: Ensure all project builds
-        run: cargo build --all --all-targets
-
-  check-codestyle-python:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: false
-          fetch-depth: 1
-
-      - name: Cache poetry deps
-        id: cache_poetry
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pypoetry/virtualenvs
-          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Run yapf to ensure code format
-        run: poetry run yapf --recursive --diff .
-
-      - name: Run mypy to check types
-        run: poetry run mypy .
+      - name: Run cargo test
+        run: cargo test --all --all-targets

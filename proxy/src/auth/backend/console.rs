@@ -49,12 +49,6 @@ impl UserFacingError for ConsoleAuthError {
     }
 }
 
-impl From<&auth::credentials::ClientCredsParseError> for ConsoleAuthError {
-    fn from(e: &auth::credentials::ClientCredsParseError) -> Self {
-        ConsoleAuthError::BadProjectName(e.clone())
-    }
-}
-
 // TODO: convert into an enum with "error"
 #[derive(Serialize, Deserialize, Debug)]
 struct GetRoleSecretResponse {
@@ -100,7 +94,7 @@ impl<'a> Api<'a> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
-            .append_pair("project", self.creds.project_name.as_ref()?)
+            .append_pair("project", &self.creds.project_name)
             .append_pair("role", &self.creds.user);
 
         // TODO: use a proper logger
@@ -123,8 +117,8 @@ impl<'a> Api<'a> {
     async fn wake_compute(&self) -> Result<DatabaseInfo> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
-        let project_name = self.creds.project_name.as_ref()?;
-        url.query_pairs_mut().append_pair("project", project_name);
+        url.query_pairs_mut()
+            .append_pair("project", &self.creds.project_name);
 
         // TODO: use a proper logger
         println!("cplane request: {url}");

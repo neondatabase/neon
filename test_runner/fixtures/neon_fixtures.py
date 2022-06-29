@@ -50,7 +50,7 @@ A fixture is created with the decorator @pytest.fixture decorator.
 See docs: https://docs.pytest.org/en/6.2.x/fixture.html
 
 There are several environment variables that can control the running of tests:
-NEON_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
+ZENITH_BIN, POSTGRES_DISTRIB_DIR, etc. See README.md for more information.
 
 There's no need to import this file to use it. It should be declared as a plugin
 inside conftest.py, and that makes it available to all tests.
@@ -151,7 +151,7 @@ def pytest_configure(config):
         return
     # Find the neon binaries.
     global neon_binpath
-    env_neon_bin = os.environ.get('NEON_BIN')
+    env_neon_bin = os.environ.get('ZENITH_BIN')
     if env_neon_bin:
         neon_binpath = env_neon_bin
     else:
