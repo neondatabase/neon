@@ -21,7 +21,7 @@ use utils::zid::ZTenantId;
 
 static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "tenant_task_events",
+        "pageserver_tenant_task_events",
         "Number of task start/stop/fail events.",
         &["event"],
     )
