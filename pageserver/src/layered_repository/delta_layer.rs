@@ -672,6 +672,25 @@ impl DeltaLayerWriter {
         Ok(())
     }
 
+    pub fn put_value_bytes(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: &[u8],
+        will_init: bool,
+    ) -> Result<()> {
+        assert!(self.lsn_range.start <= lsn);
+
+        let off = self.blob_writer.write_blob(val)?;
+
+        let blob_ref = BlobRef::new(off, will_init);
+
+        let delta_key = DeltaKey::from_key_lsn(&key, lsn);
+        self.tree.append(&delta_key.0, blob_ref.0)?;
+
+        Ok(())
+    }
+
     pub fn size(&self) -> u64 {
         self.blob_writer.size() + self.tree.borrow_writer().size()
     }

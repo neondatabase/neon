@@ -352,8 +352,8 @@ impl InMemoryLayer {
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
-                let val = Value::des(&buf)?;
-                delta_layer_writer.put_value(key, *lsn, val)?;
+                let will_init = Value::des(&buf)?.will_init();
+                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }
         }
 
