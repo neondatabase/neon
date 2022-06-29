@@ -5,6 +5,11 @@ use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use etcd_broker::subscription_value::SkTimelineInfo;
+use etcd_broker::LeaseKeepAliveStream;
+use etcd_broker::LeaseKeeper;
+
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -21,7 +26,7 @@ use utils::zid::{NodeId, ZTenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
-const LEASE_TTL_SEC: i64 = 5;
+const LEASE_TTL_SEC: i64 = 10;
 
 pub fn thread_main(conf: SafeKeeperConf) {
     let runtime = runtime::Builder::new_current_thread()
@@ -154,13 +159,48 @@ pub fn get_candiate_name(system_id: NodeId) -> String {
     format!("id_{system_id}")
 }
 
+async fn push_sk_info(
+    zttid: ZTenantTimelineId,
+    mut client: Client,
+    key: String,
+    sk_info: SkTimelineInfo,
+    mut lease: Lease,
+) -> anyhow::Result<(ZTenantTimelineId, Lease)> {
+    let put_opts = PutOptions::new().with_lease(lease.id);
+    client
+        .put(
+            key.clone(),
+            serde_json::to_string(&sk_info)?,
+            Some(put_opts),
+        )
+        .await
+        .with_context(|| format!("failed to push safekeeper info to {}", key))?;
+
+    // revive the lease
+    lease
+        .keeper
+        .keep_alive()
+        .await
+        .context("failed to send LeaseKeepAliveRequest")?;
+    lease
+        .ka_stream
+        .message()
+        .await
+        .context("failed to receive LeaseKeepAliveResponse")?;
+
+    Ok((zttid, lease))
+}
+
+struct Lease {
+    id: i64,
+    keeper: LeaseKeeper,
+    ka_stream: LeaseKeepAliveStream,
+}
+
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
     let mut client = Client::connect(&conf.broker_endpoints, None).await?;
-
-    // Get and maintain lease to automatically delete obsolete data
-    let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
-    let (mut keeper, mut ka_stream) = client.lease_keep_alive(lease.id()).await?;
+    let mut leases: HashMap<ZTenantTimelineId, Lease> = HashMap::new();
 
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
     loop {
@@ -168,33 +208,46 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // is under plain mutex. That's ok, all this code is not performance
         // sensitive and there is no risk of deadlock as we don't await while
         // lock is held.
-        for zttid in GlobalTimelines::get_active_timelines() {
-            if let Some(tli) = GlobalTimelines::get_loaded(zttid) {
-                let sk_info = tli.get_public_info(&conf)?;
-                let put_opts = PutOptions::new().with_lease(lease.id());
-                client
-                    .put(
-                        timeline_safekeeper_path(
-                            conf.broker_etcd_prefix.clone(),
-                            zttid,
-                            conf.my_id,
-                        ),
-                        serde_json::to_string(&sk_info)?,
-                        Some(put_opts),
-                    )
-                    .await
-                    .context("failed to push safekeeper info")?;
+        let active_tlis = GlobalTimelines::get_active_timelines();
+
+        // // Get and maintain (if not yet) per timeline lease to automatically delete obsolete data.
+        for zttid in active_tlis.iter() {
+            if let Entry::Vacant(v) = leases.entry(*zttid) {
+                let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
+                let (keeper, ka_stream) = client.lease_keep_alive(lease.id()).await?;
+                v.insert(Lease {
+                    id: lease.id(),
+                    keeper,
+                    ka_stream,
+                });
             }
         }
-        // revive the lease
-        keeper
-            .keep_alive()
-            .await
-            .context("failed to send LeaseKeepAliveRequest")?;
-        ka_stream
-            .message()
-            .await
-            .context("failed to receive LeaseKeepAliveResponse")?;
+        leases.retain(|zttid, _| active_tlis.contains(zttid));
+
+        // Push data concurrently to not suffer from latency, with many timelines it can be slow.
+        let handles = active_tlis
+            .iter()
+            .filter_map(|zttid| GlobalTimelines::get_loaded(*zttid))
+            .map(|tli| {
+                let sk_info = tli.get_public_info(&conf);
+                let key = timeline_safekeeper_path(
+                    conf.broker_etcd_prefix.clone(),
+                    tli.zttid,
+                    conf.my_id,
+                );
+                let lease = leases.remove(&tli.zttid).unwrap();
+                tokio::spawn(push_sk_info(tli.zttid, client.clone(), key, sk_info, lease))
+            })
+            .collect::<Vec<_>>();
+        for h in handles {
+            let (zttid, lease) = h.await??;
+            // It is ugly to pull leases from hash and then put it back, but
+            // otherwise we have to resort to long living per tli tasks (which
+            // would generate a lot of errors when etcd is down) as task wants to
+            // have 'static objects, we can't borrow to it.
+            leases.insert(zttid, lease);
+        }
+
         sleep(push_interval).await;
     }
 }
@@ -221,15 +274,12 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     .await
     .context("failed to subscribe for safekeeper info")?;
     loop {
-        match subscription.fetch_data().await {
+        match subscription.value_updates.recv().await {
             Some(new_info) => {
-                for (zttid, sk_info) in new_info {
-                    // note: there are blocking operations below, but it's considered fine for now
-                    if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                        for (safekeeper_id, info) in sk_info {
-                            tli.record_safekeeper_info(&info, safekeeper_id).await?
-                        }
-                    }
+                // note: there are blocking operations below, but it's considered fine for now
+                if let Ok(tli) = GlobalTimelines::get(&conf, new_info.key.id, false) {
+                    tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
+                        .await?
                 }
             }
             None => {
