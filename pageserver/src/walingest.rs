@@ -261,7 +261,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit()?;
+        modification.commit(lsn)?;
 
         Ok(())
     }
@@ -1069,11 +1069,10 @@ mod tests {
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
     fn init_walingest_test<R: Repository>(tline: &DatadirTimeline<R>) -> Result<WalIngest<R>> {
-        let mut m = tline.begin_modification(Lsn(0x10));
+        let mut m = tline.begin_modification();
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x10))?;
         let walingest = WalIngest::new(tline, Lsn(0x10))?;
 
         Ok(walingest)
@@ -1085,23 +1084,19 @@ mod tests {
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&tline)?;
 
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         walingest.put_rel_creation(&mut m, TESTREL_A)?;
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
-        m.commit()?;
-        drop(m);
-        let mut m = tline.begin_modification(Lsn(0x30));
+        m.commit(Lsn(0x20))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"))?;
-        m.commit()?;
-        drop(m);
-        let mut m = tline.begin_modification(Lsn(0x40));
+        m.commit(Lsn(0x30))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"))?;
-        m.commit()?;
-        drop(m);
-        let mut m = tline.begin_modification(Lsn(0x50));
+        m.commit(Lsn(0x40))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"))?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x50))?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -1147,10 +1142,9 @@ mod tests {
         );
 
         // Truncate last block
-        let mut m = tline.begin_modification(Lsn(0x60));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 2)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x60))?;
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -1172,17 +1166,15 @@ mod tests {
         );
 
         // Truncate to zero length
-        let mut m = tline.begin_modification(Lsn(0x68));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 0)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x68))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68))?, 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
-        let mut m = tline.begin_modification(Lsn(0x70));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x70))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70))?, 2);
         assert_eq!(
             tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?,
@@ -1194,10 +1186,9 @@ mod tests {
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
-        let mut m = tline.begin_modification(Lsn(0x80));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x80))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, 1501);
         for blk in 2..1500 {
             assert_eq!(
@@ -1221,20 +1212,18 @@ mod tests {
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&tline)?;
 
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x20))?;
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
 
         // Drop rel
-        let mut m = tline.begin_modification(Lsn(0x30));
+        let mut m = tline.begin_modification();
         walingest.put_rel_drop(&mut m, TESTREL_A)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x30))?;
 
         // Check that rel is not visible anymore
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
@@ -1243,10 +1232,9 @@ mod tests {
         //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30))?.is_none());
 
         // Re-create it
-        let mut m = tline.begin_modification(Lsn(0x40));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"))?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x40))?;
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
@@ -1266,13 +1254,12 @@ mod tests {
 
         // Create a 20 MB relation (the size is arbitrary)
         let relsize = 20 * 1024 * 1024 / 8192;
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
         }
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x20))?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
@@ -1293,10 +1280,9 @@ mod tests {
 
         // Truncate relation so that second segment was dropped
         // - only leave one page
-        let mut m = tline.begin_modification(Lsn(0x60));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 1)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(0x60))?;
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 1);
@@ -1324,13 +1310,12 @@ mod tests {
         // Extend relation again.
         // Add enough blocks to create second segment
         let lsn = Lsn(0x80);
-        let mut m = tline.begin_modification(lsn);
+        let mut m = tline.begin_modification();
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
         }
-        m.commit()?;
-        drop(m);
+        m.commit(lsn)?;
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, relsize);
@@ -1358,11 +1343,10 @@ mod tests {
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             lsn += 0x10;
-            let mut m = tline.begin_modification(Lsn(lsn));
+            let mut m = tline.begin_modification();
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest.put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img)?;
-            m.commit()?;
-            drop(m);
+            m.commit(Lsn(lsn))?;
         }
 
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1374,10 +1358,9 @@ mod tests {
 
         // Truncate one block
         lsn += 0x10;
-        let mut m = tline.begin_modification(Lsn(lsn));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(lsn))?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE
@@ -1386,10 +1369,9 @@ mod tests {
 
         // Truncate another block
         lsn += 0x10;
-        let mut m = tline.begin_modification(Lsn(lsn));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE - 1)?;
-        m.commit()?;
-        drop(m);
+        m.commit(Lsn(lsn))?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE - 1
@@ -1401,10 +1383,9 @@ mod tests {
         let mut size: i32 = 3000;
         while size >= 0 {
             lsn += 0x10;
-            let mut m = tline.begin_modification(Lsn(lsn));
+            let mut m = tline.begin_modification();
             walingest.put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber)?;
-            m.commit()?;
-            drop(m);
+            m.commit(Lsn(lsn))?;
             assert_eq!(
                 tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
                 size as BlockNumber

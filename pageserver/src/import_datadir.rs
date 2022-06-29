@@ -39,7 +39,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification(lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     // Import all but pg_wal
@@ -62,7 +62,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     }
 
     // We're done importing all the data files.
-    modification.commit()?;
+    modification.commit(lsn)?;
     drop(modification);
 
     // We expect the Postgres server to be shut down cleanly.
@@ -269,11 +269,10 @@ fn import_wal<R: Repository>(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
-        let mut modification = tline.begin_modification(last_lsn);
+        let mut modification = tline.begin_modification();
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                modification.lsn = lsn;
                 walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
@@ -304,7 +303,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     base_lsn: Lsn,
 ) -> Result<()> {
     info!("importing base at {}", base_lsn);
-    let mut modification = tline.begin_modification(base_lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
@@ -335,7 +334,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit()?;
+    modification.commit(base_lsn)?;
     Ok(())
 }
 
@@ -387,11 +386,10 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
-        let mut modification = tline.begin_modification(last_lsn);
+        let mut modification = tline.begin_modification();
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                modification.lsn = lsn;
                 walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 

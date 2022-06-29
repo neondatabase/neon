@@ -79,27 +79,25 @@ impl<R: Repository> DatadirTimeline<R> {
     /// the timeline.
     ///
     /// This provides a transaction-like interface to perform a bunch
-    /// of modifications atomically, all stamped with one LSN.
+    /// of modifications atomically.
     ///
-    /// To ingest a WAL record, call begin_modification(lsn) to get a
+    /// To ingest a WAL record, call begin_modification() to get a
     /// DatadirModification object. Use the functions in the object to
     /// modify the repository state, updating all the pages and metadata
-    /// that the WAL record affects. When you're done, call commit() to
-    /// commit the changes.
+    /// that the WAL record affects. When you're done, call commit(lsn) to
+    /// commit the changes. All the changes will be stamped with the specified LSN.
     ///
     /// Note that any pending modifications you make through the
     /// modification object won't be visible to calls to the 'get' and list
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification<R> {
+    pub fn begin_modification(&self) -> DatadirModification<R> {
         DatadirModification {
             tline: self,
-            lsn,
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
-            writer: self.tline.writer(),
         }
     }
 
@@ -533,16 +531,12 @@ pub struct DatadirModification<'a, R: Repository> {
     /// in the state in 'tline' yet.
     pub tline: &'a DatadirTimeline<R>,
 
-    pub lsn: Lsn,
-
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_updates: HashMap<Key, Value>,
     pending_deletions: Vec<Range<Key>>,
     pending_nblocks: isize,
-
-    writer: Box<dyn TimelineWriter<'a> + 'a>,
 }
 
 impl<'a, R: Repository> DatadirModification<'a, R> {
@@ -907,19 +901,22 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     ///
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
+    /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self, lsn: Lsn) -> Result<()> {
+        let writer = self.tline.tline.writer();
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            self.writer.put(key, self.lsn, value)?;
+            writer.put(key, lsn, value)?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            self.writer.delete(key_range, self.lsn)?;
+            writer.delete(key_range, lsn)?;
         }
 
-        self.writer.finish_write(self.lsn);
+        writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
             self.tline.current_logical_size.fetch_add(
@@ -1347,9 +1344,9 @@ pub fn create_test_timeline<R: Repository>(
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let tline = DatadirTimeline::new(tline, 256 * 1024);
-    let mut m = tline.begin_modification(Lsn(8));
+    let mut m = tline.begin_modification();
     m.init_empty()?;
-    m.commit()?;
+    m.commit(Lsn(8))?;
     drop(m);
     Ok(Arc::new(tline))
 }

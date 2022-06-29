@@ -155,7 +155,7 @@ pub async fn handle_walreceiver_connection(
                 // timer = std::time::Instant::now();
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(last_rec_lsn);
+                    let mut modification = timeline.begin_modification();
 
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // let _enter = info_span!("processing record", lsn = %lsn).entered();
@@ -165,7 +165,6 @@ pub async fn handle_walreceiver_connection(
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        modification.lsn = lsn;
                         walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
 
                         fail_point!("walreceiver-after-ingest");

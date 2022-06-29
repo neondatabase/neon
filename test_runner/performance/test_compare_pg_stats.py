@@ -103,10 +103,10 @@ def test_compare_pg_stats_wal_with_pgbench_default(neon_with_baseline: PgCompare
 
 
 @pytest.mark.parametrize("duration", [10, 30])
-def test_compare_pg_stats_wo_with_simple_write(neon_with_baseline: PgCompare,
+def test_compare_pg_stats_wo_with_simple_write(neon_compare: PgCompare,
                                                duration: int,
                                                pg_stats_wo: List[PgStatTable]):
-    env = neon_with_baseline
+    env = neon_compare
     with env.pg.connect().cursor() as cur:
         cur.execute(
             "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
