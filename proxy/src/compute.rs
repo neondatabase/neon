@@ -1,8 +1,6 @@
-use crate::auth::DatabaseInfo;
-use crate::cancellation::CancelClosure;
-use crate::error::UserFacingError;
-use std::io;
-use std::net::SocketAddr;
+use crate::{cancellation::CancelClosure, error::UserFacingError};
+use futures::TryFutureExt;
+use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
@@ -29,20 +27,57 @@ pub type Version = String;
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
+/// TODO: write a comment.
+pub type ComputeConnCfg = tokio_postgres::Config;
+
 /// Compute node connection params.
 pub struct NodeInfo {
-    pub db_info: DatabaseInfo,
+    pub config: ComputeConnCfg,
     pub scram_keys: Option<ScramKeys>,
 }
 
 impl NodeInfo {
     async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
-        let host_port = (self.db_info.host.as_str(), self.db_info.port);
-        let socket = TcpStream::connect(host_port).await?;
-        let socket_addr = socket.peer_addr()?;
-        socket2::SockRef::from(&socket).set_keepalive(true)?;
+        use tokio_postgres::config::Host;
 
-        Ok((socket_addr, socket))
+        let connect_once = |host, port| {
+            TcpStream::connect((host, port)).and_then(|socket| async {
+                let socket_addr = socket.peer_addr()?;
+                // This prevents load balancer from severing the connection.
+                socket2::SockRef::from(&socket).set_keepalive(true)?;
+                Ok((socket_addr, socket))
+            })
+        };
+
+        // We can't reuse connection establishing logic from `tokio_postgres` here,
+        // because it has no means for extracting the underlying socket which we
+        // require for our business.
+        let mut connection_error = None;
+        let ports = self.config.get_ports();
+        for (i, host) in self.config.get_hosts().iter().enumerate() {
+            let port = ports.get(i).or_else(|| ports.get(0)).unwrap_or(&5432);
+            let host = match host {
+                Host::Tcp(host) => host.as_str(),
+                Host::Unix(_) => continue, // unix sockets are not welcome here
+            };
+
+            // TODO: maybe we should add a timeout.
+            match connect_once(host, *port).await {
+                Ok(socket) => return Ok(socket),
+                Err(err) => {
+                    // We can't throw an error here, as there might be more hosts to try.
+                    println!("failed to connect to compute `{host}:{port}`: {err}");
+                    connection_error = Some(err);
+                }
+            }
+        }
+
+        Err(connection_error.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("couldn't connect: bad compute config: {:?}", self.config),
+            )
+        }))
     }
 
     /// Connect to a corresponding compute node.
@@ -52,7 +87,7 @@ impl NodeInfo {
             .await
             .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
 
-        let mut config = tokio_postgres::Config::from(self.db_info);
+        let mut config = self.config;
         if let Some(scram_keys) = self.scram_keys {
             config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(scram_keys));
         }

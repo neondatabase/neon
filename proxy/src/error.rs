@@ -1,3 +1,5 @@
+use std::io;
+
 /// Marks errors that may be safely shown to a client.
 /// This trait can be seen as a specialized version of [`ToString`].
 ///
@@ -14,4 +16,9 @@ pub trait UserFacingError: ToString {
     fn to_string_client(&self) -> String {
         self.to_string()
     }
+}
+
+/// Upcast (almost) any error into an opaque [`io::Error`].
+pub fn io_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e)
 }

@@ -82,9 +82,20 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let (stream, creds) = match handshake(stream, tls, cancel_map).await? {
+    let (mut stream, params) = match handshake(stream, tls, cancel_map).await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
+    };
+
+    let creds = {
+        let sni = stream.get_ref().sni_hostname();
+        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let result = config
+            .auth_backend
+            .map(|_| auth::ClientCredentials::parse(params, sni, common_name))
+            .transpose();
+
+        async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
     let client = Client::new(stream, creds);
@@ -101,11 +112,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
     cancel_map: &CancelMap,
-) -> anyhow::Result<Option<(PqStream<Stream<S>>, auth::ClientCredentials)>> {
+) -> anyhow::Result<Option<(PqStream<Stream<S>>, StartupMessageParams)>> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
-
-    let common_name = tls.and_then(|cfg| cfg.common_name.as_deref());
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -147,18 +156,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
                 }
 
-                // Get SNI info when available
-                let sni_data = match stream.get_ref() {
-                    Stream::Tls { tls } => tls.get_ref().1.sni_hostname().map(|s| s.to_owned()),
-                    _ => None,
-                };
-
-                // Construct credentials
-                let creds =
-                    auth::ClientCredentials::parse(params, sni_data.as_deref(), common_name);
-                let creds = async { creds }.or_else(|e| stream.throw_error(e)).await?;
-
-                break Ok(Some((stream, creds)));
+                break Ok(Some((stream, params)));
             }
             CancelRequest(cancel_key_data) => {
                 cancel_map.cancel_session(cancel_key_data).await?;
@@ -174,12 +172,12 @@ struct Client<S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<S>,
     /// Client credentials that we care about.
-    creds: auth::ClientCredentials,
+    creds: auth::BackendType<auth::ClientCredentials>,
 }
 
 impl<S> Client<S> {
     /// Construct a new connection context.
-    fn new(stream: PqStream<S>, creds: auth::ClientCredentials) -> Self {
+    fn new(stream: PqStream<S>, creds: auth::BackendType<auth::ClientCredentials>) -> Self {
         Self { stream, creds }
     }
 }
@@ -194,7 +192,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let Self { mut stream, creds } = self;
 
         // Authenticate and connect to a compute node.
-        let auth = creds.authenticate(config, &mut stream).await;
+        let auth = creds.authenticate(&config.auth_urls, &mut stream).await;
         let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
         let (db, version, cancel_closure) =
@@ -279,9 +277,13 @@ mod tests {
             let config = rustls::ServerConfig::builder()
                 .with_safe_defaults()
                 .with_no_client_auth()
-                .with_single_cert(vec![cert], key)?;
+                .with_single_cert(vec![cert], key)?
+                .into();
 
-            config.into()
+            TlsConfig {
+                config,
+                common_name: Some(common_name.to_string()),
+            }
         };
 
         let client_config = {
@@ -295,11 +297,6 @@ mod tests {
                 .with_no_client_auth();
 
             ClientConfig { config, hostname }
-        };
-
-        let tls_config = TlsConfig {
-            config: tls_config,
-            common_name: Some(common_name.to_string()),
         };
 
         Ok((client_config, tls_config))

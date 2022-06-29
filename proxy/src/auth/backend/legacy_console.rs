@@ -76,6 +76,12 @@ enum ProxyAuthResponse {
     NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
+impl ClientCredentials {
+    fn is_existing_user(&self) -> bool {
+        self.user.ends_with("@zenith")
+    }
+}
+
 async fn authenticate_proxy_client(
     auth_endpoint: &reqwest::Url,
     creds: &ClientCredentials,
@@ -128,7 +134,8 @@ async fn handle_existing_user(
 
     // Read client's password hash
     let msg = client.read_password_message().await?;
-    let md5_response = parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword)?;
+    let md5_response =
+        parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
     let db_info = authenticate_proxy_client(
         auth_endpoint,
@@ -144,7 +151,7 @@ async fn handle_existing_user(
         .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
     Ok(compute::NodeInfo {
-        db_info,
+        config: db_info.into(),
         scram_keys: None,
     })
 }
@@ -152,8 +159,8 @@ async fn handle_existing_user(
 pub async fn handle_user(
     auth_endpoint: &reqwest::Url,
     auth_link_uri: &reqwest::Url,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     creds: &ClientCredentials,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
 ) -> auth::Result<compute::NodeInfo> {
     if creds.is_existing_user() {
         handle_existing_user(auth_endpoint, client, creds).await
@@ -200,5 +207,25 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(auth, ProxyAuthResponse::NotReady { .. }));
+    }
+
+    #[test]
+    fn parse_db_info() -> anyhow::Result<()> {
+        let _: DatabaseInfo = serde_json::from_value(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+        }))?;
+
+        let _: DatabaseInfo = serde_json::from_value(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+        }))?;
+
+        Ok(())
     }
 }

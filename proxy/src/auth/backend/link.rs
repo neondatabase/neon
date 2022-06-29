@@ -41,7 +41,7 @@ pub async fn handle_user(
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
     Ok(compute::NodeInfo {
-        db_info,
+        config: db_info.into(),
         scram_keys: None,
     })
 }

@@ -1,28 +1,16 @@
-use crate::url::ApiUrl;
+use crate::{auth, url::ApiUrl};
 use anyhow::{bail, ensure, Context};
 use std::{str::FromStr, sync::Arc};
 
-#[derive(Debug)]
-pub enum AuthBackendType {
-    /// Legacy Cloud API (V1).
-    LegacyConsole,
-    /// Authentication via a web browser.
-    Link,
-    /// Current Cloud API (V2).
-    Console,
-    /// Local mock of Cloud API (V2).
-    Postgres,
-}
-
-impl FromStr for AuthBackendType {
+impl FromStr for auth::BackendType<()> {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        use AuthBackendType::*;
+        use auth::BackendType::*;
         Ok(match s {
-            "legacy" => LegacyConsole,
-            "console" => Console,
-            "postgres" => Postgres,
+            "legacy" => LegacyConsole(()),
+            "console" => Console(()),
+            "postgres" => Postgres(()),
             "link" => Link,
             _ => bail!("Invalid option `{s}` for auth method"),
         })
@@ -31,7 +19,11 @@ impl FromStr for AuthBackendType {
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: AuthBackendType,
+    pub auth_backend: auth::BackendType<()>,
+    pub auth_urls: AuthUrls,
+}
+
+pub struct AuthUrls {
     pub auth_endpoint: ApiUrl,
     pub auth_link_uri: ApiUrl,
 }
@@ -87,10 +79,8 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
                 "Failed to parse PEM object from bytes from file at '{cert_path}'."
             ))?
             .1;
-        let almost_common_name = pem.parse_x509()?.tbs_certificate.subject.to_string();
-        let expected_prefix = "CN=*.";
-        let common_name = almost_common_name.strip_prefix(expected_prefix);
-        common_name.map(str::to_string)
+        let common_name = pem.parse_x509()?.subject().to_string();
+        common_name.strip_prefix("CN=*.").map(|s| s.to_string())
     };
 
     Ok(TlsConfig {
