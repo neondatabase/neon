@@ -35,9 +35,14 @@ def test_createdb(neon_simple_env: NeonEnv):
         with closing(db.connect(dbname='foodb')) as conn:
             with conn.cursor() as cur:
                 # Check database size in both branches
-                cur.execute(
-                    'select pg_size_pretty(pg_database_size(%s)), pg_size_pretty(sum(pg_relation_size(oid))) from pg_class where relisshared is false;',
-                    ('foodb', ))
+                cur.execute("""
+                    select pg_size_pretty(pg_database_size('foodb')),
+                    pg_size_pretty(
+                    sum(pg_relation_size(oid, 'main'))
+                    +sum(pg_relation_size(oid, 'vm'))
+                    +sum(pg_relation_size(oid, 'fsm'))
+                    ) FROM pg_class where relisshared is false
+                   """)
                 res = cur.fetchone()
                 # check that dbsize equals sum of all relation sizes, excluding shared ones
                 # This is how we define dbsize in neon for now

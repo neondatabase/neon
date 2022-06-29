@@ -733,17 +733,10 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let all_rels = timeline.list_rels(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
-        let mut total_blocks: i64 = 0;
+        let total_blocks =
+            timeline.get_db_size(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
 
-        for rel in all_rels {
-            if rel.forknum == 0 {
-                let n_blocks = timeline.get_rel_size(rel, lsn).unwrap_or(0);
-                total_blocks += n_blocks as i64;
-            }
-        }
-
-        let db_size = total_blocks * pg_constants::BLCKSZ as i64;
+        let db_size = total_blocks as i64 * pg_constants::BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
             db_size,

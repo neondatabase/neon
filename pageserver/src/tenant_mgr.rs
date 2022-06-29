@@ -347,6 +347,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
             );
 
             // Wait until all gc/compaction tasks finish
+            // TODO send cancellation signal too, or make the state a watch
             let repo = get_repository_for_tenant(tenant_id)?;
             let _guard = repo.file_lock.write().unwrap();
         }
