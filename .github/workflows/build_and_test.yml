@@ -49,7 +49,7 @@ jobs:
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: COPT='-Werror' mold -run make postgres -j$(nproc)
+        run: mold -run make postgres -j$(nproc)
 
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
@@ -109,7 +109,7 @@ jobs:
       - name: Run cargo build
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
             CARGO_FLAGS=
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
@@ -121,7 +121,7 @@ jobs:
       - name: Run cargo test
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
             CARGO_FLAGS=
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
@@ -133,7 +133,7 @@ jobs:
       - name: Install rust binaries
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage run)
+            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=()
           fi
@@ -151,7 +151,9 @@ jobs:
           mkdir -p /tmp/neon/bin/
           mkdir -p /tmp/neon/test_bin/
           mkdir -p /tmp/neon/etc/
-          mkdir -p /tmp/neon/coverage/
+
+          # Keep bloated coverage data files away from the rest of the artifact
+          mkdir -p /tmp/coverage/
 
           # Install target binaries
           for bin in $binaries; do
@@ -163,13 +165,13 @@ jobs:
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
             for bin in $binaries; do
-              echo "/tmp/neon/bin/$bin" >> /tmp/neon/coverage/binaries.list
+              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
               cp "$SRC" "$DST"
-              echo "$DST" >> /tmp/neon/coverage/binaries.list
+              echo "$DST" >> /tmp/coverage/binaries.list
             done
           fi
 
@@ -313,7 +315,10 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: coverage-data-artifact
-          path: /tmp/neon/coverage/
+          path: /tmp/coverage/
+
+      - name: Merge coverage data
+        run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
       - name: Build and upload coverage report
         run: |
@@ -322,8 +327,8 @@ jobs:
           COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
 
           scripts/coverage \
-            --dir=/tmp/neon/coverage report \
-            --input-objects=/tmp/neon/coverage/binaries.list \
+            --dir=/tmp/coverage report \
+            --input-objects=/tmp/coverage/binaries.list \
             --commit-url=$COMMIT_URL \
             --format=github
 
@@ -332,7 +337,7 @@ jobs:
           scripts/git-upload \
             --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
             --message="Add code coverage for $COMMIT_URL" \
-            copy /tmp/neon/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
+            copy /tmp/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
 
           # Add link to the coverage report to the commit
           curl -f -X POST \

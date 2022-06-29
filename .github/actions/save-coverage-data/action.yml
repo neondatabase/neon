@@ -6,7 +6,7 @@ runs:
   steps:
     - name: Merge coverage data
       shell: bash -ex {0}
-      run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/neon/coverage/ merge
+      run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
     - name: Upload coverage data
       uses: actions/upload-artifact@v3
@@ -14,4 +14,4 @@ runs:
         retention-days: 7
         if-no-files-found: error
         name: coverage-data-artifact
-        path: /tmp/neon/coverage/
+        path: /tmp/coverage/
