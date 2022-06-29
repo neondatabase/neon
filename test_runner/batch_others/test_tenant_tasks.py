@@ -20,6 +20,8 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     def get_metric_value(name):
         metrics = client.get_metrics()
         relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        if len(relevant) == 0:
+            return 0
         line = get_only_element(relevant)
         value = line.lstrip(name).strip()
         return int(value)
@@ -48,9 +50,17 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         tenant_id = UUID(tenant_info["id"])
         detach_all_timelines(tenant_id)
 
-        # XXX this fails. Why?
+        # TODO poll wait until idle instead
+        import time; time.sleep(1)
         assert get_state(tenant_id) == "Idle"
 
+    # Read metrics
+    import time; time.sleep(1)
     tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
     tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
+    tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
+
+    # TODO this fails because the "active -> idle" transition only waits for gc to
+    #      finish without cancelling it, and gc waits for 100 seconds.
     assert tasks_started == tasks_ended
+    assert tasks_panicked == 0
