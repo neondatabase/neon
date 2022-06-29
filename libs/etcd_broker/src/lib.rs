@@ -6,17 +6,13 @@ pub mod subscription_key;
 /// All broker values, possible to use when dealing with etcd.
 pub mod subscription_value;
 
-use std::{
-    collections::{hash_map, HashMap},
-    str::FromStr,
-};
+use std::str::FromStr;
 
 use serde::de::DeserializeOwned;
 
 use subscription_key::SubscriptionKey;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
-use utils::zid::{NodeId, ZTenantTimelineId};
 
 use crate::subscription_key::SubscriptionFullKey;
 
@@ -28,18 +24,17 @@ pub const DEFAULT_NEON_BROKER_ETCD_PREFIX: &str = "neon";
 
 /// A way to control the data retrieval from a certain subscription.
 pub struct BrokerSubscription<V> {
-    value_updates: mpsc::UnboundedReceiver<HashMap<ZTenantTimelineId, HashMap<NodeId, V>>>,
+    /// An unbounded channel to fetch the relevant etcd updates from.
+    pub value_updates: mpsc::UnboundedReceiver<BrokerUpdate<V>>,
     key: SubscriptionKey,
-    watcher_handle: JoinHandle<Result<(), BrokerError>>,
+    /// A subscription task handle, to allow waiting on it for the task to complete.
+    /// Both the updates channel and the handle require `&mut`, so it's better to keep
+    /// both `pub` to allow using both in the same structures without borrow checker complaining.
+    pub watcher_handle: JoinHandle<Result<(), BrokerError>>,
     watcher: Watcher,
 }
 
 impl<V> BrokerSubscription<V> {
-    /// Asynchronously polls for more data from the subscription, suspending the current future if there's no data sent yet.
-    pub async fn fetch_data(&mut self) -> Option<HashMap<ZTenantTimelineId, HashMap<NodeId, V>>> {
-        self.value_updates.recv().await
-    }
-
     /// Cancels the subscription, stopping the data poller and waiting for it to shut down.
     pub async fn cancel(mut self) -> Result<(), BrokerError> {
         self.watcher.cancel().await.map_err(|e| {
@@ -48,13 +43,39 @@ impl<V> BrokerSubscription<V> {
                 format!("Failed to cancel broker subscription, kind: {:?}", self.key),
             )
         })?;
-        self.watcher_handle.await.map_err(|e| {
-            BrokerError::InternalError(format!(
-                "Failed to join the broker value updates task, kind: {:?}, error: {e}",
-                self.key
-            ))
-        })?
+        match (&mut self.watcher_handle).await {
+            Ok(res) => res,
+            Err(e) => {
+                if e.is_cancelled() {
+                    // don't error on the tasks that are cancelled already
+                    Ok(())
+                } else {
+                    Err(BrokerError::InternalError(format!(
+                        "Panicked during broker subscription task, kind: {:?}, error: {e}",
+                        self.key
+                    )))
+                }
+            }
+        }
     }
+}
+
+impl<V> Drop for BrokerSubscription<V> {
+    fn drop(&mut self) {
+        // we poll data from etcd into the channel in the same struct, so if the whole struct gets dropped,
+        // no more data is used by the receiver and it's safe to cancel and drop the whole etcd subscription task.
+        self.watcher_handle.abort();
+    }
+}
+
+/// An update from the etcd broker.
+pub struct BrokerUpdate<V> {
+    /// Etcd generation version, the bigger the more actual the data is.
+    pub etcd_version: i64,
+    /// Etcd key for the corresponding value, parsed from the broker KV.
+    pub key: SubscriptionFullKey,
+    /// Current etcd value, parsed from the broker KV.
+    pub value: V,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -124,53 +145,26 @@ where
                 break;
             }
 
-            let mut value_updates: HashMap<ZTenantTimelineId, HashMap<NodeId, V>> = HashMap::new();
-            // Keep track that the timeline data updates from etcd arrive in the right order.
-            // https://etcd.io/docs/v3.5/learning/api_guarantees/#isolation-level-and-consistency-of-replicas
-            // > etcd does not ensure linearizability for watch operations. Users are expected to verify the revision of watch responses to ensure correct ordering.
-            let mut value_etcd_versions: HashMap<ZTenantTimelineId, i64> = HashMap::new();
-
-
             let events = resp.events();
             debug!("Processing {} events", events.len());
 
             for event in events {
                 if EventType::Put == event.event_type() {
                     if let Some(new_etcd_kv) = event.kv() {
-                        let new_kv_version = new_etcd_kv.version();
-
                         match parse_etcd_kv(new_etcd_kv, &value_parser, &key.cluster_prefix) {
-                            Ok(Some((key, value))) => match value_updates
-                                .entry(key.id)
-                                .or_default()
-                                .entry(key.node_id)
-                                    {
-                                        hash_map::Entry::Occupied(mut o) => {
-                                            let old_etcd_kv_version = value_etcd_versions.get(&key.id).copied().unwrap_or(i64::MIN);
-                                            if old_etcd_kv_version < new_kv_version {
-                                                o.insert(value);
-                                                value_etcd_versions.insert(key.id,new_kv_version);
-                                            } else {
-                                                debug!("Skipping etcd timeline update due to older version compared to one that's already stored");
-                                            }
-                                        }
-                                        hash_map::Entry::Vacant(v) => {
-                                            v.insert(value);
-                                            value_etcd_versions.insert(key.id,new_kv_version);
-                                        }
-                                    },
+                            Ok(Some((key, value))) => if let Err(e) = value_updates_sender.send(BrokerUpdate {
+                                etcd_version: new_etcd_kv.version(),
+                                key,
+                                value,
+                            }) {
+                                info!("Broker value updates for key {key:?} sender got dropped, exiting: {e}");
+                                break;
+                            },
                             Ok(None) => debug!("Ignoring key {key:?} : no value was returned by the parser"),
                             Err(BrokerError::KeyNotParsed(e)) => debug!("Unexpected key {key:?} for timeline update: {e}"),
                             Err(e) => error!("Failed to represent etcd KV {new_etcd_kv:?}: {e}"),
                         };
                     }
-                }
-            }
-
-            if !value_updates.is_empty() {
-                if let Err(e) = value_updates_sender.send(value_updates) {
-                    info!("Broker value updates for key {key:?} sender got dropped, exiting: {e}");
-                    break;
                 }
             }
         }
