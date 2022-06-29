@@ -1984,7 +1984,7 @@ class Etcd:
 def get_test_output_dir(request: Any) -> pathlib.Path:
     """ Compute the working directory for an individual test. """
     test_name = request.node.name
-    test_dir = pathlib.Path(top_output_dir) / test_name
+    test_dir = pathlib.Path(top_output_dir) / test_name.replace("/", "-")
     log.info(f'get_test_output_dir is {test_dir}')
     # make mypy happy
     assert isinstance(test_dir, pathlib.Path)
