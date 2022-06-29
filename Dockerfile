@@ -24,6 +24,8 @@ ARG AWS_SECRET_ACCESS_KEY
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
+ENV CACHEPOT_RECACHE 1
+
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
