@@ -660,16 +660,7 @@ impl DeltaLayerWriter {
     /// The values must be appended in key, lsn order.
     ///
     pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
-        assert!(self.lsn_range.start <= lsn);
-
-        let off = self.blob_writer.write_blob(&Value::ser(&val)?)?;
-
-        let blob_ref = BlobRef::new(off, val.will_init());
-
-        let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
-
-        Ok(())
+        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
     }
 
     pub fn put_value_bytes(

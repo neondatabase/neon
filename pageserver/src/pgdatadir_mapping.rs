@@ -87,6 +87,9 @@ impl<R: Repository> DatadirTimeline<R> {
     /// that the WAL record affects. When you're done, call commit(lsn) to
     /// commit the changes. All the changes will be stamped with the specified LSN.
     ///
+    /// Calling commit(lsn) will flush all the changes and reset the state,
+    /// so the `DatadirModification` struct can be reused to perform the next modification.
+    ///
     /// Note that any pending modifications you make through the
     /// modification object won't be visible to calls to the 'get' and list
     /// functions of the timeline until you finish! And if you update the
@@ -1347,7 +1350,6 @@ pub fn create_test_timeline<R: Repository>(
     let mut m = tline.begin_modification();
     m.init_empty()?;
     m.commit(Lsn(8))?;
-    drop(m);
     Ok(Arc::new(tline))
 }
 

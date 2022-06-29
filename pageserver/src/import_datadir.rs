@@ -63,7 +63,6 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     // We're done importing all the data files.
     modification.commit(lsn)?;
-    drop(modification);
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
