@@ -28,7 +28,7 @@ use utils::{
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -40,6 +40,10 @@ pub struct InMemoryLayer {
     /// start is inclusive.
     ///
     start_lsn: Lsn,
+
+    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
+    /// This buffer is reused for each serialization to avoid additional malloc calls.
+    ser_buffer: Mutex<Vec<u8>>,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -255,6 +259,7 @@ impl InMemoryLayer {
             timelineid,
             tenantid,
             start_lsn,
+            ser_buffer: Mutex::new(Vec::new()),
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 index: HashMap::new(),
@@ -270,10 +275,15 @@ impl InMemoryLayer {
     pub fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timelineid, lsn);
         let mut inner = self.inner.write().unwrap();
-
         inner.assert_writeable();
 
-        let off = inner.file.write_blob(&Value::ser(&val)?)?;
+        let off = {
+            let mut buf = self.ser_buffer.lock().unwrap();
+            val.ser_into(&mut (*buf))?;
+            let off = inner.file.write_blob(&buf)?;
+            buf.clear();
+            off
+        };
 
         let vec_map = inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
