@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from typing import List
 
@@ -102,18 +103,32 @@ def test_compare_pg_stats_wal_with_pgbench_default(neon_with_baseline: PgCompare
         env.flush()
 
 
-@pytest.mark.parametrize("duration", get_durations_matrix(30))
-def test_compare_pg_stats_wo_with_simple_write(neon_with_baseline: PgCompare,
-                                               duration: int,
-                                               pg_stats_wo: List[PgStatTable]):
+@pytest.mark.parametrize("n_tables", [1, 10])
+@pytest.mark.parametrize("duration", get_durations_matrix(10))
+def test_compare_pg_stats_wo_with_heavy_write(neon_with_baseline: PgCompare,
+                                              n_tables: int,
+                                              duration: int,
+                                              pg_stats_wo: List[PgStatTable]):
     env = neon_with_baseline
     with env.pg.connect().cursor() as cur:
-        cur.execute(
-            "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
-        )
+        for i in range(n_tables):
+            cur.execute(
+                f"CREATE TABLE t{i}(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
+            )
 
-    start = time.time()
-    with env.record_pg_stats(pg_stats_wo):
+    def start_single_table_workload(table_id: int):
+        start = time.time()
         with env.pg.connect().cursor() as cur:
             while time.time() - start < duration:
-                cur.execute("INSERT INTO foo SELECT FROM generate_series(1,1000)")
+                cur.execute(f"INSERT INTO t{table_id} SELECT FROM generate_series(1,1000)")
+
+    with env.record_pg_stats(pg_stats_wo):
+        threads = [
+            threading.Thread(target=start_single_table_workload, args=(i, ))
+            for i in range(n_tables)
+        ]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
