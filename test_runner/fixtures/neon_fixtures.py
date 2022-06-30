@@ -2140,7 +2140,7 @@ def check_restored_datadir_content(test_output_dir: str, env: NeonEnv, pg: Postg
     assert (mismatch, error) == ([], [])
 
 
-def wait_until(number_of_iterations: int, interval: int, func):
+def wait_until(number_of_iterations: int, interval: float, func):
     """
     Wait until 'func' returns successfully, without exception. Returns the last return value
     from the the function.
