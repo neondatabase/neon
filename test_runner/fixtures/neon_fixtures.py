@@ -29,7 +29,7 @@ from dataclasses import dataclass
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Type, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
 import requests
@@ -824,7 +824,14 @@ class NeonPageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/detach")
         self.verbose_error(res)
 
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
+    def tenant_status(self, tenant_id: uuid.UUID) -> Dict[Any, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[str, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
         self.verbose_error(res)
         res_json = res.json()
@@ -2183,12 +2190,20 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_local(pageserver_http_client: NeonPageserverHttpClient,
-                 tenant: uuid.UUID,
-                 timeline: uuid.UUID):
+def assert_timeline_local(pageserver_http_client: NeonPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID):
     timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
     assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
     return timeline_detail
+
+
+def assert_no_in_progress_downloads_for_tenant(
+    pageserver_http_client: NeonPageserverHttpClient,
+    tenant: uuid.UUID,
+):
+    tenant_status = pageserver_http_client.tenant_status(tenant)
+    assert tenant_status['has_in_progress_downloads'] is False, tenant_status
 
 
 def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,

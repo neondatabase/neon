@@ -14,6 +14,7 @@ use crate::repository::Repository;
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_mgr::TenantInfo;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
@@ -403,14 +404,46 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     // check for management permission
     check_permission(&request, None)?;
 
+    let state = get_state(&request);
+    // clone to avoid holding the lock while awaiting for blocking task
+    let remote_index = state.remote_index.read().await.clone();
+
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_list").entered();
-        crate::tenant_mgr::list_tenants()
+        crate::tenant_mgr::list_tenants(&remote_index)
     })
     .await
     .map_err(ApiError::from_err)?;
 
     json_response(StatusCode::OK, response_data)
+}
+
+async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    // if tenant is in progress of downloading it can be absent in global tenant map
+    let tenant_state = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant_state(tenant_id))
+        .await
+        .map_err(ApiError::from_err)?;
+
+    let state = get_state(&request);
+    let remote_index = &state.remote_index;
+
+    let index_accessor = remote_index.read().await;
+    let has_in_progress_downloads = index_accessor
+        .tenant_entry(&tenant_id)
+        .ok_or_else(|| ApiError::NotFound("Tenant not found in remote index".to_string()))?
+        .has_in_progress_downloads();
+
+    json_response(
+        StatusCode::OK,
+        TenantInfo {
+            id: tenant_id,
+            state: tenant_state,
+            has_in_progress_downloads: Some(has_in_progress_downloads),
+        },
+    )
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -558,6 +591,7 @@ pub fn make_router(
         .get("/v1/status", status_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
+        .get("/v1/tenant/:tenant_id", tenant_status)
         .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)

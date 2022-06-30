@@ -5,7 +5,7 @@ use crate::config::PageServerConf;
 use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::Repository;
-use crate::storage_sync::index::RemoteIndex;
+use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr::ThreadKind;
@@ -509,15 +509,27 @@ fn load_local_timeline(
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
-    pub state: TenantState,
+    pub state: Option<TenantState>,
+    pub has_in_progress_downloads: Option<bool>,
 }
 
-pub fn list_tenants() -> Vec<TenantInfo> {
+pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
     tenants_state::read_tenants()
         .iter()
-        .map(|(id, tenant)| TenantInfo {
-            id: *id,
-            state: tenant.state,
+        .map(|(id, tenant)| {
+            let has_in_progress_downloads = remote_index
+                .tenant_entry(id)
+                .map(|entry| entry.has_in_progress_downloads());
+
+            if has_in_progress_downloads.is_none() {
+                error!("timeline is not found in remote index while it is present in the tenants registry")
+            }
+
+            TenantInfo {
+                id: *id,
+                state: Some(tenant.state),
+                has_in_progress_downloads,
+            }
         })
         .collect()
 }

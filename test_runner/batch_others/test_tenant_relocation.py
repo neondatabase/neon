@@ -1,15 +1,30 @@
-from contextlib import closing, contextmanager
 import os
 import pathlib
+import signal
 import subprocess
 import threading
-from uuid import UUID
-from fixtures.log_helper import log
+from contextlib import closing, contextmanager
 from typing import Any, Dict, Optional, Tuple
-import signal
-import pytest
+from uuid import UUID
 
-from fixtures.neon_fixtures import NeonEnv, PortDistributor, Postgres, NeonEnvBuilder, Etcd, NeonPageserverHttpClient, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload, neon_binpath, pg_distrib_dir, base_dir
+import pytest
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import (
+    Etcd,
+    NeonEnv,
+    NeonEnvBuilder,
+    NeonPageserverHttpClient,
+    PortDistributor,
+    Postgres,
+    assert_no_in_progress_downloads_for_tenant,
+    assert_timeline_local,
+    base_dir,
+    neon_binpath,
+    pg_distrib_dir,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+    wait_until,
+)
 from fixtures.utils import lsn_from_hex, subprocess_capture
 
 
@@ -144,10 +159,7 @@ def check_timeline_attached(
     old_current_lsn: int,
 ):
     # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
-    new_timeline_detail = wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_local(new_pageserver_http_client, tenant_id, timeline_id))
+    new_timeline_detail = assert_timeline_local(new_pageserver_http_client, tenant_id, timeline_id)
 
     # when load is active these checks can break because lsns are not static
     # so lets check with some margin
@@ -250,10 +262,10 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
     # wait until pageserver receives that data
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_main, current_lsn_main)
-    timeline_detail_main = assert_local(pageserver_http, tenant_id, timeline_id_main)
+    timeline_detail_main = assert_timeline_local(pageserver_http, tenant_id, timeline_id_main)
 
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_second, current_lsn_second)
-    timeline_detail_second = assert_local(pageserver_http, tenant_id, timeline_id_second)
+    timeline_detail_second = assert_timeline_local(pageserver_http, tenant_id, timeline_id_second)
 
     if with_load == 'with_load':
         # create load table
@@ -336,6 +348,16 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         elif method == "minor":
             # call to attach timeline to new pageserver
             new_pageserver_http.tenant_attach(tenant_id)
+
+            # check that it shows that download is in progress
+            tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
+            assert tenant_status.get('has_in_progress_downloads'), tenant_status
+
+            # wait until tenant is downloaded
+            wait_until(number_of_iterations=10,
+                       interval=1,
+                       func=lambda: assert_no_in_progress_downloads_for_tenant(
+                           new_pageserver_http, tenant_id))
 
             check_timeline_attached(
                 new_pageserver_http,
