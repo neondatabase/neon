@@ -2190,6 +2190,9 @@ impl LayeredTimeline {
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
                     }
+                    LsnForTimestamp::NoData(lsn) => {
+                        debug!("nodata({})", lsn);
+                    }
                 }
                 debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
             }
