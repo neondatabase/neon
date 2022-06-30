@@ -162,7 +162,9 @@ pub async fn handle_walreceiver_connection(
                         // at risk of hitting a deadlock.
                         ensure!(lsn.is_aligned());
 
-                        walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                        walingest
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                            .context("could not ingest record at {lsn}")?;
 
                         fail_point!("walreceiver-after-ingest");
 
