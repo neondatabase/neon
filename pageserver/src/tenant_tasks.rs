@@ -192,7 +192,6 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
 
                             // Spawn new task, request cancellation of the old one if exists
                             let (cancel_send, cancel_recv) = watch::channel(());
-                            // TODO this instrument doesn't work
                             let handle = tokio::spawn(compaction_loop(tenantid, cancel_recv)
                                 .instrument(info_span!("compaction loop", tenant = %tenantid)));
                             if let Some(old_cancel_send) = compaction_loops.insert(tenantid, cancel_send) {
