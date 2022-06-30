@@ -554,7 +554,7 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.create_empty_timeline(timeline_id, Lsn(0))?;
+        let timeline = repo.create_empty_timeline(timeline_id, base_lsn)?;
         let repartition_distance = repo.get_checkpoint_distance();
         let mut datadir_timeline =
             DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
@@ -1151,6 +1151,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 LsnForTimestamp::Present(lsn) => format!("{}", lsn),
                 LsnForTimestamp::Future(_lsn) => "future".into(),
                 LsnForTimestamp::Past(_lsn) => "past".into(),
+                LsnForTimestamp::NoData(_lsn) => "nodata".into(),
             };
             pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
             pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
