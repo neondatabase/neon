@@ -1,5 +1,6 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
 from uuid import UUID
+import time
 
 
 def get_only_element(l):
@@ -7,7 +8,15 @@ def get_only_element(l):
     return l[0]
 
 
+# Test that gc and compaction tenant tasks start and stop correctly
 def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
+    # The gc and compaction loops don't bother to watch for tenant state
+    # changes while sleeping, so we use small periods to make this test
+    # run faster. With default settings we'd have to wait longer for tasks
+    # to notice state changes and shut down.
+    # TODO fix this behavior in the pageserver
+    tenant_config = "{gc_period = '1 s', compaction_period = '1 s'}"
+    neon_env_builder.pageserver_config_override = f"tenant_config={tenant_config}"
     name = "test_tenant_tasks"
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -46,24 +55,23 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     time.sleep(1)
     assert (get_state(tenant) == "Idle")
 
-    # Detach all tenants
+    # Detach all tenants and wait for them to go idle
     for tenant_info in client.tenant_list():
         tenant_id = UUID(tenant_info["id"])
         detach_all_timelines(tenant_id)
 
         # TODO poll wait until idle instead
-        import time
+        # wait_until(10, 1, lambda: assert get_state(tenant_id) == "Idle")
         time.sleep(1)
         assert get_state(tenant_id) == "Idle"
 
-    # Read metrics
-    import time
-    time.sleep(1)
+    # Wait a bit longer than max(gc_period, compaction_period)
+    # so that tasks can notice state changes and shut down.
+    time.sleep(2)
+
+    # Assert tasks finish
     tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
     tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
     tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
-
-    # TODO this fails because the "active -> idle" transition only waits for gc to
-    #      finish without cancelling it, and gc waits for 100 seconds.
-    # assert tasks_started == tasks_ended
+    assert tasks_started == tasks_ended
     assert tasks_panicked == 0
