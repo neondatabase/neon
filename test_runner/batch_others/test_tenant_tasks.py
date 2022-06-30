@@ -40,6 +40,9 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         for t in timelines:
             client.timeline_detach(tenant, t)
 
+    def assert_idle(tenant):
+        assert get_state(tenant) == "Idle"
+
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     timeline = env.neon_cli.create_timeline(name, tenant_id=tenant)
@@ -50,28 +53,21 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     # TODO tenant should go idle even if we don't explicitly detach
     pg.stop()
     detach_all_timelines(tenant)
-
-    import time
-    time.sleep(1)
-    assert (get_state(tenant) == "Idle")
+    wait_until(10, 0.2, lambda: assert_idle(tenant))
 
     # Detach all tenants and wait for them to go idle
+    # TODO they should be already idle since there are no active computes
     for tenant_info in client.tenant_list():
         tenant_id = UUID(tenant_info["id"])
         detach_all_timelines(tenant_id)
+        wait_until(10, 0.2, lambda: assert_idle(tenant_id))
 
-        # TODO poll wait until idle instead
-        # wait_until(10, 1, lambda: assert get_state(tenant_id) == "Idle")
-        time.sleep(1)
-        assert get_state(tenant_id) == "Idle"
+    # Assert that all tasks finish quickly after tenants go idle
+    def assert_tasks_finish():
+        tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
+        tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
+        tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
+        assert tasks_started == tasks_ended
+        assert tasks_panicked == 0
 
-    # Wait a bit longer than max(gc_period, compaction_period)
-    # so that tasks can notice state changes and shut down.
-    time.sleep(2)
-
-    # Assert tasks finish
-    tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
-    tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
-    tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
-    assert tasks_started == tasks_ended
-    assert tasks_panicked == 0
+    wait_until(10, 0.2, assert_tasks_finish)
