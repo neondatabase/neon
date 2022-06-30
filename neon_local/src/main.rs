@@ -828,14 +828,22 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 println!("Starting existing postgres {}...", node_name);
                 node.start(&auth_token)?;
             } else {
-                let branch_name = sub_args
-                    .value_of("branch-name")
-                    .unwrap_or(DEFAULT_BRANCH_NAME);
-                let timeline_id = env
-                    .get_branch_timeline_id(branch_name, tenant_id)
-                    .ok_or_else(|| {
-                        anyhow!("Found no timeline id for branch name '{}'", branch_name)
-                    })?;
+                // Imported timelines do not have branch name.
+                // To start it usign neon_local, allow to pass timeline-id and use it directly.
+                let timeline_id: ZTimelineId = match sub_args.value_of("timeline-id") {
+                    Some(t) => ZTimelineId::from_str(t).context("Failed to parse timeline id")?,
+                    None => {
+                        let branch_name = sub_args
+                            .value_of("branch-name")
+                            .unwrap_or(DEFAULT_BRANCH_NAME);
+
+                        env.get_branch_timeline_id(branch_name, tenant_id)
+                            .ok_or_else(|| {
+                                anyhow!("Found no timeline id for branch name '{}'", branch_name)
+                            })?
+                    }
+                };
+
                 let lsn = sub_args
                     .value_of("lsn")
                     .map(Lsn::from_str)

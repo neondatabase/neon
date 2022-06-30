@@ -21,6 +21,7 @@ use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::Oid;
 use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
+use std::collections::HashSet;
 use utils::lsn::Lsn;
 
 ///
@@ -35,6 +36,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
+    let mut databases: HashSet<u32> = HashSet::new();
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
@@ -54,7 +56,9 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
             let file = File::open(absolute_path)?;
             let len = metadata.len() as usize;
-            if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
+            if let Some(control_file) =
+                import_file(&mut modification, relative_path, file, len, &mut databases)?
+            {
                 pg_control = Some(control_file);
             }
         }
@@ -83,6 +87,75 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
         Lsn(pg_control.checkPointCopy.redo),
         lsn,
     )?;
+
+    Ok(())
+}
+
+const EMPTY_GLOBAL_RELATIONS: [u32; 12] = [
+    4060, 2966, 4177, 4175, 6100, 2846, 2964, 4183, 4181, 3592, 6000, 4185,
+];
+
+const EMPTY_PER_DATABASE_RELATIONS: [u32; 49] = [
+    826, 3501, 12831, 2328, 2604, 3381, 3256, 2613, 4163, 2620, 4149, 1418, 4165, 2224, 6106, 4151,
+    6102, 3596, 1417, 3429, 4173, 4143, 4167, 6104, 3430, 4157, 2995, 2611, 4153, 4155, 2830, 3350,
+    12841, 2336, 3439, 3118, 2832, 3576, 4169, 3466, 4159, 12836, 6175, 2834, 4171, 12846, 4147,
+    3598, 4145,
+];
+
+// This is a crutch to fix import from backup
+// taken from old pageserver versions. Old
+// pageserver doesn't store empty relations
+// and doesn't add them to backup tar.
+//
+// So, we add them explicitly, using this command.
+pub fn import_empty_rels<R: Repository>(
+    modification: &mut DatadirModification<R>,
+    spcnode: Oid,
+    dbnode: Oid,
+) -> Result<()> {
+    if spcnode == pg_constants::GLOBALTABLESPACE_OID {
+        for relnode in EMPTY_GLOBAL_RELATIONS.iter() {
+            let rel = RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: pg_constants::MAIN_FORKNUM,
+            };
+
+            debug!("importing global empty relation {}", rel);
+            if let Err(e) = modification.put_rel_creation(rel, 0) {
+                if e.to_string().contains("already exists") {
+                    debug!(
+                        "import_empty_rels: relation {} already exists. that's ok",
+                        rel
+                    );
+                } else {
+                    return Err(e);
+                }
+            };
+        }
+    } else {
+        for relnode in EMPTY_PER_DATABASE_RELATIONS.iter() {
+            let rel = RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: pg_constants::MAIN_FORKNUM,
+            };
+
+            debug!("importing empty relation {}", rel);
+            if let Err(e) = modification.put_rel_creation(rel, 0) {
+                if e.to_string().contains("already exists") {
+                    debug!(
+                        "import_empty_rels: relation {} already exists. that's ok",
+                        rel
+                    );
+                } else {
+                    return Err(e);
+                }
+            };
+        }
+    }
 
     Ok(())
 }
@@ -303,6 +376,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
+    let mut databases: HashSet<u32> = HashSet::new();
 
     // Import base
     for base_tar_entry in tar::Archive::new(reader).entries()? {
@@ -313,7 +387,13 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
 
         match header.entry_type() {
             tar::EntryType::Regular => {
-                if let Some(res) = import_file(&mut modification, file_path.as_ref(), entry, len)? {
+                if let Some(res) = import_file(
+                    &mut modification,
+                    file_path.as_ref(),
+                    entry,
+                    len,
+                    &mut databases,
+                )? {
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
@@ -325,6 +405,17 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                 panic!("tar::EntryType::?? {}", file_path.display());
             }
         }
+    }
+
+    // See import_empty_rels comment
+    import_empty_rels(&mut modification, pg_constants::GLOBALTABLESPACE_OID, 0)?;
+    for dbnode in databases {
+        info!("importing empty rels for database {}", dbnode);
+        import_empty_rels(
+            &mut modification,
+            pg_constants::DEFAULTTABLESPACE_OID,
+            dbnode,
+        )?;
     }
 
     // sanity check: ensure that pg_control is loaded
@@ -418,6 +509,7 @@ pub fn import_file<R: Repository, Reader: Read>(
     file_path: &Path,
     reader: Reader,
     len: usize,
+    databases: &mut HashSet<u32>,
 ) -> Result<Option<ControlFileData>> {
     debug!("looking at {:?}", file_path);
 
@@ -465,6 +557,9 @@ pub fn import_file<R: Repository, Reader: Read>(
             .expect("invalid file path, expected dbnode")
             .to_string_lossy()
             .parse()?;
+
+        // Save database oid for later
+        databases.insert(dbnode);
 
         match file_path
             .file_name()
