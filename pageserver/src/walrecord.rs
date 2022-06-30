@@ -506,6 +506,13 @@ impl XlMultiXactTruncate {
 //      block data
 //      ...
 //      main data
+//
+//
+// For performance reasons, the caller provides the DecodedWALRecord struct and the function just fills it in.
+// It would be more natural for this function to return a DecodedWALRecord as return value,
+// but reusing the caller-supplied struct avoids an allocation.
+// This code is in the hot path for digesting incoming WAL, and is very performance sensitive.
+//
 pub fn decode_wal_record(
     record: Bytes,
     decoded: &mut DecodedWALRecord,
@@ -538,9 +545,7 @@ pub fn decode_wal_record(
     let mut blocks_total_len: u32 = 0;
     let mut main_data_len = 0;
     let mut datatotal: u32 = 0;
-    if !decoded.blocks.is_empty() {
-        decoded.blocks.clear();
-    }
+    decoded.blocks.clear();
 
     // 2. Decode the headers.
     // XLogRecordBlockHeaders if any,

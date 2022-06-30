@@ -15,6 +15,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
 use utils::{
@@ -28,7 +29,13 @@ use utils::{
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
+
+thread_local! {
+    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
+    /// This buffer is reused for each serialization to avoid additional malloc calls.
+    static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -40,10 +47,6 @@ pub struct InMemoryLayer {
     /// start is inclusive.
     ///
     start_lsn: Lsn,
-
-    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
-    /// This buffer is reused for each serialization to avoid additional malloc calls.
-    ser_buffer: Mutex<Vec<u8>>,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -259,7 +262,6 @@ impl InMemoryLayer {
             timelineid,
             tenantid,
             start_lsn,
-            ser_buffer: Mutex::new(Vec::new()),
             inner: RwLock::new(InMemoryLayerInner {
                 end_lsn: None,
                 index: HashMap::new(),
@@ -278,11 +280,13 @@ impl InMemoryLayer {
         inner.assert_writeable();
 
         let off = {
-            let mut buf = self.ser_buffer.lock().unwrap();
-            val.ser_into(&mut (*buf))?;
-            let off = inner.file.write_blob(&buf)?;
-            buf.clear();
-            off
+            SER_BUFFER.with(|x| -> Result<_> {
+                let mut buf = x.borrow_mut();
+                val.ser_into(&mut (*buf))?;
+                let off = inner.file.write_blob(&buf)?;
+                buf.clear();
+                Ok(off)
+            })?
         };
 
         let vec_map = inner.index.entry(key).or_default();
