@@ -1,7 +1,7 @@
 from contextlib import closing
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_local
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_timeline_local
 from fixtures.log_helper import log
 import time
 
@@ -11,7 +11,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
-    timeline_details = assert_local(client, env.initial_tenant, new_timeline_id)
+    timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert timeline_details['local']['current_logical_size'] == timeline_details['local'][
         'current_logical_size_non_incremental']
 
@@ -29,13 +29,13 @@ def test_timeline_size(neon_simple_env: NeonEnv):
                     FROM generate_series(1, 10) g
             """)
 
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res['local']
             assert local_details["current_logical_size"] == local_details[
                 "current_logical_size_non_incremental"]
             cur.execute("TRUNCATE foo")
 
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res['local']
             assert local_details["current_logical_size"] == local_details[
                 "current_logical_size_non_incremental"]
@@ -46,7 +46,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_size', 'empty')
 
     client = env.pageserver.http_client()
-    timeline_details = assert_local(client, env.initial_tenant, new_timeline_id)
+    timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert timeline_details['local']['current_logical_size'] == timeline_details['local'][
         'current_logical_size_non_incremental']
 
@@ -57,7 +57,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
         with conn.cursor() as cur:
             cur.execute("SHOW neon.timeline_id")
 
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res['local']
             assert local_details["current_logical_size"] == local_details[
                 "current_logical_size_non_incremental"]
@@ -73,14 +73,14 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
                             FROM generate_series(1, 10) g
                     """)
 
-                    res = assert_local(client, env.initial_tenant, new_timeline_id)
+                    res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
                     local_details = res['local']
                     assert local_details["current_logical_size"] == local_details[
                         "current_logical_size_non_incremental"]
 
             cur.execute('DROP DATABASE foodb')
 
-            res = assert_local(client, env.initial_tenant, new_timeline_id)
+            res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res['local']
             assert local_details["current_logical_size"] == local_details[
                 "current_logical_size_non_incremental"]
@@ -117,7 +117,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_size_quota')
 
     client = env.pageserver.http_client()
-    res = assert_local(client, env.initial_tenant, new_timeline_id)
+    res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert res['local']["current_logical_size"] == res['local'][
         "current_logical_size_non_incremental"]
 

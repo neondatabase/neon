@@ -22,6 +22,49 @@ paths:
                 properties:
                   id:
                     type: integer
+
+  /v1/tenant/{tenant_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get tenant status
+      responses:
+        "200":
+          description: Currently returns the flag whether the tenant has inprogress timeline downloads
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantInfo"
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/timeline:
     parameters:
       - name: tenant_id
@@ -521,12 +564,13 @@ components:
       type: object
       required:
         - id
-        - state
       properties:
         id:
           type: string
         state:
           type: string
+        has_in_progress_downloads:
+          type: bool
     TenantCreateInfo:
       type: object
       properties:
@@ -621,6 +665,7 @@ components:
           type: integer
         current_logical_size_non_incremental:
           type: integer
+
     WalReceiverEntry:
       type: object
       required:
