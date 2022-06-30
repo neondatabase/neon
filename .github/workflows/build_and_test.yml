@@ -179,7 +179,10 @@ jobs:
         run: cp -a tmp_install /tmp/neon/pg_install
 
       - name: Prepare neon artifact
-        run: tar -C /tmp/neon/ -czf ./neon.tgz .
+        run: |
+          ls -alFH /tmp/neon/test_bin
+          du -h -d3 /tmp/neon/ | sort -h -r
+          tar -C /tmp/neon/ -czf ./neon.tgz .
 
       - name: Upload neon binaries
         uses: actions/upload-artifact@v3
