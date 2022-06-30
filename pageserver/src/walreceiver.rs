@@ -178,7 +178,7 @@ async fn shutdown_all_wal_connections(
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
 struct TaskHandle<E> {
-    handle: JoinHandle<()>,
+    handle: JoinHandle<Result<(), String>>,
     events_receiver: watch::Receiver<TaskEvent<E>>,
     cancellation: watch::Sender<()>,
 }
@@ -205,8 +205,8 @@ impl<E: Clone> TaskHandle<E> {
 
         let sender = Arc::clone(&events_sender);
         let handle = tokio::task::spawn(async move {
-            let task_result = task(sender, cancellation_receiver).await;
-            events_sender.send(TaskEvent::End(task_result)).ok();
+            events_sender.send(TaskEvent::Started).ok();
+            task(sender, cancellation_receiver).await
         });
 
         TaskHandle {
@@ -216,11 +216,34 @@ impl<E: Clone> TaskHandle<E> {
         }
     }
 
+    async fn next_task_event(&mut self) -> TaskEvent<E> {
+        select! {
+            next_task_event = self.events_receiver.changed() => match next_task_event {
+                Ok(()) => self.events_receiver.borrow().clone(),
+                Err(_task_channel_part_dropped) => join_on_handle(&mut self.handle).await,
+            },
+            task_completion_result = join_on_handle(&mut self.handle) => task_completion_result,
+        }
+    }
+
     /// Aborts current task, waiting for it to finish.
     async fn shutdown(self) {
         self.cancellation.send(()).ok();
         if let Err(e) = self.handle.await {
             error!("Task failed to shut down: {e}")
+        }
+    }
+}
+
+async fn join_on_handle<E>(handle: &mut JoinHandle<Result<(), String>>) -> TaskEvent<E> {
+    match handle.await {
+        Ok(task_result) => TaskEvent::End(task_result),
+        Err(e) => {
+            if e.is_cancelled() {
+                TaskEvent::End(Ok(()))
+            } else {
+                TaskEvent::End(Err(format!("WAL receiver task panicked: {e}")))
+            }
         }
     }
 }

@@ -100,10 +100,8 @@ jobs:
           name: Rust build << parameters.build_type >>
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
               CARGO_FLAGS="--release --features profiling"
             fi
 
@@ -112,7 +110,7 @@ jobs:
             export RUSTC_WRAPPER=cachepot
             export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
-            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+            mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
             cachepot -s
 
       - save_cache:
@@ -128,32 +126,24 @@ jobs:
           name: cargo test
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
               CARGO_FLAGS=--release
             fi
 
-            "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+            cargo test $CARGO_FLAGS
 
         # Install the rust binaries, for use by test jobs
       - run:
           name: Install rust binaries
           command: |
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
             binaries=$(
-              "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+              cargo metadata --format-version=1 --no-deps |
               jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
             )
 
             test_exe_paths=$(
-              "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+              cargo test --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
             )
 
@@ -166,18 +156,7 @@ jobs:
               SRC=target/$BUILD_TYPE/$bin
               DST=/tmp/zenith/bin/$bin
               cp $SRC $DST
-              echo $DST >> /tmp/zenith/etc/binaries.list
             done
-
-            # Install test executables (for code coverage)
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              for bin in $test_exe_paths; do
-                SRC=$bin
-                DST=/tmp/zenith/test_bin/$(basename $bin)
-                cp $SRC $DST
-                echo $DST >> /tmp/zenith/etc/binaries.list
-              done
-            fi
 
         # Install the postgres binaries, for use by test jobs
       - run:
@@ -185,15 +164,7 @@ jobs:
           command: |
             cp -a tmp_install /tmp/zenith/pg_install
 
-      - run:
-          name: Merge coverage data
-          command: |
-            # This will speed up workspace uploads
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
-            fi
-
-        # Save the rust binaries and coverage data for other jobs in this workflow.
+      # Save rust binaries for other jobs in the workflow
       - persist_to_workspace:
           root: /tmp/zenith
           paths:
@@ -314,12 +285,6 @@ jobs:
 
             export GITHUB_SHA=$CIRCLE_SHA1
 
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
@@ -330,7 +295,7 @@ jobs:
             # -n4 uses four processes to run tests via pytest-xdist
             # -s is not used to prevent pytest from capturing output, because tests are running
             # in parallel and logs are mixed between different tests
-            "${cov_prefix[@]}" ./scripts/pytest \
+            ./scripts/pytest \
               --junitxml=$TEST_OUTPUT/junit.xml \
               --tb=short \
               --verbose \
@@ -359,66 +324,11 @@ jobs:
       # The store_test_results step tells CircleCI where to find the junit.xml file.
       - store_test_results:
           path: /tmp/test_output
-      - run:
-          name: Merge coverage data
-          command: |
-            # This will speed up workspace uploads
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
-            fi
-      # Save coverage data (if any)
+      # Save data (if any)
       - persist_to_workspace:
           root: /tmp/zenith
           paths:
             - "*"
-
-  coverage-report:
-    executor: neon-xlarge-executor
-    steps:
-      - attach_workspace:
-          at: /tmp/zenith
-      - checkout
-      - restore_cache:
-          name: Restore rust cache
-          keys:
-            # Require an exact match. While an out of date cache might speed up the build,
-            # there's no way to clean out old packages, so the cache grows every time something
-            # changes.
-            - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
-      - run:
-          name: Build coverage report
-          command: |
-            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
-
-            scripts/coverage \
-              --dir=/tmp/zenith/coverage report \
-              --input-objects=/tmp/zenith/etc/binaries.list \
-              --commit-url=$COMMIT_URL \
-              --format=github
-      - run:
-          name: Upload coverage report
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-            REPORT_URL=https://neondatabase.github.io/zenith-coverage-data/$CIRCLE_SHA1
-            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
-
-            scripts/git-upload \
-              --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/neondatabase/zenith-coverage-data.git \
-              --message="Add code coverage for $COMMIT_URL" \
-              copy /tmp/zenith/coverage/report $CIRCLE_SHA1 # COPY FROM TO_RELATIVE
-
-            # Add link to the coverage report to the commit
-            curl -f -X POST \
-            https://api.github.com/repos/$LOCAL_REPO/statuses/$CIRCLE_SHA1 \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"state\": \"success\",
-                \"context\": \"zenith-coverage\",
-                \"description\": \"Coverage report is ready\",
-                \"target_url\": \"$REPORT_URL\"
-              }"
 
   # Build neondatabase/neon:latest image and push it to Docker hub
   docker-image:
@@ -730,12 +640,6 @@ workflows:
           save_perf_report: true
           requires:
             - build-neon-release
-      - coverage-report:
-          # Context passes credentials for gh api
-          context: CI_ACCESS_TOKEN
-          requires:
-            # TODO: consider adding more
-            - other-tests-debug
       - docker-image:
           # Context gives an ability to login
           context: Docker Hub
