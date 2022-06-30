@@ -1925,8 +1925,11 @@ class Etcd:
     datadir: str
     port: int
     peer_port: int
-    binary_path: Path = etcd_path()
+    binary_path: Path = field(init=False)
     handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def __post_init__(self):
+        self.binary_path = etcd_path()
 
     def client_url(self):
         return f'http://127.0.0.1:{self.port}'
