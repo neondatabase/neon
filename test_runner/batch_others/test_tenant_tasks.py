@@ -49,11 +49,8 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     pg = env.postgres.create_start(name, tenant_id=tenant)
     assert (get_state(tenant) == "Active")
 
-    # Stop compute, detach timelines
-    # TODO tenant should go idle even if we don't explicitly detach
+    # Stop compute
     pg.stop()
-    detach_all_timelines(tenant)
-    wait_until(10, 0.2, lambda: assert_idle(tenant))
 
     # Detach all tenants and wait for them to go idle
     # TODO they should be already idle since there are no active computes
