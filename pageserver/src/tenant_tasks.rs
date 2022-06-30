@@ -178,7 +178,7 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             // Spawn new task, request cancellation of the old one if exists
                             let (cancel_send, cancel_recv) = watch::channel(());
                             let handle = tokio::spawn(gc_loop(tenantid, cancel_recv)
-                                .instrument(trace_span!("gc loop", tenant = %tenantid)));
+                                .instrument(info_span!("gc loop", tenant = %tenantid)));
                             if let Some(old_cancel_send) = gc_loops.insert(tenantid, cancel_send) {
                                 old_cancel_send.send(()).ok();
                             }
@@ -194,7 +194,7 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
                             let (cancel_send, cancel_recv) = watch::channel(());
                             // TODO this instrument doesn't work
                             let handle = tokio::spawn(compaction_loop(tenantid, cancel_recv)
-                                .instrument(trace_span!("compaction loop", tenant = %tenantid)));
+                                .instrument(info_span!("compaction loop", tenant = %tenantid)));
                             if let Some(old_cancel_send) = compaction_loops.insert(tenantid, cancel_send) {
                                 old_cancel_send.send(()).ok();
                             }
