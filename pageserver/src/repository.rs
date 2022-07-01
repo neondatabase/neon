@@ -225,7 +225,7 @@ pub trait Repository: Send + Sync {
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     fn create_empty_timeline(
         &self,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<Self::Timeline>>;
 
@@ -632,6 +632,19 @@ mod tests {
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn no_duplicate_timelines() -> Result<()> {
+        let repo = RepoHarness::create("no_duplicate_timelines")?.load();
+        let _ = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        match repo.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
+            Ok(_) => panic!("duplicate timeline creation should fail"),
+            Err(e) => assert_eq!(e.to_string(), "Timeline already exists"),
+        }
 
         Ok(())
     }
