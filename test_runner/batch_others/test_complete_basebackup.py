@@ -4,19 +4,38 @@ import os
 import shutil
 
 
-def get_nodes(pg_bin, restored_dir):
+def to_rel_path(tablespace, filenode):
+    if tablespace == 0:
+        return f"global/{filenode}"
+    else:
+        # TODO doesn't seem right. We need dbnode here
+        return f"base/{tablespace}/{filenode}"
+
+
+def get_rel_paths(pg_bin, restored_dir):
+    """Return list of relation paths"""
     port = "55439"  # Probably free
     with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
-        # TODO make port an optional argument
-        vanilla_pg.configure([
-            f"port={port}",
-        ])
+        vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
-        query = "SELECT relfilenode FROM pg_class"
+        query = "SELECT reltablespace, relfilenode FROM pg_class"
         result = vanilla_pg.safe_psql(query, user="cloud_admin")
-        nodes = [row[0] for row in result]
-        return nodes
+        paths = [to_rel_path(*row) for row in result]
+
+        # Check for duplicates
+        from collections import Counter
+        duplicates = {
+            x: count
+            for x, count in Counter(paths).items()
+            if count > 1
+        }
+
+        # Sus: currently seeing {'global/0': 154, 'base/1664/0': 43}
+        if duplicates:
+            print(f"Warning: found duplicate paths: {duplicates}")
+
+        return paths
 
 
 def test_complete(pg_bin):
@@ -32,13 +51,12 @@ def test_complete(pg_bin):
     subprocess_capture(work_dir, ["tar", "-xf", base_tar, "-C", restored_dir])
 
     # Get the nodes
-    nodes = get_nodes(pg_bin, restored_dir)
-    print(nodes)
+    paths = get_rel_paths(pg_bin, restored_dir)
 
-    # Add missing empty rel files
-    # TODO:
-    # 1. Convert nodes to file paths
-    # 2. Add files inside restored_dir
+    for path in paths:
+        absolute_path = os.path.join(restored_dir, path)
+        print(path, os.path.exists(absolute_path))
+        # TODO touch if not exists. But first get correct paths. Something's off now
 
     # Pack completed tar, being careful to preserve relative file names
     tmp_tar_name = "tmp.tar"
