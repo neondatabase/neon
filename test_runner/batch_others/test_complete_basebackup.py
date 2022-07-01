@@ -19,6 +19,13 @@ def get_rel_paths(pg_bin, restored_dir):
         vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
+        # Not using this, but seems relevant
+        query = "SELECT oid, dattablespace FROM pg_database"
+        result = vanilla_pg.safe_psql(query, user="cloud_admin")
+        print("AAA")
+        print(result)
+        # [(13134, 1663), (1, 1663), (13133, 1663)]
+
         query = "SELECT reltablespace, relfilenode FROM pg_class"
         result = vanilla_pg.safe_psql(query, user="cloud_admin")
         paths = [to_rel_path(*row) for row in result]
