@@ -13,6 +13,7 @@ pageservers
 safekeepers
 
 [storage:vars]
+env_name = us-stage
 console_mgmt_base_url = http://console-staging.local
 bucket_name           = zenith-staging-storage-us-east-1
 bucket_region         = us-east-1
