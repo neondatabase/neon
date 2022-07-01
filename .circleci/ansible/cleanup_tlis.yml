@@ -1,0 +1,34 @@
+- name: cleanup timelines
+  hosts: safekeepers
+  gather_facts: False
+  remote_user: admin
+  tasks:
+    - name: install pip
+      ansible.builtin.apt:
+        name: 
+          - python3-pip
+          - acl
+      become: True
+
+    - name: install psycopg2
+      ansible.builtin.pip:
+        name: psycopg2
+      become_user: safekeeper
+      become: True
+
+    - name: upload script
+      ansible.builtin.copy:
+        src: /home/ars/zenith/cloud/ops/ad_hoc/clean_timelines.py
+        dest: clean_timelines.py
+      tags:
+        - safekeeper
+    
+    - name: run script
+      ansible.builtin.command: python3 clean_timelines.py --really-delete
+      environment:
+        CONSOLE_DB: "{{ CONSOLE_DB }}"
+      become_user: safekeeper
+      become: True
+      register: hello
+    
+    - debug: var=hello
