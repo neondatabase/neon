@@ -1,92 +1,98 @@
-import subprocess
-import asyncio
-from contextlib import closing
+import time
+from asyncpg.connection import os
 
-import psycopg2.extras
-import pytest
 from fixtures.log_helper import log
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import lsn_from_hex
 
 
+# Test the GC implementation when running with branching
+# This test reproduces the issue https://github.com/neondatabase/neon/issues/707.
 #
-# Create a branches off the main branch and run gc.
+# Consider two LSNs `lsn1` and `lsn2` with some delta files as folows:
+# ...
+# ... -> has an image layer xx_p with p < lsn1
+# ...
+# lsn1
+# ...
+# ... -> has an image layer xx_q with lsn1 < q < lsn2
+# ...
+# lsn2
 #
-def test_branch_and_gc(zenith_env_builder: ZenithEnvBuilder):
+# Consider running a GC iteration such that the GC horizon is between p and lsn1
+# ...
+# ... -> has an image layer xx_p with p < lsn1
+# ...
+# ||| -------> a delta layer D's start
+# ... -> gc horizon h such that p < h < lsn1
+# lsn1
+# ||| -------> a delta layer D's end
+# ...
+# ... -> has an image layer xx_q with lsn1 < q < lsn2
+# ...
+# lsn2
+#
+# As described in the issue #707, the image layer xx_p will be deleted as
+# there exists a newer image layer xx_q. However, removing xx_p will corrupt
+# any delta layers that depend on xx_p that are not deleted by GC.
+# For example, the delta layer D is corrupted in the above example.
+#
+# Because the delta layer D covering lsn1 is corrupted, creating a branch
+# starting from lsn1 should return an error as follows:
+#     could not find data for key ... at LSN ..., for request at LSN ...
+def test_branch_and_gc(neon_simple_env: NeonEnv):
+    env = neon_simple_env
 
-    # Use safekeeper in this test to avoid a subtle race condition.
-    # Without safekeeper, walreceiver reconnection can stuck
-    # because of IO deadlock.
-    #
-    # See https://github.com/zenithdb/zenith/issues/1068
-    zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
-
-    # Override defaults, 1M gc_horizon and 4M checkpoint_distance.
-    # Extend compaction_period and gc_period to disable background compaction and gc.
-    tenant = env.zenith_cli.create_tenant(
+    tenant, _ = env.neon_cli.create_tenant(
         conf={
+            # disable background GC
             'gc_period': '10 m',
-            'gc_horizon': '1048576',
-            'checkpoint_distance': '4194304',
-            'compaction_period': '10 m',
+            'gc_horizon': f'{10 * 1024 ** 3}',
+
+            # small checkpoint distance to create more delta layer files
+            'checkpoint_distance': f'{1024 ** 2}',
+
+            # set the target size to be large to allow the image layer to cover the whole key space
+            'compaction_target_size': f'{1024 ** 3}',
+
+            # tweak the default settings to allow quickly create image layers and L1 layers
+            'compaction_period': '1 s',
             'compaction_threshold': '2',
-            'compaction_target_size': '4194304',
+            'image_creation_threshold': '1',
         })
 
-    env.zenith_cli.create_timeline(f'test_main', tenant_id=tenant)
-    pgmain = env.postgres.create_start('test_main', tenant_id=tenant)
-    log.info("postgres is running on 'test_main' branch")
+    timeline_main = env.neon_cli.create_timeline(f'test_main', tenant_id=tenant)
+    pg_main = env.postgres.create_start('test_main', tenant_id=tenant)
 
-    main_cur = pgmain.connect().cursor()
-    main_cur.execute("SHOW zenith.zenith_timeline")
-    timeline = main_cur.fetchone()[0]
+    main_cur = pg_main.connect().cursor()
 
-    # Create table, and insert 100 rows.
-    main_cur.execute('CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)')
+    main_cur.execute(
+        "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
+    )
+    main_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    init_lsn = main_cur.fetchone()[0]
-    main_cur.execute('''
-        INSERT INTO foo
-            SELECT '00112233445566778899AABBCCDDEEFF' || ':main:' || g
-            FROM generate_series(1, 100) g
-    ''')
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_100 = main_cur.fetchone()[0]
-    log.info(f'LSN after 100 rows: {lsn_100}')
+    lsn1 = main_cur.fetchone()[0]
+    log.info(f'LSN1: {lsn1}')
 
-    # Create branch.
-    env.zenith_cli.create_branch('test_branch',
-                                 'test_main',
-                                 tenant_id=tenant,
-                                 ancestor_start_lsn=lsn_100)
+    main_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
+    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
+    lsn2 = main_cur.fetchone()[0]
+    log.info(f'LSN2: {lsn2}')
+
+    # set the GC horizon such that it doesn't cover lsn1 so that
+    # we can create a new branch starting from lsn1
+    env.pageserver.safe_psql(
+        f'''do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}'''
+    )
+
+    env.neon_cli.create_branch('test_branch',
+                               'test_main',
+                               tenant_id=tenant,
+                               ancestor_start_lsn=lsn1)
     pg_branch = env.postgres.create_start('test_branch', tenant_id=tenant)
 
-    # Append more rows to generate multiple layers in ancestor's branch.
-    main_cur.execute('''
-        INSERT INTO foo
-            SELECT '00112233445566778899AABBCCDDEEFF' || ':main:' || g
-            FROM generate_series(1, 200000) g
-    ''')
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_200100 = main_cur.fetchone()[0]
-    log.info(f'LSN after 400100 rows: {lsn_200100}')
-
-    # Run gc on main branch at current lsn.
-    psconn = env.pageserver.connect()
-    psconn.cursor().execute(f'''do_gc {tenant.hex} {timeline} {lsn_200100}''')
-
-    # Insert some rows on descendent's branch to diverge.
     branch_cur = pg_branch.connect().cursor()
-    branch_cur.execute("SHOW zenith.zenith_timeline")
-    branch_timeline = branch_cur.fetchone()[0]
-    branch_cur.execute('''
-        INSERT INTO foo
-            SELECT '00112233445566778899AABBCCDDEEFF' || ':branch:' || g
-            FROM generate_series(1, 100) g
-    ''')
-    branch_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_branch_200 = branch_cur.fetchone()[0]
-    log.info(f'LSN after 200 rows on branch: {lsn_branch_200}')
+    branch_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
 
     branch_cur.execute('SELECT count(*) FROM foo')
-    assert branch_cur.fetchone() == (200, )
+    assert branch_cur.fetchone() == (200000, )

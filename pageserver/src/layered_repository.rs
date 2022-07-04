@@ -2190,7 +2190,7 @@ impl LayeredTimeline {
 
         // Calculate pitr cutoff point.
         // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
-        let mut pitr_cutoff_lsn: Lsn = *self.get_latest_gc_cutoff_lsn();
+        let mut pitr_cutoff_lsn = cutoff;
 
         if let Ok(timeline) =
             tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
