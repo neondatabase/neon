@@ -5,11 +5,6 @@ import shutil
 from pathlib import Path
 
 
-template0_files = [3430, 3256, 3429, 3118, 4171, 4165, 12960, 3576, 6102, 826, 3466, 12965, 12955, 4173, 3439,
-    2830, 4169, 1418, 3501, 4153, 4159, 2604, 4145, 4155, 1417, 2832, 2613, 2620, 3381, 6175, 6104, 12970, 4157,
-    4143, 2611, 2224, 6106, 4167, 2336, 4163, 2995, 3350, 4147, 2328, 2834, 3598, 4151, 4149, 3596]
-
-
 def get_rel_paths(pg_bin, restored_dir):
     """Yeild list of relation paths"""
     port = "55439"  # Probably free
@@ -17,22 +12,45 @@ def get_rel_paths(pg_bin, restored_dir):
         vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
+        # Create database based on template0 because we can't connect to template0
+        # TODO clean up afterwards
+        query = "create database template0copy template template0"
+        vanilla_pg.safe_psql(query, user="cloud_admin")
+        vanilla_pg.safe_psql("CHECKPOINT", user="cloud_admin")
+
+        # Get all databases
         query = "select oid, datname from pg_database"
         oid_dbname_pairs = vanilla_pg.safe_psql(query, user="cloud_admin")
+        print(oid_dbname_pairs)
+        template0_oid = [
+            oid
+            for (oid, database) in oid_dbname_pairs
+            if database == "template0"
+        ][0]
 
+        # Get rel paths for each database
         for oid, database in oid_dbname_pairs:
             if database == "template0":
-                # We can't connect to template0, but it's always the same
-                for rel in template0_files:
-                    yield f"base/{oid}/{rel}"
+                # We can't connect to template0
                 continue
 
-            query = "select pg_relation_filepath(oid) from pg_class"
+            query = "select relname, pg_relation_filepath(oid) from pg_class"
             result = vanilla_pg.safe_psql(query, user="cloud_admin", dbname=database)
-            for row in result:
-                filepath = row[0]
+            for relname, filepath in result:
                 if filepath is not None:
                     yield filepath
+
+                    # Add all template0copy paths to template0
+                    # TODO maybe just copying from template1 would be good enough
+                    if database == "template0copy":
+                        prefix = f"base/{oid}/"
+                        if filepath.startswith(prefix):
+                            suffix = filepath.removeprefix(prefix)
+                            yield f"base/{template0_oid}/{suffix}"
+                        elif filepath.startswith("global"):
+                            print(f"skipping {database} global file {filepath}")
+                        else:
+                            raise AssertionError
 
 
 def test_complete(pg_bin):
