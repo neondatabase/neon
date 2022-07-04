@@ -242,10 +242,6 @@ async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Bod
     json_response(StatusCode::OK, &wal_receiver_entry)
 }
 
-async fn timeline_attach_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    json_response(StatusCode::GONE, ())
-}
-
 // TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
 async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
@@ -605,17 +601,14 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_handler,
         )
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
-            wal_receiver_get_handler,
-        )
-        .post(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",
-            timeline_attach_handler,
-        )
+        // for backward compatibility
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
             timeline_delete_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
+            wal_receiver_get_handler,
         )
         .any(handler_404))
 }
