@@ -534,7 +534,7 @@ jobs:
           ansible-playbook --check --diff deploy.yaml -i ${{ matrix.env_name }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
 
-  deploy-staging-proxy:
+  deploy-proxy-main:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     #    needs: [ docker-image ]
     #    if: |
@@ -575,5 +575,5 @@ jobs:
         run: |
           helm plugin install https://github.com/databus23/helm-diff
           DOCKER_TAG=$(git rev-list --count HEAD)
-          helm diff upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --install -f .circleci/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} # --wait
-          helm diff upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --install -f .circleci/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
+          helm diff upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} # --wait
+          helm diff upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
