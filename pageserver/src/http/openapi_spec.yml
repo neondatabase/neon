@@ -128,13 +128,14 @@ paths:
         schema:
           type: string
           format: hex
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get info about the timeline
+      parameters:
+        - name: include-non-incremental-logical-size
+          in: query
+          schema:
+            type: string
+          description: Controls calculation of current_logical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -577,7 +578,7 @@ components:
         state:
           type: string
         has_in_progress_downloads:
-          type: bool
+          type: boolean
     TenantCreateInfo:
       type: object
       properties:
