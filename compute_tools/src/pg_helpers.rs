@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream};
@@ -138,9 +139,11 @@ impl Role {
             // Now we also support SCRAM-SHA-256 and to preserve compatibility
             // we treat all encrypted_password as md5 unless they starts with SCRAM-SHA-256.
             if pass.starts_with("SCRAM-SHA-256") {
-                params.push_str(&format!(" PASSWORD '{}'", pass));
+                write!(params, " PASSWORD '{pass}'")
+                    .expect("String is documented to not to error during write operations");
             } else {
-                params.push_str(&format!(" PASSWORD 'md5{}'", pass));
+                write!(params, " PASSWORD 'md5{pass}'")
+                    .expect("String is documented to not to error during write operations");
             }
         } else {
             params.push_str(" PASSWORD NULL");
@@ -158,7 +161,8 @@ impl Database {
     /// it may require a proper quoting too.
     pub fn to_pg_options(&self) -> String {
         let mut params: String = self.options.as_pg_options();
-        params.push_str(&format!(" OWNER {}", &self.owner.quote()));
+        write!(params, " OWNER {}", &self.owner.quote())
+            .expect("String is documented to not to error during write operations");
 
         params
     }
