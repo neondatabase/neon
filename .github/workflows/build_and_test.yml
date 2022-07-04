@@ -474,7 +474,19 @@ jobs:
             AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
           push: false
           file: Dockerfile.compute-tools
-          tags: neondatabase/compute-tools:local, neondatabase/compute-tools:testgh-latest
+          tags: neondatabase/compute-tools:local
+
+      - name: Build and push compute-tools:latest Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          build-args: |
+            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
+            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+          # push: true
+          push: false
+          file: Dockerfile.compute-tools
+          tags: neondatabase/compute-tools:latest
 
       - name: Build compute-node Docker image
         uses: docker/build-push-action@v2
@@ -482,6 +494,7 @@ jobs:
           context: ./vendor/postgres/
           build-args:
             COMPUTE_TOOLS_TAG=local
+          # push: true
           push: false
           tags: neondatabase/compute-node:testgh-latest, neondatabase/compute-node:testgh-${{steps.build-tag.outputs.tag}}
 
@@ -493,7 +506,7 @@ jobs:
     #      github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
-        environment: [ staging, neon-stress]
+        env_name: [ staging, neon-stress ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -518,7 +531,7 @@ jobs:
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
 
-          ansible-playbook --check --diff deploy.yaml -i ${{ matrix.environment }}.hosts
+          ansible-playbook --check --diff deploy.yaml -i ${{ matrix.env_name }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-staging-proxy:
@@ -527,6 +540,18 @@ jobs:
     #    if: |
     #      github.ref_name == 'main' &&
     #      github.event_name != 'workflow_dispatch'
+    strategy:
+      matrix:
+        include:
+          - env_name: "staging"
+            proxy_job: "neon-proxy"
+            proxy_config: "staging.proxy"
+            kubeconfig_secret: "STAGING_KUBECONFIG_DATA"
+
+          - env_name: "neon-stress"
+            proxy_job: "neon-stress-proxy"
+            proxy_config: "neon-stress.proxy"
+            kubeconfig_secret: "NEON_STRESS_KUBECONFIG_DATA"
     env:
       KUBECONFIG: .kubeconfig
     steps:
@@ -538,7 +563,7 @@ jobs:
 
       - name: Store kubeconfig file
         run: |
-          echo "${{ secrets.STAGING_KUBECONFIG_DATA }}" | base64 --decode > ${KUBECONFIG}
+          echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
           chmod 0600 ${KUBECONFIG}
 
       - name: Setup helm v3
@@ -550,5 +575,5 @@ jobs:
         run: |
           helm plugin install https://github.com/databus23/helm-diff
           DOCKER_TAG=$(git rev-list --count HEAD)
-          helm diff upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} # --wait
-          helm diff upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
+          helm diff upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --install -f .circleci/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} # --wait
+          helm diff upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --install -f .circleci/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
