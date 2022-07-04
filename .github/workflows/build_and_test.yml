@@ -393,10 +393,10 @@ jobs:
 
   docker-image:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    #    needs: [ pg_regress-tests, other-tests ]
-    #    if: |
-    #      github.ref_name == 'main' &&
-    #      github.event_name != 'workflow_dispatch'
+    needs: [ pg_regress-tests, other-tests ]
+    if: |
+      github.ref_name == 'main' &&
+      github.event_name != 'workflow_dispatch'
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
     steps:
@@ -431,15 +431,15 @@ jobs:
             AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
           pull: true
-          push: false
-          tags: neondatabase/neon:testgh-latest, neondatabase/neon:testgh-${{steps.build-tag.outputs.tag}}
+          push: true
+          tags: neondatabase/neon:latest, neondatabase/neon:${{steps.build-tag.outputs.tag}}
 
   docker-image-compute:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    #    needs: [ pg_regress-tests, other-tests ]
-    #    if: |
-    #      github.ref_name == 'main' &&
-    #      github.event_name != 'workflow_dispatch'
+    needs: [ pg_regress-tests, other-tests ]
+    if: |
+      github.ref_name == 'main' &&
+      github.event_name != 'workflow_dispatch'
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
     steps:
@@ -483,8 +483,7 @@ jobs:
           build-args: |
             AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
-          # push: true
-          push: false
+          push: true
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:latest
 
@@ -494,16 +493,15 @@ jobs:
           context: ./vendor/postgres/
           build-args:
             COMPUTE_TOOLS_TAG=local
-          # push: true
-          push: false
-          tags: neondatabase/compute-node:testgh-latest, neondatabase/compute-node:testgh-${{steps.build-tag.outputs.tag}}
+          push: true
+          tags: neondatabase/compute-node:latest, neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
 
   deploy-main:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    #    needs: [ docker-image ]
-    #    if: |
-    #      github.ref_name == 'main' &&
-    #      github.event_name != 'workflow_dispatch'
+    needs: [ docker-image ]
+    if: |
+      github.ref_name == 'main' &&
+      github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
         env_name: [ staging, neon-stress ]
@@ -518,7 +516,7 @@ jobs:
         run: |
           pip install --progress-bar off --user ansible boto3
 
-      - name: Show diff
+      - name: Redeploy
         run: |
           cd "$(pwd)/.circleci/ansible"
 
@@ -531,15 +529,15 @@ jobs:
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
 
-          ansible-playbook --check --diff deploy.yaml -i ${{ matrix.env_name }}.hosts
+          ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy-main:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    #    needs: [ docker-image ]
-    #    if: |
-    #      github.ref_name == 'main' &&
-    #      github.event_name != 'workflow_dispatch'
+    needs: [ docker-image ]
+    if: |
+      github.ref_name == 'main' &&
+      github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
         include:
@@ -573,7 +571,6 @@ jobs:
 
       - name: Re-deploy proxy
         run: |
-          helm plugin install https://github.com/databus23/helm-diff
-          DOCKER_TAG=$(git rev-list --count HEAD)
-          helm diff upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} # --wait
-          helm diff upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
+          DOCKER_TAG=${{needs.docker-images.outputs.build-tag}}
+          helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+          helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .circleci/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
