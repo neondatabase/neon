@@ -2,14 +2,7 @@ from fixtures.neon_fixtures import VanillaPostgres
 from fixtures.utils import mkdir_if_needed, subprocess_capture
 import os
 import shutil
-
-
-def to_rel_path(tablespace, filenode):
-    if tablespace == 0:
-        return f"global/{filenode}"
-    else:
-        # TODO doesn't seem right. We need dbnode here
-        return f"base/{tablespace}/{filenode}"
+from pathlib import Path
 
 
 def get_rel_paths(pg_bin, restored_dir):
@@ -19,30 +12,13 @@ def get_rel_paths(pg_bin, restored_dir):
         vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
-        # Not using this, but seems relevant
-        query = "SELECT oid, dattablespace FROM pg_database"
+        query = "select pg_relation_filepath(oid) from pg_class"
         result = vanilla_pg.safe_psql(query, user="cloud_admin")
-        print("AAA")
-        print(result)
-        # [(13134, 1663), (1, 1663), (13133, 1663)]
-
-        query = "SELECT reltablespace, relfilenode FROM pg_class"
-        result = vanilla_pg.safe_psql(query, user="cloud_admin")
-        paths = [to_rel_path(*row) for row in result]
-
-        # Check for duplicates
-        from collections import Counter
-        duplicates = {
-            x: count
-            for x, count in Counter(paths).items()
-            if count > 1
-        }
-
-        # Sus: currently seeing {'global/0': 154, 'base/1664/0': 43}
-        if duplicates:
-            print(f"Warning: found duplicate paths: {duplicates}")
-
-        return paths
+        return [
+            row[0]
+            for row in result
+            if row[0] is not None  # TODO why is it None sometimes?
+        ]
 
 
 def test_complete(pg_bin):
@@ -57,13 +33,18 @@ def test_complete(pg_bin):
     os.mkdir(restored_dir, 0o750)
     subprocess_capture(work_dir, ["tar", "-xf", base_tar, "-C", restored_dir])
 
+    # TODO rm empty fiiles, just to see if they get recreated
+
     # Get the nodes
     paths = get_rel_paths(pg_bin, restored_dir)
 
+    # Touch files that don't exist
     for path in paths:
         absolute_path = os.path.join(restored_dir, path)
-        print(path, os.path.exists(absolute_path))
-        # TODO touch if not exists. But first get correct paths. Something's off now
+        exists = os.path.exists(absolute_path)
+        if not exists:
+            print("Touching file ", absolute_path)
+            Path(absolute_path).touch()
 
     # Pack completed tar, being careful to preserve relative file names
     tmp_tar_name = "tmp.tar"
