@@ -485,12 +485,15 @@ jobs:
           push: false
           tags: neondatabase/compute-node:testgh-latest, neondatabase/compute-node:testgh-${{steps.build-tag.outputs.tag}}
 
-  deploy-staging:
+  deploy-main:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     #    needs: [ docker-image ]
     #    if: |
     #      github.ref_name == 'main' &&
     #      github.event_name != 'workflow_dispatch'
+    strategy:
+      matrix:
+        environment: [ staging, neon-stress]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -515,5 +518,37 @@ jobs:
           ssh-add ssh-key
           rm -f ssh-key ssh-key-cert.pub
 
-          ansible-playbook --check --diff deploy.yaml -i staging.hosts
+          ansible-playbook --check --diff deploy.yaml -i ${{ matrix.environment }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
+
+  deploy-staging-proxy:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    #    needs: [ docker-image ]
+    #    if: |
+    #      github.ref_name == 'main' &&
+    #      github.event_name != 'workflow_dispatch'
+    env:
+      KUBECONFIG: .kubeconfig
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Store kubeconfig file
+        run: |
+          echo "${{ secrets.STAGING_KUBECONFIG_DATA }}" | base64 --decode > ${KUBECONFIG}
+          chmod 0600 ${KUBECONFIG}
+
+      - name: Setup helm v3
+        run: |
+          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+
+      - name: Re-deploy proxy
+        run: |
+          helm plugin install https://github.com/databus23/helm-diff
+          DOCKER_TAG=$(git rev-list --count HEAD)
+          helm diff upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
+          helm diff upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
