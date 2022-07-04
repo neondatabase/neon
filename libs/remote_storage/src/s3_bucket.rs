@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use rusoto_core::{
     credential::{InstanceMetadataProvider, StaticProvider},
-    HttpClient, Region,
+    HttpClient, Region, RusotoError,
 };
 use rusoto_s3::{
-    DeleteObjectRequest, GetObjectRequest, ListObjectsV2Request, PutObjectRequest, S3Client,
-    StreamingBody, S3,
+    DeleteObjectRequest, GetObjectError, GetObjectRequest, ListObjectsV2Request, PutObjectRequest,
+    S3Client, StreamingBody, S3,
 };
 use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
-use crate::{strip_path_prefix, RemoteStorage, S3Config};
+use crate::{strip_path_prefix, Download, DownloadError, RemoteStorage, S3Config};
 
 use super::StorageMetadata;
 
@@ -187,6 +187,39 @@ impl S3Bucket {
             concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
         })
     }
+
+    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 download")
+            .map_err(DownloadError::Other)?;
+
+        metrics::inc_get_object();
+
+        match self.client.get_object(request).await {
+            Ok(object_output) => match object_output.body {
+                None => {
+                    metrics::inc_get_object_fail();
+                    Err(DownloadError::Other(anyhow::anyhow!(
+                        "Got no body for the S3 object given"
+                    )))
+                }
+                Some(body) => Ok(Download {
+                    metadata: object_output.metadata.map(StorageMetadata),
+                    download_stream: Box::pin(io::BufReader::new(body.into_async_read())),
+                }),
+            },
+            Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => Err(DownloadError::NotFound),
+            Err(e) => {
+                metrics::inc_get_object_fail();
+                Err(DownloadError::Other(anyhow::anyhow!(
+                    "Failed to download S3 object: {e}"
+                )))
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -283,38 +316,13 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(
-        &self,
-        from: &Self::RemoteObjectId,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 download")?;
-
-        metrics::inc_get_object();
-
-        let object_output = self
-            .client
-            .get_object(GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: from.key().to_owned(),
-                ..GetObjectRequest::default()
-            })
-            .await
-            .map_err(|e| {
-                metrics::inc_get_object_fail();
-                e
-            })?;
-
-        if let Some(body) = object_output.body {
-            let mut from = io::BufReader::new(body.into_async_read());
-            io::copy(&mut from, to).await?;
-        }
-
-        Ok(object_output.metadata.map(StorageMetadata))
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError> {
+        self.download_object(GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            key: from.key().to_owned(),
+            ..GetObjectRequest::default()
+        })
+        .await
     }
 
     async fn download_byte_range(
@@ -322,8 +330,7 @@ impl RemoteStorage for S3Bucket {
         from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
+    ) -> Result<Download, DownloadError> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
         // and needs both ends to be exclusive
         let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
@@ -331,34 +338,14 @@ impl RemoteStorage for S3Bucket {
             Some(end_inclusive) => format!("bytes={}-{}", start_inclusive, end_inclusive),
             None => format!("bytes={}-", start_inclusive),
         });
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 range download")?;
 
-        metrics::inc_get_object();
-
-        let object_output = self
-            .client
-            .get_object(GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: from.key().to_owned(),
-                range,
-                ..GetObjectRequest::default()
-            })
-            .await
-            .map_err(|e| {
-                metrics::inc_get_object_fail();
-                e
-            })?;
-
-        if let Some(body) = object_output.body {
-            let mut from = io::BufReader::new(body.into_async_read());
-            io::copy(&mut from, to).await?;
-        }
-
-        Ok(object_output.metadata.map(StorageMetadata))
+        self.download_object(GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            key: from.key().to_owned(),
+            range,
+            ..GetObjectRequest::default()
+        })
+        .await
     }
 
     async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()> {
