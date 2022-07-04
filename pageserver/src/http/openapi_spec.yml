@@ -113,6 +113,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
       - name: tenant_id
@@ -242,25 +243,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: timeline_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-    post:
-      description: Deprecated
-      responses:
-        "410":
-          description: GONE
 
   /v1/tenant/{tenant_id}/attach:
     parameters:
@@ -327,10 +309,35 @@ paths:
           type: string
           format: hex
     post:
-      description: Deprecated
+      description: Deprecated, use DELETE /v1/tenant/{tenant_id}/timeline/{timeline_id} instead
+      deprecated: true
       responses:
-        "410":
-          description: GONE
+        "200":
+          description: Ok
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}/detach:
     parameters:

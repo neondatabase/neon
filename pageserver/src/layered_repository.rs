@@ -408,20 +408,19 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    // in order to be retriable detach needs to be idempotent
     fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
         // in order to be retriable detach needs to be idempotent
+        // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
 
         // Ensure that there are no child timelines **attached to that pageserver**,
-        // because detach removes files, which will brake child branches
-        let num_children = timelines
+        // because detach removes files, which will break child branches
+        let children_exist = timelines
             .iter()
-            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
-            .count();
+            .any(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id));
 
         ensure!(
-            num_children == 0,
+            !children_exist,
             "Cannot detach timeline which has child timelines"
         );
         let timeline_entry = match timelines.entry(timeline_id) {
