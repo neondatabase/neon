@@ -550,5 +550,5 @@ jobs:
         run: |
           helm plugin install https://github.com/databus23/helm-diff
           DOCKER_TAG=$(git rev-list --count HEAD)
-          helm diff upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-          helm diff upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
+          helm diff upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} # --wait
+          helm diff upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} # --wait
