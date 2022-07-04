@@ -33,7 +33,18 @@ def test_complete(pg_bin):
     os.mkdir(restored_dir, 0o750)
     subprocess_capture(work_dir, ["tar", "-xf", base_tar, "-C", restored_dir])
 
-    # TODO rm empty fiiles, just to see if they get recreated
+    # Find empty files
+    empty_files = []
+    for root, dirs, files in os.walk(restored_dir):
+        for name in files:
+            file_path = os.path.join(root, name)
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                empty_files.append(file_path)
+
+    # Delete empty files (just to see if they get recreated)
+    for empty_file in empty_files:
+        os.remove(empty_file)
 
     # Get the nodes
     paths = get_rel_paths(pg_bin, restored_dir)
@@ -45,6 +56,21 @@ def test_complete(pg_bin):
         if not exists:
             print("Touching file ", absolute_path)
             Path(absolute_path).touch()
+
+    # Check that all deleted files are back
+    unimportant_files = {
+        "postgresql.auto.conf",
+        "pg_ident.conf",
+    }
+    for empty_file in empty_files:
+        file_name = os.path.basename(empty_file)
+        if file_name in unimportant_files:
+            continue
+
+        exists = os.path.exists(empty_file)
+        if not exists:
+            print(f"Deleted empty file {empty_file} was not recreated")
+            exit(1)
 
     # Pack completed tar, being careful to preserve relative file names
     tmp_tar_name = "tmp.tar"
