@@ -6,19 +6,26 @@ from pathlib import Path
 
 
 def get_rel_paths(pg_bin, restored_dir):
-    """Return list of relation paths"""
+    """Yeild list of relation paths"""
     port = "55439"  # Probably free
     with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
         vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
-        query = "select pg_relation_filepath(oid) from pg_class"
+        query = "select datname from pg_database"
         result = vanilla_pg.safe_psql(query, user="cloud_admin")
-        return [
-            row[0]
-            for row in result
-            if row[0] is not None  # TODO why is it None sometimes?
-        ]
+        databases = [row[0] for row in result]
+
+        for database in databases:
+            if database == "template0":
+                continue  # TODO this one doesn't take connections
+
+            query = "select pg_relation_filepath(oid) from pg_class"
+            result = vanilla_pg.safe_psql(query, user="cloud_admin", dbname=database)
+            for row in result:
+                filepath = row[0]
+                if filepath is not None:
+                    yield filepath
 
 
 def test_complete(pg_bin):
@@ -47,7 +54,8 @@ def test_complete(pg_bin):
         os.remove(empty_file)
 
     # Get the nodes
-    paths = get_rel_paths(pg_bin, restored_dir)
+    paths = list(get_rel_paths(pg_bin, restored_dir))
+    print(paths)
 
     # Touch files that don't exist
     for path in paths:
@@ -70,7 +78,6 @@ def test_complete(pg_bin):
         exists = os.path.exists(empty_file)
         if not exists:
             print(f"Deleted empty file {empty_file} was not recreated")
-            exit(1)
 
     # Pack completed tar, being careful to preserve relative file names
     tmp_tar_name = "tmp.tar"
