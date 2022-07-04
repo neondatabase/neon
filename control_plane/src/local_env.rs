@@ -406,26 +406,10 @@ impl LocalEnv {
         for binary in ["pageserver", "safekeeper"] {
             if !self.zenith_distrib_dir.join(binary).exists() {
                 bail!(
-                    "Can't find binary '{}' in zenith distrib dir '{}'",
-                    binary,
-                    self.zenith_distrib_dir.display()
-                );
-            }
-        }
-
-        for binary in ["pageserver", "safekeeper"] {
-            if !self.zenith_distrib_dir.join(binary).exists() {
-                bail!(
                     "Can't find binary '{binary}' in zenith distrib dir '{}'",
                     self.zenith_distrib_dir.display()
                 );
             }
-        }
-        if !self.pg_distrib_dir.join("bin/postgres").exists() {
-            bail!(
-                "Can't find postgres binary at {}",
-                self.pg_distrib_dir.display()
-            );
         }
 
         fs::create_dir(&base_path)?;
