@@ -1,3 +1,4 @@
+import pathlib
 import pytest
 import random
 import time
@@ -14,7 +15,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.neon_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol
-from fixtures.utils import get_dir_size, lsn_to_hex, mkdir_if_needed, lsn_from_hex
+from fixtures.utils import get_dir_size, lsn_to_hex, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 from uuid import uuid4
@@ -645,7 +646,7 @@ class ProposerPostgres(PgProtocol):
     def create_dir_config(self, safekeepers: str):
         """ Create dir and config for running --sync-safekeepers """
 
-        mkdir_if_needed(self.pg_data_dir_path())
+        pathlib.Path(self.pg_data_dir_path()).mkdir(exist_ok=True)
         with open(self.config_file_path(), "w") as f:
             cfg = [
                 "synchronous_standby_names = 'walproposer'\n",
@@ -828,7 +829,7 @@ class SafekeeperEnv:
 
         self.timeline_id = uuid.uuid4()
         self.tenant_id = uuid.uuid4()
-        mkdir_if_needed(str(self.repo_dir))
+        self.repo_dir.mkdir(exist_ok=True)
 
         # Create config and a Safekeeper object for each safekeeper
         self.safekeepers = []
@@ -847,8 +848,8 @@ class SafekeeperEnv:
             http=self.port_distributor.get_port(),
         )
 
-        safekeeper_dir = os.path.join(self.repo_dir, f"sk{i}")
-        mkdir_if_needed(safekeeper_dir)
+        safekeeper_dir = self.repo_dir / f"sk{i}"
+        safekeeper_dir.mkdir(exist_ok=True)
 
         args = [
             self.bin_safekeeper,
@@ -857,7 +858,7 @@ class SafekeeperEnv:
             "--listen-http",
             f"127.0.0.1:{port.http}",
             "-D",
-            safekeeper_dir,
+            str(safekeeper_dir),
             "--id",
             str(i),
             "--broker-endpoints",

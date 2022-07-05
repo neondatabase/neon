@@ -12,6 +12,7 @@ pageservers
 safekeepers
 
 [storage:vars]
+env_name = prod-1
 console_mgmt_base_url = http://console-release.local
 bucket_name           = zenith-storage-oregon
 bucket_region         = us-west-2

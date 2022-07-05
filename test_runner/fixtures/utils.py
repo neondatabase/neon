@@ -12,18 +12,6 @@ def get_self_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def mkdir_if_needed(path: str) -> None:
-    """ Create a directory if it doesn't already exist
-
-    Note this won't try to create intermediate directories.
-    """
-    try:
-        os.mkdir(path)
-    except FileExistsError:
-        pass
-    assert os.path.isdir(path)
-
-
 def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     """ Run a process and capture its output
 

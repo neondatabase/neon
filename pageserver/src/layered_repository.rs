@@ -158,6 +158,18 @@ pub struct LayeredRepository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
+    // Allows us to gracefully cancel operations that edit the directory
+    // that backs this layered repository. Usage:
+    //
+    // Use `let _guard = file_lock.try_read()` while writing any files.
+    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
+    //
+    // TODO try_read this lock during checkpoint as well to prevent race
+    //      between checkpoint and detach/delete.
+    // TODO try_read this lock for all gc/compaction operations, not just
+    //      ones scheduled by the tenant task manager.
+    pub file_lock: RwLock<()>,
+
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
@@ -220,23 +232,32 @@ impl Repository for LayeredRepository {
 
     fn create_empty_timeline(
         &self,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<LayeredTimeline>> {
         let mut timelines = self.timelines.lock().unwrap();
+        let vacant_timeline_entry = match timelines.entry(timeline_id) {
+            Entry::Occupied(_) => bail!("Timeline already exists"),
+            Entry::Vacant(vacant_entry) => vacant_entry,
+        };
+
+        let timeline_path = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        if timeline_path.exists() {
+            bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
+        }
 
         // Create the timeline directory, and write initial metadata to file.
-        crashsafe_dir::create_dir_all(self.conf.timeline_path(&timelineid, &self.tenant_id))?;
+        crashsafe_dir::create_dir_all(timeline_path)?;
 
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        Self::save_metadata(self.conf, timelineid, self.tenant_id, &metadata, true)?;
+        Self::save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
 
         let timeline = LayeredTimeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
             None,
-            timelineid,
+            timeline_id,
             self.tenant_id,
             Arc::clone(&self.walredo_mgr),
             self.upload_layers,
@@ -245,12 +266,7 @@ impl Repository for LayeredRepository {
 
         // Insert if not exists
         let timeline = Arc::new(timeline);
-        match timelines.entry(timelineid) {
-            Entry::Occupied(_) => bail!("Timeline already exists"),
-            Entry::Vacant(vacant) => {
-                vacant.insert(LayeredTimelineEntry::Loaded(Arc::clone(&timeline)))
-            }
-        };
+        vacant_timeline_entry.insert(LayeredTimelineEntry::Loaded(Arc::clone(&timeline)));
 
         Ok(timeline)
     }
@@ -685,6 +701,7 @@ impl LayeredRepository {
     ) -> LayeredRepository {
         LayeredRepository {
             tenant_id,
+            file_lock: RwLock::new(()),
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
@@ -1910,15 +1927,28 @@ impl LayeredTimeline {
                 } else {
                     Lsn(0)
                 };
+                // Let's consider an example:
+                //
+                // delta layer with LSN range 71-81
+                // delta layer with LSN range 81-91
+                // delta layer with LSN range 91-101
+                // image layer at LSN 100
+                //
+                // If 'lsn' is still 100, i.e. no new WAL has been processed since the last image layer,
+                // there's no need to create a new one. We check this case explicitly, to avoid passing
+                // a bogus range to count_deltas below, with start > end. It's even possible that there
+                // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
+                // after we read last_record_lsn, which is passed here in the 'lsn' argument.
+                if img_lsn < lsn {
+                    let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
 
-                let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
-
-                debug!(
-                    "range {}-{}, has {} deltas on this timeline",
-                    img_range.start, img_range.end, num_deltas
-                );
-                if num_deltas >= self.get_image_creation_threshold() {
-                    return Ok(true);
+                    debug!(
+                        "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
+                        img_range.start, img_range.end, num_deltas, img_lsn, lsn
+                    );
+                    if num_deltas >= self.get_image_creation_threshold() {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -2209,6 +2239,9 @@ impl LayeredTimeline {
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
+                    }
+                    LsnForTimestamp::NoData(lsn) => {
+                        debug!("nodata({})", lsn);
                     }
                 }
                 debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)

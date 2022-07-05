@@ -51,6 +51,7 @@ pub enum LsnForTimestamp {
     Present(Lsn),
     Future(Lsn),
     Past(Lsn),
+    NoData(Lsn),
 }
 
 impl<R: Repository> DatadirTimeline<R> {
@@ -265,7 +266,7 @@ impl<R: Repository> DatadirTimeline<R> {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                bail!("no commit timestamps found");
+                Ok(LsnForTimestamp::NoData(max_lsn))
             }
             (true, false) => {
                 // Didn't find any commit timestamps larger than the request

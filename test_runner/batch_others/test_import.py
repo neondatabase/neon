@@ -191,3 +191,8 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     # Check it's the same as the first fullbackup
     # TODO pageserver should be checking checksum
     assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
+
+    # Check that gc works
+    psconn = env.pageserver.connect()
+    pscur = psconn.cursor()
+    pscur.execute(f"do_gc {tenant.hex} {timeline} 0")

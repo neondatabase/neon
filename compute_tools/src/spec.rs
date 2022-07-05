@@ -4,7 +4,6 @@ use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
 use postgres::{Client, NoTls};
 use serde::Deserialize;
-use urlencoding::encode;
 
 use crate::compute::ComputeNode;
 use crate::config;
@@ -231,9 +230,11 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
 fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()> {
     for db in &node.spec.cluster.databases {
         if db.owner != *role_name {
-            let db_name_encoded = format!("/{}", encode(&db.name));
-            let db_connstr = node.connstr.replacen("/postgres", &db_name_encoded, 1);
-            let mut client = Client::connect(&db_connstr, NoTls)?;
+            let mut connstr = node.connstr.clone();
+            // database name is always the last and the only component of the path
+            connstr.set_path(&db.name);
+
+            let mut client = Client::connect(connstr.as_str(), NoTls)?;
 
             // This will reassign all dependent objects to the db owner
             let reassign_query = format!(
