@@ -110,21 +110,20 @@ def main(args: argparse.Namespace):
             if args.only_import is False:
                 query = f"fullbackup {timeline['tenant_id']} {timeline['timeline_id']} {timeline['local']['last_record_lsn']}"
 
-                cmd = ["psql", "--no-psqlrc", old_pageserver_connstr, "-c", query]
+                cmd = [args.psql_path, "--no-psqlrc", old_pageserver_connstr, "-c", query]
                 print(f"Running: {cmd}")
 
                 tar_filename = path.join(basepath,
                                          f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
-                incomplete_tar_filename = tar_filename + ".incomplete"
                 stderr_filename = path.join(
                     basepath, f"{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
 
-                with open(incomplete_tar_filename, 'w') as stdout_f:
+                with open(tar_filename, 'w') as stdout_f:
                     with open(stderr_filename, 'w') as stderr_f:
-                        print(f"(capturing output to {incomplete_filename})")
+                        print(f"(capturing output to {tar_filename})")
                         subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=psql_env)
 
-                add_missing_emtpy_rels(incomplete_tar_filename, tar_filename)
+                # add_missing_emtpy_rels(incomplete_tar_filename, tar_filename)
 
                 print(f"Done export: {tar_filename}")
 
