@@ -1,6 +1,3 @@
-import time
-from asyncpg.connection import os
-
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import lsn_from_hex
