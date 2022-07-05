@@ -222,7 +222,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                 "--psql-path",
                 os.path.join(pg_distrib_dir, "bin", "psql"),
             ]
-            subprocess_capture(env.repo_dir, cmd, check=True)
+            subprocess_capture(str(env.repo_dir), cmd, check=True)
         elif method == "minor":
             # call to attach timeline to new pageserver
             new_pageserver_http.timeline_attach(tenant, timeline)
