@@ -12,6 +12,7 @@ pageservers
 safekeepers
 
 [storage:vars]
+env_name = neon-stress
 console_mgmt_base_url = http://neon-stress-console.local
 bucket_name           = neon-storage-ireland
 bucket_region         = eu-west-1
