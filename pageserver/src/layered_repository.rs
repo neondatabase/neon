@@ -2328,9 +2328,10 @@ impl LayeredTimeline {
             // If GC horizon is at 2500, we can remove layers A and B, but
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
-            {
+            if !layers.image_layer_exists(
+                &l.get_key_range(),
+                &(l.get_lsn_range().end..disk_consistent_lsn + 1),
+            )? {
                 debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().display()
