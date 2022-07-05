@@ -72,6 +72,14 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
 
+import pytest
+import os
+def add_missing_empty_rels(base_tar, output_tar):
+    os.environ['INPUT_BASE_TAR'] = base_tar
+    os.environ['OUTPUT_BASE_TAR'] = output_tar
+    pytest.main(["-s", "-k", "test_main_hack"])
+
+
 def main(args: argparse.Namespace):
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host
@@ -107,13 +115,16 @@ def main(args: argparse.Namespace):
 
                 tar_filename = path.join(basepath,
                                          f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
+                incomplete_tar_filename = tar_filename + ".incomplete"
                 stderr_filename = path.join(
                     basepath, f"{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
 
-                with open(tar_filename, 'w') as stdout_f:
+                with open(incomplete_tar_filename, 'w') as stdout_f:
                     with open(stderr_filename, 'w') as stderr_f:
-                        print(f"(capturing output to {tar_filename})")
+                        print(f"(capturing output to {incomplete_filename})")
                         subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=psql_env)
+
+                add_missing_emtpy_rels(incomplete_tar_filename, tar_filename)
 
                 print(f"Done export: {tar_filename}")
 
