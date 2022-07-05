@@ -59,6 +59,9 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
             'compaction_period': '1 s',
             'compaction_threshold': '2',
             'image_creation_threshold': '1',
+
+            # set PITR interval to be small, so we can do GC
+            'pitr_interval': '1 s'
         })
 
     timeline_main = env.neon_cli.create_timeline(f'test_main', tenant_id=tenant)
