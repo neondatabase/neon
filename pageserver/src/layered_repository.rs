@@ -1923,15 +1923,28 @@ impl LayeredTimeline {
                 } else {
                     Lsn(0)
                 };
+                // Let's consider an example:
+                //
+                // delta layer with LSN range 71-81
+                // delta layer with LSN range 81-91
+                // delta layer with LSN range 91-101
+                // image layer at LSN 100
+                //
+                // If 'lsn' is still 100, i.e. no new WAL has been processed since the last image layer,
+                // there's no need to create a new one. We check this case explicitly, to avoid passing
+                // a bogus range to count_deltas below, with start > end. It's even possible that there
+                // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
+                // after we read last_record_lsn, which is passed here in the 'lsn' argument.
+                if img_lsn < lsn {
+                    let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
 
-                let num_deltas = layers.count_deltas(&img_range, &(img_lsn..lsn))?;
-
-                debug!(
-                    "range {}-{}, has {} deltas on this timeline",
-                    img_range.start, img_range.end, num_deltas
-                );
-                if num_deltas >= self.get_image_creation_threshold() {
-                    return Ok(true);
+                    debug!(
+                        "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
+                        img_range.start, img_range.end, num_deltas, img_lsn, lsn
+                    );
+                    if num_deltas >= self.get_image_creation_threshold() {
+                        return Ok(true);
+                    }
                 }
             }
         }
