@@ -14,7 +14,6 @@ use super::XLogLongPageHeaderData;
 use super::XLogPageHeaderData;
 use super::XLogRecord;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crc32c::*;
 use log::*;
 use std::cmp::min;
 use thiserror::Error;
@@ -198,18 +197,12 @@ impl WalStreamDecoder {
         }
 
         // We now have a record in the 'recordbuf' local variable.
-        let xlogrec =
-            XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
-                WalDecodeError {
-                    msg: format!("xlog record deserialization failed {}", e),
-                    lsn: self.lsn,
-                }
-            })?;
+        let xlogrec = XLogRecord::from_buf(&recordbuf).map_err(|e| WalDecodeError {
+            msg: format!("xlog record deserialization failed {}", e),
+            lsn: self.lsn,
+        })?;
 
-        let mut crc = 0;
-        crc = crc32c_append(crc, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
-        crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
-        if crc != xlogrec.xl_crc {
+        if !wal_record_verify_checksum(&xlogrec, &recordbuf) {
             return Err(WalDecodeError {
                 msg: "WAL record crc mismatch".into(),
                 lsn: self.lsn,

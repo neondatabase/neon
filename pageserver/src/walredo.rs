@@ -48,7 +48,8 @@ use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
-use postgres_ffi::pg_constants;
+use postgres_ffi::xlog_utils::wal_record_verify_checksum;
+use postgres_ffi::{page_verify_checksum, pg_constants, XLogRecord};
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -726,6 +727,13 @@ impl PostgresRedoProcess {
         let mut writebuf: Vec<u8> = Vec::new();
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
+            if !page_verify_checksum(&img, tag.blknum) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("block {} of relation {} is invalid", tag.blknum, tag.rel),
+                ));
+            }
+
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
@@ -734,6 +742,25 @@ impl PostgresRedoProcess {
                 rec: postgres_rec,
             } = rec
             {
+                let xlogrec = XLogRecord::from_buf(postgres_rec).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "could not deserialize WAL record for relation {} at LSN {}: {}",
+                            tag.rel, lsn, e
+                        ),
+                    )
+                })?;
+                if !wal_record_verify_checksum(&xlogrec, postgres_rec) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "WAL record for relation {} at LSN {} is invalid",
+                            tag.rel, lsn
+                        ),
+                    ));
+                }
+
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
                 return Err(Error::new(

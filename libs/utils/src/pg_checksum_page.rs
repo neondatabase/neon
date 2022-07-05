@@ -35,6 +35,9 @@ fn checksum_comp(checksum: u32, value: u32) -> u32 {
  * The checksum includes the block number (to detect the case where a page is
  * somehow moved to a different location), the page header (excluding the
  * checksum itself), and the page data.
+ *
+ * As in C implementation in Postgres, the checksum attribute on the page is
+ * excluded from the calculation and preserved.
  */
 pub fn pg_checksum_page(data: &[u8], blkno: u32) -> u16 {
     let page = unsafe { std::mem::transmute::<&[u8], &[u32]>(data) };
@@ -43,8 +46,19 @@ pub fn pg_checksum_page(data: &[u8], blkno: u32) -> u16 {
 
     /* main checksum calculation */
     for i in 0..(BLCKSZ / (4 * N_SUMS)) {
-        for j in 0..N_SUMS {
-            sums[j] = checksum_comp(sums[j], page[i * N_SUMS + j]);
+        for (j, sum) in sums.iter_mut().enumerate().take(N_SUMS) {
+            let chunk_i = i * N_SUMS + j;
+            let chunk: u32;
+            if chunk_i == 2 {
+                let mut chunk_copy = page[chunk_i].to_le_bytes();
+                chunk_copy[0] = 0;
+                chunk_copy[1] = 0;
+                chunk = u32::from_le_bytes(chunk_copy);
+            } else {
+                chunk = page[chunk_i];
+            }
+
+            *sum = checksum_comp(*sum, chunk);
         }
     }
     /* finally add in two rounds of zeroes for additional mixing */
@@ -67,4 +81,40 @@ pub fn pg_checksum_page(data: &[u8], blkno: u32) -> u16 {
      * one. That avoids checksums of zero, which seems like a good idea.
      */
     ((checksum % 65535) + 1) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pg_checksum_page, BLCKSZ};
+
+    #[test]
+    fn page_with_and_without_checksum() {
+        // Create a page with some content and without a correct checksum.
+        let mut page: [u8; BLCKSZ] = [0; BLCKSZ];
+        for (i, byte) in page.iter_mut().enumerate().take(BLCKSZ) {
+            *byte = i as u8;
+        }
+
+        // Calculate the checksum.
+        let checksum = pg_checksum_page(&page[..], 0);
+
+        // Zero the checksum attribute on the page.
+        page[8..10].copy_from_slice(&[0u8; 2]);
+
+        // Calculate the checksum again, should be the same.
+        let new_checksum = pg_checksum_page(&page[..], 0);
+        assert_eq!(checksum, new_checksum);
+
+        // Set the correct checksum into the page.
+        page[8..10].copy_from_slice(&checksum.to_le_bytes());
+
+        // Calculate the checksum again, should be the same.
+        let new_checksum = pg_checksum_page(&page[..], 0);
+        assert_eq!(checksum, new_checksum);
+
+        // Check that we protect from the page transposition, i.e. page is the
+        // same, but in the wrong place.
+        let wrong_blockno_checksum = pg_checksum_page(&page[..], 1);
+        assert_ne!(checksum, wrong_blockno_checksum);
+    }
 }
