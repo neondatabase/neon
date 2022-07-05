@@ -163,6 +163,11 @@ pub struct LayeredRepository {
     //
     // Use `let _guard = file_lock.try_read()` while writing any files.
     // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
+    //
+    // TODO try_read this lock during checkpoint as well to prevent race
+    //      between checkpoint and detach/delete.
+    // TODO try_read this lock for all gc/compaction operations, not just
+    //      ones scheduled by the tenant task manager.
     pub file_lock: RwLock<()>,
 
     // Overridden tenant-specific config parameters.
