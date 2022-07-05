@@ -158,6 +158,18 @@ pub struct LayeredRepository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
+    // Allows us to gracefully cancel operations that edit the directory
+    // that backs this layered repository. Usage:
+    //
+    // Use `let _guard = file_lock.try_read()` while writing any files.
+    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
+    //
+    // TODO try_read this lock during checkpoint as well to prevent race
+    //      between checkpoint and detach/delete.
+    // TODO try_read this lock for all gc/compaction operations, not just
+    //      ones scheduled by the tenant task manager.
+    pub file_lock: RwLock<()>,
+
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
@@ -685,6 +697,7 @@ impl LayeredRepository {
     ) -> LayeredRepository {
         LayeredRepository {
             tenant_id,
+            file_lock: RwLock::new(()),
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
