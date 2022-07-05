@@ -583,7 +583,9 @@ impl PageServerHandler {
 
         // Flush data to disk, then upload to s3
         info!("flushing layers");
-        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+        datadir_timeline
+            .tline
+            .checkpoint(CheckpointConfig::Forced)?;
 
         info!("done");
         Ok(())
@@ -1097,7 +1099,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Couldn't load timeline")?;
-            timeline.tline.compact()?;
+            timeline.tline.compact(false)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -1123,7 +1125,7 @@ impl postgres_backend::Handler for PageServerHandler {
             //
             // FIXME: This probably shouldn't be part of a "checkpoint" command, but a
             // separate operation. Update the tests if you change this.
-            timeline.tline.compact()?;
+            timeline.tline.compact(false)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;

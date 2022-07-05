@@ -348,7 +348,7 @@ impl Repository for LayeredRepository {
                 info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
             match timeline {
                 LayeredTimelineEntry::Loaded(timeline) => {
-                    timeline.compact()?;
+                    timeline.compact(false)?;
                 }
                 LayeredTimelineEntry::Unloaded { .. } => {
                     debug!("Cannot compact remote timeline {}", timelineid)
@@ -1113,7 +1113,7 @@ impl Timeline for LayeredTimeline {
             CheckpointConfig::Forced => {
                 self.freeze_inmem_layer(false);
                 self.flush_frozen_layers(true)?;
-                self.compact()
+                self.compact(true)
             }
         }
     }
@@ -1820,7 +1820,7 @@ impl LayeredTimeline {
         Ok(())
     }
 
-    pub fn compact(&self) -> Result<()> {
+    pub fn compact(&self, forced_compact: bool) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
         //
@@ -1867,6 +1867,7 @@ impl LayeredTimeline {
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
             )?;
+
             let timer = self.create_images_time_histo.start_timer();
             // 2. Create new image layers for partitions that have been modified
             // "enough".
@@ -1889,7 +1890,7 @@ impl LayeredTimeline {
 
             // 3. Compact
             let timer = self.compact_time_histo.start_timer();
-            self.compact_level0(target_file_size)?;
+            self.compact_level0(target_file_size, forced_compact)?;
             timer.stop_and_record();
         } else {
             debug!("Could not compact because no partitioning specified yet");
@@ -1970,13 +1971,15 @@ impl LayeredTimeline {
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files.
     ///
-    fn compact_level0(&self, target_file_size: u64) -> Result<()> {
+    fn compact_level0(&self, target_file_size: u64, forced: bool) -> Result<()> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
-        // Only compact if enough layers have accumulated.
-        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
+        // Compact if enough layers have accumulated or if forced.
+        if level0_deltas.is_empty()
+            || (!forced && level0_deltas.len() < self.get_compaction_threshold())
+        {
             return Ok(());
         }
 
@@ -2633,7 +2636,7 @@ pub mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.compact(false)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
@@ -2641,7 +2644,7 @@ pub mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.compact(false)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
@@ -2649,7 +2652,7 @@ pub mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.compact(false)?;
 
         let writer = tline.writer();
         writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
@@ -2657,7 +2660,7 @@ pub mod tests {
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
-        tline.compact()?;
+        tline.compact(false)?;
 
         assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
@@ -2705,7 +2708,7 @@ pub mod tests {
 
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.compact(false)?;
             tline.gc()?;
         }
 
@@ -2775,7 +2778,7 @@ pub mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.compact(false)?;
             tline.gc()?;
         }
 
@@ -2852,7 +2855,7 @@ pub mod tests {
             let cutoff = tline.get_last_record_lsn();
             tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
             tline.checkpoint(CheckpointConfig::Forced)?;
-            tline.compact()?;
+            tline.compact(false)?;
             tline.gc()?;
         }
 
