@@ -248,18 +248,20 @@ pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()
             bail!("Postgres exited unexpectedly with code {}", code);
         }
 
-        if pid_path.exists() {
-            let file = BufReader::new(File::open(&pid_path)?);
-            let status = file
-                .lines()
-                .last()
-                .unwrap()
-                .unwrap_or_else(|_| "unknown".to_string());
-            let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
+        // Check that we can open pid file first.
+        if let Ok(file) = File::open(&pid_path) {
+            let file = BufReader::new(file);
+            let last_line = file.lines().last();
 
-            // Now Postgres is ready to accept connections
-            if status.trim() == "ready" && can_connect {
-                break;
+            // Pid file could be there and we could read it, but it could be empty, for example.
+            if let Some(Ok(line)) = last_line {
+                let status = line.trim();
+                let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
+
+                // Now Postgres is ready to accept connections
+                if status == "ready" && can_connect {
+                    break;
+                }
             }
         }
 
