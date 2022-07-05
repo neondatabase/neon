@@ -1,5 +1,5 @@
 from fixtures.neon_fixtures import VanillaPostgres
-from fixtures.utils import mkdir_if_needed, subprocess_capture
+from fixtures.utils import subprocess_capture
 import os
 import shutil
 from pathlib import Path
@@ -116,27 +116,28 @@ def touch_missing_rels(log_dir, corrupt_tar, output_tar, paths):
             absolute_path = os.path.join(restored_dir, path)
             exists = os.path.exists(absolute_path)
             if not exists:
+                print("File {absolute_path} didn't exist. Creating..")
                 Path(absolute_path).touch()
 
         # Repackage
         pack_base(log_dir, restored_dir, output_tar)
 
 
-def test_complete(pg_bin):
+def test_complete(test_output_dir, pg_bin):
     # Specify directories
-    # TODO make this a standalone script, with these as inputs
+    # TODO make a basebackup instead of using one from another test
     work_dir = "/home/bojan/src/neondatabase/neon/test_output/test_import_from_pageserver/"
     base_tar = os.path.join(work_dir, "psql_2.stdout")
     output_tar = os.path.join(work_dir, "psql_2-completed.stdout")
 
     # Create new base tar with missing empty files
-    corrupt_tar = os.path.join(work_dir, "psql_2-corrupted.stdout")
-    deleted_files = corrupt(work_dir, base_tar, corrupt_tar)
-    assert len(set(get_files_in_tar(work_dir, base_tar)) -
-               set(get_files_in_tar(work_dir, corrupt_tar))) > 0
+    corrupt_tar = os.path.join(test_output_dir, "psql_2-corrupted.stdout")
+    deleted_files = corrupt(test_output_dir, base_tar, corrupt_tar)
+    assert len(set(get_files_in_tar(test_output_dir, base_tar)) -
+               set(get_files_in_tar(test_output_dir, corrupt_tar))) > 0
 
     # Reconstruct paths from the corrupted tar, assert it covers everything important
-    reconstructed_paths = set(get_rel_paths(work_dir, pg_bin, corrupt_tar))
+    reconstructed_paths = set(get_rel_paths(test_output_dir, pg_bin, corrupt_tar))
     paths_missed = deleted_files - reconstructed_paths
     assert paths_missed.issubset({
         "postgresql.auto.conf",
@@ -144,10 +145,24 @@ def test_complete(pg_bin):
     })
 
     # Recreate the correct tar by touching files, compare with original tar
-    touch_missing_rels(work_dir, corrupt_tar, output_tar, reconstructed_paths)
-    paths_missed = (set(get_files_in_tar(work_dir, base_tar)) -
-                    set(get_files_in_tar(work_dir, output_tar)))
+    touch_missing_rels(test_output_dir, corrupt_tar, output_tar, reconstructed_paths)
+    paths_missed = (set(get_files_in_tar(test_output_dir, base_tar)) -
+                    set(get_files_in_tar(test_output_dir, output_tar)))
     assert paths_missed.issubset({
         "postgresql.auto.conf",
         "pg_ident.conf",
     })
+
+
+# HACK this script relies on test fixtures, but you can run it with
+# poetry run pytest -k test_main_hack and pass inputs via envvars
+#
+# The script takes a base tar, infers what empty rel files might be missing
+# and creates a new base tar with those files included. It does not modify
+# the original file.
+def test_main_hack(test_output_dir, pg_bin):
+    base_tar = os.environ['INPUT_BASE_TAR']
+    output_tar = os.environ['OUTPUT_BASE_TAR']
+
+    reconstructed_paths = set(get_rel_paths(test_output_dir, pg_bin, base_tar))
+    touch_missing_rels(test_output_dir, base_tar, output_tar, reconstructed_paths)
