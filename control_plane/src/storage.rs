@@ -427,6 +427,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+                data_checksums: Some(true),
             })
             .send()?
             .error_from_body()?
@@ -436,7 +437,7 @@ impl PageServerNode {
             .map(|id| {
                 id.parse().with_context(|| {
                     format!(
-                        "Failed to parse tennat creation response as tenant id: {}",
+                        "Failed to parse tenant creation response as tenant id: {}",
                         id
                     )
                 })

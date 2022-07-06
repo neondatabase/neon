@@ -11,7 +11,7 @@ use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr::ThreadKind;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
-use crate::{thread_mgr, timelines, walreceiver};
+use crate::{tenant_config, thread_mgr, timelines, walreceiver};
 use crate::{DatadirTimelineImpl, RepositoryImpl};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -266,7 +266,11 @@ pub fn create_tenant_repository(
             Ok(None)
         }
         Entry::Vacant(v) => {
-            let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+            let data_checksums = tenant_conf
+                .data_checksums
+                .unwrap_or(tenant_config::defaults::DEFAULT_DATA_CHECKSUMS);
+            let wal_redo_manager =
+                Arc::new(PostgresRedoManager::new(conf, data_checksums, tenant_id));
             let repo = timelines::create_repo(
                 conf,
                 tenant_conf,
@@ -567,10 +571,16 @@ fn load_local_repo(
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<Arc<RepositoryImpl>> {
+    // Restore tenant config
+    let tenant_conf = LayeredRepository::load_tenant_config(conf, tenant_id)?;
+
     let mut m = tenants_state::write_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
+        let data_checksums = tenant_conf
+            .data_checksums
+            .unwrap_or(tenant_config::defaults::DEFAULT_DATA_CHECKSUMS);
         // Set up a WAL redo manager, for applying WAL records.
-        let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
+        let walredo_mgr = PostgresRedoManager::new(conf, data_checksums, tenant_id);
 
         // Set up an object repository, for actual data storage.
         let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(
@@ -588,8 +598,6 @@ fn load_local_repo(
         }
     });
 
-    // Restore tenant config
-    let tenant_conf = LayeredRepository::load_tenant_config(conf, tenant_id)?;
     tenant.repo.update_tenant_config(tenant_conf)?;
 
     Ok(Arc::clone(&tenant.repo))

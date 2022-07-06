@@ -38,6 +38,10 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+
+    // Turn off data checksums by default to do not affect old tenants.
+    // We turn it on explicitly for all new tenants.
+    pub const DEFAULT_DATA_CHECKSUMS: bool = false;
 }
 
 /// Per-tenant configuration options
@@ -83,6 +87,7 @@ pub struct TenantConf {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
+    pub data_checksums: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -105,6 +110,7 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     pub lagging_wal_timeout: Option<Duration>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub data_checksums: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -135,6 +141,7 @@ impl TenantConfOpt {
                 .lagging_wal_timeout
                 .unwrap_or(global_conf.lagging_wal_timeout),
             max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
+            data_checksums: self.data_checksums.unwrap_or(global_conf.data_checksums),
         }
     }
 
@@ -172,6 +179,9 @@ impl TenantConfOpt {
         if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
             self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
         }
+        if let Some(data_checksums) = other.data_checksums {
+            self.data_checksums = Some(data_checksums);
+        }
     }
 }
 
@@ -199,6 +209,7 @@ impl TenantConf {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
+            data_checksums: DEFAULT_DATA_CHECKSUMS,
         }
     }
 
@@ -229,6 +240,7 @@ impl TenantConf {
             .unwrap(),
             max_lsn_wal_lag: NonZeroU64::new(defaults::DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .unwrap(),
+            data_checksums: defaults::DEFAULT_DATA_CHECKSUMS,
         }
     }
 }

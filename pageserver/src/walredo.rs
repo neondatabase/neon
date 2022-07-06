@@ -132,6 +132,7 @@ lazy_static! {
 pub struct PostgresRedoManager {
     tenantid: ZTenantId,
     conf: &'static PageServerConf,
+    data_checksums: bool,
 
     process: Mutex<Option<PostgresRedoProcess>>,
 }
@@ -230,11 +231,16 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
+    pub fn new(
+        conf: &'static PageServerConf,
+        data_checksums: bool,
+        tenantid: ZTenantId,
+    ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
             tenantid,
             conf,
+            data_checksums,
             process: Mutex::new(None),
         }
     }
@@ -269,7 +275,13 @@ impl PostgresRedoManager {
         // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
         let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
+            .apply_wal_records(
+                buf_tag,
+                base_img,
+                records,
+                wal_redo_timeout,
+                self.data_checksums,
+            )
             .map_err(WalRedoError::IoError);
 
         let end_time = Instant::now();
@@ -718,6 +730,7 @@ impl PostgresRedoProcess {
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
+        data_checksums: bool,
     ) -> Result<Bytes, std::io::Error> {
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -727,7 +740,9 @@ impl PostgresRedoProcess {
         let mut writebuf: Vec<u8> = Vec::new();
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
-            if !page_verify_checksum(&img, tag.blknum) {
+            // Checksums could be not stamped for old tenants, so check them only if they
+            // are enabled (this is controlled by per-tenant config).
+            if data_checksums && !page_verify_checksum(&img, tag.blknum) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("block {} of relation {} is invalid", tag.blknum, tag.rel),
@@ -751,6 +766,8 @@ impl PostgresRedoProcess {
                         ),
                     )
                 })?;
+                // WAL records always have a checksum, check it before sending to redo process.
+                // It doesn't do these checks itself.
                 if !wal_record_verify_checksum(&xlogrec, postgres_rec) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
