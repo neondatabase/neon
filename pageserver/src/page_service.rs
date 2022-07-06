@@ -951,7 +951,10 @@ impl postgres_backend::Handler for PageServerHandler {
 
             match self.handle_import_basebackup(pgb, tenant, timeline, base_lsn, end_lsn) {
                 Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?,
+                Err(e) => {
+                    error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
             };
         } else if query_string.starts_with("import wal ") {
             // Import the `pg_wal` section of a basebackup.
@@ -970,7 +973,10 @@ impl postgres_backend::Handler for PageServerHandler {
 
             match self.handle_import_wal(pgb, tenant, timeline, start_lsn, end_lsn) {
                 Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?,
+                Err(e) => {
+                    error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
             };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
