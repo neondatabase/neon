@@ -44,12 +44,16 @@ async def test_psql_session_id(link_proxy):
         # log.info(f"{attempt=} proc.stderr.readline() = {raw_line}") # for local debugging
         line = raw_line.decode("utf-8").strip()
         if line.startswith("http"):
-            psql_session_id = line.split("/")[-1]
+            line_parts = line.split("/")
+            psql_session_id = line_parts[-1]
+            link_auth_uri = '/'.join(line_parts[:-1])
+            assert link_auth_uri == link_proxy.link_auth_uri, \
+                f"Line='{line}' should contain a http auth link of form '{link_proxy.link_auth_uri}/<psql_session_id>'. "
             break
         log.debug("line %d does not contain expected result: %s", attempt, line)
 
     assert attempt <= max_attempts, "exhausted given attempts, did not get the result"
-    assert psql_session_id is not None
+    assert psql_session_id is not None, "psql_session_id not found from output of proc.stderr.readline()"
     log.debug(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
     log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
 
