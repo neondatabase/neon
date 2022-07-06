@@ -204,7 +204,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         if method == "major":
             cmd = [
                 "python",
-                os.path.join(base_dir, "scripts/export_import_betwen_pageservers.py"),
+                os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",
                 tenant.hex,
                 "--from-host",
