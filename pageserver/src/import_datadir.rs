@@ -530,6 +530,9 @@ pub fn import_file<R: Repository, Reader: Read>(
             }
         };
 
+        // zenith.signal is not necessarily the last file, that we handle
+        // but it is ok to call `finish_write()`, because final `modification.commit()`
+        // will update lsn once more to the final one.
         let writer = modification.tline.tline.writer();
         writer.finish_write(prev_lsn);
 
