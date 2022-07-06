@@ -382,7 +382,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar):
         port = "55439"  # Probably free
         with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
             vanilla_pg.configure([f"port={port}"])
-            vanilla_pg.start()
+            vanilla_pg.start(log_path=os.path.join(log_dir, "tmp_pg.log"))
 
             # Create database based on template0 because we can't connect to template0
             query = "create database template0copy template template0"
