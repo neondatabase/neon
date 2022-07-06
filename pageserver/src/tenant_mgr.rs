@@ -13,7 +13,7 @@ use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use crate::{DatadirTimelineImpl, RepositoryImpl};
-use anyhow::{bail, Context};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
@@ -401,7 +401,14 @@ pub fn get_local_timeline_with_load(
 }
 
 pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
-    // shutdown the timeline tasks (this shuts down the walreceiver)
+    // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
+    // It is important that we do not take locks here, and do not check whether the timeline exists
+    // because if we hold tenants_state::write_tenants() while awaiting for the threads to join
+    // we cannot create new timelines and tenants, and that can take quite some time,
+    // it can even become stuck due to a bug making whole pageserver unavailable for some operations
+    // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
+    // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
+    // will synchronize and either fail with the not found error or succeed
 
     let (sender, receiver) = std::sync::mpsc::channel::<()>();
     tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
@@ -417,13 +424,10 @@ pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow
     debug!("thread shutdown completed");
     match tenants_state::write_tenants().get_mut(&tenant_id) {
         Some(tenant) => {
-            tenant
-                .repo
-                .delete_timeline(timeline_id)
-                .context("Failed to delete tenant timeline from repo")?;
+            tenant.repo.delete_timeline(timeline_id)?;
             tenant.local_timelines.remove(&timeline_id);
         }
-        None => warn!("Tenant {tenant_id} not found in local tenant state"),
+        None => anyhow::bail!("Tenant {tenant_id} not found in local tenant state"),
     }
 
     Ok(())
@@ -552,7 +556,7 @@ fn check_broken_timeline(
     // A timeline with zero disk consistent LSN can happen when the page server
     // failed to checkpoint the timeline import data when creating that timeline.
     if metadata.disk_consistent_lsn() == Lsn::INVALID {
-        bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
+        anyhow::bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
     }
 
     Ok(())
@@ -615,7 +619,7 @@ fn attach_downloaded_tenant(
         match tenants_state::write_tenants().get_mut(&tenant_id) {
             Some(tenant) => match tenant.local_timelines.entry(timeline_id) {
                 Entry::Occupied(_) => {
-                    bail!("Local timeline {timeline_id} already registered")
+                    anyhow::bail!("Local timeline {timeline_id} already registered")
                 }
                 Entry::Vacant(v) => {
                     v.insert(load_local_timeline(repo, timeline_id).with_context(|| {
@@ -623,7 +627,7 @@ fn attach_downloaded_tenant(
                     })?);
                 }
             },
-            None => bail!(
+            None => anyhow::bail!(
                 "Tenant {} not found in local tenant state",
                 repo.tenant_id()
             ),
