@@ -516,15 +516,17 @@ pub fn import_file<R: Repository, Reader: Read>(
         // Parse zenith signal file to set correct previous LSN
         let bytes = read_all_bytes(reader)?;
         // zenith.signal format is "PREV LSN: prev_lsn"
-        // TODO write serialization and deserialization in the same place,
-        //      write tests.
+        // TODO write serialization and deserialization in the same place.
         let zenith_signal = std::str::from_utf8(&bytes)?.trim();
         let prev_lsn = match zenith_signal {
             "PREV LSN: none" => Lsn(0),
             "PREV LSN: invalid" => Lsn(0),
             other => {
                 let split = other.split(':').collect::<Vec<_>>();
-                split[1].trim().parse::<Lsn>().context("can't parse zenith.signal")?
+                split[1]
+                    .trim()
+                    .parse::<Lsn>()
+                    .context("can't parse zenith.signal")?
             }
         };
 
