@@ -116,6 +116,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                            port_distributor: PortDistributor,
+                           test_output_dir,
                            method: str,
                            with_load: str):
     neon_env_builder.enable_local_fs_remote_storage()
