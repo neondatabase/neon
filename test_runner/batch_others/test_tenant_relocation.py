@@ -111,7 +111,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
         # basebackup and importing it into the new pageserver.
         # This kind of migration can tolerate breaking changes
         # to storage format
-        pytest.param('major', marks=pytest.mark.xfail(reason="Not implemented")),
+        'major',
     ])
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
