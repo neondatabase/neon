@@ -4,7 +4,7 @@ use std::net::TcpListener;
 use utils::http::{endpoint, error::ApiError, json::json_response, RouterBuilder, RouterService};
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    json_response(StatusCode::OK, "")
+    json_response(StatusCode::OK, "OK")
 }
 
 fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
