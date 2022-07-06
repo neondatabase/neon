@@ -604,8 +604,7 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            let (reader, _) = read_object(wal_file_path, xlogoff as u64).await;
-            return Ok(Box::pin(reader));
+            return read_object(wal_file_path, xlogoff as u64).await;
         }
 
         bail!("WAL segment is not found")

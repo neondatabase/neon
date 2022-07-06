@@ -516,10 +516,23 @@ pub fn import_file<R: Repository, Reader: Read>(
         // Parse zenith signal file to set correct previous LSN
         let bytes = read_all_bytes(reader)?;
         // zenith.signal format is "PREV LSN: prev_lsn"
-        let zenith_signal = std::str::from_utf8(&bytes)?;
-        let zenith_signal = zenith_signal.split(':').collect::<Vec<_>>();
-        let prev_lsn = zenith_signal[1].trim().parse::<Lsn>()?;
+        // TODO write serialization and deserialization in the same place.
+        let zenith_signal = std::str::from_utf8(&bytes)?.trim();
+        let prev_lsn = match zenith_signal {
+            "PREV LSN: none" => Lsn(0),
+            "PREV LSN: invalid" => Lsn(0),
+            other => {
+                let split = other.split(':').collect::<Vec<_>>();
+                split[1]
+                    .trim()
+                    .parse::<Lsn>()
+                    .context("can't parse zenith.signal")?
+            }
+        };
 
+        // zenith.signal is not necessarily the last file, that we handle
+        // but it is ok to call `finish_write()`, because final `modification.commit()`
+        // will update lsn once more to the final one.
         let writer = modification.tline.tline.writer();
         writer.finish_write(prev_lsn);
 

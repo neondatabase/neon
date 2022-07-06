@@ -1160,6 +1160,7 @@ class NeonCli:
         node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
+        check_return_code=True,
     ) -> 'subprocess.CompletedProcess[str]':
         args = [
             'pg',
@@ -1172,7 +1173,7 @@ class NeonCli:
         if node_name is not None:
             args.append(node_name)
 
-        return self.raw_cli(args)
+        return self.raw_cli(args, check_return_code=check_return_code)
 
     def raw_cli(self,
                 arguments: List[str],
@@ -1188,6 +1189,8 @@ class NeonCli:
         >>> result = env.neon_cli.raw_cli(...)
         >>> assert result.stderr == ""
         >>> log.info(result.stdout)
+
+        If `check_return_code`, on non-zero exit code logs failure and raises.
         """
 
         assert type(arguments) == list
@@ -1213,27 +1216,27 @@ class NeonCli:
             env_vars[var] = val
 
         # Intercept CalledProcessError and print more info
-        try:
-            res = subprocess.run(args,
-                                 env=env_vars,
-                                 check=True,
-                                 universal_newlines=True,
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
+        res = subprocess.run(args,
+                             env=env_vars,
+                             check=False,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        if not res.returncode:
             log.info(f"Run success: {res.stdout}")
-        except subprocess.CalledProcessError as exc:
+        elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
             msg = f"""\
-            Run failed: {exc}
-              stdout: {exc.stdout}
-              stderr: {exc.stderr}
+            Run {res.args} failed:
+              stdout: {res.stdout}
+              stderr: {res.stderr}
             """
             log.info(msg)
+            raise Exception(msg) from subprocess.CalledProcessError(res.returncode,
+                                                                    res.args,
+                                                                    res.stdout,
+                                                                    res.stderr)
 
-            raise Exception(msg) from exc
-
-        if check_return_code:
-            res.check_returncode()
         return res
 
 
@@ -1526,7 +1529,11 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, env: NeonEnv, tenant_id: uuid.UUID, port: int):
+    def __init__(self,
+                 env: NeonEnv,
+                 tenant_id: uuid.UUID,
+                 port: int,
+                 check_stop_result: bool = True):
         super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
@@ -1534,6 +1541,7 @@ class Postgres(PgProtocol):
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.port = port
+        self.check_stop_result = check_stop_result
         # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
@@ -1584,8 +1592,6 @@ class Postgres(PgProtocol):
                                                 tenant_id=self.tenant_id,
                                                 port=self.port)
         self.running = True
-
-        log.info(f"stdout: {run_result.stdout}")
 
         return self
 
@@ -1650,7 +1656,9 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.neon_cli.pg_stop(self.node_name, self.tenant_id)
+            self.env.neon_cli.pg_stop(self.node_name,
+                                      self.tenant_id,
+                                      check_return_code=self.check_stop_result)
             self.running = False
 
         return self
@@ -1662,7 +1670,10 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.neon_cli.pg_stop(self.node_name, self.tenant_id, True)
+        self.env.neon_cli.pg_stop(self.node_name,
+                                  self.tenant_id,
+                                  True,
+                                  check_return_code=self.check_stop_result)
         self.node_name = None
         self.running = False
 
@@ -1681,12 +1692,16 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
+        started_at = time.time()
+
         self.create(
             branch_name=branch_name,
             node_name=node_name,
             config_lines=config_lines,
             lsn=lsn,
         ).start()
+
+        log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
         return self
 
