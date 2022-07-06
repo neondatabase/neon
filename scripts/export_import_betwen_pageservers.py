@@ -4,14 +4,13 @@
 #
 from os import path
 import os
+import time
 import requests
 import uuid
 import subprocess
 import argparse
 from pathlib import Path
-
-# directory to save exported tar files to
-basepath = path.dirname(path.abspath(__file__))
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 
 
 class NeonPageserverApiException(Exception):
@@ -71,6 +70,67 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
+    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+
+import pytest
+import os
+def add_missing_empty_rels(base_tar, output_tar):
+    os.environ['INPUT_BASE_TAR'] = base_tar
+    os.environ['OUTPUT_BASE_TAR'] = output_tar
+    pytest.main(["-s", "-k", "test_main_hack"])
+
+
+def lsn_to_hex(num: int) -> str:
+    """ Convert lsn from int to standard hex notation. """
+    return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
+
+
+def lsn_from_hex(lsn_hex: str) -> int:
+    """ Convert lsn from hex notation to int. """
+    l, r = lsn_hex.split('/')
+    return (int(l, 16) << 32) + int(r, 16)
+
+
+def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID) -> int:
+    detail = pageserver_http_client.timeline_detail(tenant, timeline)
+
+    if detail['remote'] is None:
+        # No remote information at all. This happens right after creating
+        # a timeline, before any part of it has been uploaded to remote
+        # storage yet.
+        return 0
+    else:
+        lsn_str = detail['remote']['remote_consistent_lsn']
+        assert isinstance(lsn_str, str)
+        return lsn_from_hex(lsn_str)
+
+
+def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
+                    tenant: uuid.UUID,
+                    timeline: uuid.UUID,
+                    lsn: int):
+    """waits for local timeline upload up to specified lsn"""
+    for i in range(10):
+        current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
+        if current_lsn >= lsn:
+            return
+        print("waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        time.sleep(1)
+
+    raise Exception("timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
+        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
+
 
 def main(args: argparse.Namespace):
     old_pageserver_host = args.old_pageserver_host
@@ -102,32 +162,37 @@ def main(args: argparse.Namespace):
             if args.only_import is False:
                 query = f"fullbackup {timeline['tenant_id']} {timeline['timeline_id']} {timeline['local']['last_record_lsn']}"
 
-                cmd = ["psql", "--no-psqlrc", old_pageserver_connstr, "-c", query]
+                cmd = [args.psql_path, "--no-psqlrc", old_pageserver_connstr, "-c", query]
                 print(f"Running: {cmd}")
 
-                tar_filename = path.join(basepath,
+                tar_filename = path.join(args.work_dir,
                                          f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
                 stderr_filename = path.join(
-                    basepath, f"{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
+                    args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
 
                 with open(tar_filename, 'w') as stdout_f:
                     with open(stderr_filename, 'w') as stderr_f:
                         print(f"(capturing output to {tar_filename})")
-                        subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=psql_env)
+                        subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=psql_env, check=True)
 
-                print(f"Done export: {tar_filename}")
+                # add_missing_emtpy_rels(incomplete_tar_filename, tar_filename)
+
+                file_size = os.path.getsize(tar_filename)
+                print(f"Done export: {tar_filename}, size {file_size}")
+
+
 
             # Import timelines to new pageserver
             psql_path = Path(args.psql_path)
             import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {timeline['local']['last_record_lsn']} {timeline['local']['last_record_lsn']}"
-            tar_filename = path.join(basepath,
+            tar_filename = path.join(args.work_dir,
                                      f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
             full_cmd = rf"""cat {tar_filename} | {psql_path} {new_pageserver_connstr} -c '{import_cmd}' """
 
             stderr_filename2 = path.join(
-                basepath, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
+                args.work_dir, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
             stdout_filename = path.join(
-                basepath, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stdout")
+                args.work_dir, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stdout")
 
             print(f"Running: {full_cmd}")
 
@@ -138,9 +203,13 @@ def main(args: argparse.Namespace):
                                    stdout=stdout_f,
                                    stderr=stderr_f,
                                    env=psql_env,
-                                   shell=True)
+                                   shell=True,
+                                   check=True)
 
                     print(f"Done import")
+
+            # Wait until pageserver persists the files
+            wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(timeline['local']['last_record_lsn']))
 
 
 if __name__ == '__main__':
@@ -217,6 +286,13 @@ if __name__ == '__main__':
         default=False,
         action='store_true',
         help='Skip export and tenant creation part',
+    )
+    parser.add_argument(
+        '--work-dir',
+        dest='work_dir',
+        required=True,
+        default=False,
+        help='directory where temporary tar files are stored',
     )
     args = parser.parse_args()
     main(args)
