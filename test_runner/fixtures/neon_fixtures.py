@@ -1518,7 +1518,7 @@ class NeonProxy(PgProtocol):
         self.port = port
         self.pg_port = pg_port
         self._popen: Optional[subprocess.Popen[bytes]] = None
-        self.link_auth_uri = None
+        self.link_auth_uri = "http://dummy-uri"
 
     def start(self) -> None:
         """
@@ -1543,8 +1543,6 @@ class NeonProxy(PgProtocol):
         Starts a proxy with option '--auth-backend link' and a dummy authentication link '--uri dummy-auth-link'."
         """
         assert self._popen is None
-        assert self.link_auth_uri is None
-        self.link_auth_uri = "http://dummy-uri"
 
         # Start proxy
         bin_proxy = os.path.join(str(neon_binpath), 'proxy')
