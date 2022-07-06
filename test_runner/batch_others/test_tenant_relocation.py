@@ -200,7 +200,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                                new_pageserver_http_port,
                                neon_env_builder.broker):
 
-        # Migrate either by attacking from s3 or import/export basebackup
+        # Migrate either by attaching from s3 or import/export basebackup
         if method == "major":
             cmd = [
                 "python",
