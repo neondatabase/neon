@@ -1483,10 +1483,10 @@ class PSQL:
     database_url: str
 
     def __init__(
-            self,
-            path: str = "psql",
-            host: str = "localhost",
-            port: int = 5432,
+        self,
+        path: str = "psql",
+        host: str = "localhost",
+        port: int = 5432,
     ):
         assert shutil.which(path)
 
@@ -1494,14 +1494,16 @@ class PSQL:
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dmy-cluster-123"
 
     async def run(self, query: str = None) -> tp.Union[tuple[int, str], Process]:
-        run_args = [self.path, self.database_url] #, "--no-align", "--no-psqlrc", "--tuples-only"]
+        run_args = [self.path, self.database_url]  #, "--no-align", "--no-psqlrc", "--tuples-only"]
         run_args += (["--command", query] if query is not None else [])
 
-        cmd_line = ' '.join(["'"+x+"'" if ' ' in x else x for x in run_args])
+        cmd_line = ' '.join(["'" + x + "'" if ' ' in x else x for x in run_args])
         log.info(f"running psql with command line ::: {cmd_line}")
-        return await asyncio.create_subprocess_exec(
-            *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        log.debug(f"running psql with command line ::: {cmd_line}")
+        return await asyncio.create_subprocess_exec(*run_args,
+                                                    stdout=subprocess.PIPE,
+                                                    stderr=subprocess.PIPE)
+
 
 class NeonProxy(PgProtocol):
     def __init__(self, port: int, pg_port: int = None):
@@ -1552,7 +1554,6 @@ class NeonProxy(PgProtocol):
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
-
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
@@ -1574,6 +1575,7 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     with NeonProxy(port) as proxy:
         proxy.start_with_link_auth()
         yield proxy
+
 
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:

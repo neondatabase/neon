@@ -14,7 +14,7 @@ async def test_psql_session_id(link_proxy):
     This is only one half of the test: the half that establishes connection to the proxy and retrieves the session_id
     The second half of the test required more heavy machinery to be ported from the cloud codebase
         (such as: project_state(..), and psql_project_connect)
-    to connect to postgress and make sure the end-to-end behavior is satisified.
+    to connect to postgres and make sure the end-to-end behavior is satisfied.
     """
     psql = PSQL(
         host=link_proxy.host,
