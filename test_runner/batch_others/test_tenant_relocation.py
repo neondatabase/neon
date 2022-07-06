@@ -221,6 +221,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                 str(new_pageserver_pg_port),
                 "--psql-path",
                 os.path.join(pg_distrib_dir, "bin", "psql"),
+                 "--work-dir",
+                os.path.join(test_output_dir),
             ]
             subprocess_capture(str(env.repo_dir), cmd, check=True)
         elif method == "minor":
