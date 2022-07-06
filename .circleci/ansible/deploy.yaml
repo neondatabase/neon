@@ -1,14 +1,14 @@
-- name: Upload Zenith binaries
+- name: Upload Neon binaries
   hosts: storage
   gather_facts: False
   remote_user: admin
 
   tasks:
 
-    - name: get latest version of Zenith binaries
+    - name: get latest version of Neon binaries
       register: current_version_file
       set_fact:
-        current_version: "{{ lookup('file', '.zenith_current_version') | trim }}"
+        current_version: "{{ lookup('file', '.neon_current_version') | trim }}"
       tags:
       - pageserver
       - safekeeper
@@ -19,11 +19,11 @@
       - pageserver
       - safekeeper
 
-    - name: upload and extract Zenith binaries to /usr/local
+    - name: upload and extract Neon binaries to /usr/local
       ansible.builtin.unarchive:
         owner: root
         group: root
-        src: zenith_install.tar.gz
+        src: neon_install.tar.gz
         dest: /usr/local
       become: true
       tags:
@@ -57,7 +57,7 @@
       args:
         creates: "/storage/pageserver/data/tenants"
       environment:
-        ZENITH_REPO_DIR: "/storage/pageserver/data"
+        NEON_REPO_DIR: "/storage/pageserver/data"
         LD_LIBRARY_PATH: "/usr/local/lib"
       become: true
       tags:
@@ -131,7 +131,7 @@
       args:
         creates: "/storage/safekeeper/data/safekeeper.id"
       environment:
-        ZENITH_REPO_DIR: "/storage/safekeeper/data"
+        NEON_REPO_DIR: "/storage/safekeeper/data"
         LD_LIBRARY_PATH: "/usr/local/lib"
       become: true
       tags:

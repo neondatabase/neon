@@ -5,9 +5,13 @@
 __pycache__/
 test_output/
 .vscode
-/.zenith
-/integration_tests/.zenith
+.idea
+/.neon
+/integration_tests/.neon
 
 # Coverage
 *.profraw
 *.profdata
+
+*.key
+*.crt

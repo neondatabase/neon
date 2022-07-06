@@ -8,12 +8,10 @@ use anyhow::{bail, Context, Result};
 use clap::{App, Arg};
 use daemonize::Daemonize;
 
+use fail::FailScenario;
 use pageserver::{
     config::{defaults::*, PageServerConf},
-    http, page_cache, page_service, profiling,
-    remote_storage::{self, SyncStartupData},
-    repository::{Repository, TimelineSyncStatusUpdate},
-    tenant_mgr, thread_mgr,
+    http, page_cache, page_service, profiling, tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
     timelines, virtual_file, LOG_FILE_NAME,
 };
@@ -22,19 +20,24 @@ use utils::{
     http::endpoint,
     logging,
     postgres_backend::AuthType,
+    project_git_version,
     shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
     zid::{ZTenantId, ZTimelineId},
-    GIT_VERSION,
 };
 
+project_git_version!(GIT_VERSION);
+
 fn version() -> String {
-    format!("{} profiling:{}", GIT_VERSION, cfg!(feature = "profiling"))
+    format!(
+        "{GIT_VERSION} profiling:{} failpoints:{}",
+        cfg!(feature = "profiling"),
+        fail::has_failpoints()
+    )
 }
 
 fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("pageserver");
     let arg_matches = App::new("Zenith page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
@@ -82,9 +85,26 @@ fn main() -> anyhow::Result<()> {
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
+        .arg(
+            Arg::new("enabled-features")
+                .long("enabled-features")
+                .takes_value(false)
+                .help("Show enabled compile time features"),
+        )
         .get_matches();
 
-    let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".zenith"));
+    if arg_matches.is_present("enabled-features") {
+        let features: &[&str] = &[
+            #[cfg(feature = "failpoints")]
+            "failpoints",
+            #[cfg(feature = "profiling")]
+            "profiling",
+        ];
+        println!("{{\"features\": {features:?} }}");
+        return Ok(());
+    }
+
+    let workdir = Path::new(arg_matches.value_of("workdir").unwrap_or(".neon"));
     let workdir = workdir
         .canonicalize()
         .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
@@ -164,6 +184,9 @@ fn main() -> anyhow::Result<()> {
     // as a ref.
     let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
+    // Initialize up failpoints support
+    let scenario = FailScenario::setup();
+
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
@@ -179,17 +202,19 @@ fn main() -> anyhow::Result<()> {
                 cfg_file_path.display()
             )
         })?;
-        Ok(())
     } else {
-        start_pageserver(conf, daemonize).context("Failed to start pageserver")
+        start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
     }
+
+    scenario.teardown();
+    Ok(())
 }
 
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // TODO: Check that it looks like a valid repository before going further
 
@@ -229,53 +254,16 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(err) => error!(%err, "could not daemonize"),
+            Err(err) => bail!("{err}. could not daemonize. bailing."),
         }
     }
 
     let signals = signals::install_shutdown_handlers()?;
 
-    // Initialize repositories with locally available timelines.
-    // Timelines that are only partially available locally (remote storage has more data than this pageserver)
-    // are scheduled for download and added to the repository once download is completed.
-    let SyncStartupData {
-        remote_index,
-        local_timeline_init_statuses,
-    } = remote_storage::start_local_timeline_sync(conf)
-        .context("Failed to set up local files sync with external storage")?;
+    // start profiler (if enabled)
+    let profiler_guard = profiling::init_profiler(conf);
 
-    for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
-        // initialize local tenant
-        let repo = tenant_mgr::load_local_repo(conf, tenant_id, &remote_index)
-            .with_context(|| format!("Failed to load repo for tenant {}", tenant_id))?;
-        for (timeline_id, init_status) in local_timeline_init_statuses {
-            match init_status {
-                remote_storage::LocalTimelineInitStatus::LocallyComplete => {
-                    debug!("timeline {} for tenant {} is locally complete, registering it in repository", timeline_id, tenant_id);
-                    // Lets fail here loudly to be on the safe side.
-                    // XXX: It may be a better api to actually distinguish between repository startup
-                    //   and processing of newly downloaded timelines.
-                    repo.apply_timeline_remote_sync_status_update(
-                        timeline_id,
-                        TimelineSyncStatusUpdate::Downloaded,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "Failed to bootstrap timeline {} for tenant {}",
-                            timeline_id, tenant_id
-                        )
-                    })?
-                }
-                remote_storage::LocalTimelineInitStatus::NeedsSync => {
-                    debug!(
-                        "timeline {} for tenant {} needs sync, \
-                         so skipped for adding into repository until sync is finished",
-                        tenant_id, timeline_id
-                    );
-                }
-            }
-        }
-    }
+    pageserver::tenant_tasks::init_tenant_task_pool()?;
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -288,8 +276,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    // start profiler (if enabled)
-    let profiler_guard = profiling::init_profiler(conf);
+    let remote_index = tenant_mgr::init_tenant_mgr(conf)?;
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
@@ -299,7 +286,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "http_endpoint_thread",
-        false,
+        true,
         move || {
             let router = http::make_router(conf, auth_cloned, remote_index)?;
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
@@ -313,7 +300,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         None,
         None,
         "libpq endpoint thread",
-        false,
+        true,
         move || page_service::thread_main(conf, auth, pageserver_listener, conf.auth_type),
     )?;
 
@@ -333,7 +320,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 signal.name()
             );
             profiling::exit_profiler(conf, &profiler_guard);
-            pageserver::shutdown_pageserver();
+            pageserver::shutdown_pageserver(0);
             unreachable!()
         }
     })

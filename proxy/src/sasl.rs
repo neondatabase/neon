@@ -10,6 +10,7 @@ mod channel_binding;
 mod messages;
 mod stream;
 
+use crate::error::UserFacingError;
 use std::io;
 use thiserror::Error;
 
@@ -36,12 +37,37 @@ pub enum Error {
     Io(#[from] io::Error),
 }
 
+impl UserFacingError for Error {
+    fn to_string_client(&self) -> String {
+        use Error::*;
+        match self {
+            // This constructor contains the reason why auth has failed.
+            AuthenticationFailed(s) => s.to_string(),
+            // TODO: add support for channel binding
+            ChannelBindingFailed(_) => "channel binding is not supported yet".to_string(),
+            ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
+            _ => "authentication protocol violation".to_string(),
+        }
+    }
+}
+
 /// A convenient result type for SASL exchange.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A result of one SASL exchange.
+pub enum Step<T, R> {
+    /// We should continue exchanging messages.
+    Continue(T),
+    /// The client has been authenticated successfully.
+    Authenticated(R),
+}
+
 /// Every SASL mechanism (e.g. [SCRAM](crate::scram)) is expected to implement this trait.
 pub trait Mechanism: Sized {
+    /// What's produced as a result of successful authentication.
+    type Output;
+
     /// Produce a server challenge to be sent to the client.
     /// This is how this method is called in PostgreSQL (`libpq/sasl.h`).
-    fn exchange(self, input: &str) -> Result<(Option<Self>, String)>;
+    fn exchange(self, input: &str) -> Result<(Step<Self, Self::Output>, String)>;
 }

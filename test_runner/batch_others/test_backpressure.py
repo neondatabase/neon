@@ -1,14 +1,13 @@
 from contextlib import closing, contextmanager
 import psycopg2.extras
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+import pytest
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
-import os
 import time
-import asyncpg
-from fixtures.zenith_fixtures import Postgres
+from fixtures.neon_fixtures import Postgres
 import threading
 
-pytest_plugins = ("fixtures.zenith_fixtures")
+pytest_plugins = ("fixtures.neon_fixtures")
 
 
 @contextmanager
@@ -25,7 +24,7 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
     log.info("checks started")
 
     with pg_cur(pg) as cur:
-        cur.execute("CREATE EXTENSION zenith")  # TODO move it to zenith_fixtures?
+        cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()
@@ -91,11 +90,11 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
 # If backpressure is enabled and tuned properly, insertion will be throttled, but the query will not timeout.
 
 
-def test_backpressure_received_lsn_lag(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/1587")
+def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
     # Create a branch for us
-    env.zenith_cli.create_branch('test_backpressure')
+    env.neon_cli.create_branch('test_backpressure')
 
     pg = env.postgres.create_start('test_backpressure',
                                    config_lines=['max_replication_write_lag=30MB'])

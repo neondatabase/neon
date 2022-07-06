@@ -4,18 +4,19 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{bail, ensure, Context, Result};
-use std::convert::TryInto;
+use anyhow::{anyhow, bail, ensure, Context, Result};
+use remote_storage::RemoteStorageConfig;
 use std::env;
-use std::num::{NonZeroU32, NonZeroUsize};
+
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
+use url::Url;
 use utils::{
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 use crate::layered_repository::TIMELINES_SEGMENT_NAME;
@@ -33,9 +34,7 @@ pub mod defaults {
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
-    pub const DEFAULT_SUPERUSER: &str = "zenith_admin";
-    pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC: usize = 10;
-    pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
+    pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -66,6 +65,7 @@ pub mod defaults {
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
+#image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 # [remote_storage]
@@ -78,7 +78,7 @@ pub mod defaults {
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
     // can safely distinguish different pageservers
-    pub id: ZNodeId,
+    pub id: NodeId,
 
     /// Example (default): 127.0.0.1:64000
     pub listen_pg_addr: String,
@@ -112,6 +112,13 @@ pub struct PageServerConf {
 
     pub profiling: ProfilingConfig,
     pub default_tenant_conf: TenantConf,
+
+    /// A prefix to add in etcd brokers before every key.
+    /// Can be used for isolating different pageserver groups within the same etcd cluster.
+    pub broker_etcd_prefix: String,
+
+    /// Etcd broker endpoints to connect to.
+    pub broker_endpoints: Vec<Url>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +134,7 @@ impl FromStr for ProfilingConfig {
         let result = match s {
             "disabled"  => ProfilingConfig::Disabled,
             "page_requests"  => ProfilingConfig::PageRequests,
-            _ => bail!("invalid value \"{}\" for profiling option, valid values are \"disabled\" and \"page_requests\"", s),
+            _ => bail!("invalid value \"{s}\" for profiling option, valid values are \"disabled\" and \"page_requests\""),
         };
         Ok(result)
     }
@@ -173,9 +180,11 @@ struct PageServerConfigBuilder {
     auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: BuilderValue<ZNodeId>,
+    id: BuilderValue<NodeId>,
 
     profiling: BuilderValue<ProfilingConfig>,
+    broker_etcd_prefix: BuilderValue<String>,
+    broker_endpoints: BuilderValue<Vec<Url>>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -201,6 +210,8 @@ impl Default for PageServerConfigBuilder {
             remote_storage_config: Set(None),
             id: NotSet,
             profiling: Set(ProfilingConfig::Disabled),
+            broker_etcd_prefix: Set(etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string()),
+            broker_endpoints: Set(Vec::new()),
         }
     }
 }
@@ -257,7 +268,15 @@ impl PageServerConfigBuilder {
         self.remote_storage_config = BuilderValue::Set(remote_storage_config)
     }
 
-    pub fn id(&mut self, node_id: ZNodeId) {
+    pub fn broker_endpoints(&mut self, broker_endpoints: Vec<Url>) {
+        self.broker_endpoints = BuilderValue::Set(broker_endpoints)
+    }
+
+    pub fn broker_etcd_prefix(&mut self, broker_etcd_prefix: String) {
+        self.broker_etcd_prefix = BuilderValue::Set(broker_etcd_prefix)
+    }
+
+    pub fn id(&mut self, node_id: NodeId) {
         self.id = BuilderValue::Set(node_id)
     }
 
@@ -265,100 +284,51 @@ impl PageServerConfigBuilder {
         self.profiling = BuilderValue::Set(profiling)
     }
 
-    pub fn build(self) -> Result<PageServerConf> {
+    pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let broker_endpoints = self
+            .broker_endpoints
+            .ok_or(anyhow!("No broker endpoints provided"))?;
+
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
-                .ok_or(anyhow::anyhow!("missing listen_pg_addr"))?,
+                .ok_or(anyhow!("missing listen_pg_addr"))?,
             listen_http_addr: self
                 .listen_http_addr
-                .ok_or(anyhow::anyhow!("missing listen_http_addr"))?,
+                .ok_or(anyhow!("missing listen_http_addr"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
-                .ok_or(anyhow::anyhow!("missing wait_lsn_timeout"))?,
+                .ok_or(anyhow!("missing wait_lsn_timeout"))?,
             wal_redo_timeout: self
                 .wal_redo_timeout
-                .ok_or(anyhow::anyhow!("missing wal_redo_timeout"))?,
-            superuser: self.superuser.ok_or(anyhow::anyhow!("missing superuser"))?,
+                .ok_or(anyhow!("missing wal_redo_timeout"))?,
+            superuser: self.superuser.ok_or(anyhow!("missing superuser"))?,
             page_cache_size: self
                 .page_cache_size
-                .ok_or(anyhow::anyhow!("missing page_cache_size"))?,
+                .ok_or(anyhow!("missing page_cache_size"))?,
             max_file_descriptors: self
                 .max_file_descriptors
-                .ok_or(anyhow::anyhow!("missing max_file_descriptors"))?,
-            workdir: self.workdir.ok_or(anyhow::anyhow!("missing workdir"))?,
+                .ok_or(anyhow!("missing max_file_descriptors"))?,
+            workdir: self.workdir.ok_or(anyhow!("missing workdir"))?,
             pg_distrib_dir: self
                 .pg_distrib_dir
-                .ok_or(anyhow::anyhow!("missing pg_distrib_dir"))?,
-            auth_type: self.auth_type.ok_or(anyhow::anyhow!("missing auth_type"))?,
+                .ok_or(anyhow!("missing pg_distrib_dir"))?,
+            auth_type: self.auth_type.ok_or(anyhow!("missing auth_type"))?,
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
-                .ok_or(anyhow::anyhow!("missing auth_validation_public_key_path"))?,
+                .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
             remote_storage_config: self
                 .remote_storage_config
-                .ok_or(anyhow::anyhow!("missing remote_storage_config"))?,
-            id: self.id.ok_or(anyhow::anyhow!("missing id"))?,
-            profiling: self.profiling.ok_or(anyhow::anyhow!("missing profiling"))?,
+                .ok_or(anyhow!("missing remote_storage_config"))?,
+            id: self.id.ok_or(anyhow!("missing id"))?,
+            profiling: self.profiling.ok_or(anyhow!("missing profiling"))?,
             // TenantConf is handled separately
             default_tenant_conf: TenantConf::default(),
+            broker_endpoints,
+            broker_etcd_prefix: self
+                .broker_etcd_prefix
+                .ok_or(anyhow!("missing broker_etcd_prefix"))?,
         })
-    }
-}
-
-/// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteStorageConfig {
-    /// Max allowed number of concurrent sync operations between pageserver and the remote storage.
-    pub max_concurrent_sync: NonZeroUsize,
-    /// Max allowed errors before the sync task is considered failed and evicted.
-    pub max_sync_errors: NonZeroU32,
-    /// The storage connection configuration.
-    pub storage: RemoteStorageKind,
-}
-
-/// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteStorageKind {
-    /// Storage based on local file system.
-    /// Specify a root folder to place all stored files into.
-    LocalFs(PathBuf),
-    /// AWS S3 based storage, storing all files in the S3 bucket
-    /// specified by the config
-    AwsS3(S3Config),
-}
-
-/// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct S3Config {
-    /// Name of the bucket to connect to.
-    pub bucket_name: String,
-    /// The region where the bucket is located at.
-    pub bucket_region: String,
-    /// A "subfolder" in the bucket, to use the same bucket separately by multiple pageservers at once.
-    pub prefix_in_bucket: Option<String>,
-    /// "Login" to use when connecting to bucket.
-    /// Can be empty for cases like AWS k8s IAM
-    /// where we can allow certain pods to connect
-    /// to the bucket directly without any credentials.
-    pub access_key_id: Option<String>,
-    /// "Password" to use when connecting to bucket.
-    pub secret_access_key: Option<String>,
-    /// A base URL to send S3 requests to.
-    /// By default, the endpoint is derived from a region name, assuming it's
-    /// an AWS S3 region name, erroring on wrong region name.
-    /// Endpoint provides a way to support other S3 flavors and their regions.
-    ///
-    /// Example: `http://127.0.0.1:5000`
-    pub endpoint: Option<String>,
-}
-
-impl std::fmt::Debug for S3Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3Config")
-            .field("bucket_name", &self.bucket_name)
-            .field("bucket_region", &self.bucket_region)
-            .field("prefix_in_bucket", &self.prefix_in_bucket)
-            .finish()
     }
 }
 
@@ -399,7 +369,7 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Path) -> Result<Self> {
+    pub fn parse_and_validate(toml: &Document, workdir: &Path) -> anyhow::Result<Self> {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
@@ -424,14 +394,25 @@ impl PageServerConf {
                 )),
                 "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(Some(Self::parse_remote_storage_config(item)?))
+                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item)?))
                 }
-                "tenant_conf" => {
+                "tenant_config" => {
                     t_conf = Self::parse_toml_tenant_conf(item)?;
                 }
-                "id" => builder.id(ZNodeId(parse_toml_u64(key, item)?)),
+                "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "profiling" => builder.profiling(parse_toml_from_str(key, item)?),
-                _ => bail!("unrecognized pageserver option '{}'", key),
+                "broker_etcd_prefix" => builder.broker_etcd_prefix(parse_toml_string(key, item)?),
+                "broker_endpoints" => builder.broker_endpoints(
+                    parse_toml_array(key, item)?
+                        .into_iter()
+                        .map(|endpoint_str| {
+                            endpoint_str.parse::<Url>().with_context(|| {
+                                format!("Array item {endpoint_str} for key {key} is not a valid url endpoint")
+                            })
+                        })
+                        .collect::<anyhow::Result<_>>()?,
+                ),
+                _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
 
@@ -466,125 +447,74 @@ impl PageServerConf {
 
     pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
         let mut t_conf: TenantConfOpt = Default::default();
-        for (key, item) in item
-            .as_table()
-            .ok_or(anyhow::anyhow!("invalid tenant config"))?
-            .iter()
-        {
-            match key {
-                "checkpoint_distance" => {
-                    t_conf.checkpoint_distance = Some(parse_toml_u64(key, item)?)
-                }
-                "compaction_target_size" => {
-                    t_conf.compaction_target_size = Some(parse_toml_u64(key, item)?)
-                }
-                "compaction_period" => {
-                    t_conf.compaction_period = Some(parse_toml_duration(key, item)?)
-                }
-                "compaction_threshold" => {
-                    t_conf.compaction_threshold = Some(parse_toml_u64(key, item)? as usize)
-                }
-                "gc_horizon" => t_conf.gc_horizon = Some(parse_toml_u64(key, item)?),
-                "gc_period" => t_conf.gc_period = Some(parse_toml_duration(key, item)?),
-                "pitr_interval" => t_conf.pitr_interval = Some(parse_toml_duration(key, item)?),
-                _ => bail!("unrecognized tenant config option '{}'", key),
-            }
+        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
+            t_conf.checkpoint_distance =
+                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
         }
+
+        if let Some(compaction_target_size) = item.get("compaction_target_size") {
+            t_conf.compaction_target_size = Some(parse_toml_u64(
+                "compaction_target_size",
+                compaction_target_size,
+            )?);
+        }
+
+        if let Some(compaction_period) = item.get("compaction_period") {
+            t_conf.compaction_period =
+                Some(parse_toml_duration("compaction_period", compaction_period)?);
+        }
+
+        if let Some(compaction_threshold) = item.get("compaction_threshold") {
+            t_conf.compaction_threshold =
+                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
+        }
+
+        if let Some(gc_horizon) = item.get("gc_horizon") {
+            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
+        }
+
+        if let Some(gc_period) = item.get("gc_period") {
+            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
+        }
+
+        if let Some(pitr_interval) = item.get("pitr_interval") {
+            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
+        }
+        if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
+            t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
+                "walreceiver_connect_timeout",
+                walreceiver_connect_timeout,
+            )?);
+        }
+        if let Some(lagging_wal_timeout) = item.get("lagging_wal_timeout") {
+            t_conf.lagging_wal_timeout = Some(parse_toml_duration(
+                "lagging_wal_timeout",
+                lagging_wal_timeout,
+            )?);
+        }
+        if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
+            t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+        }
+
         Ok(t_conf)
-    }
-
-    /// subroutine of parse_config(), to parse the `[remote_storage]` table.
-    fn parse_remote_storage_config(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
-        let local_path = toml.get("local_path");
-        let bucket_name = toml.get("bucket_name");
-        let bucket_region = toml.get("bucket_region");
-
-        let max_concurrent_sync: NonZeroUsize = if let Some(s) = toml.get("max_concurrent_sync") {
-            parse_toml_u64("max_concurrent_sync", s)
-                .and_then(|toml_u64| {
-                    toml_u64.try_into().with_context(|| {
-                        format!("'max_concurrent_sync' value {} is too large", toml_u64)
-                    })
-                })
-                .ok()
-                .and_then(NonZeroUsize::new)
-                .context("'max_concurrent_sync' must be a non-zero positive integer")?
-        } else {
-            NonZeroUsize::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC).unwrap()
-        };
-        let max_sync_errors: NonZeroU32 = if let Some(s) = toml.get("max_sync_errors") {
-            parse_toml_u64("max_sync_errors", s)
-                .and_then(|toml_u64| {
-                    toml_u64.try_into().with_context(|| {
-                        format!("'max_sync_errors' value {} is too large", toml_u64)
-                    })
-                })
-                .ok()
-                .and_then(NonZeroU32::new)
-                .context("'max_sync_errors' must be a non-zero positive integer")?
-        } else {
-            NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS).unwrap()
-        };
-
-        let storage = match (local_path, bucket_name, bucket_region) {
-            (None, None, None) => bail!("no 'local_path' nor 'bucket_name' option"),
-            (_, Some(_), None) => {
-                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
-            }
-            (_, None, Some(_)) => {
-                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
-            }
-            (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
-                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                access_key_id: toml
-                    .get("access_key_id")
-                    .map(|access_key_id| parse_toml_string("access_key_id", access_key_id))
-                    .transpose()?,
-                secret_access_key: toml
-                    .get("secret_access_key")
-                    .map(|secret_access_key| {
-                        parse_toml_string("secret_access_key", secret_access_key)
-                    })
-                    .transpose()?,
-                prefix_in_bucket: toml
-                    .get("prefix_in_bucket")
-                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
-                    .transpose()?,
-                endpoint: toml
-                    .get("endpoint")
-                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
-                    .transpose()?,
-            }),
-            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
-                parse_toml_string("local_path", local_path)?,
-            )),
-            (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
-        };
-
-        Ok(RemoteStorageConfig {
-            max_concurrent_sync,
-            max_sync_errors,
-            storage,
-        })
     }
 
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> PathBuf {
-        PathBuf::from(format!("../tmp_check/test_{}", test_name))
+        PathBuf::from(format!("../tmp_check/test_{test_name}"))
     }
 
     #[cfg(test)]
     pub fn dummy_conf(repo_dir: PathBuf) -> Self {
         PageServerConf {
-            id: ZNodeId(0),
+            id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            superuser: "zenith_admin".to_string(),
+            superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir: PathBuf::new(),
             auth_type: AuthType::Trust,
@@ -592,6 +522,8 @@ impl PageServerConf {
             remote_storage_config: None,
             profiling: ProfilingConfig::Disabled,
             default_tenant_conf: TenantConf::dummy_conf(),
+            broker_endpoints: Vec::new(),
+            broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
         }
     }
 }
@@ -601,7 +533,7 @@ impl PageServerConf {
 fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
     let s = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
 }
 
@@ -610,9 +542,9 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
     // for our use, though.
     let i: i64 = item
         .as_integer()
-        .with_context(|| format!("configure option {} is not an integer", name))?;
+        .with_context(|| format!("configure option {name} is not an integer"))?;
     if i < 0 {
-        bail!("configure option {} cannot be negative", name);
+        bail!("configure option {name} cannot be negative");
     }
     Ok(i as u64)
 }
@@ -620,25 +552,51 @@ fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
 fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
     let s = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
+        .with_context(|| format!("configure option {name} is not a string"))?;
 
     Ok(humantime::parse_duration(s)?)
 }
 
-fn parse_toml_from_str<T>(name: &str, item: &Item) -> Result<T>
+fn parse_toml_from_str<T>(name: &str, item: &Item) -> anyhow::Result<T>
 where
-    T: FromStr<Err = anyhow::Error>,
+    T: FromStr,
+    <T as FromStr>::Err: std::fmt::Display,
 {
     let v = item
         .as_str()
-        .with_context(|| format!("configure option {} is not a string", name))?;
-    T::from_str(v)
+        .with_context(|| format!("configure option {name} is not a string"))?;
+    T::from_str(v).map_err(|e| {
+        anyhow!(
+            "Failed to parse string as {parse_type} for configure option {name}: {e}",
+            parse_type = stringify!(T)
+        )
+    })
+}
+
+fn parse_toml_array(name: &str, item: &Item) -> anyhow::Result<Vec<String>> {
+    let array = item
+        .as_array()
+        .with_context(|| format!("configure option {name} is not an array"))?;
+
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .with_context(|| format!("Array item {value:?} for key {name} is not a string"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        num::{NonZeroU32, NonZeroUsize},
+    };
 
+    use remote_storage::{RemoteStorageKind, S3Config};
     use tempfile::{tempdir, TempDir};
 
     use super::*;
@@ -665,19 +623,21 @@ id = 10
     fn parse_defaults() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        // we have to create dummy pathes to overcome the validation errors
-        let config_string = format!("pg_distrib_dir='{}'\nid=10", pg_distrib_dir.display());
+        let broker_endpoint = "http://127.0.0.1:7777";
+        // we have to create dummy values to overcome the validation errors
+        let config_string = format!(
+            "pg_distrib_dir='{}'\nid=10\nbroker_endpoints = ['{broker_endpoint}']",
+            pg_distrib_dir.display()
+        );
         let toml = config_string.parse()?;
 
-        let parsed_config =
-            PageServerConf::parse_and_validate(&toml, &workdir).unwrap_or_else(|e| {
-                panic!("Failed to parse config '{}', reason: {}", config_string, e)
-            });
+        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
             parsed_config,
             PageServerConf {
-                id: ZNodeId(10),
+                id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
@@ -692,6 +652,10 @@ id = 10
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
+                broker_endpoints: vec![broker_endpoint
+                    .parse()
+                    .expect("Failed to parse a valid broker endpoint URL")],
+                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -703,23 +667,21 @@ id = 10
     fn parse_basic_config() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
+        let broker_endpoint = "http://127.0.0.1:7777";
 
         let config_string = format!(
-            "{}pg_distrib_dir='{}'",
-            ALL_BASE_VALUES_TOML,
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoints = ['{broker_endpoint}']",
             pg_distrib_dir.display()
         );
         let toml = config_string.parse()?;
 
-        let parsed_config =
-            PageServerConf::parse_and_validate(&toml, &workdir).unwrap_or_else(|e| {
-                panic!("Failed to parse config '{}', reason: {}", config_string, e)
-            });
+        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
             parsed_config,
             PageServerConf {
-                id: ZNodeId(10),
+                id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
                 wait_lsn_timeout: Duration::from_secs(111),
@@ -734,6 +696,10 @@ id = 10
                 remote_storage_config: None,
                 profiling: ProfilingConfig::Disabled,
                 default_tenant_conf: TenantConf::default(),
+                broker_endpoints: vec![broker_endpoint
+                    .parse()
+                    .expect("Failed to parse a valid broker endpoint URL")],
+                broker_etcd_prefix: etcd_broker::DEFAULT_NEON_BROKER_ETCD_PREFIX.to_string(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -745,6 +711,7 @@ id = 10
     fn parse_remote_fs_storage_config() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
+        let broker_endpoint = "http://127.0.0.1:7777";
 
         let local_storage_path = tempdir.path().join("local_remote_storage");
 
@@ -762,37 +729,36 @@ local_path = '{}'"#,
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
-                r#"{}
+                r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
+broker_endpoints = ['{broker_endpoint}']
 
-{}"#,
-                ALL_BASE_VALUES_TOML,
+{remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
-                remote_storage_config_str,
             );
 
             let toml = config_string.parse()?;
 
             let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
                 .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{}', reason: {}", config_string, e)
+                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
                 })
                 .remote_storage_config
                 .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
-            parsed_remote_storage_config,
-            RemoteStorageConfig {
-                max_concurrent_sync: NonZeroUsize::new(
-                    defaults::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNC
-                )
-                .unwrap(),
-                max_sync_errors: NonZeroU32::new(defaults::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
-                    .unwrap(),
-                storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
-            },
-            "Remote storage config should correctly parse the local FS config and fill other storage defaults"
-        );
+                parsed_remote_storage_config,
+                RemoteStorageConfig {
+                    max_concurrent_syncs: NonZeroUsize::new(
+                        remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
+                    )
+                        .unwrap(),
+                    max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
+                        .unwrap(),
+                    storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
+                },
+                "Remote storage config should correctly parse the local FS config and fill other storage defaults"
+            );
         }
         Ok(())
     }
@@ -805,47 +771,44 @@ pg_distrib_dir='{}'
         let bucket_name = "some-sample-bucket".to_string();
         let bucket_region = "eu-north-1".to_string();
         let prefix_in_bucket = "test_prefix".to_string();
-        let access_key_id = "SOMEKEYAAAAASADSAH*#".to_string();
-        let secret_access_key = "SOMEsEcReTsd292v".to_string();
         let endpoint = "http://localhost:5000".to_string();
-        let max_concurrent_sync = NonZeroUsize::new(111).unwrap();
+        let max_concurrent_syncs = NonZeroUsize::new(111).unwrap();
         let max_sync_errors = NonZeroU32::new(222).unwrap();
+        let s3_concurrency_limit = NonZeroUsize::new(333).unwrap();
+        let broker_endpoint = "http://127.0.0.1:7777";
 
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-max_concurrent_sync = {}
-max_sync_errors = {}
-bucket_name = '{}'
-bucket_region = '{}'
-prefix_in_bucket = '{}'
-access_key_id = '{}'
-secret_access_key = '{}'
-endpoint = '{}'"#,
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
+max_concurrent_syncs = {max_concurrent_syncs}
+max_sync_errors = {max_sync_errors}
+bucket_name = '{bucket_name}'
+bucket_region = '{bucket_region}'
+prefix_in_bucket = '{prefix_in_bucket}'
+endpoint = '{endpoint}'
+concurrency_limit = {s3_concurrency_limit}"#
             ),
             format!(
-                "remote_storage={{max_concurrent_sync={}, max_sync_errors={}, bucket_name='{}', bucket_region='{}', prefix_in_bucket='{}', access_key_id='{}', secret_access_key='{}', endpoint='{}'}}",
-                max_concurrent_sync, max_sync_errors, bucket_name, bucket_region, prefix_in_bucket, access_key_id, secret_access_key, endpoint
+                "remote_storage={{max_concurrent_syncs={max_concurrent_syncs}, max_sync_errors={max_sync_errors}, bucket_name='{bucket_name}',\
+                bucket_region='{bucket_region}', prefix_in_bucket='{prefix_in_bucket}', endpoint='{endpoint}', concurrency_limit={s3_concurrency_limit}}}",
             ),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
-                r#"{}
+                r#"{ALL_BASE_VALUES_TOML}
 pg_distrib_dir='{}'
+broker_endpoints = ['{broker_endpoint}']
 
-{}"#,
-                ALL_BASE_VALUES_TOML,
+{remote_storage_config_str}"#,
                 pg_distrib_dir.display(),
-                remote_storage_config_str,
             );
 
             let toml = config_string.parse()?;
 
             let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
                 .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{}', reason: {}", config_string, e)
+                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
                 })
                 .remote_storage_config
                 .expect("Should have remote storage config for S3");
@@ -853,15 +816,14 @@ pg_distrib_dir='{}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_sync,
+                    max_concurrent_syncs,
                     max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
                         bucket_region: bucket_region.clone(),
-                        access_key_id: Some(access_key_id.clone()),
-                        secret_access_key: Some(secret_access_key.clone()),
                         prefix_in_bucket: Some(prefix_in_bucket.clone()),
-                        endpoint: Some(endpoint.clone())
+                        endpoint: Some(endpoint.clone()),
+                        concurrency_limit: s3_concurrency_limit,
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"

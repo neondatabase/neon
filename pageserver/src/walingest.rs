@@ -12,7 +12,7 @@
 //! The zenith Repository can store page versions in two formats: as
 //! page images, or a WAL records. WalIngest::ingest_record() extracts
 //! page images out of some WAL records, but most it stores as WAL
-//! records. If a WAL record modifies multple pages, WalIngest
+//! records. If a WAL record modifies multiple pages, WalIngest
 //! will call Repository::put_wal_record or put_page_image functions
 //! separately for each modified page.
 //!
@@ -21,8 +21,10 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use anyhow::Context;
 use postgres_ffi::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::{page_is_new, page_set_lsn};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
@@ -82,7 +84,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ) -> Result<()> {
         let mut modification = timeline.begin_modification(lsn);
 
-        let mut decoded = decode_wal_record(recdata);
+        let mut decoded = decode_wal_record(recdata).context("failed decoding wal record")?;
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
 
@@ -251,7 +253,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
-            let new_checkpoint_bytes = self.checkpoint.encode();
+            let new_checkpoint_bytes = self.checkpoint.encode()?;
 
             modification.put_checkpoint(new_checkpoint_bytes)?;
             self.checkpoint_modified = false;
@@ -303,8 +305,14 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 image.resize(image.len() + blk.hole_length as usize, 0u8);
                 image.unsplit(tail);
             }
-            image[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
-            image[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+            //
+            // Match the logic of XLogReadBufferForRedoExtended:
+            // The page may be uninitialized. If so, we can't set the LSN because
+            // that would corrupt the page.
+            //
+            if !page_is_new(&image) {
+                page_set_lsn(&mut image, lsn)
+            }
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
@@ -635,7 +643,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                     segno,
                     rpageno,
                     if is_commit {
-                        ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+                        ZenithWalRecord::ClogSetCommitted {
+                            xids: page_xids,
+                            timestamp: parsed.xact_time,
+                        }
                     } else {
                         ZenithWalRecord::ClogSetAborted { xids: page_xids }
                     },
@@ -652,7 +663,10 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             segno,
             rpageno,
             if is_commit {
-                ZenithWalRecord::ClogSetCommitted { xids: page_xids }
+                ZenithWalRecord::ClogSetCommitted {
+                    xids: page_xids,
+                    timestamp: parsed.xact_time,
+                }
             } else {
                 ZenithWalRecord::ClogSetAborted { xids: page_xids }
             },

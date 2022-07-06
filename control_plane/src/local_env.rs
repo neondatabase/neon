@@ -4,6 +4,7 @@
 //! script which will use local paths.
 
 use anyhow::{bail, ensure, Context};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
@@ -14,15 +15,15 @@ use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     postgres_backend::AuthType,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 use crate::safekeeper::SafekeeperNode;
 
 //
-// This data structures represents zenith CLI config
+// This data structures represents neon_local CLI config
 //
-// It is deserialized from the .zenith/config file, or the config file passed
+// It is deserialized from the .neon/config file, or the config file passed
 // to 'zenith init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
@@ -33,8 +34,8 @@ pub struct LocalEnv {
     // compute nodes).
     //
     // This is not stored in the config file. Rather, this is the path where the
-    // config file itself is. It is read from the ZENITH_REPO_DIR env variable or
-    // '.zenith' if not given.
+    // config file itself is. It is read from the NEON_REPO_DIR env variable or
+    // '.neon' if not given.
     #[serde(skip)]
     pub base_data_dir: PathBuf,
 
@@ -59,9 +60,7 @@ pub struct LocalEnv {
     #[serde(default)]
     pub private_key_path: PathBuf,
 
-    // A comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
-    #[serde(default)]
-    pub broker_endpoints: Option<String>,
+    pub etcd_broker: EtcdBroker,
 
     pub pageserver: PageServerConf,
 
@@ -77,11 +76,75 @@ pub struct LocalEnv {
     branch_name_mappings: HashMap<String, Vec<(ZTenantId, ZTimelineId)>>,
 }
 
+/// Etcd broker config for cluster internal communication.
+#[serde_as]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub struct EtcdBroker {
+    /// A prefix to all to any key when pushing/polling etcd from a node.
+    #[serde(default)]
+    pub broker_etcd_prefix: Option<String>,
+
+    /// Broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'.
+    #[serde(default)]
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub broker_endpoints: Vec<Url>,
+
+    /// Etcd binary path to use.
+    #[serde(default)]
+    pub etcd_binary_path: PathBuf,
+}
+
+impl EtcdBroker {
+    pub fn locate_etcd() -> anyhow::Result<PathBuf> {
+        let which_output = Command::new("which")
+            .arg("etcd")
+            .output()
+            .context("Failed to run 'which etcd' command")?;
+        let stdout = String::from_utf8_lossy(&which_output.stdout);
+        ensure!(
+            which_output.status.success(),
+            "'which etcd' invocation failed. Status: {}, stdout: {stdout}, stderr: {}",
+            which_output.status,
+            String::from_utf8_lossy(&which_output.stderr)
+        );
+
+        let etcd_path = PathBuf::from(stdout.trim());
+        ensure!(
+            etcd_path.is_file(),
+            "'which etcd' invocation was successful, but the path it returned is not a file or does not exist: {}",
+            etcd_path.display()
+        );
+
+        Ok(etcd_path)
+    }
+
+    pub fn comma_separated_endpoints(&self) -> String {
+        self.broker_endpoints
+            .iter()
+            .map(|url| {
+                // URL by default adds a '/' path at the end, which is not what etcd CLI wants.
+                let url_string = url.as_str();
+                if url_string.ends_with('/') {
+                    &url_string[0..url_string.len() - 1]
+                } else {
+                    url_string
+                }
+            })
+            .fold(String::new(), |mut comma_separated_urls, url| {
+                if !comma_separated_urls.is_empty() {
+                    comma_separated_urls.push(',');
+                }
+                comma_separated_urls.push_str(url);
+                comma_separated_urls
+            })
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct PageServerConf {
     // node id
-    pub id: ZNodeId,
+    pub id: NodeId,
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
@@ -96,7 +159,7 @@ pub struct PageServerConf {
 impl Default for PageServerConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             auth_type: AuthType::Trust,
@@ -108,19 +171,25 @@ impl Default for PageServerConf {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
-    pub id: ZNodeId,
+    pub id: NodeId,
     pub pg_port: u16,
     pub http_port: u16,
     pub sync: bool,
+    pub remote_storage: Option<String>,
+    pub backup_threads: Option<u32>,
+    pub auth_enabled: bool,
 }
 
 impl Default for SafekeeperConf {
     fn default() -> Self {
         Self {
-            id: ZNodeId(0),
+            id: NodeId(0),
             pg_port: 0,
             http_port: 0,
             sync: true,
+            remote_storage: None,
+            backup_threads: None,
+            auth_enabled: false,
         }
     }
 }
@@ -180,12 +249,7 @@ impl LocalEnv {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
-                bail!(
-                    "branch '{}' is already mapped to timeline {}, cannot map to another timeline {}",
-                    branch_name,
-                    old_timeline_id,
-                    timeline_id
-                );
+                bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
             }
         } else {
             existing_values.push((tenant_id, timeline_id));
@@ -221,7 +285,7 @@ impl LocalEnv {
     ///
     /// Unlike 'load_config', this function fills in any defaults that are missing
     /// from the config file.
-    pub fn create_config(toml: &str) -> anyhow::Result<Self> {
+    pub fn parse_config(toml: &str) -> anyhow::Result<Self> {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
@@ -234,25 +298,10 @@ impl LocalEnv {
                 env.pg_distrib_dir = cwd.join("tmp_install")
             }
         }
-        if !env.pg_distrib_dir.join("bin/postgres").exists() {
-            bail!(
-                "Can't find postgres binary at {}",
-                env.pg_distrib_dir.display()
-            );
-        }
 
         // Find zenith binaries.
         if env.zenith_distrib_dir == Path::new("") {
             env.zenith_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
-        }
-        for binary in ["pageserver", "safekeeper"] {
-            if !env.zenith_distrib_dir.join(binary).exists() {
-                bail!(
-                    "Can't find binary '{}' in zenith distrib dir '{}'",
-                    binary,
-                    env.zenith_distrib_dir.display()
-                );
-            }
         }
 
         // If no initial tenant ID was given, generate it.
@@ -290,7 +339,7 @@ impl LocalEnv {
     pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
         // Currently, the user first passes a config file with 'zenith init --config=<path>'
         // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
-        // to .zenith/config. TODO: We lose any formatting and comments along the way, which is
+        // to .neon/config. TODO: We lose any formatting and comments along the way, which is
         // a bit sad.
         let mut conf_content = r#"# This file describes a locale deployment of the page server
 # and safekeeeper node. It is read by the 'zenith' command-line
@@ -342,11 +391,26 @@ impl LocalEnv {
             base_path != Path::new(""),
             "repository base path is missing"
         );
+
         ensure!(
             !base_path.exists(),
             "directory '{}' already exists. Perhaps already initialized?",
             base_path.display()
         );
+        if !self.pg_distrib_dir.join("bin/postgres").exists() {
+            bail!(
+                "Can't find postgres binary at {}",
+                self.pg_distrib_dir.display()
+            );
+        }
+        for binary in ["pageserver", "safekeeper"] {
+            if !self.zenith_distrib_dir.join(binary).exists() {
+                bail!(
+                    "Can't find binary '{binary}' in zenith distrib dir '{}'",
+                    self.zenith_distrib_dir.display()
+                );
+            }
+        }
 
         fs::create_dir(&base_path)?;
 
@@ -403,8 +467,36 @@ impl LocalEnv {
 }
 
 fn base_path() -> PathBuf {
-    match std::env::var_os("ZENITH_REPO_DIR") {
-        Some(val) => PathBuf::from(val.to_str().unwrap()),
-        None => ".zenith".into(),
+    match std::env::var_os("NEON_REPO_DIR") {
+        Some(val) => PathBuf::from(val),
+        None => PathBuf::from(".neon"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_conf_parsing() {
+        let simple_conf_toml = include_str!("../simple.conf");
+        let simple_conf_parse_result = LocalEnv::parse_config(simple_conf_toml);
+        assert!(
+            simple_conf_parse_result.is_ok(),
+            "failed to parse simple config {simple_conf_toml}, reason: {simple_conf_parse_result:?}"
+        );
+
+        let string_to_replace = "broker_endpoints = ['http://127.0.0.1:2379']";
+        let spoiled_url_str = "broker_endpoints = ['!@$XOXO%^&']";
+        let spoiled_url_toml = simple_conf_toml.replace(string_to_replace, spoiled_url_str);
+        assert!(
+            spoiled_url_toml.contains(spoiled_url_str),
+            "Failed to replace string {string_to_replace} in the toml file {simple_conf_toml}"
+        );
+        let spoiled_url_parse_result = LocalEnv::parse_config(&spoiled_url_toml);
+        assert!(
+            spoiled_url_parse_result.is_err(),
+            "expected toml with invalid Url {spoiled_url_toml} to fail the parsing, but got {spoiled_url_parse_result:?}"
+        );
     }
 }

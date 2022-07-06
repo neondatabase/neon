@@ -9,11 +9,11 @@ pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod profiling;
 pub mod reltag;
-pub mod remote_storage;
 pub mod repository;
+pub mod storage_sync;
 pub mod tenant_config;
 pub mod tenant_mgr;
-pub mod tenant_threads;
+pub mod tenant_tasks;
 pub mod thread_mgr;
 pub mod timelines;
 pub mod virtual_file;
@@ -24,7 +24,6 @@ pub mod walredo;
 
 use lazy_static::lazy_static;
 use tracing::info;
-use utils::postgres_backend;
 
 use crate::thread_mgr::ThreadKind;
 use metrics::{register_int_gauge_vec, IntGaugeVec};
@@ -45,7 +44,7 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
-        "pageserver_live_connections_count",
+        "pageserver_live_connections",
         "Number of live network connections",
         &["pageserver_connection_kind"]
     )
@@ -67,13 +66,12 @@ pub type RepositoryImpl = LayeredRepository;
 
 pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;
 
-pub fn shutdown_pageserver() {
+pub fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint thread. This prevents new connections from
     // being accepted.
     thread_mgr::shutdown_threads(Some(ThreadKind::LibpqEndpointListener), None, None);
 
     // Shut down any page service threads.
-    postgres_backend::set_pgbackend_shutdown_requested();
     thread_mgr::shutdown_threads(Some(ThreadKind::PageRequestHandler), None, None);
 
     // Shut down all the tenants. This flushes everything to disk and kills
@@ -94,5 +92,5 @@ pub fn shutdown_pageserver() {
     thread_mgr::shutdown_threads(None, None, None);
 
     info!("Shut down successfully completed");
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }

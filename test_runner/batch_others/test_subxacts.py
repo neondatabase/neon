@@ -1,4 +1,4 @@
-from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.log_helper import log
 
 
@@ -6,11 +6,11 @@ from fixtures.log_helper import log
 #
 # The pg_subxact SLRU is not preserved on restarts, and doesn't need to be
 # maintained in the pageserver, so subtransactions are not very exciting for
-# Zenith. They are included in the commit record though and updated in the
+# Neon. They are included in the commit record though and updated in the
 # CLOG.
-def test_subxacts(zenith_simple_env: ZenithEnv, test_output_dir):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_subxacts", "empty")
+def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_subxacts", "empty")
     pg = env.postgres.create_start('test_subxacts')
 
     log.info("postgres is running on 'test_subxacts' branch")

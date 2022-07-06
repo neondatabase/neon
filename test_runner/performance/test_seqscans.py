@@ -2,9 +2,9 @@
 #
 from contextlib import closing
 from dataclasses import dataclass
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
-from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.compare_fixtures import PgCompare
 import pytest
 
@@ -20,8 +20,8 @@ import pytest
         pytest.param(10000000, 1, 0),
         pytest.param(10000000, 1, 4)
     ])
-def test_seqscans(zenith_with_baseline: PgCompare, rows: int, iters: int, workers: int):
-    env = zenith_with_baseline
+def test_seqscans(neon_with_baseline: PgCompare, rows: int, iters: int, workers: int):
+    env = neon_with_baseline
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:

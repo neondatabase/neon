@@ -43,10 +43,13 @@ pub struct LayerMap {
     pub next_open_layer_at: Option<Lsn>,
 
     ///
-    /// The frozen layer, if any, contains WAL older than the current 'open_layer'
-    /// or 'next_open_layer_at', but newer than any historic layer. The frozen
-    /// layer is during checkpointing, when an InMemoryLayer is being written out
-    /// to disk.
+    /// Frozen layers, if any. Frozen layers are in-memory layers that
+    /// are no longer added to, but haven't been written out to disk
+    /// yet. They contain WAL older than the current 'open_layer' or
+    /// 'next_open_layer_at', but newer than any historic layer.
+    /// The frozen layers are in order from oldest to newest, so that
+    /// the newest one is in the 'back' of the VecDeque, and the oldest
+    /// in the 'front'.
     ///
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
@@ -129,17 +132,15 @@ impl LayerMap {
                 // this layer contains the requested point in the key/lsn space.
                 // No need to search any further
                 trace!(
-                    "found layer {} for request on {} at {}",
+                    "found layer {} for request on {key} at {end_lsn}",
                     l.filename().display(),
-                    key,
-                    end_lsn
                 );
                 latest_delta.replace(Arc::clone(l));
                 break;
             }
             // this layer's end LSN is smaller than the requested point. If there's
             // nothing newer, this is what we need to return. Remember this.
-            if let Some(ref old_candidate) = latest_delta {
+            if let Some(old_candidate) = &latest_delta {
                 if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
                     latest_delta.replace(Arc::clone(l));
                 }
@@ -149,10 +150,8 @@ impl LayerMap {
         }
         if let Some(l) = latest_delta {
             trace!(
-                "found (old) layer {} for request on {} at {}",
+                "found (old) layer {} for request on {key} at {end_lsn}",
                 l.filename().display(),
-                key,
-                end_lsn
             );
             let lsn_floor = std::cmp::max(
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
@@ -163,17 +162,13 @@ impl LayerMap {
                 layer: l,
             }))
         } else if let Some(l) = latest_img {
-            trace!(
-                "found img layer and no deltas for request on {} at {}",
-                key,
-                end_lsn
-            );
+            trace!("found img layer and no deltas for request on {key} at {end_lsn}");
             Ok(Some(SearchResult {
                 lsn_floor: latest_img_lsn.unwrap(),
                 layer: l,
             }))
         } else {
-            trace!("no layer found for request on {} at {}", key, end_lsn);
+            trace!("no layer found for request on {key} at {end_lsn}");
             Ok(None)
         }
     }
@@ -191,7 +186,6 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    #[allow(dead_code)]
     pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
         let len_before = self.historic_layers.len();
 
@@ -207,18 +201,14 @@ impl LayerMap {
         NUM_ONDISK_LAYERS.dec();
     }
 
-    /// Is there a newer image layer for given key-range?
+    /// Is there a newer image layer for given key- and LSN-range?
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    /// We ignore layers newer than disk_consistent_lsn because they will be removed at restart
-    /// We also only look at historic layers
-    //#[allow(dead_code)]
-    pub fn newer_image_layer_exists(
+    pub fn image_layer_exists(
         &self,
         key_range: &Range<Key>,
-        lsn: Lsn,
-        disk_consistent_lsn: Lsn,
+        lsn_range: &Range<Lsn>,
     ) -> Result<bool> {
         let mut range_remain = key_range.clone();
 
@@ -231,8 +221,7 @@ impl LayerMap {
                 let img_lsn = l.get_lsn_range().start;
                 if !l.is_incremental()
                     && l.get_key_range().contains(&range_remain.start)
-                    && img_lsn > lsn
-                    && img_lsn < disk_consistent_lsn
+                    && lsn_range.contains(&img_lsn)
                 {
                     made_progress = true;
                     let img_key_end = l.get_key_range().end;
@@ -250,7 +239,7 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> std::slice::Iter<Arc<dyn Layer>> {
+    pub fn iter_historic_layers(&self) -> impl Iterator<Item = &Arc<dyn Layer>> {
         self.historic_layers.iter()
     }
 

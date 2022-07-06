@@ -1,15 +1,17 @@
+import pytest
 from contextlib import closing
+from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.benchmark_fixture import NeonBenchmarker
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder
-from fixtures.benchmark_fixture import ZenithBenchmarker
 
-
-def test_startup(zenith_env_builder: ZenithEnvBuilder, zenbenchmark: ZenithBenchmarker):
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+# This test sometimes runs for longer than the global 5 minute timeout.
+@pytest.mark.timeout(600)
+def test_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     # Start
-    env.zenith_cli.create_branch('test_startup')
+    env.neon_cli.create_branch('test_startup')
     with zenbenchmark.record_duration("startup_time"):
         pg = env.postgres.create_start('test_startup')
         pg.safe_psql("select 1;")

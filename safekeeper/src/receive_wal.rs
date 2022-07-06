@@ -5,7 +5,6 @@
 use anyhow::{anyhow, bail, Result};
 
 use bytes::BytesMut;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::*;
 
 use crate::timeline::Timeline;
@@ -28,29 +27,19 @@ use utils::{
     sock_split::ReadStream,
 };
 
-use crate::callmemaybe::CallmeEvent;
-
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
     pg_backend: &'pg mut PostgresBackend,
     /// The cached result of `pg_backend.socket().peer_addr()` (roughly)
     peer_addr: SocketAddr,
-    /// Pageserver connection string forwarded from compute
-    /// NOTE that it is allowed to operate without a pageserver.
-    /// So if compute has no pageserver configured do not use it.
-    pageserver_connstr: Option<String>,
 }
 
 impl<'pg> ReceiveWalConn<'pg> {
-    pub fn new(
-        pg: &'pg mut PostgresBackend,
-        pageserver_connstr: Option<String>,
-    ) -> ReceiveWalConn<'pg> {
+    pub fn new(pg: &'pg mut PostgresBackend) -> ReceiveWalConn<'pg> {
         let peer_addr = *pg.get_peer_addr();
         ReceiveWalConn {
             pg_backend: pg,
             peer_addr,
-            pageserver_connstr,
         }
     }
 
@@ -88,17 +77,10 @@ impl<'pg> ReceiveWalConn<'pg> {
             _ => bail!("unexpected message {:?} instead of greeting", next_msg),
         }
 
-        // Register the connection and defer unregister.
-        spg.timeline
-            .get()
-            .on_compute_connect(self.pageserver_connstr.as_ref(), &spg.tx)?;
-        let _guard = ComputeConnectionGuard {
-            timeline: Arc::clone(spg.timeline.get()),
-            callmemaybe_tx: spg.tx.clone(),
-        };
-
         let mut next_msg = Some(next_msg);
 
+        let mut first_time_through = true;
+        let mut _guard: Option<ComputeConnectionGuard> = None;
         loop {
             if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
                 // poll AppendRequest's without blocking and write WAL to disk without flushing,
@@ -125,6 +107,16 @@ impl<'pg> ReceiveWalConn<'pg> {
                 if let Some(reply) = reply {
                     self.write_msg(&reply)?;
                 }
+            }
+            if first_time_through {
+                // Register the connection and defer unregister. Do that only
+                // after processing first message, as it sets wal_seg_size,
+                // wanted by many.
+                spg.timeline.get().on_compute_connect()?;
+                _guard = Some(ComputeConnectionGuard {
+                    timeline: Arc::clone(spg.timeline.get()),
+                });
+                first_time_through = false;
             }
 
             // blocking wait for the next message
@@ -194,13 +186,10 @@ impl ProposerPollStream {
 
 struct ComputeConnectionGuard {
     timeline: Arc<Timeline>,
-    callmemaybe_tx: UnboundedSender<CallmeEvent>,
 }
 
 impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline
-            .on_compute_disconnect(&self.callmemaybe_tx)
-            .unwrap();
+        self.timeline.on_compute_disconnect().unwrap();
     }
 }

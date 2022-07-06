@@ -7,11 +7,10 @@
 //! - Fixed-width keys
 //! - Fixed-width values (VALUE_SZ)
 //! - The tree is created in a bulk operation. Insert/deletion after creation
-//!   is not suppported
+//!   is not supported
 //! - page-oriented
 //!
 //! TODO:
-//! - better errors (e.g. with thiserror?)
 //! - maybe something like an Adaptive Radix Tree would be more efficient?
 //! - the values stored by image and delta layers are offsets into the file,
 //!   and they are in monotonically increasing order. Prefix compression would
@@ -19,11 +18,12 @@
 //! - An Iterator interface would be more convenient for the callers than the
 //!   'visit' function
 //!
-use anyhow;
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use hex;
-use std::cmp::Ordering;
+use std::{cmp::Ordering, io, result};
+use thiserror::Error;
+use tracing::error;
 
 use crate::layered_repository::block_io::{BlockReader, BlockWriter};
 
@@ -86,6 +86,23 @@ impl Value {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum DiskBtreeError {
+    #[error("Attempt to append a value that is too large {0} > {}", MAX_VALUE)]
+    AppendOverflow(u64),
+
+    #[error("Unsorted input: key {key:?} is <= last_key {last_key:?}")]
+    UnsortedInput { key: Box<[u8]>, last_key: Box<[u8]> },
+
+    #[error("Could not push to new leaf node")]
+    FailedToPushToNewLeafNode,
+
+    #[error("IoError: {0}")]
+    Io(#[from] io::Error),
+}
+
+pub type Result<T> = result::Result<T, DiskBtreeError>;
+
 /// This is the on-disk representation.
 struct OnDiskNode<'a, const L: usize> {
     // Fixed-width fields
@@ -106,12 +123,12 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
     ///
     /// Interpret a PAGE_SZ page as a node.
     ///
-    fn deparse(buf: &[u8]) -> OnDiskNode<L> {
+    fn deparse(buf: &[u8]) -> Result<OnDiskNode<L>> {
         let mut cursor = std::io::Cursor::new(buf);
-        let num_children = cursor.read_u16::<BE>().unwrap();
-        let level = cursor.read_u8().unwrap();
-        let prefix_len = cursor.read_u8().unwrap();
-        let suffix_len = cursor.read_u8().unwrap();
+        let num_children = cursor.read_u16::<BE>()?;
+        let level = cursor.read_u8()?;
+        let prefix_len = cursor.read_u8()?;
+        let suffix_len = cursor.read_u8()?;
 
         let mut off = cursor.position();
         let prefix_off = off as usize;
@@ -129,7 +146,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
         let keys = &buf[keys_off..keys_off + keys_len];
         let values = &buf[values_off..values_off + values_len];
 
-        OnDiskNode {
+        Ok(OnDiskNode {
             num_children,
             level,
             prefix_len,
@@ -137,7 +154,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
             prefix,
             keys,
             values,
-        }
+        })
     }
 
     ///
@@ -149,7 +166,11 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
         Value::from_slice(value_slice)
     }
 
-    fn binary_search(&self, search_key: &[u8; L], keybuf: &mut [u8]) -> Result<usize, usize> {
+    fn binary_search(
+        &self,
+        search_key: &[u8; L],
+        keybuf: &mut [u8],
+    ) -> result::Result<usize, usize> {
         let mut size = self.num_children as usize;
         let mut low = 0;
         let mut high = size;
@@ -209,7 +230,7 @@ where
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub fn get(&self, search_key: &[u8; L]) -> anyhow::Result<Option<u64>> {
+    pub fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(search_key, VisitDirection::Forwards, |key, value| {
             if key == search_key {
@@ -230,7 +251,7 @@ where
         search_key: &[u8; L],
         dir: VisitDirection,
         mut visitor: V,
-    ) -> anyhow::Result<bool>
+    ) -> Result<bool>
     where
         V: FnMut(&[u8], u64) -> bool,
     {
@@ -243,7 +264,7 @@ where
         search_key: &[u8; L],
         dir: VisitDirection,
         visitor: &mut V,
-    ) -> anyhow::Result<bool>
+    ) -> Result<bool>
     where
         V: FnMut(&[u8], u64) -> bool,
     {
@@ -260,11 +281,11 @@ where
         search_key: &[u8; L],
         dir: VisitDirection,
         visitor: &mut V,
-    ) -> anyhow::Result<bool>
+    ) -> Result<bool>
     where
         V: FnMut(&[u8], u64) -> bool,
     {
-        let node = OnDiskNode::deparse(node_buf);
+        let node = OnDiskNode::deparse(node_buf)?;
         let prefix_len = node.prefix_len as usize;
         let suffix_len = node.suffix_len as usize;
 
@@ -369,15 +390,15 @@ where
     }
 
     #[allow(dead_code)]
-    pub fn dump(&self) -> anyhow::Result<()> {
+    pub fn dump(&self) -> Result<()> {
         self.dump_recurse(self.root_blk, &[], 0)
     }
 
-    fn dump_recurse(&self, blknum: u32, path: &[u8], depth: usize) -> anyhow::Result<()> {
+    fn dump_recurse(&self, blknum: u32, path: &[u8], depth: usize) -> Result<()> {
         let blk = self.reader.read_blk(self.start_blk + blknum)?;
         let buf: &[u8] = blk.as_ref();
 
-        let node = OnDiskNode::<L>::deparse(buf);
+        let node = OnDiskNode::<L>::deparse(buf)?;
 
         print!("{:indent$}", "", indent = depth * 2);
         println!(
@@ -423,6 +444,13 @@ where
     ///
     /// stack[0] is the current root page, stack.last() is the leaf.
     ///
+    /// We maintain the length of the stack to be always greater than zero.
+    /// Two exceptions are:
+    /// 1. `Self::flush_node`. The method will push the new node if it extracted the last one.
+    ///   So because other methods cannot see the intermediate state invariant still holds.
+    /// 2. `Self::finish`. It consumes self and does not return it back,
+    ///  which means that this is where the structure is destroyed.
+    ///  Thus stack of zero length cannot be observed by other methods.
     stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append
@@ -442,26 +470,36 @@ where
         }
     }
 
-    pub fn append(&mut self, key: &[u8; L], value: u64) -> Result<(), anyhow::Error> {
-        assert!(value <= MAX_VALUE);
+    pub fn append(&mut self, key: &[u8; L], value: u64) -> Result<()> {
+        if value > MAX_VALUE {
+            return Err(DiskBtreeError::AppendOverflow(value));
+        }
         if let Some(last_key) = &self.last_key {
-            assert!(key > last_key, "unsorted input");
+            if key <= last_key {
+                return Err(DiskBtreeError::UnsortedInput {
+                    key: key.as_slice().into(),
+                    last_key: last_key.as_slice().into(),
+                });
+            }
         }
         self.last_key = Some(*key);
 
-        Ok(self.append_internal(key, Value::from_u64(value))?)
+        self.append_internal(key, Value::from_u64(value))
     }
 
-    fn append_internal(&mut self, key: &[u8; L], value: Value) -> Result<(), std::io::Error> {
+    fn append_internal(&mut self, key: &[u8; L], value: Value) -> Result<()> {
         // Try to append to the current leaf buffer
-        let last = self.stack.last_mut().unwrap();
+        let last = self
+            .stack
+            .last_mut()
+            .expect("should always have at least one item");
         let level = last.level;
         if last.push(key, value) {
             return Ok(());
         }
 
-        // It did not fit. Try to compress, and it it succeeds to make some room
-        // on the node, try appending to it again.
+        // It did not fit. Try to compress, and if it succeeds to make
+        // some room on the node, try appending to it again.
         #[allow(clippy::collapsible_if)]
         if last.compress() {
             if last.push(key, value) {
@@ -476,26 +514,33 @@ where
         // key to it.
         let mut last = BuildNode::new(level);
         if !last.push(key, value) {
-            panic!("could not push to new leaf node");
+            return Err(DiskBtreeError::FailedToPushToNewLeafNode);
         }
+
         self.stack.push(last);
 
         Ok(())
     }
 
-    fn flush_node(&mut self) -> Result<(), std::io::Error> {
-        let last = self.stack.pop().unwrap();
+    /// Flush the bottommost node in the stack to disk. Appends a downlink to its parent,
+    /// and recursively flushes the parent too, if it becomes full. If the root page becomes full,
+    /// creates a new root page, increasing the height of the tree.
+    fn flush_node(&mut self) -> Result<()> {
+        // Get the current bottommost node in the stack and flush it to disk.
+        let last = self
+            .stack
+            .pop()
+            .expect("should always have at least one item");
         let buf = last.pack();
         let downlink_key = last.first_key();
         let downlink_ptr = self.writer.write_blk(buf)?;
 
-        // Append the downlink to the parent
+        // Append the downlink to the parent. If there is no parent, ie. this was the root page,
+        // create a new root page, increasing the height of the tree.
         if self.stack.is_empty() {
             self.stack.push(BuildNode::new(last.level + 1));
         }
-        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))?;
-
-        Ok(())
+        self.append_internal(&downlink_key, Value::from_blknum(downlink_ptr))
     }
 
     ///
@@ -505,13 +550,16 @@ where
     /// (In the image and delta layers, it is stored in the beginning of the file,
     /// in the summary header)
     ///
-    pub fn finish(mut self) -> Result<(u32, W), std::io::Error> {
+    pub fn finish(mut self) -> Result<(u32, W)> {
         // flush all levels, except the root.
         while self.stack.len() > 1 {
             self.flush_node()?;
         }
 
-        let root = self.stack.first().unwrap();
+        let root = self
+            .stack
+            .first()
+            .expect("by the check above we left one item there");
         let buf = root.pack();
         let root_blknum = self.writer.write_blk(buf)?;
 
@@ -692,14 +740,14 @@ mod tests {
     impl BlockReader for TestDisk {
         type BlockLease = std::rc::Rc<[u8; PAGE_SZ]>;
 
-        fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+        fn read_blk(&self, blknum: u32) -> io::Result<Self::BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
             Ok(std::rc::Rc::new(buf))
         }
     }
     impl BlockWriter for &mut TestDisk {
-        fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error> {
+        fn write_blk(&mut self, buf: Bytes) -> io::Result<u32> {
             let blknum = self.blocks.len();
             self.blocks.push(buf);
             Ok(blknum as u32)
@@ -707,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn basic() -> anyhow::Result<()> {
+    fn basic() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
@@ -788,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn lots_of_keys() -> anyhow::Result<()> {
+    fn lots_of_keys() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
 
@@ -882,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn random_data() -> anyhow::Result<()> {
+    fn random_data() -> Result<()> {
         // Generate random keys with exponential distribution, to
         // exercise the prefix compression
         const NUM_KEYS: usize = 100000;
@@ -927,21 +975,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsorted input")]
     fn unsorted_input() {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 2>::new(&mut disk);
 
         let _ = writer.append(b"ba", 1);
         let _ = writer.append(b"bb", 2);
-        let _ = writer.append(b"aa", 3);
+        let err = writer.append(b"aa", 3).expect_err("should've failed");
+        match err {
+            DiskBtreeError::UnsortedInput { key, last_key } => {
+                assert_eq!(key.as_ref(), b"aa".as_slice());
+                assert_eq!(last_key.as_ref(), b"bb".as_slice());
+            }
+            _ => panic!("unexpected error variant, expected DiskBtreeError::UnsortedInput"),
+        }
     }
 
     ///
     /// This test contains a particular data set, see disk_btree_test_data.rs
     ///
     #[test]
-    fn particular_data() -> anyhow::Result<()> {
+    fn particular_data() -> Result<()> {
         // Build a tree from it
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);

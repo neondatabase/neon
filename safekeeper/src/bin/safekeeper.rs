@@ -6,30 +6,39 @@ use clap::{App, Arg};
 use const_format::formatcp;
 use daemonize::Daemonize;
 use fs2::FileExt;
+use remote_storage::RemoteStorageConfig;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use tokio::sync::mpsc;
+use toml_edit::Document;
 use tracing::*;
 use url::{ParseError, Url};
 
-use safekeeper::control_file::{self};
-use safekeeper::defaults::{DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR};
+use safekeeper::broker;
+use safekeeper::control_file;
+use safekeeper::defaults::{
+    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_PG_LISTEN_ADDR, DEFAULT_WAL_BACKUP_RUNTIME_THREADS,
+};
 use safekeeper::http;
-use safekeeper::s3_offload;
+use safekeeper::remove_wal;
+use safekeeper::timeline::GlobalTimelines;
+use safekeeper::wal_backup;
 use safekeeper::wal_service;
 use safekeeper::SafeKeeperConf;
-use safekeeper::{broker, callmemaybe};
+use utils::auth::JwtAuth;
 use utils::{
-    http::endpoint, logging, shutdown::exit_now, signals, tcp_listener, zid::ZNodeId, GIT_VERSION,
+    http::endpoint, logging, project_git_version, shutdown::exit_now, signals, tcp_listener,
+    zid::NodeId,
 };
 
 const LOCK_FILE_NAME: &str = "safekeeper.lock";
 const ID_FILE_NAME: &str = "safekeeper.id";
+project_git_version!(GIT_VERSION);
 
-fn main() -> Result<()> {
-    metrics::set_common_metrics_prefix("safekeeper");
+fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("Zenith safekeeper")
         .about("Store WAL stream to local file system and push it to WAL receivers")
         .version(GIT_VERSION)
@@ -70,12 +79,6 @@ fn main() -> Result<()> {
                 .takes_value(true),
         )
         .arg(
-            Arg::new("ttl")
-                .long("ttl")
-                .takes_value(true)
-                .help("interval for keeping WAL at safekeeper node, after which them will be uploaded to S3 and removed locally"),
-        )
-        .arg(
             Arg::new("recall")
                 .long("recall")
                 .takes_value(true)
@@ -99,7 +102,7 @@ fn main() -> Result<()> {
             Arg::new("dump-control-file")
                 .long("dump-control-file")
                 .takes_value(true)
-                .help("Dump control file at path specifed by this argument and exit"),
+                .help("Dump control file at path specified by this argument and exit"),
         )
         .arg(
             Arg::new("id").long("id").takes_value(true).help("safekeeper node id: integer")
@@ -108,6 +111,34 @@ fn main() -> Result<()> {
             .long("broker-endpoints")
             .takes_value(true)
             .help("a comma separated broker (etcd) endpoints for storage nodes coordination, e.g. 'http://127.0.0.1:2379'"),
+        )
+        .arg(
+            Arg::new("broker-etcd-prefix")
+            .long("broker-etcd-prefix")
+            .takes_value(true)
+            .help("a prefix to always use when polling/pusing data in etcd from this safekeeper"),
+        )
+        .arg(
+            Arg::new("wal-backup-threads").long("backup-threads").takes_value(true).help(formatcp!("number of threads for wal backup (default {DEFAULT_WAL_BACKUP_RUNTIME_THREADS}")),
+        ).arg(
+            Arg::new("remote-storage")
+                .long("remote-storage")
+                .takes_value(true)
+                .help("Remote storage configuration for WAL backup (offloading to s3) as TOML inline table, e.g. {\"max_concurrent_syncs\" = 17, \"max_sync_errors\": 13, \"bucket_name\": \"<BUCKETNAME>\", \"bucket_region\":\"<REGION>\", \"concurrency_limit\": 119}.\nSafekeeper offloads WAL to [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring structure on the file system.")
+        )
+        .arg(
+            Arg::new("enable-wal-backup")
+                .long("enable-wal-backup")
+                .takes_value(true)
+                .default_value("true")
+                .default_missing_value("true")
+                .help("Enable/disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring WAL backup horizon."),
+        )
+        .arg(
+            Arg::new("auth-validation-public-key-path")
+                .long("auth-validation-public-key-path")
+                .takes_value(true)
+                .help("Path to an RSA .pem public key which is used to check JWT tokens")
         )
         .get_matches();
 
@@ -118,7 +149,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut conf: SafeKeeperConf = Default::default();
+    let mut conf = SafeKeeperConf::default();
 
     if let Some(dir) = arg_matches.value_of("datadir") {
         // change into the data directory.
@@ -141,17 +172,13 @@ fn main() -> Result<()> {
         conf.listen_http_addr = addr.to_owned();
     }
 
-    if let Some(ttl) = arg_matches.value_of("ttl") {
-        conf.ttl = Some(humantime::parse_duration(ttl)?);
-    }
-
     if let Some(recall) = arg_matches.value_of("recall") {
         conf.recall_period = humantime::parse_duration(recall)?;
     }
 
     let mut given_id = None;
     if let Some(given_id_str) = arg_matches.value_of("id") {
-        given_id = Some(ZNodeId(
+        given_id = Some(NodeId(
             given_id_str
                 .parse()
                 .context("failed to parse safekeeper id")?,
@@ -160,16 +187,42 @@ fn main() -> Result<()> {
 
     if let Some(addr) = arg_matches.value_of("broker-endpoints") {
         let collected_ep: Result<Vec<Url>, ParseError> = addr.split(',').map(Url::parse).collect();
-        conf.broker_endpoints = Some(collected_ep?);
+        conf.broker_endpoints = collected_ep.context("Failed to parse broker endpoint urls")?;
     }
+    if let Some(prefix) = arg_matches.value_of("broker-etcd-prefix") {
+        conf.broker_etcd_prefix = prefix.to_string();
+    }
+
+    if let Some(backup_threads) = arg_matches.value_of("wal-backup-threads") {
+        conf.backup_runtime_threads = backup_threads
+            .parse()
+            .with_context(|| format!("Failed to parse backup threads {}", backup_threads))?;
+    }
+    if let Some(storage_conf) = arg_matches.value_of("remote-storage") {
+        // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
+        let storage_conf_toml = format!("remote_storage = {}", storage_conf);
+        let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
+        let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
+        conf.remote_storage = Some(RemoteStorageConfig::from_toml(storage_conf_parsed_toml)?);
+    }
+    // Seems like there is no better way to accept bool values explicitly in clap.
+    conf.wal_backup_enabled = arg_matches
+        .value_of("enable-wal-backup")
+        .unwrap()
+        .parse()
+        .context("failed to parse bool enable-s3-offload bool")?;
+
+    conf.auth_validation_public_key_path = arg_matches
+        .value_of("auth-validation-public-key-path")
+        .map(PathBuf::from);
 
     start_safekeeper(conf, given_id, arg_matches.is_present("init"))
 }
 
-fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: bool) -> Result<()> {
+fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<NodeId>, init: bool) -> Result<()> {
     let log_file = logging::init("safekeeper.log", conf.daemonize)?;
 
-    info!("version: {}", GIT_VERSION);
+    info!("version: {GIT_VERSION}");
 
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(LOCK_FILE_NAME);
@@ -198,6 +251,19 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         e
     })?;
 
+    let auth = match conf.auth_validation_public_key_path.as_ref() {
+        None => {
+            info!("Auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("Loading JWT auth key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+
     // XXX: Don't spawn any threads before daemonizing!
     if conf.daemonize {
         info!("daemonizing...");
@@ -219,20 +285,27 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
         // Otherwise, the coverage data will be damaged.
         match daemonize.exit_action(|| exit_now(0)).start() {
             Ok(_) => info!("Success, daemonized"),
-            Err(e) => error!("Error, {}", e),
+            Err(err) => bail!("Error: {err}. could not daemonize. bailing."),
         }
     }
 
+    // Register metrics collector for active timelines. It's important to do this
+    // after daemonizing, otherwise process collector will be upset.
+    let registry = metrics::default_registry();
+    let timeline_collector = safekeeper::metrics::TimelineCollector::new();
+    registry.register(Box::new(timeline_collector))?;
+
     let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
+    let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
+    GlobalTimelines::init(wal_backup_launcher_tx);
 
     let conf_ = conf.clone();
     threads.push(
         thread::Builder::new()
             .name("http_endpoint_thread".into())
             .spawn(|| {
-                // TODO authentication
-                let router = http::make_router(conf_);
+                let router = http::make_router(conf_, auth);
                 endpoint::serve_thread_main(
                     router,
                     http_listener,
@@ -242,55 +315,52 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
             })?,
     );
 
-    if conf.ttl.is_some() {
-        let conf_ = conf.clone();
-        threads.push(
-            thread::Builder::new()
-                .name("S3 offload thread".into())
-                .spawn(|| {
-                    s3_offload::thread_main(conf_);
-                })?,
-        );
-    }
-
-    let (tx, rx) = mpsc::unbounded_channel();
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
         .name("Safekeeper thread".into())
         .spawn(|| {
-            // thread code
-            let thread_result = wal_service::thread_main(conf_cloned, pg_listener, tx);
-            if let Err(e) = thread_result {
-                info!("safekeeper thread terminated: {}", e);
+            // TODO: add auth
+            if let Err(e) = wal_service::thread_main(conf_cloned, pg_listener) {
+                info!("safekeeper thread terminated: {e}");
             }
         })
         .unwrap();
 
     threads.push(safekeeper_thread);
 
-    let conf_cloned = conf.clone();
-    let callmemaybe_thread = thread::Builder::new()
-        .name("callmemaybe thread".into())
-        .spawn(|| {
-            // thread code
-            let thread_result = callmemaybe::thread_main(conf_cloned, rx);
-            if let Err(e) = thread_result {
-                error!("callmemaybe thread terminated: {}", e);
-            }
-        })
-        .unwrap();
-    threads.push(callmemaybe_thread);
-
-    if conf.broker_endpoints.is_some() {
+    if !conf.broker_endpoints.is_empty() {
         let conf_ = conf.clone();
         threads.push(
             thread::Builder::new()
                 .name("broker thread".into())
                 .spawn(|| {
+                    // TODO: add auth?
                     broker::thread_main(conf_);
                 })?,
         );
+    } else {
+        warn!("No broker endpoints providing, starting without node sync")
     }
+
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("WAL removal thread".into())
+            .spawn(|| {
+                // TODO: add auth?
+                remove_wal::thread_main(conf_);
+            })?,
+    );
+
+    let conf_ = conf.clone();
+    threads.push(
+        thread::Builder::new()
+            .name("wal backup launcher thread".into())
+            .spawn(move || {
+                // TODO: add auth?
+                wal_backup::wal_backup_launcher_thread_main(conf_, wal_backup_launcher_rx);
+            })?,
+    );
 
     // TODO: put more thoughts into handling of failed threads
     // We probably should restart them.
@@ -307,14 +377,14 @@ fn start_safekeeper(mut conf: SafeKeeperConf, given_id: Option<ZNodeId>, init: b
 }
 
 /// Determine safekeeper id and set it in config.
-fn set_id(conf: &mut SafeKeeperConf, given_id: Option<ZNodeId>) -> Result<()> {
+fn set_id(conf: &mut SafeKeeperConf, given_id: Option<NodeId>) -> Result<()> {
     let id_file_path = conf.workdir.join(ID_FILE_NAME);
 
-    let my_id: ZNodeId;
+    let my_id: NodeId;
     // If ID exists, read it in; otherwise set one passed
     match fs::read(&id_file_path) {
         Ok(id_serialized) => {
-            my_id = ZNodeId(
+            my_id = NodeId(
                 std::str::from_utf8(&id_serialized)
                     .context("failed to parse safekeeper id")?
                     .parse()

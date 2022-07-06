@@ -1,7 +1,10 @@
+use std::fmt::Write;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::Child;
 use std::str::FromStr;
 use std::{fs, thread, time};
 
@@ -136,9 +139,11 @@ impl Role {
             // Now we also support SCRAM-SHA-256 and to preserve compatibility
             // we treat all encrypted_password as md5 unless they starts with SCRAM-SHA-256.
             if pass.starts_with("SCRAM-SHA-256") {
-                params.push_str(&format!(" PASSWORD '{}'", pass));
+                write!(params, " PASSWORD '{pass}'")
+                    .expect("String is documented to not to error during write operations");
             } else {
-                params.push_str(&format!(" PASSWORD 'md5{}'", pass));
+                write!(params, " PASSWORD 'md5{pass}'")
+                    .expect("String is documented to not to error during write operations");
             }
         } else {
             params.push_str(" PASSWORD NULL");
@@ -156,7 +161,8 @@ impl Database {
     /// it may require a proper quoting too.
     pub fn to_pg_options(&self) -> String {
         let mut params: String = self.options.as_pg_options();
-        params.push_str(&format!(" OWNER {}", &self.owner.quote()));
+        write!(params, " OWNER {}", &self.owner.quote())
+            .expect("String is documented to not to error during write operations");
 
         params
     }
@@ -220,12 +226,12 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// Wait for Postgres to become ready to accept connections:
 /// - state should be `ready` in the `pgdata/postmaster.pid`
 /// - and we should be able to connect to 127.0.0.1:5432
-pub fn wait_for_postgres(port: &str, pgdata: &Path) -> Result<()> {
+pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
     let mut slept: u64 = 0; // ms
     let pause = time::Duration::from_millis(100);
 
-    let timeout = time::Duration::from_millis(200);
+    let timeout = time::Duration::from_millis(10);
     let addr = SocketAddr::from_str(&format!("127.0.0.1:{}", port)).unwrap();
 
     loop {
@@ -236,14 +242,19 @@ pub fn wait_for_postgres(port: &str, pgdata: &Path) -> Result<()> {
             bail!("timed out while waiting for Postgres to start");
         }
 
+        if let Ok(Some(status)) = pg.try_wait() {
+            // Postgres exited, that is not what we expected, bail out earlier.
+            let code = status.code().unwrap_or(-1);
+            bail!("Postgres exited unexpectedly with code {}", code);
+        }
+
         if pid_path.exists() {
-            // XXX: dumb and the simplest way to get the last line in a text file
-            // TODO: better use `.lines().last()` later
-            let stdout = Command::new("tail")
-                .args(&["-n1", pid_path.to_str().unwrap()])
-                .output()?
-                .stdout;
-            let status = String::from_utf8(stdout)?;
+            let file = BufReader::new(File::open(&pid_path)?);
+            let status = file
+                .lines()
+                .last()
+                .unwrap()
+                .unwrap_or_else(|_| "unknown".to_string());
             let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
 
             // Now Postgres is ready to accept connections

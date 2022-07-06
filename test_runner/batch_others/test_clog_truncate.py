@@ -3,18 +3,18 @@ import os
 
 from contextlib import closing
 
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 
 #
 # Test compute node start after clog truncation
 #
-def test_clog_truncate(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch('test_clog_truncate', 'empty')
+def test_clog_truncate(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch('test_clog_truncate', 'empty')
 
-    # set agressive autovacuum to make sure that truncation will happen
+    # set aggressive autovacuum to make sure that truncation will happen
     config = [
         'autovacuum_max_workers=10',
         'autovacuum_vacuum_threshold=0',
@@ -29,7 +29,7 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
     log.info('postgres is running on test_clog_truncate branch')
 
     # Install extension containing function needed for test
-    pg.safe_psql('CREATE EXTENSION zenith_test_utils')
+    pg.safe_psql('CREATE EXTENSION neon_test_utils')
 
     # Consume many xids to advance clog
     with closing(pg.connect()) as conn:
@@ -62,9 +62,9 @@ def test_clog_truncate(zenith_simple_env: ZenithEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f'create branch at lsn_after_truncation {lsn_after_truncation}')
-    env.zenith_cli.create_branch('test_clog_truncate_new',
-                                 'test_clog_truncate',
-                                 ancestor_start_lsn=lsn_after_truncation)
+    env.neon_cli.create_branch('test_clog_truncate_new',
+                               'test_clog_truncate',
+                               ancestor_start_lsn=lsn_after_truncation)
     pg2 = env.postgres.create_start('test_clog_truncate_new')
     log.info('postgres is running on test_clog_truncate_new branch')
 

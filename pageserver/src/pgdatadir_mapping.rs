@@ -13,6 +13,7 @@ use crate::repository::{Repository, Timeline};
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
+use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,14 @@ where
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: AtomicIsize,
+}
+
+#[derive(Debug)]
+pub enum LsnForTimestamp {
+    Present(Lsn),
+    Future(Lsn),
+    Past(Lsn),
+    NoData(Lsn),
 }
 
 impl<R: Repository> DatadirTimeline<R> {
@@ -113,6 +122,19 @@ impl<R: Repository> DatadirTimeline<R> {
 
         let key = rel_block_to_key(tag, blknum);
         self.tline.get(key, lsn)
+    }
+
+    // Get size of a database in blocks
+    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+        let mut total_blocks = 0;
+
+        let rels = self.list_rels(spcnode, dbnode, lsn)?;
+
+        for rel in rels {
+            let n_blocks = self.get_rel_size(rel, lsn)?;
+            total_blocks += n_blocks as usize;
+        }
+        Ok(total_blocks)
     }
 
     /// Get size of a relation file
@@ -200,6 +222,106 @@ impl<R: Repository> DatadirTimeline<R> {
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
+    }
+
+    /// Locate LSN, such that all transactions that committed before
+    /// 'search_timestamp' are visible, but nothing newer is.
+    ///
+    /// This is not exact. Commit timestamps are not guaranteed to be ordered,
+    /// so it's not well defined which LSN you get if there were multiple commits
+    /// "in flight" at that point in time.
+    ///
+    pub fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
+        let gc_cutoff_lsn_guard = self.tline.get_latest_gc_cutoff_lsn();
+        let min_lsn = *gc_cutoff_lsn_guard;
+        let max_lsn = self.tline.get_last_record_lsn();
+
+        // LSNs are always 8-byte aligned. low/mid/high represent the
+        // LSN divided by 8.
+        let mut low = min_lsn.0 / 8;
+        let mut high = max_lsn.0 / 8 + 1;
+
+        let mut found_smaller = false;
+        let mut found_larger = false;
+        while low < high {
+            // cannot overflow, high and low are both smaller than u64::MAX / 2
+            let mid = (high + low) / 2;
+
+            let cmp = self.is_latest_commit_timestamp_ge_than(
+                search_timestamp,
+                Lsn(mid * 8),
+                &mut found_smaller,
+                &mut found_larger,
+            )?;
+
+            if cmp {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        match (found_smaller, found_larger) {
+            (false, false) => {
+                // This can happen if no commit records have been processed yet, e.g.
+                // just after importing a cluster.
+                Ok(LsnForTimestamp::NoData(max_lsn))
+            }
+            (true, false) => {
+                // Didn't find any commit timestamps larger than the request
+                Ok(LsnForTimestamp::Future(max_lsn))
+            }
+            (false, true) => {
+                // Didn't find any commit timestamps smaller than the request
+                Ok(LsnForTimestamp::Past(max_lsn))
+            }
+            (true, true) => {
+                // low is the LSN of the first commit record *after* the search_timestamp,
+                // Back off by one to get to the point just before the commit.
+                //
+                // FIXME: it would be better to get the LSN of the previous commit.
+                // Otherwise, if you restore to the returned LSN, the database will
+                // include physical changes from later commits that will be marked
+                // as aborted, and will need to be vacuumed away.
+                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
+            }
+        }
+    }
+
+    ///
+    /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
+    /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
+    ///
+    /// Additionally, sets 'found_smaller'/'found_Larger, if encounters any commits
+    /// with a smaller/larger timestamp.
+    ///
+    fn is_latest_commit_timestamp_ge_than(
+        &self,
+        search_timestamp: TimestampTz,
+        probe_lsn: Lsn,
+        found_smaller: &mut bool,
+        found_larger: &mut bool,
+    ) -> Result<bool> {
+        for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
+            let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
+            for blknum in (0..nblocks).rev() {
+                let clog_page =
+                    self.get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn)?;
+
+                if clog_page.len() == pg_constants::BLCKSZ as usize + 8 {
+                    let mut timestamp_bytes = [0u8; 8];
+                    timestamp_bytes.copy_from_slice(&clog_page[pg_constants::BLCKSZ as usize..]);
+                    let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
+
+                    if timestamp >= search_timestamp {
+                        *found_larger = true;
+                        return Ok(true);
+                    } else {
+                        *found_smaller = true;
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Get a list of SLRU segments
@@ -413,7 +535,7 @@ pub struct DatadirModification<'a, R: Repository> {
 
     lsn: Lsn,
 
-    // The modifications are not applied directly to the underyling key-value store.
+    // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_updates: HashMap<Key, Value>,
@@ -559,6 +681,10 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
+        let req_lsn = self.tline.get_last_record_lsn();
+
+        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn)?;
+
         // Remove entry from dbdir
         let buf = self.get(DBDIR_KEY)?;
         let mut dir = DbDirectory::des(&buf)?;
@@ -572,7 +698,8 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
             );
         }
 
-        // FIXME: update pending_nblocks
+        // Update logical database size.
+        self.pending_nblocks -= total_blocks as isize;
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
@@ -641,6 +768,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     /// Extend relation
+    /// If new size is smaller, do nothing.
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
 
@@ -648,10 +776,13 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
 
-        let buf = nblocks.to_le_bytes();
-        self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+        // only extend relation here. never decrease the size
+        if nblocks > old_size {
+            let buf = nblocks.to_le_bytes();
+            self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        self.pending_nblocks += nblocks as isize - old_size as isize;
+            self.pending_nblocks += nblocks as isize - old_size as isize;
+        }
         Ok(())
     }
 

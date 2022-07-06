@@ -1,5 +1,5 @@
 use crate::layered_repository::metadata::TimelineMetadata;
-use crate::remote_storage::RemoteIndex;
+use crate::storage_sync::index::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use crate::CheckpointConfig;
 use anyhow::{bail, Result};
@@ -19,7 +19,7 @@ use utils::{
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
 ///
-/// The Repository treates this as an opaque struct, but see the code in pgdatadir_mapping.rs
+/// The Repository treats this as an opaque struct, but see the code in pgdatadir_mapping.rs
 /// for what we actually store in these fields.
 pub struct Key {
     pub field1: u8,
@@ -195,8 +195,9 @@ impl Display for TimelineSyncStatusUpdate {
         f.write_str(s)
     }
 }
+
 ///
-/// A repository corresponds to one .zenith directory. One repository holds multiple
+/// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
     type Timeline: Timeline;
@@ -210,7 +211,7 @@ pub trait Repository: Send + Sync {
     ) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
-    /// This function is idempotent. It doesnt change internal state in any way.
+    /// This function is idempotent. It doesn't change internal state in any way.
     fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>>;
 
     /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
@@ -224,7 +225,7 @@ pub trait Repository: Send + Sync {
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     fn create_empty_timeline(
         &self,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<Self::Timeline>>;
 
@@ -242,7 +243,7 @@ pub trait Repository: Send + Sync {
     ///
     /// 'timelineid' specifies the timeline to GC, or None for all.
     /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `checkpoint_before_gc` parameter is used to force compaction of storage before CG
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
     /// to make tests more deterministic.
     /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
     fn gc_iteration(
@@ -259,7 +260,7 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    /// detaches locally available timeline by stopping all threads and removing all the data.
+    /// detaches timeline-related in-memory data.
     fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
@@ -345,11 +346,11 @@ pub trait Timeline: Send + Sync {
 
     /// Look up given page version.
     ///
-    /// NOTE: It is considerd an error to 'get' a key that doesn't exist. The abstraction
+    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
     /// above this needs to store suitable metadata to track what data exists with
     /// what keys, in separate metadata entries. If a non-existent key is requested,
-    /// the Repository implementation may incorrectly return a value from an ancestore
-    /// branch, for exampel, or waste a lot of cycles chasing the non-existing key.
+    /// the Repository implementation may incorrectly return a value from an ancestor
+    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
 
@@ -467,7 +468,11 @@ pub mod repo_harness {
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
+                image_creation_threshold: Some(tenant_conf.image_creation_threshold),
                 pitr_interval: Some(tenant_conf.pitr_interval),
+                walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
+                lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
+                max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
             }
         }
     }
@@ -627,6 +632,19 @@ mod tests {
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
         assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn no_duplicate_timelines() -> Result<()> {
+        let repo = RepoHarness::create("no_duplicate_timelines")?.load();
+        let _ = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
+
+        match repo.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
+            Ok(_) => panic!("duplicate timeline creation should fail"),
+            Err(e) => assert_eq!(e.to_string(), "Timeline already exists"),
+        }
 
         Ok(())
     }

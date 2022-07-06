@@ -1,56 +1,32 @@
 //! Communication with etcd, providing safekeeper peers and pageserver coordination.
 
-use anyhow::bail;
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
-use etcd_client::Client;
-use etcd_client::EventType;
-use etcd_client::PutOptions;
-use etcd_client::WatchOptions;
-use lazy_static::lazy_static;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-use std::str::FromStr;
+use etcd_broker::subscription_value::SkTimelineInfo;
+use etcd_broker::LeaseKeepAliveStream;
+use etcd_broker::LeaseKeeper;
+
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::time::Duration;
+use tokio::spawn;
 use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
+use url::Url;
 
-use crate::{safekeeper::Term, timeline::GlobalTimelines, SafeKeeperConf};
-use utils::{
-    lsn::Lsn,
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+use crate::{timeline::GlobalTimelines, SafeKeeperConf};
+use etcd_broker::{
+    subscription_key::{OperationKind, SkOperationKind, SubscriptionKey},
+    Client, PutOptions,
 };
+use utils::zid::{NodeId, ZTenantTimelineId};
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
-const LEASE_TTL_SEC: i64 = 5;
-// TODO: add global zenith installation ID.
-const ZENITH_PREFIX: &str = "zenith";
-
-/// Published data about safekeeper. Fields made optional for easy migrations.
-#[serde_as]
-#[derive(Deserialize, Serialize)]
-pub struct SafekeeperInfo {
-    /// Term of the last entry.
-    pub last_log_term: Option<Term>,
-    /// LSN of the last record.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub flush_lsn: Option<Lsn>,
-    /// Up to which LSN safekeeper regards its WAL as committed.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub commit_lsn: Option<Lsn>,
-    /// LSN up to which safekeeper offloaded WAL to s3.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub s3_wal_lsn: Option<Lsn>,
-    /// LSN of last checkpoint uploaded by pageserver.
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub peer_horizon_lsn: Option<Lsn>,
-}
+const LEASE_TTL_SEC: i64 = 10;
 
 pub fn thread_main(conf: SafeKeeperConf) {
     let runtime = runtime::Builder::new_current_thread()
@@ -66,26 +42,165 @@ pub fn thread_main(conf: SafeKeeperConf) {
     });
 }
 
-/// Prefix to timeline related data.
-fn timeline_path(zttid: &ZTenantTimelineId) -> String {
+/// Key to per timeline per safekeeper data.
+fn timeline_safekeeper_path(
+    broker_etcd_prefix: String,
+    zttid: ZTenantTimelineId,
+    sk_id: NodeId,
+) -> String {
     format!(
-        "{}/{}/{}",
-        ZENITH_PREFIX, zttid.tenant_id, zttid.timeline_id
+        "{}/{sk_id}",
+        SubscriptionKey::sk_timeline_info(broker_etcd_prefix, zttid).watch_key()
     )
 }
 
-/// Key to per timeline per safekeeper data.
-fn timeline_safekeeper_path(zttid: &ZTenantTimelineId, sk_id: ZNodeId) -> String {
-    format!("{}/safekeeper/{}", timeline_path(zttid), sk_id)
+pub struct Election {
+    pub election_name: String,
+    pub candidate_name: String,
+    pub broker_endpoints: Vec<Url>,
+}
+
+impl Election {
+    pub fn new(election_name: String, candidate_name: String, broker_endpoints: Vec<Url>) -> Self {
+        Self {
+            election_name,
+            candidate_name,
+            broker_endpoints,
+        }
+    }
+}
+
+pub struct ElectionLeader {
+    client: Client,
+    keep_alive: JoinHandle<Result<()>>,
+}
+
+impl ElectionLeader {
+    pub async fn check_am_i(
+        &mut self,
+        election_name: String,
+        candidate_name: String,
+    ) -> Result<bool> {
+        let resp = self.client.leader(election_name).await?;
+
+        let kv = resp.kv().ok_or(anyhow!("failed to get leader response"))?;
+        let leader = kv.value_str()?;
+
+        Ok(leader == candidate_name)
+    }
+
+    pub async fn give_up(self) {
+        self.keep_alive.abort();
+        // TODO: it'll be wise to resign here but it'll happen after lease expiration anyway
+        // should we await for keep alive termination?
+        let _ = self.keep_alive.await;
+    }
+}
+
+pub async fn get_leader(req: &Election, leader: &mut Option<ElectionLeader>) -> Result<()> {
+    let mut client = Client::connect(req.broker_endpoints.clone(), None)
+        .await
+        .context("Could not connect to etcd")?;
+
+    let lease = client
+        .lease_grant(LEASE_TTL_SEC, None)
+        .await
+        .context("Could not acquire a lease");
+
+    let lease_id = lease.map(|l| l.id()).unwrap();
+
+    // kill previous keepalive, if any
+    if let Some(l) = leader.take() {
+        l.give_up().await;
+    }
+
+    let keep_alive = spawn::<_>(lease_keep_alive(client.clone(), lease_id));
+    // immediately save handle to kill task if we get canceled below
+    *leader = Some(ElectionLeader {
+        client: client.clone(),
+        keep_alive,
+    });
+
+    client
+        .campaign(
+            req.election_name.clone(),
+            req.candidate_name.clone(),
+            lease_id,
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn lease_keep_alive(mut client: Client, lease_id: i64) -> Result<()> {
+    let (mut keeper, mut ka_stream) = client
+        .lease_keep_alive(lease_id)
+        .await
+        .context("failed to create keepalive stream")?;
+
+    loop {
+        let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
+
+        keeper
+            .keep_alive()
+            .await
+            .context("failed to send LeaseKeepAliveRequest")?;
+
+        ka_stream
+            .message()
+            .await
+            .context("failed to receive LeaseKeepAliveResponse")?;
+
+        sleep(push_interval).await;
+    }
+}
+
+pub fn get_candiate_name(system_id: NodeId) -> String {
+    format!("id_{system_id}")
+}
+
+async fn push_sk_info(
+    zttid: ZTenantTimelineId,
+    mut client: Client,
+    key: String,
+    sk_info: SkTimelineInfo,
+    mut lease: Lease,
+) -> anyhow::Result<(ZTenantTimelineId, Lease)> {
+    let put_opts = PutOptions::new().with_lease(lease.id);
+    client
+        .put(
+            key.clone(),
+            serde_json::to_string(&sk_info)?,
+            Some(put_opts),
+        )
+        .await
+        .with_context(|| format!("failed to push safekeeper info to {}", key))?;
+
+    // revive the lease
+    lease
+        .keeper
+        .keep_alive()
+        .await
+        .context("failed to send LeaseKeepAliveRequest")?;
+    lease
+        .ka_stream
+        .message()
+        .await
+        .context("failed to receive LeaseKeepAliveResponse")?;
+
+    Ok((zttid, lease))
+}
+
+struct Lease {
+    id: i64,
+    keeper: LeaseKeeper,
+    ka_stream: LeaseKeepAliveStream,
 }
 
 /// Push once in a while data about all active timelines to the broker.
-async fn push_loop(conf: SafeKeeperConf) -> Result<()> {
-    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None).await?;
-
-    // Get and maintain lease to automatically delete obsolete data
-    let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
-    let (mut keeper, mut ka_stream) = client.lease_keep_alive(lease.id()).await?;
+async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
+    let mut leases: HashMap<ZTenantTimelineId, Lease> = HashMap::new();
 
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
     loop {
@@ -94,73 +209,83 @@ async fn push_loop(conf: SafeKeeperConf) -> Result<()> {
         // sensitive and there is no risk of deadlock as we don't await while
         // lock is held.
         let active_tlis = GlobalTimelines::get_active_timelines();
-        for zttid in &active_tlis {
-            if let Ok(tli) = GlobalTimelines::get(&conf, *zttid, false) {
-                let sk_info = tli.get_public_info();
-                let put_opts = PutOptions::new().with_lease(lease.id());
-                client
-                    .put(
-                        timeline_safekeeper_path(zttid, conf.my_id),
-                        serde_json::to_string(&sk_info)?,
-                        Some(put_opts),
-                    )
-                    .await
-                    .context("failed to push safekeeper info")?;
+
+        // // Get and maintain (if not yet) per timeline lease to automatically delete obsolete data.
+        for zttid in active_tlis.iter() {
+            if let Entry::Vacant(v) = leases.entry(*zttid) {
+                let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
+                let (keeper, ka_stream) = client.lease_keep_alive(lease.id()).await?;
+                v.insert(Lease {
+                    id: lease.id(),
+                    keeper,
+                    ka_stream,
+                });
             }
         }
-        // revive the lease
-        keeper
-            .keep_alive()
-            .await
-            .context("failed to send LeaseKeepAliveRequest")?;
-        ka_stream
-            .message()
-            .await
-            .context("failed to receive LeaseKeepAliveResponse")?;
+        leases.retain(|zttid, _| active_tlis.contains(zttid));
+
+        // Push data concurrently to not suffer from latency, with many timelines it can be slow.
+        let handles = active_tlis
+            .iter()
+            .filter_map(|zttid| GlobalTimelines::get_loaded(*zttid))
+            .map(|tli| {
+                let sk_info = tli.get_public_info(&conf);
+                let key = timeline_safekeeper_path(
+                    conf.broker_etcd_prefix.clone(),
+                    tli.zttid,
+                    conf.my_id,
+                );
+                let lease = leases.remove(&tli.zttid).unwrap();
+                tokio::spawn(push_sk_info(tli.zttid, client.clone(), key, sk_info, lease))
+            })
+            .collect::<Vec<_>>();
+        for h in handles {
+            let (zttid, lease) = h.await??;
+            // It is ugly to pull leases from hash and then put it back, but
+            // otherwise we have to resort to long living per tli tasks (which
+            // would generate a lot of errors when etcd is down) as task wants to
+            // have 'static objects, we can't borrow to it.
+            leases.insert(zttid, lease);
+        }
+
         sleep(push_interval).await;
     }
 }
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
-    lazy_static! {
-        static ref TIMELINE_SAFEKEEPER_RE: Regex =
-            Regex::new(r"^zenith/([[:xdigit:]]+)/([[:xdigit:]]+)/safekeeper/([[:digit:]])$")
-                .unwrap();
-    }
-    let mut client = Client::connect(conf.broker_endpoints.as_ref().unwrap(), None).await?;
-    loop {
-        let wo = WatchOptions::new().with_prefix();
-        // TODO: subscribe only to my timelines
-        let (_, mut stream) = client.watch(ZENITH_PREFIX, Some(wo)).await?;
-        while let Some(resp) = stream.message().await? {
-            if resp.canceled() {
-                bail!("watch canceled");
-            }
+    let mut client = Client::connect(&conf.broker_endpoints, None).await?;
 
-            for event in resp.events() {
-                if EventType::Put == event.event_type() {
-                    if let Some(kv) = event.kv() {
-                        if let Some(caps) = TIMELINE_SAFEKEEPER_RE.captures(kv.key_str()?) {
-                            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-                            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-                            let zttid = ZTenantTimelineId::new(tenant_id, timeline_id);
-                            let safekeeper_id = ZNodeId(caps.get(3).unwrap().as_str().parse()?);
-                            let value_str = kv.value_str()?;
-                            match serde_json::from_str::<SafekeeperInfo>(value_str) {
-                                Ok(safekeeper_info) => {
-                                    if let Ok(tli) = GlobalTimelines::get(&conf, zttid, false) {
-                                        tli.record_safekeeper_info(&safekeeper_info, safekeeper_id)?
-                                    }
-                                }
-                                Err(err) => warn!(
-                                    "failed to deserialize safekeeper info {}: {}",
-                                    value_str, err
-                                ),
-                            }
-                        }
+    let mut subscription = etcd_broker::subscribe_for_values(
+        &mut client,
+        SubscriptionKey::all(conf.broker_etcd_prefix.clone()),
+        |full_key, value_str| {
+            if full_key.operation == OperationKind::Safekeeper(SkOperationKind::TimelineInfo) {
+                match serde_json::from_str::<SkTimelineInfo>(value_str) {
+                    Ok(new_info) => return Some(new_info),
+                    Err(e) => {
+                        error!("Failed to parse timeline info from value str '{value_str}': {e}")
                     }
                 }
+            }
+            None
+        },
+    )
+    .await
+    .context("failed to subscribe for safekeeper info")?;
+    loop {
+        match subscription.value_updates.recv().await {
+            Some(new_info) => {
+                // note: there are blocking operations below, but it's considered fine for now
+                if let Ok(tli) = GlobalTimelines::get(&conf, new_info.key.id, false) {
+                    tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
+                        .await?
+                }
+            }
+            None => {
+                // XXX it means we lost connection with etcd, error is consumed inside sub object
+                debug!("timeline updates sender closed, aborting the pull loop");
+                return Ok(());
             }
         }
     }
@@ -189,11 +314,12 @@ async fn main_loop(conf: SafeKeeperConf) {
                 },
                 res = async { pull_handle.as_mut().unwrap().await }, if pull_handle.is_some() => {
                     // was it panic or normal error?
-                    let err = match res {
-                        Ok(res_internal) => res_internal.unwrap_err(),
-                        Err(err_outer) => err_outer.into(),
+                    match res {
+                        Ok(res_internal) => if let Err(err_inner) = res_internal {
+                            warn!("pull task failed: {:?}", err_inner);
+                        }
+                        Err(err_outer) => { warn!("pull task panicked: {:?}", err_outer) }
                     };
-                    warn!("pull task failed: {:?}", err);
                     pull_handle = None;
                 },
                 _ = ticker.tick() => {

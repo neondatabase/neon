@@ -27,7 +27,7 @@ struct SafeKeeperStateV1 {
     acceptor_state: AcceptorStateV1,
     /// information about server
     server: ServerInfoV2,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
@@ -57,7 +57,7 @@ pub struct SafeKeeperStateV2 {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfoV2,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
@@ -89,7 +89,7 @@ pub struct SafeKeeperStateV3 {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfoV3,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
@@ -101,6 +101,43 @@ pub struct SafeKeeperStateV3 {
     // Safekeeper starts receiving WAL from this LSN, zeros before it ought to
     // be skipped during decoding.
     pub wal_start_lsn: Lsn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafeKeeperStateV4 {
+    #[serde(with = "hex")]
+    pub tenant_id: ZTenantId,
+    /// Zenith timelineid
+    #[serde(with = "hex")]
+    pub timeline_id: ZTimelineId,
+    /// persistent acceptor state
+    pub acceptor_state: AcceptorState,
+    /// information about server
+    pub server: ServerInfo,
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
+    /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
+    pub proposer_uuid: PgUuid,
+    /// Part of WAL acknowledged by quorum and available locally. Always points
+    /// to record boundary.
+    pub commit_lsn: Lsn,
+    /// First LSN not yet offloaded to s3. Useful to persist to avoid finding
+    /// out offloading progress on boot.
+    pub s3_wal_lsn: Lsn,
+    /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
+    /// of last record streamed to everyone). Persisting it helps skipping
+    /// recovery in walproposer, generally we compute it from peers. In
+    /// walproposer proto called 'truncate_lsn'.
+    pub peer_horizon_lsn: Lsn,
+    /// LSN of the oldest known checkpoint made by pageserver and successfully
+    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
+    /// informational purposes, we receive it from pageserver (or broker).
+    pub remote_consistent_lsn: Lsn,
+    // Peers and their state as we remember it. Knowing peers themselves is
+    // fundamental; but state is saved here only for informational purposes and
+    // obviously can be stale. (Currently not saved at all, but let's provision
+    // place to have less file version upgrades).
+    pub peers: Peers,
 }
 
 pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState> {
@@ -125,8 +162,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
                 wal_seg_size: oldstate.server.wal_seg_size,
             },
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
@@ -146,8 +185,10 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             acceptor_state: oldstate.acceptor_state,
             server,
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
@@ -167,12 +208,50 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             acceptor_state: oldstate.acceptor_state,
             server,
             proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: oldstate.commit_lsn,
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn(0),
             peer_horizon_lsn: oldstate.truncate_lsn,
             remote_consistent_lsn: Lsn(0),
             peers: Peers(vec![]),
         });
+    // migrate to having timeline_start_lsn
+    } else if version == 4 {
+        info!("reading safekeeper control file version {}", version);
+        let oldstate = SafeKeeperStateV4::des(&buf[..buf.len()])?;
+        let server = ServerInfo {
+            pg_version: oldstate.server.pg_version,
+            system_id: oldstate.server.system_id,
+            wal_seg_size: oldstate.server.wal_seg_size,
+        };
+        return Ok(SafeKeeperState {
+            tenant_id: oldstate.tenant_id,
+            timeline_id: oldstate.timeline_id,
+            acceptor_state: oldstate.acceptor_state,
+            server,
+            proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
+            commit_lsn: oldstate.commit_lsn,
+            backup_lsn: Lsn::INVALID,
+            peer_horizon_lsn: oldstate.peer_horizon_lsn,
+            remote_consistent_lsn: Lsn(0),
+            peers: Peers(vec![]),
+        });
+    } else if version == 5 {
+        info!("reading safekeeper control file version {}", version);
+        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        if oldstate.timeline_start_lsn != Lsn(0) {
+            return Ok(oldstate);
+        }
+
+        // set special timeline_start_lsn because we don't know the real one
+        info!("setting timeline_start_lsn and local_start_lsn to Lsn(1)");
+        oldstate.timeline_start_lsn = Lsn(1);
+        oldstate.local_start_lsn = Lsn(1);
+
+        return Ok(oldstate);
     }
     bail!("unsupported safekeeper control file version {}", version)
 }

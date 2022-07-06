@@ -25,9 +25,9 @@ To use, declare the 'zenbenchmark' fixture in the test function. Run the
 bencmark, and then record the result by calling zenbenchmark.record. For example:
 
 import timeit
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 
-def test_mybench(zenith_simple_env: env, zenbenchmark):
+def test_mybench(neon_simple_env: env, zenbenchmark):
 
     # Initialize the test
     ...
@@ -142,7 +142,7 @@ class MetricReport(str, enum.Enum):  # str is a hack to make it json serializabl
     LOWER_IS_BETTER = 'lower_is_better'
 
 
-class ZenithBenchmarker:
+class NeonBenchmarker:
     """
     An object for recording benchmark results. This is created for each test
     function by the zenbenchmark fixture
@@ -163,7 +163,7 @@ class ZenithBenchmarker:
         Record a benchmark result.
         """
         # just to namespace the value
-        name = f"zenith_benchmarker_{metric_name}"
+        name = f"neon_benchmarker_{metric_name}"
         self.property_recorder(
             name,
             {
@@ -206,7 +206,7 @@ class ZenithBenchmarker:
             f"{prefix}.number_of_transactions_actually_processed",
             pg_bench_result.number_of_transactions_actually_processed,
             '',
-            # thats because this is predefined by test matrix and doesnt change across runs
+            # that's because this is predefined by test matrix and doesn't change across runs
             report=MetricReport.TEST_PARAM,
         )
         self.record(f"{prefix}.latency_average",
@@ -236,14 +236,14 @@ class ZenithBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        metric_name = r'pageserver_disk_io_bytes{io_operation="write"}'
+        metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
         return self.get_int_counter_value(pageserver, metric_name)
 
     def get_peak_mem(self, pageserver) -> int:
         """
         Fetch the "maxrss" metric from the pageserver
         """
-        metric_name = r'pageserver_maxrss_kb'
+        metric_name = r'libmetrics_maxrss_kb'
         return self.get_int_counter_value(pageserver, metric_name)
 
     def get_int_counter_value(self, pageserver, metric_name) -> int:
@@ -289,12 +289,12 @@ class ZenithBenchmarker:
 
 
 @pytest.fixture(scope="function")
-def zenbenchmark(record_property) -> Iterator[ZenithBenchmarker]:
+def zenbenchmark(record_property) -> Iterator[NeonBenchmarker]:
     """
     This is a python decorator for benchmark fixtures. It contains functions for
     recording measurements, and prints them out at the end.
     """
-    benchmarker = ZenithBenchmarker(record_property)
+    benchmarker = NeonBenchmarker(record_property)
     yield benchmarker
 
 
@@ -302,7 +302,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--out-dir",
         dest="out_dir",
-        help="Directory to ouput performance tests results to.",
+        help="Directory to output performance tests results to.",
     )
 
 

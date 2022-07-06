@@ -20,5 +20,10 @@ serde = { version = "1.0", features = ["derive"] }
 utils = { path = "../utils" }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
+[dev-dependencies]
+env_logger = "0.9"
+postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+wal_generate = { path = "wal_generate" }
+
 [build-dependencies]
 bindgen = "0.59.1"

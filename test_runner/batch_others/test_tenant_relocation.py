@@ -3,13 +3,15 @@ import os
 import pathlib
 import subprocess
 import threading
+import typing
 from uuid import UUID
 from fixtures.log_helper import log
+from typing import Optional
 import signal
 import pytest
 
-from fixtures.zenith_fixtures import PgProtocol, PortDistributor, Postgres, ZenithEnvBuilder, ZenithPageserverHttpClient, assert_local, wait_for, wait_for_last_record_lsn, wait_for_upload, zenith_binpath, pg_distrib_dir
-from fixtures.utils import lsn_from_hex
+from fixtures.neon_fixtures import PgProtocol, PortDistributor, Postgres, NeonEnvBuilder, Etcd, NeonPageserverHttpClient, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload, neon_binpath, pg_distrib_dir, base_dir
+from fixtures.utils import lsn_from_hex, subprocess_capture
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -21,9 +23,10 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
                           pageserver_bin: pathlib.Path,
                           remote_storage_mock_path: pathlib.Path,
                           pg_port: int,
-                          http_port: int):
+                          http_port: int,
+                          broker: Optional[Etcd]):
     """
-    cannot use ZenithPageserver yet because it depends on zenith cli
+    cannot use NeonPageserver yet because it depends on neon cli
     which currently lacks support for multiple pageservers
     """
     cmd = [
@@ -37,6 +40,9 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
+
+    if broker is not None:
+        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
 
     subprocess.check_output(cmd, text=True)
 
@@ -86,7 +92,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
                     # if we recovered after failure verify that we have correct number of rows
                     log.info("recovering at %s", inserted_ctr)
                     cur.execute("SELECT count(*) FROM load")
-                    # it seems that sometimes transaction gets commited before we can acknowledge
+                    # it seems that sometimes transaction gets committed before we can acknowledge
                     # the result, so sometimes selected value is larger by one than we expect
                     assert cur.fetchone()[0] - inserted_ctr <= 1
                     log.info("successfully recovered %s", inserted_ctr)
@@ -95,24 +101,38 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
+@pytest.mark.parametrize(
+    'method',
+    [
+        # A minor migration involves no storage breaking changes.
+        # It is done by attaching the tenant to a new pageserver.
+        'minor',
+        # A major migration involves exporting a postgres datadir
+        # basebackup and importing it into the new pageserver.
+        # This kind of migration can tolerate breaking changes
+        # to storage format
+        pytest.param('major', marks=pytest.mark.xfail(reason="Not implemented")),
+    ])
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
-def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
+def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                            port_distributor: PortDistributor,
+                           test_output_dir,
+                           method: str,
                            with_load: str):
-    zenith_env_builder.num_safekeepers = 1
-    zenith_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_local_fs_remote_storage()
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
 
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
-    tenant = env.zenith_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant, _ = env.neon_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s", tenant)
-    env.zenith_cli.create_root_branch('main', tenant_id=tenant)
-    env.zenith_cli.create_branch('test_tenant_relocation', tenant_id=tenant)
 
-    tenant_pg = env.postgres.create_start(branch_name='main',
+    # attach does not download ancestor branches (should it?), just use root branch for now
+    env.neon_cli.create_root_branch('test_tenant_relocation', tenant_id=tenant)
+
+    tenant_pg = env.postgres.create_start(branch_name='test_tenant_relocation',
                                           node_name='test_tenant_relocation',
                                           tenant_id=tenant)
 
@@ -120,7 +140,7 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     with closing(tenant_pg.connect()) as conn:
         with conn.cursor() as cur:
             # save timeline for later gc call
-            cur.execute("SHOW zenith.zenith_timeline")
+            cur.execute("SHOW neon.timeline_id")
             timeline = UUID(cur.fetchone()[0])
             log.info("timeline to relocate %s", timeline.hex)
 
@@ -147,8 +167,11 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         load_stop_event = threading.Event()
         load_ok_event = threading.Event()
-        load_thread = threading.Thread(target=load,
-                                       args=(tenant_pg, load_stop_event, load_ok_event))
+        load_thread = threading.Thread(
+            target=load,
+            args=(tenant_pg, load_stop_event, load_ok_event),
+            daemon=True,  # To make sure the child dies when the parent errors
+        )
         load_thread.start()
 
     # run checkpoint manually to be sure that data landed in remote storage
@@ -167,44 +190,62 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
     new_pageserver_pg_port = port_distributor.get_port()
     new_pageserver_http_port = port_distributor.get_port()
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = pathlib.Path(zenith_binpath) / 'pageserver'
+    pageserver_bin = pathlib.Path(neon_binpath) / 'pageserver'
 
-    new_pageserver_http = ZenithPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
+    new_pageserver_http = NeonPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
 
     with new_pageserver_helper(new_pageserver_dir,
                                pageserver_bin,
                                remote_storage_mock_path,
                                new_pageserver_pg_port,
-                               new_pageserver_http_port):
+                               new_pageserver_http_port,
+                               neon_env_builder.broker):
 
-        # call to attach timeline to new pageserver
-        new_pageserver_http.timeline_attach(tenant, timeline)
-        # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
-        new_timeline_detail = wait_for(
-            number_of_iterations=5,
-            interval=1,
-            func=lambda: assert_local(new_pageserver_http, tenant, timeline))
+        # Migrate either by attaching from s3 or import/export basebackup
+        if method == "major":
+            cmd = [
+                "python",
+                os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
+                "--tenant-id",
+                tenant.hex,
+                "--from-host",
+                "localhost",
+                "--from-http-port",
+                str(pageserver_http.port),
+                "--from-pg-port",
+                str(env.pageserver.service_port.pg),
+                "--to-host",
+                "localhost",
+                "--to-http-port",
+                str(new_pageserver_http_port),
+                "--to-pg-port",
+                str(new_pageserver_pg_port),
+                "--psql-path",
+                os.path.join(pg_distrib_dir, "bin", "psql"),
+                "--work-dir",
+                os.path.join(test_output_dir),
+            ]
+            subprocess_capture(str(env.repo_dir), cmd, check=True)
+        elif method == "minor":
+            # call to attach timeline to new pageserver
+            new_pageserver_http.timeline_attach(tenant, timeline)
 
-        # when load is active these checks can break because lsns are not static
-        # so lets check with some margin
-        assert_abs_margin_ratio(lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
-                                lsn_from_hex(timeline_detail['local']['disk_consistent_lsn']),
-                                0.03)
+            # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint
+            new_timeline_detail = wait_until(
+                number_of_iterations=5,
+                interval=1,
+                func=lambda: assert_local(new_pageserver_http, tenant, timeline))
 
-        # callmemaybe to start replication from safekeeper to the new pageserver
-        # when there is no load there is a clean checkpoint and no wal delta
-        # needs to be streamed to the new pageserver
-        # TODO (rodionov) use attach to start replication
-        with pg_cur(PgProtocol(host='localhost', port=new_pageserver_pg_port)) as cur:
-            # "callmemaybe {} {} host={} port={} options='-c ztimelineid={} ztenantid={}'"
-            safekeeper_connstring = f"host=localhost port={env.safekeepers[0].port.pg} options='-c ztimelineid={timeline} ztenantid={tenant} pageserver_connstr=postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
-            cur.execute("callmemaybe {} {} {}".format(tenant.hex,
-                                                      timeline.hex,
-                                                      safekeeper_connstring))
+            # when load is active these checks can break because lsns are not static
+            # so lets check with some margin
+            assert_abs_margin_ratio(
+                lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
+                lsn_from_hex(timeline_detail['local']['disk_consistent_lsn']),
+                0.03)
 
         tenant_pg.stop()
 
-        # rewrite zenith cli config to use new pageserver for basebackup to start new compute
+        # rewrite neon cli config to use new pageserver for basebackup to start new compute
         cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
         cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
@@ -212,10 +253,17 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
 
         tenant_pg_config_file_path = pathlib.Path(tenant_pg.config_file_path())
         tenant_pg_config_file_path.open('a').write(
-            f"\nzenith.page_server_connstring = 'postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
+            f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_pg_port}'"
         )
 
         tenant_pg.start()
+
+        timeline_to_detach_local_path = env.repo_dir / 'tenants' / tenant.hex / 'timelines' / timeline.hex
+        files_before_detach = os.listdir(timeline_to_detach_local_path)
+        assert 'metadata' in files_before_detach, f'Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
+             but got: {files_before_detach}'
+        assert len(files_before_detach) > 2, f'Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
+             but got {files_before_detach}'
 
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
@@ -238,7 +286,9 @@ def test_tenant_relocation(zenith_env_builder: ZenithEnvBuilder,
             load_thread.join(timeout=10)
             log.info('load thread stopped')
 
-        # bring old pageserver back for clean shutdown via zenith cli
+        assert not os.path.exists(timeline_to_detach_local_path), f'After detach, local timeline dir {timeline_to_detach_local_path} should be removed'
+
+        # bring old pageserver back for clean shutdown via neon cli
         # new pageserver will be shut down by the context manager
         cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"

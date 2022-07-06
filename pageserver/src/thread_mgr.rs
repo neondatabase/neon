@@ -91,14 +91,11 @@ pub enum ThreadKind {
     // associated with one later, after receiving a command from the client.
     PageRequestHandler,
 
-    // Thread that connects to a safekeeper to fetch WAL for one timeline.
-    WalReceiver,
+    // Main walreceiver manager thread that ensures that every timeline spawns a connection to safekeeper, to fetch WAL.
+    WalReceiverManager,
 
-    // Thread that handles compaction of all timelines for a tenant.
-    Compactor,
-
-    // Thread that handles GC of a tenant
-    GarbageCollector,
+    // Thread that schedules new compaction and gc jobs
+    TenantTaskManager,
 
     // Thread that flushes frozen in-memory layers to disk
     LayerFlushThread,
@@ -108,14 +105,20 @@ pub enum ThreadKind {
     StorageSync,
 }
 
+struct MutableThreadState {
+    /// Tenant and timeline that this thread is associated with.
+    tenant_id: Option<ZTenantId>,
+    timeline_id: Option<ZTimelineId>,
+
+    /// Handle for waiting for the thread to exit. It can be None, if the
+    /// the thread has already exited.
+    join_handle: Option<JoinHandle<()>>,
+}
+
 struct PageServerThread {
     _thread_id: u64,
 
     kind: ThreadKind,
-
-    /// Tenant and timeline that this thread is associated with.
-    tenant_id: Option<ZTenantId>,
-    timeline_id: Option<ZTimelineId>,
 
     name: String,
 
@@ -124,48 +127,46 @@ struct PageServerThread {
     shutdown_requested: AtomicBool,
     shutdown_tx: watch::Sender<()>,
 
-    /// Handle for waiting for the thread to exit. It can be None, if the
-    /// the thread has already exited.
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+    mutable: Mutex<MutableThreadState>,
 }
 
 /// Launch a new thread
+/// Note: if shutdown_process_on_error is set to true failure
+///   of the thread will lead to shutdown of entire process
 pub fn spawn<F>(
     kind: ThreadKind,
     tenant_id: Option<ZTenantId>,
     timeline_id: Option<ZTimelineId>,
     name: &str,
-    fail_on_error: bool,
+    shutdown_process_on_error: bool,
     f: F,
-) -> std::io::Result<()>
+) -> std::io::Result<u64>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
-    let thread = PageServerThread {
+    let thread = Arc::new(PageServerThread {
         _thread_id: thread_id,
         kind,
-        tenant_id,
-        timeline_id,
         name: name.to_string(),
-
         shutdown_requested: AtomicBool::new(false),
         shutdown_tx,
-
-        join_handle: Mutex::new(None),
-    };
-
-    let thread_rc = Arc::new(thread);
-
-    let mut jh_guard = thread_rc.join_handle.lock().unwrap();
+        mutable: Mutex::new(MutableThreadState {
+            tenant_id,
+            timeline_id,
+            join_handle: None,
+        }),
+    });
 
     THREADS
         .lock()
         .unwrap()
-        .insert(thread_id, Arc::clone(&thread_rc));
+        .insert(thread_id, Arc::clone(&thread));
 
-    let thread_rc2 = Arc::clone(&thread_rc);
+    let mut thread_mut = thread.mutable.lock().unwrap();
+
+    let thread_cloned = Arc::clone(&thread);
     let thread_name = name.to_string();
     let join_handle = match thread::Builder::new()
         .name(name.to_string())
@@ -173,9 +174,9 @@ where
             thread_wrapper(
                 thread_name,
                 thread_id,
-                thread_rc2,
+                thread_cloned,
                 shutdown_rx,
-                fail_on_error,
+                shutdown_process_on_error,
                 f,
             )
         }) {
@@ -187,11 +188,11 @@ where
             return Err(err);
         }
     };
-    *jh_guard = Some(join_handle);
-    drop(jh_guard);
+    thread_mut.join_handle = Some(join_handle);
+    drop(thread_mut);
 
     // The thread is now running. Nothing more to do here
-    Ok(())
+    Ok(thread_id)
 }
 
 /// This wrapper function runs in a newly-spawned thread. It initializes the
@@ -201,7 +202,7 @@ fn thread_wrapper<F>(
     thread_id: u64,
     thread: Arc<PageServerThread>,
     shutdown_rx: watch::Receiver<()>,
-    fail_on_error: bool,
+    shutdown_process_on_error: bool,
     f: F,
 ) where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
@@ -221,29 +222,54 @@ fn thread_wrapper<F>(
     let result = panic::catch_unwind(AssertUnwindSafe(f));
 
     // Remove our entry from the global hashmap.
-    THREADS.lock().unwrap().remove(&thread_id);
+    let thread = THREADS
+        .lock()
+        .unwrap()
+        .remove(&thread_id)
+        .expect("no thread in registry");
 
+    let thread_mut = thread.mutable.lock().unwrap();
     match result {
         Ok(Ok(())) => debug!("Thread '{}' exited normally", thread_name),
         Ok(Err(err)) => {
-            if fail_on_error {
+            if shutdown_process_on_error {
                 error!(
-                    "Shutting down: thread '{}' exited with error: {:?}",
-                    thread_name, err
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread_mut.tenant_id, thread_mut.timeline_id, err
                 );
-                shutdown_pageserver();
+                shutdown_pageserver(1);
             } else {
-                error!("Thread '{}' exited with error: {:?}", thread_name, err);
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                    thread_name, thread_mut.tenant_id, thread_mut.timeline_id, err
+                );
             }
         }
         Err(err) => {
-            error!(
-                "Shutting down: thread '{}' panicked: {:?}",
-                thread_name, err
-            );
-            shutdown_pageserver();
+            if shutdown_process_on_error {
+                error!(
+                    "Shutting down: thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread_mut.tenant_id, thread_mut.timeline_id, err
+                );
+                shutdown_pageserver(1);
+            } else {
+                error!(
+                    "Thread '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                    thread_name, thread_mut.tenant_id, thread_mut.timeline_id, err
+                );
+            }
         }
     }
+}
+
+// expected to be called from the thread of the given id.
+pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelineId>) {
+    CURRENT_THREAD.with(|ct| {
+        let borrowed = ct.borrow();
+        let mut thread_mut = borrowed.as_ref().unwrap().mutable.lock().unwrap();
+        thread_mut.tenant_id = tenant_id;
+        thread_mut.timeline_id = timeline_id;
+    });
 }
 
 /// Is there a thread running that matches the criteria
@@ -269,9 +295,10 @@ pub fn shutdown_threads(
 
     let threads = THREADS.lock().unwrap();
     for thread in threads.values() {
+        let thread_mut = thread.mutable.lock().unwrap();
         if (kind.is_none() || Some(thread.kind) == kind)
-            && (tenant_id.is_none() || thread.tenant_id == tenant_id)
-            && (timeline_id.is_none() || thread.timeline_id == timeline_id)
+            && (tenant_id.is_none() || thread_mut.tenant_id == tenant_id)
+            && (timeline_id.is_none() || thread_mut.timeline_id == timeline_id)
         {
             thread.shutdown_requested.store(true, Ordering::Relaxed);
             // FIXME: handle error?
@@ -282,8 +309,10 @@ pub fn shutdown_threads(
     drop(threads);
 
     for thread in victim_threads {
+        let mut thread_mut = thread.mutable.lock().unwrap();
         info!("waiting for {} to shut down", thread.name);
-        if let Some(join_handle) = thread.join_handle.lock().unwrap().take() {
+        if let Some(join_handle) = thread_mut.join_handle.take() {
+            drop(thread_mut);
             let _ = join_handle.join();
         } else {
             // The thread had not even fully started yet. Or it was shut down

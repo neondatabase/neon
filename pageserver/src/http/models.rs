@@ -1,8 +1,10 @@
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::{
     lsn::Lsn,
-    zid::{ZNodeId, ZTenantId, ZTimelineId},
+    zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
 #[serde_as]
@@ -31,7 +33,11 @@ pub struct TenantCreateRequest {
     pub compaction_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
+    pub image_creation_threshold: Option<usize>,
     pub pitr_interval: Option<String>,
+    pub walreceiver_connect_timeout: Option<String>,
+    pub lagging_wal_timeout: Option<String>,
+    pub max_lsn_wal_lag: Option<NonZeroU64>,
 }
 
 #[serde_as]
@@ -41,7 +47,7 @@ pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub ZTenantId
 
 #[derive(Serialize)]
 pub struct StatusResponse {
-    pub id: ZNodeId,
+    pub id: NodeId,
 }
 
 impl TenantCreateRequest {
@@ -65,7 +71,11 @@ pub struct TenantConfigRequest {
     pub compaction_threshold: Option<usize>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
+    pub image_creation_threshold: Option<usize>,
     pub pitr_interval: Option<String>,
+    pub walreceiver_connect_timeout: Option<String>,
+    pub lagging_wal_timeout: Option<String>,
+    pub max_lsn_wal_lag: Option<NonZeroU64>,
 }
 
 impl TenantConfigRequest {
@@ -78,7 +88,23 @@ impl TenantConfigRequest {
             compaction_threshold: None,
             gc_horizon: None,
             gc_period: None,
+            image_creation_threshold: None,
             pitr_interval: None,
+            walreceiver_connect_timeout: None,
+            lagging_wal_timeout: None,
+            max_lsn_wal_lag: None,
         }
     }
+}
+
+/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
+/// We keep one WAL receiver active per timeline.
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WalReceiverEntry {
+    pub wal_producer_connstr: Option<String>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub last_received_msg_lsn: Option<Lsn>,
+    /// the timestamp (in microseconds) of the last received message
+    pub last_received_msg_ts: Option<u128>,
 }

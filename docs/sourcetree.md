@@ -10,7 +10,7 @@ Intended to be used in integration tests and in CLI tools for local installation
 
 `/docs`:
 
-Documentaion of the Zenith features and concepts.
+Documentation of the Zenith features and concepts.
 Now it is mostly dev documentation.
 
 `/monitoring`:
@@ -28,7 +28,7 @@ The pageserver has a few different duties:
 - Receive WAL from the WAL service and decode it.
 - Replay WAL that's applicable to the chunks that the Page Server maintains
 
-For more detailed info, see `/pageserver/README`
+For more detailed info, see [/pageserver/README](/pageserver/README.md)
 
 `/proxy`:
 
@@ -42,13 +42,13 @@ Integration tests, written in Python using the `pytest` framework.
 
 `/vendor/postgres`:
 
-PostgreSQL source tree, with the modifications needed for Zenith.
+PostgreSQL source tree, with the modifications needed for Neon.
 
-`/vendor/postgres/contrib/zenith`:
+`/vendor/postgres/contrib/neon`:
 
 PostgreSQL extension that implements storage manager API and network communications with remote page server.
 
-`/vendor/postgres/contrib/zenith_test_utils`:
+`/vendor/postgres/contrib/neon_test_utils`:
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
@@ -57,7 +57,7 @@ PostgreSQL extension that contains functions needed for testing and debugging.
 The zenith WAL service that receives WAL from a primary compute nodes and streams it to the pageserver.
 It acts as a holding area and redistribution center for recently generated WAL.
 
-For more detailed info, see `/safekeeper/README`
+For more detailed info, see [/safekeeper/README](/safekeeper/README.md)
 
 `/workspace_hack`:
 The workspace_hack crate exists only to pin down some dependencies.
@@ -91,18 +91,22 @@ so manual installation of dependencies is not recommended.
 A single virtual environment with all dependencies is described in the single `Pipfile`.
 
 ### Prerequisites
-- Install Python 3.7 (the minimal supported version) or greater.
-    - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesnt work as expected.
-    - If you have some trouble with other version you can resolve it by installing Python 3.7 separately, via pyenv or via system package manager e.g.:
+- Install Python 3.9 (the minimal supported version) or greater.
+    - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesn't work as expected.
+    - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via [pyenv](https://github.com/pyenv/pyenv) or via system package manager e.g.:
       ```bash
       # In Ubuntu
       sudo add-apt-repository ppa:deadsnakes/ppa
       sudo apt update
-      sudo apt install python3.7
+      sudo apt install python3.9
       ```
 - Install `poetry`
     - Exact version of `poetry` is not important, see installation instructions available at poetry's [website](https://python-poetry.org/docs/#installation)`.
-- Install dependencies via `./scripts/pysync`. Note that CI uses Python 3.7 so if you have different version some linting tools can yield different result locally vs in the CI.
+- Install dependencies via `./scripts/pysync`.
+    - Note that CI uses specific Python version (look for `PYTHON_VERSION` [here](https://github.com/neondatabase/docker-images/blob/main/rust/Dockerfile))
+      so if you have different version some linting tools can yield different result locally vs in the CI.
+    - You can explicitly specify which Python to use by running `poetry env use /path/to/python`, e.g. `poetry env use python3.9`.
+      This may also disable the `The currently activated Python version X.Y.Z is not supported by the project` warning.
 
 Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.

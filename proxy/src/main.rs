@@ -8,31 +8,26 @@ mod auth;
 mod cancellation;
 mod compute;
 mod config;
-mod cplane_api;
 mod error;
 mod http;
 mod mgmt;
-mod proxy;
-mod stream;
-mod waiters;
-
-// Currently SCRAM is only used in tests
-#[cfg(test)]
 mod parse;
-#[cfg(test)]
+mod proxy;
 mod sasl;
-#[cfg(test)]
 mod scram;
+mod stream;
+mod url;
+mod waiters;
 
 use anyhow::{bail, Context};
 use clap::{App, Arg};
 use config::ProxyConfig;
 use futures::FutureExt;
-use std::future::Future;
+use std::{future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
-use utils::GIT_VERSION;
+use utils::project_git_version;
 
-use crate::config::{ClientAuthMethod, RouterConfig};
+project_git_version!(GIT_VERSION);
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
 async fn flatten_err(
@@ -43,8 +38,7 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    metrics::set_common_metrics_prefix("zenith_proxy");
-    let arg_matches = App::new("Zenith proxy/router")
+    let arg_matches = App::new("Neon proxy/router")
         .version(GIT_VERSION)
         .arg(
             Arg::new("proxy")
@@ -55,18 +49,11 @@ async fn main() -> anyhow::Result<()> {
                 .default_value("127.0.0.1:4432"),
         )
         .arg(
-            Arg::new("auth-method")
-                .long("auth-method")
+            Arg::new("auth-backend")
+                .long("auth-backend")
                 .takes_value(true)
-                .help("Possible values: password | link | mixed")
-                .default_value("mixed"),
-        )
-        .arg(
-            Arg::new("static-router")
-                .short('s')
-                .long("static-router")
-                .takes_value(true)
-                .help("Route all clients to host:port"),
+                .help("Possible values: legacy | console | postgres | link")
+                .default_value("legacy"),
         )
         .arg(
             Arg::new("mgmt")
@@ -89,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 .short('u')
                 .long("uri")
                 .takes_value(true)
-                .help("redirect unauthenticated users to given uri")
+                .help("redirect unauthenticated users to the given uri in case of link auth")
                 .default_value("http://localhost:3000/psql_session/"),
         )
         .arg(
@@ -97,77 +84,69 @@ async fn main() -> anyhow::Result<()> {
                 .short('a')
                 .long("auth-endpoint")
                 .takes_value(true)
-                .help("API endpoint for authenticating users")
+                .help("cloud API endpoint for authenticating users")
                 .default_value("http://localhost:3000/authenticate_proxy_request/"),
         )
         .arg(
-            Arg::new("ssl-key")
+            Arg::new("tls-key")
                 .short('k')
-                .long("ssl-key")
+                .long("tls-key")
+                .alias("ssl-key") // backwards compatibility
                 .takes_value(true)
-                .help("path to SSL key for client postgres connections"),
+                .help("path to TLS key for client postgres connections"),
         )
         .arg(
-            Arg::new("ssl-cert")
+            Arg::new("tls-cert")
                 .short('c')
-                .long("ssl-cert")
+                .long("tls-cert")
+                .alias("ssl-cert") // backwards compatibility
                 .takes_value(true)
-                .help("path to SSL cert for client postgres connections"),
+                .help("path to TLS cert for client postgres connections"),
         )
         .get_matches();
 
     let tls_config = match (
-        arg_matches.value_of("ssl-key"),
-        arg_matches.value_of("ssl-cert"),
+        arg_matches.value_of("tls-key"),
+        arg_matches.value_of("tls-cert"),
     ) {
-        (Some(key_path), Some(cert_path)) => Some(config::configure_ssl(key_path, cert_path)?),
+        (Some(key_path), Some(cert_path)) => Some(config::configure_tls(key_path, cert_path)?),
         (None, None) => None,
-        _ => bail!("either both or neither ssl-key and ssl-cert must be specified"),
+        _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    let auth_method = arg_matches.value_of("auth-method").unwrap().parse()?;
-    let router_config = match arg_matches.value_of("static-router") {
-        None => RouterConfig::Dynamic(auth_method),
-        Some(addr) => {
-            if let ClientAuthMethod::Password = auth_method {
-                let (host, port) = addr.split_once(':').unwrap();
-                RouterConfig::Static {
-                    host: host.to_string(),
-                    port: port.parse().unwrap(),
-                }
-            } else {
-                bail!("static-router requires --auth-method password")
-            }
-        }
-    };
+    let proxy_address: SocketAddr = arg_matches.value_of("proxy").unwrap().parse()?;
+    let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
+    let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
-        router_config,
-        proxy_address: arg_matches.value_of("proxy").unwrap().parse()?,
-        mgmt_address: arg_matches.value_of("mgmt").unwrap().parse()?,
-        http_address: arg_matches.value_of("http").unwrap().parse()?,
-        redirect_uri: arg_matches.value_of("uri").unwrap().parse()?,
-        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
         tls_config,
+        auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
+        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
+        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
     }));
 
-    println!("Version: {}", GIT_VERSION);
+    println!("Version: {GIT_VERSION}");
+    println!("Authentication backend: {:?}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
-    println!("Starting http on {}", config.http_address);
-    let http_listener = TcpListener::bind(config.http_address).await?.into_std()?;
+    println!("Starting http on {}", http_address);
+    let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
-    println!("Starting mgmt on {}", config.mgmt_address);
-    let mgmt_listener = TcpListener::bind(config.mgmt_address).await?.into_std()?;
+    println!("Starting mgmt on {}", mgmt_address);
+    let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
 
-    println!("Starting proxy on {}", config.proxy_address);
-    let proxy_listener = TcpListener::bind(config.proxy_address).await?;
+    println!("Starting proxy on {}", proxy_address);
+    let proxy_listener = TcpListener::bind(proxy_address).await?;
 
-    let http = tokio::spawn(http::thread_main(http_listener));
-    let proxy = tokio::spawn(proxy::thread_main(config, proxy_listener));
-    let mgmt = tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener));
+    let tasks = [
+        tokio::spawn(http::thread_main(http_listener)),
+        tokio::spawn(proxy::thread_main(config, proxy_listener)),
+        tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
+    ]
+    .map(flatten_err);
 
-    let tasks = [flatten_err(http), flatten_err(proxy), flatten_err(mgmt)];
+    // This will block until all tasks have completed.
+    // Furthermore, the first one to fail will cancel the rest.
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
 
     Ok(())

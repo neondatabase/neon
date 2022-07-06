@@ -2,16 +2,16 @@ import os
 import pathlib
 
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.log_helper import log
 
 
 #
 # Test CREATE DATABASE when there have been relmapper changes
 #
-def test_createdb(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch('test_createdb', 'empty')
+def test_createdb(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch('test_createdb', 'empty')
 
     pg = env.postgres.create_start('test_createdb')
     log.info("postgres is running on 'test_createdb' branch")
@@ -27,20 +27,34 @@ def test_createdb(zenith_simple_env: ZenithEnv):
             lsn = cur.fetchone()[0]
 
     # Create a branch
-    env.zenith_cli.create_branch('test_createdb2', 'test_createdb', ancestor_start_lsn=lsn)
+    env.neon_cli.create_branch('test_createdb2', 'test_createdb', ancestor_start_lsn=lsn)
     pg2 = env.postgres.create_start('test_createdb2')
 
     # Test that you can connect to the new database on both branches
     for db in (pg, pg2):
-        db.connect(dbname='foodb').close()
+        with closing(db.connect(dbname='foodb')) as conn:
+            with conn.cursor() as cur:
+                # Check database size in both branches
+                cur.execute("""
+                    select pg_size_pretty(pg_database_size('foodb')),
+                    pg_size_pretty(
+                    sum(pg_relation_size(oid, 'main'))
+                    +sum(pg_relation_size(oid, 'vm'))
+                    +sum(pg_relation_size(oid, 'fsm'))
+                    ) FROM pg_class where relisshared is false
+                   """)
+                res = cur.fetchone()
+                # check that dbsize equals sum of all relation sizes, excluding shared ones
+                # This is how we define dbsize in neon for now
+                assert res[0] == res[1]
 
 
 #
 # Test DROP DATABASE
 #
-def test_dropdb(zenith_simple_env: ZenithEnv, test_output_dir):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch('test_dropdb', 'empty')
+def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
+    env = neon_simple_env
+    env.neon_cli.create_branch('test_dropdb', 'empty')
     pg = env.postgres.create_start('test_dropdb')
     log.info("postgres is running on 'test_dropdb' branch")
 
@@ -64,14 +78,14 @@ def test_dropdb(zenith_simple_env: ZenithEnv, test_output_dir):
             lsn_after_drop = cur.fetchone()[0]
 
     # Create two branches before and after database drop.
-    env.zenith_cli.create_branch('test_before_dropdb',
-                                 'test_dropdb',
-                                 ancestor_start_lsn=lsn_before_drop)
+    env.neon_cli.create_branch('test_before_dropdb',
+                               'test_dropdb',
+                               ancestor_start_lsn=lsn_before_drop)
     pg_before = env.postgres.create_start('test_before_dropdb')
 
-    env.zenith_cli.create_branch('test_after_dropdb',
-                                 'test_dropdb',
-                                 ancestor_start_lsn=lsn_after_drop)
+    env.neon_cli.create_branch('test_after_dropdb',
+                               'test_dropdb',
+                               ancestor_start_lsn=lsn_after_drop)
     pg_after = env.postgres.create_start('test_after_dropdb')
 
     # Test that database exists on the branch before drop

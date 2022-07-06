@@ -1,18 +1,19 @@
 import pytest
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
+from fixtures.pg_stats import PgStatTable
 
-from fixtures.zenith_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, ZenithEnv
-from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
+from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, NeonEnv
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 
 # Type-related stuff
-from typing import Iterator
+from typing import Dict, List
 
 
 class PgCompare(ABC):
     """Common interface of all postgres implementations, useful for benchmarks.
 
-    This class is a helper class for the zenith_with_baseline fixture. See its documentation
+    This class is a helper class for the neon_with_baseline fixture. See its documentation
     for more details.
     """
     @property
@@ -26,7 +27,7 @@ class PgCompare(ABC):
         pass
 
     @property
-    def zenbenchmark(self) -> ZenithBenchmarker:
+    def zenbenchmark(self) -> NeonBenchmarker:
         pass
 
     @abstractmethod
@@ -51,22 +52,47 @@ class PgCompare(ABC):
     def record_duration(self, out_name):
         pass
 
+    @contextmanager
+    def record_pg_stats(self, pg_stats: List[PgStatTable]):
+        init_data = self._retrieve_pg_stats(pg_stats)
 
-class ZenithCompare(PgCompare):
-    """PgCompare interface for the zenith stack."""
+        yield
+
+        data = self._retrieve_pg_stats(pg_stats)
+
+        for k in set(init_data) & set(data):
+            self.zenbenchmark.record(k, data[k] - init_data[k], '', MetricReport.HIGHER_IS_BETTER)
+
+    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
+        results: Dict[str, int] = {}
+
+        with self.pg.connect().cursor() as cur:
+            for pg_stat in pg_stats:
+                cur.execute(pg_stat.query)
+                row = cur.fetchone()
+                assert len(row) == len(pg_stat.columns)
+
+                for col, val in zip(pg_stat.columns, row):
+                    results[f"{pg_stat.table}.{col}"] = int(val)
+
+        return results
+
+
+class NeonCompare(PgCompare):
+    """PgCompare interface for the neon stack."""
     def __init__(self,
-                 zenbenchmark: ZenithBenchmarker,
-                 zenith_simple_env: ZenithEnv,
+                 zenbenchmark: NeonBenchmarker,
+                 neon_simple_env: NeonEnv,
                  pg_bin: PgBin,
                  branch_name):
-        self.env = zenith_simple_env
+        self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
-        self.env.zenith_cli.create_branch(branch_name, 'empty')
+        self.env.neon_cli.create_branch(branch_name, 'empty')
         self._pg = self.env.postgres.create_start(branch_name)
-        self.timeline = self.pg.safe_psql("SHOW zenith.zenith_timeline")[0][0]
+        self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
         # Long-lived cursor, useful for flushing
         self.psconn = self.env.pageserver.connect()
@@ -106,9 +132,9 @@ class ZenithCompare(PgCompare):
                                  report=MetricReport.LOWER_IS_BETTER)
 
         total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_num_persistent_files_created")
+            self.env.pageserver, "pageserver_created_persistent_files_total")
         total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_persistent_bytes_written")
+            self.env.pageserver, "pageserver_written_persistent_bytes_total")
         self.zenbenchmark.record("data_uploaded",
                                  total_bytes / (1024 * 1024),
                                  "MB",
@@ -130,7 +156,10 @@ class VanillaCompare(PgCompare):
     def __init__(self, zenbenchmark, vanilla_pg: VanillaPostgres):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
-        vanilla_pg.configure(['shared_buffers=1MB'])
+        vanilla_pg.configure([
+            'shared_buffers=1MB',
+            'synchronous_commit=off',
+        ])
         vanilla_pg.start()
 
         # Long-lived cursor, useful for flushing
@@ -218,9 +247,9 @@ class RemoteCompare(PgCompare):
 
 
 @pytest.fixture(scope='function')
-def zenith_compare(request, zenbenchmark, pg_bin, zenith_simple_env) -> ZenithCompare:
+def neon_compare(request, zenbenchmark, pg_bin, neon_simple_env) -> NeonCompare:
     branch_name = request.node.name
-    return ZenithCompare(zenbenchmark, zenith_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
 
 
 @pytest.fixture(scope='function')
@@ -233,13 +262,13 @@ def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
     return RemoteCompare(zenbenchmark, remote_pg)
 
 
-@pytest.fixture(params=["vanilla_compare", "zenith_compare"], ids=["vanilla", "zenith"])
-def zenith_with_baseline(request) -> PgCompare:
-    """Parameterized fixture that helps compare zenith against vanilla postgres.
+@pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
+def neon_with_baseline(request) -> PgCompare:
+    """Parameterized fixture that helps compare neon against vanilla postgres.
 
     A test that uses this fixture turns into a parameterized test that runs against:
     1. A vanilla postgres instance
-    2. A simple zenith env (see zenith_simple_env)
+    2. A simple neon env (see neon_simple_env)
     3. Possibly other postgres protocol implementations.
 
     The main goal of this fixture is to make it easier for people to read and write
@@ -251,7 +280,7 @@ def zenith_with_baseline(request) -> PgCompare:
     of that.
 
     If a test requires some one-off special implementation-specific logic, use of
-    isinstance(zenith_with_baseline, ZenithCompare) is encouraged. Though if that
+    isinstance(neon_with_baseline, NeonCompare) is encouraged. Though if that
     implementation-specific logic is widely useful across multiple tests, it might
     make sense to add methods to the PgCompare class.
     """

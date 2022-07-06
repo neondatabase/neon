@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use postgres_ffi::relfile_utils::forknumber_to_name;
-use postgres_ffi::Oid;
+use postgres_ffi::{pg_constants, Oid};
 
 ///
 /// Relation data file segment id throughout the Postgres cluster.
@@ -72,6 +72,30 @@ impl fmt::Display for RelTag {
         } else {
             write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
         }
+    }
+}
+
+impl RelTag {
+    pub fn to_segfile_name(&self, segno: u32) -> String {
+        let mut name = if self.spcnode == pg_constants::GLOBALTABLESPACE_OID {
+            "global/".to_string()
+        } else {
+            format!("base/{}/", self.dbnode)
+        };
+
+        name += &self.relnode.to_string();
+
+        if let Some(fork_name) = forknumber_to_name(self.forknum) {
+            name += "_";
+            name += fork_name;
+        }
+
+        if segno != 0 {
+            name += ".";
+            name += &segno.to_string();
+        }
+
+        name
     }
 }
 

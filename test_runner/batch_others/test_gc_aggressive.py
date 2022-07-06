@@ -1,7 +1,7 @@
 import asyncio
 import random
 
-from fixtures.zenith_fixtures import ZenithEnv, Postgres
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.log_helper import log
 
 # Test configuration
@@ -27,7 +27,7 @@ async def update_table(pg: Postgres):
 
 
 # Perform aggressive GC with 0 horizon
-async def gc(env: ZenithEnv, timeline: str):
+async def gc(env: NeonEnv, timeline: str):
     psconn = await env.pageserver.connect_async()
 
     while updates_performed < updates_to_perform:
@@ -35,7 +35,7 @@ async def gc(env: ZenithEnv, timeline: str):
 
 
 # At the same time, run UPDATEs and GC
-async def update_and_gc(env: ZenithEnv, pg: Postgres, timeline: str):
+async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: str):
     workers = []
     for worker_id in range(num_connections):
         workers.append(asyncio.create_task(update_table(pg)))
@@ -48,18 +48,21 @@ async def update_and_gc(env: ZenithEnv, pg: Postgres, timeline: str):
 #
 # Aggressively force GC, while running queries.
 #
-# (repro for https://github.com/zenithdb/zenith/issues/1047)
+# (repro for https://github.com/neondatabase/neon/issues/1047)
 #
-def test_gc_aggressive(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_gc_aggressive", "empty")
+def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
+
+    # Disable pitr, because here we want to test branch creation after GC
+    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("test_gc_aggressive", "main")
     pg = env.postgres.create_start('test_gc_aggressive')
     log.info('postgres is running on test_gc_aggressive branch')
 
     conn = pg.connect()
     cur = conn.cursor()
 
-    cur.execute("SHOW zenith.zenith_timeline")
+    cur.execute("SHOW neon.timeline_id")
     timeline = cur.fetchone()[0]
 
     # Create table, and insert the first 100 rows

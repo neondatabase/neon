@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 from typing import Any, List
 from fixtures.log_helper import log
@@ -9,18 +10,6 @@ from fixtures.log_helper import log
 def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
     return os.path.dirname(os.path.abspath(__file__))
-
-
-def mkdir_if_needed(path: str) -> None:
-    """ Create a directory if it doesn't already exist
-
-    Note this won't try to create intermediate directories.
-    """
-    try:
-        os.mkdir(path)
-    except FileExistsError:
-        pass
-    assert os.path.isdir(path)
 
 
 def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
@@ -75,10 +64,25 @@ def lsn_from_hex(lsn_hex: str) -> int:
 def print_gc_result(row):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
-        "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
+        "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
+        " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
         .format_map(row))
 
 
-# path to etcd binary or None if not present.
-def etcd_path():
-    return shutil.which("etcd")
+def etcd_path() -> Path:
+    path_output = shutil.which("etcd")
+    if path_output is None:
+        raise RuntimeError('etcd not found in PATH')
+    else:
+        return Path(path_output)
+
+
+# Traverse directory to get total size.
+def get_dir_size(path: str) -> int:
+    """Return size in bytes."""
+    totalbytes = 0
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            totalbytes += os.path.getsize(os.path.join(root, name))
+
+    return totalbytes

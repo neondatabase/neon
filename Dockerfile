@@ -1,5 +1,5 @@
 # Build Postgres
-FROM zimg/rust:1.58 AS pg-build
+FROM neondatabase/rust:1.58 AS pg-build
 WORKDIR /pg
 
 USER root
@@ -14,7 +14,7 @@ RUN set -e \
     && tar -C tmp_install -czf /postgres_install.tar.gz .
 
 # Build zenith binaries
-FROM zimg/rust:1.58 AS build
+FROM neondatabase/rust:1.58 AS build
 ARG GIT_VERSION=local
 
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
@@ -25,8 +25,10 @@ COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/inclu
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
-# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, loosing the compilation stats.
-RUN mold -run cargo build --release && cachepot -s
+# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
+RUN set -e \
+    && sudo -E "PATH=$PATH" mold -run cargo build --release \
+    && cachepot -s
 
 # Build final image
 #
@@ -44,9 +46,9 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/circleci/project/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/runner/target/release/proxy      /usr/local/bin
 
 COPY --from=pg-build /pg/tmp_install/         /usr/local/
 COPY --from=pg-build /postgres_install.tar.gz /data/

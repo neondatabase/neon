@@ -1,9 +1,9 @@
 # Compute node tools
 
-Postgres wrapper (`zenith_ctl`) is intended to be run as a Docker entrypoint or as a `systemd`
-`ExecStart` option. It will handle all the `zenith` specifics during compute node
+Postgres wrapper (`compute_ctl`) is intended to be run as a Docker entrypoint or as a `systemd`
+`ExecStart` option. It will handle all the `Neon` specifics during compute node
 initialization:
-- `zenith_ctl` accepts cluster (compute node) specification as a JSON file.
+- `compute_ctl` accepts cluster (compute node) specification as a JSON file.
 - Every start is a fresh start, so the data directory is removed and
   initialized again on each run.
 - Next it will put configuration files into the `PGDATA` directory.
@@ -13,18 +13,18 @@ initialization:
 - Check and alter/drop/create roles and databases.
 - Hang waiting on the `postmaster` process to exit.
 
-Also `zenith_ctl` spawns two separate service threads:
+Also `compute_ctl` spawns two separate service threads:
 - `compute-monitor` checks the last Postgres activity timestamp and saves it
-  into the shared `ComputeState`;
+  into the shared `ComputeNode`;
 - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
   last activity requests.
 
 Usage example:
 ```sh
-zenith_ctl -D /var/db/postgres/compute \
-           -C 'postgresql://zenith_admin@localhost/postgres' \
-           -S /var/db/postgres/specs/current.json \
-           -b /usr/local/bin/postgres
+compute_ctl -D /var/db/postgres/compute \
+            -C 'postgresql://cloud_admin@localhost/postgres' \
+            -S /var/db/postgres/specs/current.json \
+            -b /usr/local/bin/postgres
 ```
 
 ## Tests

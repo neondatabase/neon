@@ -4,7 +4,10 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use etcd_broker::subscription_value::SkTimelineInfo;
 use postgres_ffi::xlog_utils::TimeLineID;
+
+use postgres_ffi::xlog_utils::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -12,24 +15,21 @@ use std::fmt;
 use std::io::Read;
 use tracing::*;
 
-use lazy_static::lazy_static;
-
-use crate::broker::SafekeeperInfo;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
+
 use crate::wal_storage;
-use metrics::{register_gauge_vec, Gauge, GaugeVec};
 use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
-    pq_proto::{SystemId, ZenithFeedback},
-    zid::{ZNodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
+    pq_proto::{ReplicationFeedback, SystemId},
+    zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 4;
-const SK_PROTOCOL_VERSION: u32 = 1;
+pub const SK_FORMAT_VERSION: u32 = 6;
+const SK_PROTOCOL_VERSION: u32 = 2;
 const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
@@ -50,7 +50,7 @@ impl TermHistory {
     }
 
     // Parse TermHistory as n_entries followed by TermSwitchEntry pairs
-    pub fn from_bytes(mut bytes: Bytes) -> Result<TermHistory> {
+    pub fn from_bytes(bytes: &mut Bytes) -> Result<TermHistory> {
         if bytes.remaining() < 4 {
             bail!("TermHistory misses len");
         }
@@ -139,7 +139,7 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
-    s3_wal_lsn: Lsn,
+    backup_lsn: Lsn,
     /// Term of the last entry.
     term: Term,
     /// LSN of the last record.
@@ -151,7 +151,7 @@ pub struct PeerInfo {
 impl PeerInfo {
     fn new() -> Self {
         Self {
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn::INVALID,
             term: INVALID_TERM,
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
@@ -162,7 +162,7 @@ impl PeerInfo {
 // vector-based node id -> peer state map with very limited functionality we
 // need/
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Peers(pub Vec<(ZNodeId, PeerInfo)>);
+pub struct Peers(pub Vec<(NodeId, PeerInfo)>);
 
 /// Persistent information stored on safekeeper node
 /// On disk data is prefixed by magic and format version and followed by checksum.
@@ -177,16 +177,23 @@ pub struct SafeKeeperState {
     pub acceptor_state: AcceptorState,
     /// information about server
     pub server: ServerInfo,
-    /// Unique id of the last *elected* proposer we dealed with. Not needed
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
+    /// Since which LSN this timeline generally starts. Safekeeper might have
+    /// joined later.
+    pub timeline_start_lsn: Lsn,
+    /// Since which LSN safekeeper has (had) WAL for this timeline.
+    /// All WAL segments next to one containing local_start_lsn are
+    /// filled with data from the beginning.
+    pub local_start_lsn: Lsn,
     /// Part of WAL acknowledged by quorum and available locally. Always points
     /// to record boundary.
     pub commit_lsn: Lsn,
-    /// First LSN not yet offloaded to s3. Useful to persist to avoid finding
-    /// out offloading progress on boot.
-    pub s3_wal_lsn: Lsn,
+    /// LSN that points to the end of the last backed up segment. Useful to
+    /// persist to avoid finding out offloading progress on boot.
+    pub backup_lsn: Lsn,
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
@@ -208,14 +215,14 @@ pub struct SafeKeeperState {
 // are not flushed yet.
 pub struct SafekeeperMemState {
     pub commit_lsn: Lsn,
-    pub s3_wal_lsn: Lsn, // TODO: keep only persistent version
+    pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
     pub proposer_uuid: PgUuid,
 }
 
 impl SafeKeeperState {
-    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<ZNodeId>) -> SafeKeeperState {
+    pub fn new(zttid: &ZTenantTimelineId, peers: Vec<NodeId>) -> SafeKeeperState {
         SafeKeeperState {
             tenant_id: zttid.tenant_id,
             timeline_id: zttid.timeline_id,
@@ -229,8 +236,10 @@ impl SafeKeeperState {
                 wal_seg_size: 0,
             },
             proposer_uuid: [0; 16],
+            timeline_start_lsn: Lsn(0),
+            local_start_lsn: Lsn(0),
             commit_lsn: Lsn(0),
-            s3_wal_lsn: Lsn(0),
+            backup_lsn: Lsn::INVALID,
             peer_horizon_lsn: Lsn(0),
             remote_consistent_lsn: Lsn(0),
             peers: Peers(peers.iter().map(|p| (*p, PeerInfo::new())).collect()),
@@ -266,6 +275,7 @@ pub struct ProposerGreeting {
 #[derive(Debug, Serialize)]
 pub struct AcceptorGreeting {
     term: u64,
+    node_id: NodeId,
 }
 
 /// Vote request sent from proposer to safekeepers
@@ -284,6 +294,7 @@ pub struct VoteResponse {
     flush_lsn: Lsn,
     truncate_lsn: Lsn,
     term_history: TermHistory,
+    timeline_start_lsn: Lsn,
 }
 
 /*
@@ -295,6 +306,7 @@ pub struct ProposerElected {
     pub term: Term,
     pub start_streaming_at: Lsn,
     pub term_history: TermHistory,
+    pub timeline_start_lsn: Lsn,
 }
 
 /// Request with WAL message sent from proposer to safekeeper. Along the way it
@@ -336,7 +348,7 @@ pub struct AppendResponse {
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub zenith_feedback: ZenithFeedback,
+    pub pageserver_feedback: ReplicationFeedback,
 }
 
 impl AppendResponse {
@@ -346,7 +358,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            zenith_feedback: ZenithFeedback::empty(),
+            pageserver_feedback: ReplicationFeedback::empty(),
         }
     }
 }
@@ -385,10 +397,15 @@ impl ProposerAcceptorMessage {
                 }
                 let term = msg_bytes.get_u64_le();
                 let start_streaming_at = msg_bytes.get_u64_le().into();
-                let term_history = TermHistory::from_bytes(msg_bytes)?;
+                let term_history = TermHistory::from_bytes(&mut msg_bytes)?;
+                if msg_bytes.remaining() < 8 {
+                    bail!("ProposerElected message is not complete");
+                }
+                let timeline_start_lsn = msg_bytes.get_u64_le().into();
                 let msg = ProposerElected {
                     term,
                     start_streaming_at,
+                    timeline_start_lsn,
                     term_history,
                 };
                 Ok(ProposerAcceptorMessage::Elected(msg))
@@ -435,6 +452,7 @@ impl AcceptorProposerMessage {
             AcceptorProposerMessage::Greeting(msg) => {
                 buf.put_u64_le('g' as u64);
                 buf.put_u64_le(msg.term);
+                buf.put_u64_le(msg.node_id.0);
             }
             AcceptorProposerMessage::VoteResponse(msg) => {
                 buf.put_u64_le('v' as u64);
@@ -447,6 +465,7 @@ impl AcceptorProposerMessage {
                     buf.put_u64_le(e.term);
                     buf.put_u64_le(e.lsn.into());
                 }
+                buf.put_u64_le(msg.timeline_start_lsn.into());
             }
             AcceptorProposerMessage::AppendResponse(msg) => {
                 buf.put_u64_le('a' as u64);
@@ -457,7 +476,7 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.zenith_feedback.serialize(buf)?
+                msg.pageserver_feedback.serialize(buf)?
             }
         }
 
@@ -465,50 +484,23 @@ impl AcceptorProposerMessage {
     }
 }
 
-lazy_static! {
-    // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
-    // i64 is faster than f64, so update to u64 when available.
-    static ref COMMIT_LSN_GAUGE: GaugeVec = register_gauge_vec!(
-        "safekeeper_commit_lsn",
-        "Current commit_lsn (not necessarily persisted to disk), grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("Failed to register safekeeper_commit_lsn gauge vec");
-}
-
-struct SafeKeeperMetrics {
-    commit_lsn: Gauge,
-    // WAL-related metrics are in WalStorageMetrics
-}
-
-impl SafeKeeperMetrics {
-    fn new(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-        Self {
-            commit_lsn: COMMIT_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
-        }
-    }
-}
-
 /// SafeKeeper which consumes events (messages from compute) and provides
 /// replies.
 pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
-    // Cached metrics so we don't have to recompute labels on each update.
-    metrics: SafeKeeperMetrics,
-
     /// Maximum commit_lsn between all nodes, can be ahead of local flush_lsn.
     /// Note: be careful to set only if we are sure our WAL (term history) matches
     /// committed one.
     pub global_commit_lsn: Lsn,
     /// LSN since the proposer safekeeper currently talking to appends WAL;
     /// determines epoch switch point.
-    epoch_start_lsn: Lsn,
+    pub epoch_start_lsn: Lsn,
 
     pub inmem: SafekeeperMemState, // in memory part
     pub state: CTRL,               // persistent state storage
 
     pub wal_store: WAL,
+
+    node_id: NodeId, // safekeeper's node id
 }
 
 impl<CTRL, WAL> SafeKeeper<CTRL, WAL>
@@ -521,6 +513,7 @@ where
         ztli: ZTimelineId,
         state: CTRL,
         mut wal_store: WAL,
+        node_id: NodeId,
     ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.timeline_id != ZTimelineId::from([0u8; 16]) && ztli != state.timeline_id {
             bail!("Calling SafeKeeper::new with inconsistent ztli ({}) and SafeKeeperState.server.timeline_id ({})", ztli, state.timeline_id);
@@ -530,18 +523,18 @@ where
         wal_store.init_storage(&state)?;
 
         Ok(SafeKeeper {
-            metrics: SafeKeeperMetrics::new(state.tenant_id, ztli),
             global_commit_lsn: state.commit_lsn,
             epoch_start_lsn: Lsn(0),
             inmem: SafekeeperMemState {
                 commit_lsn: state.commit_lsn,
-                s3_wal_lsn: state.s3_wal_lsn,
+                backup_lsn: state.backup_lsn,
                 peer_horizon_lsn: state.peer_horizon_lsn,
                 remote_consistent_lsn: state.remote_consistent_lsn,
                 proposer_uuid: state.proposer_uuid,
             },
             state,
             wal_store,
+            node_id,
         })
     }
 
@@ -550,13 +543,16 @@ where
         self.state
             .acceptor_state
             .term_history
-            .up_to(self.wal_store.flush_lsn())
+            .up_to(self.flush_lsn())
     }
 
     pub fn get_epoch(&self) -> Term {
-        self.state
-            .acceptor_state
-            .get_epoch(self.wal_store.flush_lsn())
+        self.state.acceptor_state.get_epoch(self.flush_lsn())
+    }
+
+    /// wal_store wrapper avoiding commit_lsn <= flush_lsn violation when we don't have WAL yet.
+    fn flush_lsn(&self) -> Lsn {
+        max(self.wal_store.flush_lsn(), self.state.timeline_start_lsn)
     }
 
     /// Process message from proposer and possibly form reply. Concurrent
@@ -624,7 +620,6 @@ where
             self.state.persist(&state)?;
         }
 
-        // pass wal_seg_size to read WAL and find flush_lsn
         self.wal_store.init_storage(&self.state)?;
 
         info!(
@@ -633,6 +628,7 @@ where
         );
         Ok(Some(AcceptorProposerMessage::Greeting(AcceptorGreeting {
             term: self.state.acceptor_state.term,
+            node_id: self.node_id,
         })))
     }
 
@@ -645,9 +641,10 @@ where
         let mut resp = VoteResponse {
             term: self.state.acceptor_state.term,
             vote_given: false as u64,
-            flush_lsn: self.wal_store.flush_lsn(),
+            flush_lsn: self.flush_lsn(),
             truncate_lsn: self.state.peer_horizon_lsn,
             term_history: self.get_term_history(),
+            timeline_start_lsn: self.state.timeline_start_lsn,
         };
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.clone();
@@ -676,11 +673,11 @@ where
     fn append_response(&self) -> AppendResponse {
         let ar = AppendResponse {
             term: self.state.acceptor_state.term,
-            flush_lsn: self.wal_store.flush_lsn(),
+            flush_lsn: self.flush_lsn(),
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            zenith_feedback: ZenithFeedback::empty(),
+            pageserver_feedback: ReplicationFeedback::empty(),
         };
         trace!("formed AppendResponse {:?}", ar);
         ar
@@ -703,8 +700,36 @@ where
         // and now adopt term history from proposer
         {
             let mut state = self.state.clone();
+
+            // Here we learn initial LSN for the first time, set fields
+            // interested in that.
+
+            if state.timeline_start_lsn == Lsn(0) {
+                // Remember point where WAL begins globally.
+                state.timeline_start_lsn = msg.timeline_start_lsn;
+                info!(
+                    "setting timeline_start_lsn to {:?}",
+                    state.timeline_start_lsn
+                );
+
+                state.local_start_lsn = msg.start_streaming_at;
+                info!("setting local_start_lsn to {:?}", state.local_start_lsn);
+            }
+            // Initializing commit_lsn before acking first flushed record is
+            // important to let find_end_of_wal skip the whole in the beginning
+            // of the first segment.
+            //
+            // NB: on new clusters, this happens at the same time as
+            // timeline_start_lsn initialization, it is taken outside to provide
+            // upgrade.
+            self.global_commit_lsn = max(self.global_commit_lsn, state.timeline_start_lsn);
+            self.inmem.commit_lsn = max(self.inmem.commit_lsn, state.timeline_start_lsn);
+
+            // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
+            self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
+
             state.acceptor_state.term_history = msg.term_history.clone();
-            self.state.persist(&state)?;
+            self.persist_control_file(state)?;
         }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
@@ -714,11 +739,10 @@ where
 
     /// Advance commit_lsn taking into account what we have locally
     pub fn update_commit_lsn(&mut self) -> Result<()> {
-        let commit_lsn = min(self.global_commit_lsn, self.wal_store.flush_lsn());
+        let commit_lsn = min(self.global_commit_lsn, self.flush_lsn());
         assert!(commit_lsn >= self.inmem.commit_lsn);
 
         self.inmem.commit_lsn = commit_lsn;
-        self.metrics.commit_lsn.set(self.inmem.commit_lsn.0 as f64);
 
         // If new commit_lsn reached epoch switch, force sync of control
         // file: walproposer in sync mode is very interested when this
@@ -728,25 +752,16 @@ where
         // that we receive new epoch_start_lsn, and we still need to sync
         // control file in this case.
         if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
-            self.persist_control_file()?;
-        }
-
-        // We got our first commit_lsn, which means we should sync
-        // everything to disk, to initialize the state.
-        if self.state.commit_lsn == Lsn(0) && commit_lsn > Lsn(0) {
-            self.wal_store.flush_wal()?;
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
 
         Ok(())
     }
 
-    /// Persist in-memory state to the disk.
-    fn persist_control_file(&mut self) -> Result<()> {
-        let mut state = self.state.clone();
-
+    /// Persist in-memory state to the disk, taking other data from state.
+    fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
         state.commit_lsn = self.inmem.commit_lsn;
-        state.s3_wal_lsn = self.inmem.s3_wal_lsn;
+        state.backup_lsn = self.inmem.backup_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
         state.remote_consistent_lsn = self.inmem.remote_consistent_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
@@ -779,13 +794,6 @@ where
         // do the job
         if !msg.wal_data.is_empty() {
             self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
-
-            // If this was the first record we ever received, initialize
-            // commit_lsn to help find_end_of_wal skip the hole in the
-            // beginning.
-            if self.global_commit_lsn == Lsn(0) {
-                self.global_commit_lsn = msg.h.begin_lsn;
-            }
         }
 
         // flush wal to the disk, if required
@@ -808,7 +816,7 @@ where
         if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
             < self.inmem.peer_horizon_lsn
         {
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
 
         trace!(
@@ -842,7 +850,7 @@ where
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&mut self, sk_info: &SafekeeperInfo) -> Result<()> {
+    pub fn record_safekeeper_info(&mut self, sk_info: &SkTimelineInfo) -> Result<()> {
         let mut sync_control_file = false;
         if let (Some(commit_lsn), Some(last_log_term)) = (sk_info.commit_lsn, sk_info.last_log_term)
         {
@@ -854,11 +862,11 @@ where
                 self.update_commit_lsn()?;
             }
         }
-        if let Some(s3_wal_lsn) = sk_info.s3_wal_lsn {
-            let new_s3_wal_lsn = max(s3_wal_lsn, self.inmem.s3_wal_lsn);
+        if let Some(backup_lsn) = sk_info.backup_lsn {
+            let new_backup_lsn = max(backup_lsn, self.inmem.backup_lsn);
             sync_control_file |=
-                self.state.s3_wal_lsn + (self.state.server.wal_seg_size as u64) < new_s3_wal_lsn;
-            self.inmem.s3_wal_lsn = new_s3_wal_lsn;
+                self.state.backup_lsn + (self.state.server.wal_seg_size as u64) < new_backup_lsn;
+            self.inmem.backup_lsn = new_backup_lsn;
         }
         if let Some(remote_consistent_lsn) = sk_info.remote_consistent_lsn {
             let new_remote_consistent_lsn =
@@ -876,18 +884,33 @@ where
             self.inmem.peer_horizon_lsn = new_peer_horizon_lsn;
         }
         if sync_control_file {
-            self.persist_control_file()?;
+            self.persist_control_file(self.state.clone())?;
         }
         Ok(())
+    }
+
+    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
+    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+    /// offloading.
+    /// While it is safe to use inmem values for determining horizon,
+    /// we use persistent to make possible normal states less surprising.
+    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
+        let mut horizon_lsn = min(
+            self.state.remote_consistent_lsn,
+            self.state.peer_horizon_lsn,
+        );
+        if wal_backup_enabled {
+            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
+        }
+        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use super::*;
     use crate::wal_storage::Storage;
+    use std::ops::Deref;
 
     // fake storage for tests
     struct InMemoryState {
@@ -935,6 +958,10 @@ mod tests {
         fn flush_wal(&mut self) -> Result<()> {
             Ok(())
         }
+
+        fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
+            Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
+        }
     }
 
     #[test]
@@ -944,7 +971,8 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
+
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -959,7 +987,8 @@ mod tests {
         let storage = InMemoryState {
             persisted_state: state,
         };
-        sk = SafeKeeper::new(ztli, storage, sk.wal_store).unwrap();
+
+        sk = SafeKeeper::new(ztli, storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request);
@@ -976,7 +1005,8 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
         let ztli = ZTimelineId::from([0u8; 16]);
-        let mut sk = SafeKeeper::new(ztli, storage, wal_store).unwrap();
+
+        let mut sk = SafeKeeper::new(ztli, storage, wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,
@@ -999,6 +1029,7 @@ mod tests {
                 term: 1,
                 lsn: Lsn(3),
             }]),
+            timeline_start_lsn: Lsn(0),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .unwrap();

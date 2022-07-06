@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::net::TcpStream;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -11,6 +13,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
+use pageserver::tenant_mgr::TenantInfo;
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -25,8 +28,7 @@ use utils::{
 };
 
 use crate::local_env::LocalEnv;
-use crate::{fill_rust_env_vars, read_pidfile};
-use pageserver::tenant_mgr::TenantInfo;
+use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -35,6 +37,12 @@ pub enum PageserverHttpError {
 
     #[error("Error: {0}")]
     Response(String),
+}
+
+impl From<anyhow::Error> for PageserverHttpError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Response(e.to_string())
+    }
 }
 
 type Result<T> = result::Result<T, PageserverHttpError>;
@@ -121,6 +129,16 @@ impl PageServerNode {
         );
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let broker_endpoints_param = format!(
+            "broker_endpoints=[{}]",
+            self.env
+                .etcd_broker
+                .broker_endpoints
+                .iter()
+                .map(|url| format!("'{url}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let mut args = Vec::with_capacity(20);
 
         args.push("--init");
@@ -129,7 +147,18 @@ impl PageServerNode {
         args.extend(["-c", &authg_type_param]);
         args.extend(["-c", &listen_http_addr_param]);
         args.extend(["-c", &listen_pg_addr_param]);
+        args.extend(["-c", &broker_endpoints_param]);
         args.extend(["-c", &id]);
+
+        let broker_etcd_prefix_param = self
+            .env
+            .etcd_broker
+            .broker_etcd_prefix
+            .as_ref()
+            .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
+        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
+            args.extend(["-c", broker_etcd_prefix_param]);
+        }
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
@@ -167,6 +196,9 @@ impl PageServerNode {
             );
         }
 
+        // echo the captured output of the init command
+        println!("{}", String::from_utf8_lossy(&init_output.stdout));
+
         Ok(initial_timeline_id)
     }
 
@@ -186,8 +218,6 @@ impl PageServerNode {
         );
         io::stdout().flush().unwrap();
 
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
-
         let repo_path = self.repo_path();
         let mut args = vec!["-D", repo_path.to_str().unwrap()];
 
@@ -195,9 +225,11 @@ impl PageServerNode {
             args.extend(["-c", config_override]);
         }
 
-        fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        let mut cmd = Command::new(self.env.pageserver_bin()?);
+        let mut filled_cmd = fill_rust_env_vars(cmd.args(&args).arg("--daemonize"));
+        filled_cmd = fill_aws_secrets_vars(filled_cmd);
 
-        if !cmd.status()?.success() {
+        if !filled_cmd.status()?.success() {
             bail!(
                 "Pageserver failed to start. See '{}' for details.",
                 self.repo_path().join("pageserver.log").display()
@@ -257,12 +289,13 @@ impl PageServerNode {
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
         let sig = if immediate {
-            println!("Stop pageserver immediately");
+            print!("Stopping pageserver immediately..");
             Signal::SIGQUIT
         } else {
-            println!("Stop pageserver gracefully");
+            print!("Stopping pageserver gracefully..");
             Signal::SIGTERM
         };
+        io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
@@ -284,25 +317,36 @@ impl PageServerNode {
         // TODO Remove this "timeout" and handle it on caller side instead.
         // Shutting down may take a long time,
         // if pageserver checkpoints a lot of data
+        let mut tcp_stopped = false;
         for _ in 0..100 {
-            if let Err(_e) = TcpStream::connect(&address) {
-                println!("Pageserver stopped receiving connections");
-
-                //Now check status
-                match self.check_status() {
-                    Ok(_) => {
-                        println!("Pageserver status is OK. Wait a bit.");
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(err) => {
-                        println!("Pageserver status is: {}", err);
-                        return Ok(());
+            if !tcp_stopped {
+                if let Err(err) = TcpStream::connect(&address) {
+                    tcp_stopped = true;
+                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                        eprintln!("\nPageserver connection failed with error: {err}");
                     }
                 }
-            } else {
-                println!("Pageserver still receives connections");
-                thread::sleep(Duration::from_secs(1));
             }
+            if tcp_stopped {
+                // Also check status on the HTTP port
+
+                match self.check_status() {
+                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
+                        println!("done!");
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("\nPageserver status check failed with error: {err}");
+                        return Ok(());
+                    }
+                    Ok(()) => {
+                        // keep waiting
+                    }
+                }
+            }
+            print!(".");
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(1));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -369,7 +413,20 @@ impl PageServerNode {
                     .map(|x| x.parse::<u64>())
                     .transpose()?,
                 gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                walreceiver_connect_timeout: settings
+                    .get("walreceiver_connect_timeout")
+                    .map(|x| x.to_string()),
+                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                max_lsn_wal_lag: settings
+                    .get("max_lsn_wal_lag")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
             })
             .send()?
             .error_from_body()?
@@ -393,19 +450,41 @@ impl PageServerNode {
                 tenant_id,
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
                 compaction_target_size: settings
                     .get("compaction_target_size")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'compaction_target_size' as an integer")?,
                 compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
                 compaction_threshold: settings
                     .get("compaction_threshold")
-                    .map(|x| x.parse::<usize>().unwrap()),
+                    .map(|x| x.parse::<usize>())
+                    .transpose()
+                    .context("Failed to parse 'compaction_threshold' as an integer")?,
                 gc_horizon: settings
                     .get("gc_horizon")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'gc_horizon' as an integer")?,
                 gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .get("image_creation_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()
+                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                walreceiver_connect_timeout: settings
+                    .get("walreceiver_connect_timeout")
+                    .map(|x| x.to_string()),
+                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                max_lsn_wal_lag: settings
+                    .get("max_lsn_wal_lag")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
             })
             .send()?
             .error_from_body()?;
@@ -448,5 +527,55 @@ impl PageServerNode {
             .json::<Option<TimelineInfo>>()?;
 
         Ok(timeline_info_response)
+    }
+
+    /// Import a basebackup prepared using either:
+    /// a) `pg_basebackup -F tar`, or
+    /// b) The `fullbackup` pageserver endpoint
+    ///
+    /// # Arguments
+    /// * `tenant_id` - tenant to import into. Created if not exists
+    /// * `timeline_id` - id to assign to imported timeline
+    /// * `base` - (start lsn of basebackup, path to `base.tar` file)
+    /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
+    pub fn timeline_import(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        base: (Lsn, PathBuf),
+        pg_wal: Option<(Lsn, PathBuf)>,
+    ) -> anyhow::Result<()> {
+        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+
+        // Init base reader
+        let (start_lsn, base_tarfile_path) = base;
+        let base_tarfile = File::open(base_tarfile_path)?;
+        let mut base_reader = BufReader::new(base_tarfile);
+
+        // Init wal reader if necessary
+        let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
+            let wal_tarfile = File::open(wal_tarfile_path)?;
+            let wal_reader = BufReader::new(wal_tarfile);
+            (end_lsn, Some(wal_reader))
+        } else {
+            (start_lsn, None)
+        };
+
+        // Import base
+        let import_cmd =
+            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let mut writer = client.copy_in(&import_cmd)?;
+        io::copy(&mut base_reader, &mut writer)?;
+        writer.finish()?;
+
+        // Import wal if necessary
+        if let Some(mut wal_reader) = wal_reader {
+            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+            let mut writer = client.copy_in(&import_cmd)?;
+            io::copy(&mut wal_reader, &mut writer)?;
+            writer.finish()?;
+        }
+
+        Ok(())
     }
 }

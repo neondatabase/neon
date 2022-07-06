@@ -2,7 +2,7 @@ import timeit
 from fixtures.benchmark_fixture import MetricReport
 import pytest
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 # Run bulk tenant creation test.
 #
@@ -13,33 +13,29 @@ from fixtures.zenith_fixtures import ZenithEnvBuilder
 
 
 @pytest.mark.parametrize('tenants_count', [1, 5, 10])
-@pytest.mark.parametrize('use_safekeepers', ['with_wa', 'without_wa'])
 def test_bulk_tenant_create(
-    zenith_env_builder: ZenithEnvBuilder,
-    use_safekeepers: str,
+    neon_env_builder: NeonEnvBuilder,
     tenants_count: int,
     zenbenchmark,
 ):
-    """Measure tenant creation time (with and without wal acceptors)"""
-    if use_safekeepers == 'with_wa':
-        zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     time_slices = []
 
     for i in range(tenants_count):
         start = timeit.default_timer()
 
-        tenant = env.zenith_cli.create_tenant()
-        env.zenith_cli.create_timeline(
-            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_safekeepers}', tenant_id=tenant)
+        tenant, _ = env.neon_cli.create_tenant()
+        env.neon_cli.create_timeline(f'test_bulk_tenant_create_{tenants_count}_{i}',
+                                     tenant_id=tenant)
 
         # FIXME: We used to start new safekeepers here. Did that make sense? Should we do it now?
         #if use_safekeepers == 'with_sa':
         #    wa_factory.start_n_new(3)
 
-        pg_tenant = env.postgres.create_start(
-            f'test_bulk_tenant_create_{tenants_count}_{i}_{use_safekeepers}', tenant_id=tenant)
+        pg_tenant = env.postgres.create_start(f'test_bulk_tenant_create_{tenants_count}_{i}',
+                                              tenant_id=tenant)
 
         end = timeit.default_timer()
         time_slices.append(end - start)

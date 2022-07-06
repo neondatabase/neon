@@ -4,10 +4,10 @@ set -e
 
 RELEASE=${RELEASE:-false}
 
-# look at docker hub for latest tag fo zenith docker image
+# look at docker hub for latest tag for neon docker image
 if [ "${RELEASE}" = "true" ]; then
-    echo "search latest relase tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/zenithdb/zenith/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | tail -1)
+    echo "search latest release tag"
+    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
     if [ -z "${VERSION}" ]; then
         echo "no any docker tags found, exiting..."
         exit 1
@@ -16,7 +16,7 @@ if [ "${RELEASE}" = "true" ]; then
     fi
 else
     echo "search latest dev tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/zenithdb/zenith/tags |jq -r -S '.[].name' | grep -v release | tail -1)
+    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -E '^[0-9]+$' | sort -n | tail -1)
     if [ -z "${VERSION}" ]; then
         echo "no any docker tags found, exiting..."
         exit 1
@@ -28,25 +28,25 @@ fi
 echo "found ${VERSION}"
 
 # do initial cleanup
-rm -rf zenith_install postgres_install.tar.gz zenith_install.tar.gz .zenith_current_version
-mkdir zenith_install
+rm -rf neon_install postgres_install.tar.gz neon_install.tar.gz .neon_current_version
+mkdir neon_install
 
-# retrive binaries from docker image
+# retrieve binaries from docker image
 echo "getting binaries from docker image"
-docker pull --quiet zenithdb/zenith:${TAG}
-ID=$(docker create zenithdb/zenith:${TAG})
+docker pull --quiet neondatabase/neon:${TAG}
+ID=$(docker create neondatabase/neon:${TAG})
 docker cp ${ID}:/data/postgres_install.tar.gz .
-tar -xzf postgres_install.tar.gz -C zenith_install
-docker cp ${ID}:/usr/local/bin/pageserver zenith_install/bin/
-docker cp ${ID}:/usr/local/bin/safekeeper zenith_install/bin/
-docker cp ${ID}:/usr/local/bin/proxy zenith_install/bin/
-docker cp ${ID}:/usr/local/bin/postgres zenith_install/bin/
+tar -xzf postgres_install.tar.gz -C neon_install
+docker cp ${ID}:/usr/local/bin/pageserver neon_install/bin/
+docker cp ${ID}:/usr/local/bin/safekeeper neon_install/bin/
+docker cp ${ID}:/usr/local/bin/proxy neon_install/bin/
+docker cp ${ID}:/usr/local/bin/postgres neon_install/bin/
 docker rm -vf ${ID}
 
 # store version to file (for ansible playbooks) and create binaries tarball
-echo ${VERSION} > zenith_install/.zenith_current_version
-echo ${VERSION} > .zenith_current_version
-tar -czf zenith_install.tar.gz -C zenith_install .
+echo ${VERSION} > neon_install/.neon_current_version
+echo ${VERSION} > .neon_current_version
+tar -czf neon_install.tar.gz -C neon_install .
 
 # do final cleaup
-rm -rf zenith_install postgres_install.tar.gz
+rm -rf neon_install postgres_install.tar.gz

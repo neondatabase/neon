@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+# It is simpler infra-wise to have failpoints enabled by default
+# It shouldn't affect performance in any way because failpoints
+# are not placed in hot code paths
+default = ["failpoints"]
 profiling = ["pprof"]
+failpoints = ["fail/failpoints"]
 
 [dependencies]
 chrono = "0.4.19"
@@ -21,7 +25,6 @@ lazy_static = "1.4.0"
 clap = "3.0"
 daemonize = "0.4.1"
 tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
-tokio-util = { version = "0.7", features = ["io"] }
 postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
@@ -35,6 +38,7 @@ humantime = "2.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_with = "1.12.0"
+humantime-serde = "1.1.1"
 
 pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
 
@@ -48,15 +52,16 @@ nix = "0.23"
 once_cell = "1.8.0"
 crossbeam-utils = "0.8.5"
 fail = "0.5.0"
-
-rusoto_core = "0.47"
-rusoto_s3 = "0.47"
-async-trait = "0.1"
+git-version = "0.3.5"
 
 postgres_ffi = { path = "../libs/postgres_ffi" }
+etcd_broker = { path = "../libs/etcd_broker" }
 metrics = { path = "../libs/metrics" }
 utils = { path = "../libs/utils" }
+remote_storage = { path = "../libs/remote_storage" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
+close_fds = "0.3.2"
+walkdir = "2.3.2"
 
 [dev-dependencies]
 hex-literal = "0.3"

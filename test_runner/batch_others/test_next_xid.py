@@ -1,14 +1,12 @@
 import time
 
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_next_xid(zenith_env_builder: ZenithEnvBuilder):
-    # One safekeeper is enough for this test.
-    zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
+def test_next_xid(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
 
     pg = env.postgres.create_start('main')
 

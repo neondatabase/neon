@@ -1,21 +1,23 @@
 import os
+import pathlib
+import pytest
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
-from fixtures.utils import mkdir_if_needed
-from fixtures.zenith_fixtures import ZenithEnv, check_restored_datadir_content, base_dir, pg_distrib_dir
 
+# The pg_regress tests run for a long time, especially in debug mode,
+# so use a larger-than-default timeout.
+@pytest.mark.timeout(1800)
+def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: pathlib.Path, pg_bin, capsys):
+    env = neon_simple_env
 
-def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, capsys):
-    env = zenith_simple_env
-
-    env.zenith_cli.create_branch("test_pg_regress", "empty")
+    env.neon_cli.create_branch("test_pg_regress", "empty")
     # Connect to postgres and create a database called "regression".
     pg = env.postgres.create_start('test_pg_regress')
     pg.safe_psql('CREATE DATABASE regression')
 
     # Create some local directories for pg_regress to run in.
-    runpath = os.path.join(test_output_dir, 'regress')
-    mkdir_if_needed(runpath)
-    mkdir_if_needed(os.path.join(runpath, 'testtablespace'))
+    runpath = test_output_dir / 'regress'
+    (runpath / 'testtablespace').mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
     build_path = os.path.join(pg_distrib_dir, 'build/src/test/regress')
@@ -48,7 +50,7 @@ def test_pg_regress(zenith_simple_env: ZenithEnv, test_output_dir: str, pg_bin, 
 
         # checkpoint one more time to ensure that the lsn we get is the latest one
         pg.safe_psql('CHECKPOINT')
-        lsn = pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
+        pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
 
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, pg)
