@@ -91,7 +91,6 @@ pub fn init_wal_receiver_main_thread(
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("wal-receiver-runtime-thread")
-        .worker_threads(40)
         .enable_all()
         .on_thread_start(|| IS_WAL_RECEIVER.with(|c| c.set(true)))
         .build()
