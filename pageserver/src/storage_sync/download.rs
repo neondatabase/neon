@@ -44,13 +44,23 @@ where
                 index_part_path.display()
             )
         })?;
+
+    let mut index_part_download =
+        storage
+            .download(&part_storage_path)
+            .await
+            .with_context(|| {
+                format!("Failed to open download stream for for storage path {part_storage_path:?}")
+            })?;
     let mut index_part_bytes = Vec::new();
-    storage
-        .download(&part_storage_path, &mut index_part_bytes)
-        .await
-        .with_context(|| {
-            format!("Failed to download an index part from storage path {part_storage_path:?}")
-        })?;
+    io::copy(
+        &mut index_part_download.download_stream,
+        &mut index_part_bytes,
+    )
+    .await
+    .with_context(|| {
+        format!("Failed to download an index part from storage path {part_storage_path:?}")
+    })?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes).with_context(|| {
         format!("Failed to deserialize index part file from storage path '{part_storage_path:?}'")
@@ -162,15 +172,19 @@ where
                             temp_file_path.display()
                         )
                     })?;
-
-                storage
-                    .download(&layer_storage_path, &mut destination_file)
+                let mut download = storage
+                    .download(&layer_storage_path)
                     .await
                     .with_context(|| {
                         format!(
-                            "Failed to download a layer from storage path '{layer_storage_path:?}'"
+                            "Failed to open a download stream for layer with remote storage path '{layer_storage_path:?}'"
                         )
                     })?;
+                io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
+                    format!(
+                        "Failed to download layer with remote storage path '{layer_storage_path:?}' into file '{}'", temp_file_path.display()
+                    )
+                })?;
 
                 // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
                 // A file will not be closed immediately when it goes out of scope if there are any IO operations

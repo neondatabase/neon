@@ -85,7 +85,7 @@ runs:
           EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
         fi
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          if [[ "$GITHUB_REF" == "main" ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
             mkdir -p "$PERF_REPORT_DIR"
             EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
           fi
@@ -115,7 +115,7 @@ runs:
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
-          if [[ "$GITHUB_REF" == "main" ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
             export REPORT_FROM="$PERF_REPORT_DIR"
             export REPORT_TO=local
             scripts/generate_and_push_perf_report.sh

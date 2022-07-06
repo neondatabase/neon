@@ -17,7 +17,7 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::path_with_suffix_extension;
+use crate::{path_with_suffix_extension, Download, DownloadError};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
 
@@ -192,15 +192,12 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    async fn download(
-        &self,
-        from: &Self::RemoteObjectId,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
-        let file_path = self.resolve_in_storage(from)?;
-
-        if file_path.exists() && file_path.is_file() {
-            let mut source = io::BufReader::new(
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError> {
+        let file_path = self
+            .resolve_in_storage(from)
+            .map_err(DownloadError::BadInput)?;
+        if file_exists(&file_path).map_err(DownloadError::BadInput)? {
+            let source = io::BufReader::new(
                 fs::OpenOptions::new()
                     .read(true)
                     .open(&file_path)
@@ -210,22 +207,20 @@ impl RemoteStorage for LocalFs {
                             "Failed to open source file '{}' to use in the download",
                             file_path.display()
                         )
-                    })?,
+                    })
+                    .map_err(DownloadError::Other)?,
             );
-            io::copy(&mut source, to).await.with_context(|| {
-                format!(
-                    "Failed to download file '{}' from the local storage",
-                    file_path.display()
-                )
-            })?;
-            source.flush().await?;
 
-            self.read_storage_metadata(&file_path).await
+            let metadata = self
+                .read_storage_metadata(&file_path)
+                .await
+                .map_err(DownloadError::Other)?;
+            Ok(Download {
+                metadata,
+                download_stream: Box::pin(source),
+            })
         } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
+            Err(DownloadError::NotFound)
         }
     }
 
@@ -234,22 +229,19 @@ impl RemoteStorage for LocalFs {
         from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
+    ) -> Result<Download, DownloadError> {
         if let Some(end_exclusive) = end_exclusive {
-            ensure!(
-                end_exclusive > start_inclusive,
-                "Invalid range, start ({}) is bigger then end ({:?})",
-                start_inclusive,
-                end_exclusive
-            );
+            if end_exclusive <= start_inclusive {
+                return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) is not less than end_exclusive ({end_exclusive:?})")));
+            };
             if start_inclusive == end_exclusive.saturating_sub(1) {
-                return Ok(None);
+                return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
             }
         }
-        let file_path = self.resolve_in_storage(from)?;
-
-        if file_path.exists() && file_path.is_file() {
+        let file_path = self
+            .resolve_in_storage(from)
+            .map_err(DownloadError::BadInput)?;
+        if file_exists(&file_path).map_err(DownloadError::BadInput)? {
             let mut source = io::BufReader::new(
                 fs::OpenOptions::new()
                     .read(true)
@@ -260,31 +252,31 @@ impl RemoteStorage for LocalFs {
                             "Failed to open source file '{}' to use in the download",
                             file_path.display()
                         )
-                    })?,
+                    })
+                    .map_err(DownloadError::Other)?,
             );
             source
                 .seek(io::SeekFrom::Start(start_inclusive))
                 .await
-                .context("Failed to seek to the range start in a local storage file")?;
-            match end_exclusive {
-                Some(end_exclusive) => {
-                    io::copy(&mut source.take(end_exclusive - start_inclusive), to).await
-                }
-                None => io::copy(&mut source, to).await,
-            }
-            .with_context(|| {
-                format!(
-                    "Failed to download file '{}' range from the local storage",
-                    file_path.display()
-                )
-            })?;
+                .context("Failed to seek to the range start in a local storage file")
+                .map_err(DownloadError::Other)?;
+            let metadata = self
+                .read_storage_metadata(&file_path)
+                .await
+                .map_err(DownloadError::Other)?;
 
-            self.read_storage_metadata(&file_path).await
+            Ok(match end_exclusive {
+                Some(end_exclusive) => Download {
+                    metadata,
+                    download_stream: Box::pin(source.take(end_exclusive - start_inclusive)),
+                },
+                None => Download {
+                    metadata,
+                    download_stream: Box::pin(source),
+                },
+            })
         } else {
-            bail!(
-                "File '{}' either does not exist or is not a file",
-                file_path.display()
-            )
+            Err(DownloadError::NotFound)
         }
     }
 
@@ -350,6 +342,19 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
         fs::create_dir_all(target_dir).await?;
     }
     Ok(())
+}
+
+fn file_exists(file_path: &Path) -> anyhow::Result<bool> {
+    if file_path.exists() {
+        ensure!(
+            file_path.is_file(),
+            "file path '{}' is not a file",
+            file_path.display()
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +523,31 @@ mod fs_tests {
     use std::{collections::HashMap, io::Write};
     use tempfile::tempdir;
 
+    async fn read_and_assert_remote_file_contents(
+        storage: &LocalFs,
+        #[allow(clippy::ptr_arg)]
+        // have to use &PathBuf due to `storage.local_path` parameter requirements
+        remote_storage_path: &PathBuf,
+        expected_metadata: Option<&StorageMetadata>,
+    ) -> anyhow::Result<String> {
+        let mut download = storage
+            .download(remote_storage_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
+        ensure!(
+            download.metadata.as_ref() == expected_metadata,
+            "Unexpected metadata returned for the downloaded file"
+        );
+
+        let mut contents = String::new();
+        download
+            .download_stream
+            .read_to_string(&mut contents)
+            .await
+            .context("Failed to read remote file contents into string")?;
+        Ok(contents)
+    }
+
     #[tokio::test]
     async fn upload_file() -> anyhow::Result<()> {
         let workdir = tempdir()?.path().to_owned();
@@ -568,15 +598,7 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
-        let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let metadata = storage.download(&upload_target, &mut content_bytes).await?;
-        assert!(
-            metadata.is_none(),
-            "No metadata should be returned for no metadata upload"
-        );
-
-        content_bytes.flush().await?;
-        let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
+        let contents = read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             contents,
@@ -584,13 +606,9 @@ mod fs_tests {
         );
 
         let non_existing_path = PathBuf::from("somewhere").join("else");
-        match storage.download(&non_existing_path, &mut io::sink()).await {
-            Ok(_) => panic!("Should not allow downloading non-existing storage files"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("does not exist"));
-                assert!(error_string.contains(&non_existing_path.display().to_string()));
-            }
+        match storage.download(&non_existing_path).await {
+            Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
+            other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
         Ok(())
     }
@@ -603,58 +621,31 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
-        let mut full_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let metadata = storage
-            .download_byte_range(&upload_target, 0, None, &mut full_range_bytes)
-            .await?;
-        assert!(
-            metadata.is_none(),
-            "No metadata should be returned for no metadata upload"
-        );
-        full_range_bytes.flush().await?;
+        let full_range_download_contents =
+            read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
-            String::from_utf8(full_range_bytes.into_inner().into_inner())?,
+            full_range_download_contents,
             "Download full range should return the whole upload"
-        );
-
-        let mut zero_range_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let same_byte = 1_000_000_000;
-        let metadata = storage
-            .download_byte_range(
-                &upload_target,
-                same_byte,
-                Some(same_byte + 1), // exclusive end
-                &mut zero_range_bytes,
-            )
-            .await?;
-        assert!(
-            metadata.is_none(),
-            "No metadata should be returned for no metadata upload"
-        );
-        zero_range_bytes.flush().await?;
-        assert!(
-            zero_range_bytes.into_inner().into_inner().is_empty(),
-            "Zero byte range should not download any part of the file"
         );
 
         let uploaded_bytes = dummy_contents(upload_name).into_bytes();
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
-        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let metadata = storage
-            .download_byte_range(
-                &upload_target,
-                0,
-                Some(first_part_local.len() as u64),
-                &mut first_part_remote,
-            )
+        let mut first_part_download = storage
+            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
             .await?;
         assert!(
-            metadata.is_none(),
+            first_part_download.metadata.is_none(),
             "No metadata should be returned for no metadata upload"
         );
 
+        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        io::copy(
+            &mut first_part_download.download_stream,
+            &mut first_part_remote,
+        )
+        .await?;
         first_part_remote.flush().await?;
         let first_part_remote = first_part_remote.into_inner().into_inner();
         assert_eq!(
@@ -663,20 +654,24 @@ mod fs_tests {
             "First part bytes should be returned when requested"
         );
 
-        let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let metadata = storage
+        let mut second_part_download = storage
             .download_byte_range(
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
-                &mut second_part_remote,
             )
             .await?;
         assert!(
-            metadata.is_none(),
+            second_part_download.metadata.is_none(),
             "No metadata should be returned for no metadata upload"
         );
 
+        let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        io::copy(
+            &mut second_part_download.download_stream,
+            &mut second_part_remote,
+        )
+        .await?;
         second_part_remote.flush().await?;
         let second_part_remote = second_part_remote.into_inner().into_inner();
         assert_eq!(
@@ -696,11 +691,30 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&workdir, &storage, upload_name, None).await?;
 
+        let start = 1_000_000_000;
+        let end = start + 1;
+        match storage
+            .download_byte_range(
+                &upload_target,
+                start,
+                Some(end), // exclusive end
+            )
+            .await
+        {
+            Ok(_) => panic!("Should not allow downloading wrong ranges"),
+            Err(e) => {
+                let error_string = e.to_string();
+                assert!(error_string.contains("zero bytes"));
+                assert!(error_string.contains(&start.to_string()));
+                assert!(error_string.contains(&end.to_string()));
+            }
+        }
+
         let start = 10000;
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_byte_range(&upload_target, start, Some(end), &mut io::sink())
+            .download_byte_range(&upload_target, start, Some(end))
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -712,18 +726,6 @@ mod fs_tests {
             }
         }
 
-        let non_existing_path = PathBuf::from("somewhere").join("else");
-        match storage
-            .download_byte_range(&non_existing_path, 1, Some(3), &mut io::sink())
-            .await
-        {
-            Ok(_) => panic!("Should not allow downloading non-existing storage file ranges"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("does not exist"));
-                assert!(error_string.contains(&non_existing_path.display().to_string()));
-            }
-        }
         Ok(())
     }
 
@@ -762,35 +764,26 @@ mod fs_tests {
         let upload_target =
             upload_dummy_file(&workdir, &storage, upload_name, Some(metadata.clone())).await?;
 
-        let mut content_bytes = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let full_download_metadata = storage.download(&upload_target, &mut content_bytes).await?;
-
-        content_bytes.flush().await?;
-        let contents = String::from_utf8(content_bytes.into_inner().into_inner())?;
+        let full_range_download_contents =
+            read_and_assert_remote_file_contents(&storage, &upload_target, Some(&metadata)).await?;
         assert_eq!(
             dummy_contents(upload_name),
-            contents,
+            full_range_download_contents,
             "We should upload and download the same contents"
-        );
-
-        assert_eq!(
-            full_download_metadata.as_ref(),
-            Some(&metadata),
-            "We should get the same metadata back for full download"
         );
 
         let uploaded_bytes = dummy_contents(upload_name).into_bytes();
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
-        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        let partial_download_metadata = storage
-            .download_byte_range(
-                &upload_target,
-                0,
-                Some(first_part_local.len() as u64),
-                &mut first_part_remote,
-            )
+        let mut partial_download_with_metadata = storage
+            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
             .await?;
+        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
+        io::copy(
+            &mut partial_download_with_metadata.download_stream,
+            &mut first_part_remote,
+        )
+        .await?;
         first_part_remote.flush().await?;
         let first_part_remote = first_part_remote.into_inner().into_inner();
         assert_eq!(
@@ -800,8 +793,8 @@ mod fs_tests {
         );
 
         assert_eq!(
-            partial_download_metadata.as_ref(),
-            Some(&metadata),
+            partial_download_with_metadata.metadata,
+            Some(metadata),
             "We should get the same metadata back for partial download"
         );
 
@@ -843,7 +836,7 @@ mod fs_tests {
     }
 
     fn dummy_contents(name: &str) -> String {
-        format!("contents for {}", name)
+        format!("contents for {name}")
     }
 
     async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<PathBuf>> {
