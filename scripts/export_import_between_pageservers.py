@@ -80,14 +80,6 @@ class NeonPageserverHttpClient(requests.Session):
         return res_json
 
 
-import pytest
-import os
-def add_missing_empty_rels(base_tar, output_tar):
-    os.environ['INPUT_BASE_TAR'] = base_tar
-    os.environ['OUTPUT_BASE_TAR'] = output_tar
-    pytest.main(["-s", "-k", "test_main_hack"])
-
-
 def lsn_to_hex(num: int) -> str:
     """ Convert lsn from int to standard hex notation. """
     return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
