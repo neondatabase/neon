@@ -32,6 +32,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
+from asyncio.subprocess import Process
 
 import requests
 import backoff  # type: ignore
@@ -1493,8 +1494,8 @@ class PSQL:
         self.path = path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dmy-cluster-123"
 
-    async def run(self, query: str = None) -> tp.Union[tuple[int, str], Process]:
-        run_args = [self.path, self.database_url]  #, "--no-align", "--no-psqlrc", "--tuples-only"]
+    async def run(self, query=None) -> Union[tuple[int, str], Process]:
+        run_args = [self.path, self.database_url]
         run_args += (["--command", query] if query is not None else [])
 
         cmd_line = ' '.join(["'" + x + "'" if ' ' in x else x for x in run_args])
@@ -1506,7 +1507,7 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, port: int, pg_port: int = None):
+    def __init__(self, port: int, pg_port=None):
         super().__init__(host="127.0.0.1",
                          user="proxy_user",
                          password="pytest2",
