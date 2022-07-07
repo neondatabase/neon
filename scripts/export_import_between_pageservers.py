@@ -1,5 +1,10 @@
-### utils copied from test fixtures
+#
+# Script to export nodes from one pageserver
+# and import them into another page server
+#
+
 import os
+from os import path
 import shutil
 from pathlib import Path
 import tempfile
@@ -7,11 +12,18 @@ from contextlib import closing
 import psycopg2
 import subprocess
 import argparse
-
-from typing import Any, List
+import time
+import requests
+import uuid
 from psycopg2.extensions import connection as PgConnection
 import asyncpg
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+
+
+###############################################
+### client-side utils copied from test fixtures
+###############################################
+
 
 Env = Dict[str, str]
 
@@ -239,21 +251,6 @@ class VanillaPostgres(PgProtocol):
         if self.running:
             self.stop()
 
-#
-# Simple script to export nodes from one pageserver
-# and import them into another page server
-#
-from os import path
-import os
-import time
-import requests
-import uuid
-import subprocess
-import argparse
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
-
-
 class NeonPageserverApiException(Exception):
     pass
 
@@ -365,20 +362,31 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
         lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
 
 
+##############
+# End of utils
+##############
+
+
 def pack_base(log_dir, restored_dir, output_tar):
+    """Create tar file from basebackup, being careful to produce relative filenames."""
     tmp_tar_name = "tmp.tar"
     tmp_tar_path = os.path.join(restored_dir, tmp_tar_name)
     cmd = ["tar", "-cf", tmp_tar_name] + os.listdir(restored_dir)
+    # We actually cd into the dir and call tar from there. If we call tar from
+    # outside we won't encode filenames as relative, and they won't parse well
+    # on import.
     subprocess_capture(log_dir, cmd, cwd=restored_dir)
     shutil.move(tmp_tar_path, output_tar)
 
 
 def reconstruct_paths(log_dir, pg_bin, base_tar):
-    """Yeild list of relation paths"""
+    """Reconstruct what relation files should exist in the datadir by querying postgres."""
     with tempfile.TemporaryDirectory() as restored_dir:
         # Unpack the base tar
         subprocess_capture(log_dir, ["tar", "-xf", base_tar, "-C", restored_dir])
 
+        # Start a vanilla postgres from the given datadir and query it to find
+        # what relfiles should exist, but possibly don't.
         port = "55439"  # Probably free
         with VanillaPostgres(restored_dir, pg_bin, port, init=False) as vanilla_pg:
             vanilla_pg.configure([f"port={port}"])
@@ -424,6 +432,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar):
 
 
 def touch_missing_rels(log_dir, corrupt_tar, output_tar, paths):
+    """Add the appropriate empty files to a basebadkup tar."""
     with tempfile.TemporaryDirectory() as restored_dir:
         # Unpack the base tar
         subprocess_capture(log_dir, ["tar", "-xf", corrupt_tar, "-C", restored_dir])
@@ -440,6 +449,11 @@ def touch_missing_rels(log_dir, corrupt_tar, output_tar, paths):
         pack_base(log_dir, restored_dir, output_tar)
 
 
+# HACK This is a workaround for exporting from old pageservers that
+#      can't export empty relations. In this case we need to start
+#      a vanilla postgres from the exported datadir, and query it
+#      to see what empty relations are missing, and then create
+#      those empty files before importing.
 def add_missing_rels(base_tar, output_tar, log_dir, pg_bin):
     reconstructed_paths = set(reconstruct_paths(log_dir, pg_bin, base_tar))
     touch_missing_rels(log_dir, base_tar, output_tar, reconstructed_paths)
