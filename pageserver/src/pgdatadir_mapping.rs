@@ -912,7 +912,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, value)?;
+            writer.put(key, self.lsn, &value)?;
         }
         for key_range in self.pending_deletions {
             writer.delete(key_range.clone(), self.lsn)?;

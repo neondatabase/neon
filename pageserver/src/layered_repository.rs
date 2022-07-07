@@ -1640,7 +1640,7 @@ impl LayeredTimeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_value(key, lsn, val)?;
@@ -2555,7 +2555,7 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()> {
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
@@ -2697,7 +2697,7 @@ pub mod tests {
         let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -2705,7 +2705,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -2713,7 +2713,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer.put(TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -2721,7 +2721,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer.put(TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -2759,7 +2759,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
                 drop(writer);
@@ -2805,7 +2805,7 @@ pub mod tests {
             writer.put(
                 test_key,
                 lsn,
-                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
@@ -2823,7 +2823,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
                 drop(writer);
@@ -2875,7 +2875,7 @@ pub mod tests {
             writer.put(
                 test_key,
                 lsn,
-                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
@@ -2899,7 +2899,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
@@ -2958,7 +2958,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
                 )?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
