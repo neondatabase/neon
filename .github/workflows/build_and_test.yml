@@ -256,7 +256,9 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container:
+      image: nikolaik/python-nodejs:latest
     needs: [ build-neon ]
     strategy:
       fail-fast: false
