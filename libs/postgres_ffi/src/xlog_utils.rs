@@ -621,7 +621,7 @@ mod tests {
             fs::remove_dir_all(&cfg.datadir).unwrap();
         }
         cfg.initdb().unwrap();
-        let mut srv = cfg.start_server().unwrap();
+        let srv = cfg.start_server().unwrap();
         let expected_wal_end: Lsn =
             u64::from(C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap()).into();
         srv.kill();
