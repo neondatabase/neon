@@ -489,7 +489,19 @@ def main(args: argparse.Namespace):
 
             # Export timelines from old pageserver
             if args.only_import is False:
-                query = f"fullbackup {timeline['tenant_id']} {timeline['timeline_id']} {timeline['local']['last_record_lsn']}"
+                conn = psycopg2.connect(old_pageserver_connstr)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cmd = f"get_last_record_rlsn {timeline['tenant_id']} {timeline['timeline_id']}"
+                    cur.execute(cmd)
+                    res = cur.fetchone()
+                    prev_lsn = res[0]
+                    last_lsn = res[1]
+
+                print(f"prev_lsn {prev_lsn} last_lsn {last_lsn}")
+                conn.close()
+
+                query = f"fullbackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {prev_lsn}"
 
                 cmd = [psql_path, "--no-psqlrc", old_pageserver_connstr, "-c", query]
                 print(f"Running: {cmd}")
@@ -512,7 +524,7 @@ def main(args: argparse.Namespace):
                 print(f"Done export: {tar_filename}, size {file_size}")
 
             # Import timelines to new pageserver
-            import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {timeline['local']['last_record_lsn']} {timeline['local']['last_record_lsn']}"
+            import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {last_lsn}"
             tar_filename = path.join(args.work_dir,
                                      f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
             full_cmd = rf"""cat {tar_filename} | {psql_path} {new_pageserver_connstr} -c '{import_cmd}' """
@@ -537,7 +549,7 @@ def main(args: argparse.Namespace):
                     print(f"Done import")
 
             # Wait until pageserver persists the files
-            wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(timeline['local']['last_record_lsn']))
+            wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(last_lsn))
 
 
 if __name__ == '__main__':

@@ -121,15 +121,6 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                            with_load: str):
     neon_env_builder.enable_local_fs_remote_storage()
 
-    if method == "major" and with_load == "with_load":
-        # TODO This currently fails because when we export under load
-        #      we don't have a prev_lsn to put in zenith.signal. We should
-        #      change the fullbackup (export) api so that it takes fullbackup
-        #      at the current LSN, where prev_lsn is known. It would also
-        #      have to return the LSN where fullbakcup was taken, instead
-        #      of taking it as input.
-        return
-
     env = neon_env_builder.init_start()
 
     # create folder for remote storage mock
@@ -287,6 +278,21 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
             cur.execute("INSERT INTO t SELECT generate_series(1001,2000), 'some payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (2001000, )
+
+            # ensure that we can successfully read all relations on the new pageserver
+            cur.execute('''
+                DO $$
+                DECLARE
+                r RECORD;
+                BEGIN
+                FOR r IN
+                SELECT relname FROM pg_class WHERE relkind='r'
+                LOOP
+                    RAISE NOTICE '%', r.relname;
+                    EXECUTE 'SELECT count(*) FROM quote_ident($1)' USING r.relname;
+                END LOOP;
+                END$$;
+                ''')
 
         if with_load == 'with_load':
             assert load_ok_event.wait(3)
