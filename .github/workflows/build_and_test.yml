@@ -22,7 +22,9 @@ env:
 
 jobs:
   build-postgres:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+      container:
+        image: ghcr.io/catthehacker/ubuntu:act-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +68,9 @@ jobs:
 
 
   build-neon:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+      container:
+        image: ghcr.io/catthehacker/ubuntu:act-22.04
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
