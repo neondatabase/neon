@@ -388,7 +388,7 @@ pub trait TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()>;
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()>;
 
     fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
 
@@ -598,12 +598,12 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -650,13 +650,13 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), test_value("foobar at 0x20"))?;
+        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
+        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), test_value("foo at 0x30"))?;
+        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), test_value("foo at 0x40"))?;
+        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -667,7 +667,7 @@ mod tests {
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer();
-        new_writer.put(TEST_KEY_A, Lsn(0x40), test_value("bar at 0x40"))?;
+        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -698,14 +698,14 @@ mod tests {
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
@@ -716,14 +716,14 @@ mod tests {
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
         }
