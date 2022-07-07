@@ -20,6 +20,7 @@ def test_hot_table(env: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
+            cur.execute('drop table if exists t;')
 
             # Write many updates to a small table
             with env.record_duration('write'):

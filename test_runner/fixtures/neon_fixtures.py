@@ -324,7 +324,7 @@ class PgProtocol:
         # Convert options='-c<key>=<val>' to server_settings
         if 'options' in conn_options:
             options = conn_options.pop('options')
-            for match in re.finditer('-c(\w*)=(\w*)', options):
+            for match in re.finditer(r'-c(\w*)=(\w*)', options):
                 key = match.group(1)
                 val = match.group(2)
                 if 'server_options' in conn_options:
