@@ -94,9 +94,9 @@ class Cargo:
             'test',
             '--no-run',
             '--message-format=json',
+            f'--profile={profile}',
         ]
-        env = dict(os.environ, PROFILE=profile)
-        output = subprocess.check_output(cmd, cwd=self.cwd, env=env, text=True)
+        output = subprocess.check_output(cmd, cwd=self.cwd, text=True)
 
         for line in output.splitlines(keepends=False):
             meta = json.loads(line)
@@ -210,7 +210,8 @@ class ProfDir:
 
     @property
     def files(self) -> List[Path]:
-        return [f for f in self.cwd.iterdir() if f.suffix in ('.profraw', '.profdata')]
+        exts = ('.profraw', '.profdata')
+        return sorted([f for f in self.cwd.iterdir() if f.suffix in exts])
 
     @property
     def file_names_hash(self) -> str:
@@ -546,7 +547,6 @@ self-contained example:
     p_report = commands.add_parser('report', help='generate a coverage report')
     p_report.add_argument('--profile',
                           default='debug',
-                          choices=('debug', 'release'),
                           help='cargo build profile')
     p_report.add_argument('--format',
                           default='html',
