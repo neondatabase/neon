@@ -364,7 +364,7 @@ jobs:
             }"
 
   trigger-e2e-tests:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+   runs-on: [ self-hosted, Linux, k8s-runner ]
    needs: [ build-neon ]
    steps:
      - name: Set PR's status to pending and request a remote CI test
