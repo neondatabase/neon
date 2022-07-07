@@ -159,6 +159,7 @@ jobs:
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
             DST=/tmp/neon/bin/$bin
+            objcopy --compress-debug-sections "$SRC"
             cp "$SRC" "$DST"
           done
 
@@ -170,6 +171,7 @@ jobs:
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
+              objcopy --compress-debug-sections "$SRC"
               cp "$SRC" "$DST"
               echo "$DST" >> /tmp/coverage/binaries.list
             done
