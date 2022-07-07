@@ -10,11 +10,11 @@ fn main() -> Result<()> {
         .takes_value(true)
         .help("Type of WAL to craft")
         .possible_values([
-            "simple",
-            "last_wal_record_xlog_switch",
-            "last_wal_record_xlog_switch_ends_on_page_boundary",
-            "last_wal_record_crossing_segment",
-            "wal_record_crossing_segment_followed_by_small_one",
+            Simple::NAME,
+            LastWalRecordXlogSwitch::NAME,
+            LastWalRecordXlogSwitchEndsOnPageBoundary::NAME,
+            WalRecordCrossingSegmentFollowedBySmallOne::NAME,
+            LastWalRecordCrossingSegment::NAME,
         ])
         .required(true);
     let arg_matches = App::new("Postgres WAL crafter")
@@ -56,17 +56,15 @@ fn main() -> Result<()> {
 
     let wal_craft = |arg_matches: &ArgMatches, client| {
         let lsn = match arg_matches.value_of("type").unwrap() {
-            "simple" => generate_simple(client)?,
-            "last_wal_record_xlog_switch" => generate_last_wal_record_xlog_switch(client)?,
-            "last_wal_record_xlog_switch_ends_on_page_boundary" => {
-                generate_last_wal_record_xlog_switch_ends_on_page_boundary(client)?
+            Simple::NAME => Simple::craft(client)?,
+            LastWalRecordXlogSwitch::NAME => LastWalRecordXlogSwitch::craft(client)?,
+            LastWalRecordXlogSwitchEndsOnPageBoundary::NAME => {
+                LastWalRecordXlogSwitchEndsOnPageBoundary::craft(client)?
             }
-            "last_wal_record_crossing_segment" => {
-                generate_last_wal_record_crossing_segment(client)?
+            WalRecordCrossingSegmentFollowedBySmallOne::NAME => {
+                WalRecordCrossingSegmentFollowedBySmallOne::craft(client)?
             }
-            "wal_record_crossing_segment_followed_by_small_one" => {
-                generate_wal_record_crossing_segment_followed_by_small_one(client)?
-            }
+            LastWalRecordCrossingSegment::NAME => LastWalRecordCrossingSegment::craft(client)?,
             a => panic!("Unknown --type argument: {}", a),
         };
         println!("end_of_wal = {}", lsn);
