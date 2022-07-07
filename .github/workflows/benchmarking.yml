@@ -88,7 +88,7 @@ jobs:
         # Plus time needed to initialize the test databases.
         TEST_PG_BENCH_DURATIONS_MATRIX: "300"
         TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-        PLATFORM: "zenith-staging"
+        PLATFORM: "neon-staging"
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
