@@ -22,9 +22,7 @@ env:
 
 jobs:
   build-postgres:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
       fail-fast: false
       matrix:
