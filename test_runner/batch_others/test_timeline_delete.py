@@ -1,7 +1,7 @@
 from uuid import uuid4
 import pytest
 
-from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException
+from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException, wait_until
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -42,7 +42,10 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     timeline_path = env.repo_dir / "tenants" / env.initial_tenant.hex / "timelines" / leaf_timeline_id.hex
     assert timeline_path.exists()
 
-    ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
+    # retry deletes when compaction or gc is running in pageserver
+    wait_until(number_of_iterations=3,
+               interval=0.2,
+               func=lambda: ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id))
 
     assert not timeline_path.exists()
 
@@ -51,5 +54,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
                        match="is not found neither locally nor remotely"):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
-    # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
-    ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)
+        # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
+        wait_until(number_of_iterations=3,
+                   interval=0.2,
+                   func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id))
