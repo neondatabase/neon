@@ -87,7 +87,6 @@ where
             // yet.)
             let end_of_timeline = timeline.tline.get_last_record_rlsn();
             if req_lsn == end_of_timeline.last {
-                // TODO ensure prev_lsn agrees, if provided
                 (end_of_timeline.prev, req_lsn)
             } else {
                 (Lsn(0), req_lsn)
