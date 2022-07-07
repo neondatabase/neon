@@ -11,9 +11,16 @@ members = [
 ]
 
 [profile.release]
-# This is useful for profiling and, to some extent, debug.
-# Besides, debug info should not affect the performance.
+strip = "debuginfo"
+
+[profile.perf]
+inherits = "release"
 debug = true
+
+[profile.release-coverage]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true
 
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
