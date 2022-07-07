@@ -347,7 +347,7 @@ pub(crate) fn create_timeline(
     tenant_id: ZTenantId,
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
-    ancestor_start_lsn: Option<Lsn>,
+    mut ancestor_start_lsn: Option<Lsn>,
 ) -> Result<Option<TimelineInfo>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
@@ -363,17 +363,18 @@ pub(crate) fn create_timeline(
                 .get_timeline_load(ancestor_timeline_id)
                 .context("Cannot branch off the timeline that's not present locally")?;
 
-            if let Some(lsn) = ancestor_start_lsn {
+            if let Some(lsn) = ancestor_start_lsn.as_mut() {
                 // Wait for the WAL to arrive and be processed on the parent branch up
                 // to the requested branch point. The repository code itself doesn't
                 // require it, but if we start to receive WAL on the new timeline,
                 // decoding the new WAL might need to look up previous pages, relation
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
-                ancestor_timeline.wait_lsn(lsn)?;
+                *lsn = lsn.align();
+                ancestor_timeline.wait_lsn(*lsn)?;
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
-                if ancestor_ancestor_lsn > lsn {
+                if ancestor_ancestor_lsn > *lsn {
                     // can we safely just branch from the ancestor instead?
                     anyhow::bail!(
                     "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
