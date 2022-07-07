@@ -357,41 +357,34 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    let mut start_lsn = ancestor_start_lsn.unwrap_or(Lsn(0));
-
     let new_timeline_info = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline_load(ancestor_timeline_id)
                 .context("Cannot branch off the timeline that's not present locally")?;
 
-            if start_lsn == Lsn(0) {
-                // Find end of WAL on the old timeline
-                let end_of_wal = ancestor_timeline.get_last_record_lsn();
-                info!("branching at end of WAL: {}", end_of_wal);
-                start_lsn = end_of_wal;
-            } else {
+            if let Some(lsn) = ancestor_start_lsn {
                 // Wait for the WAL to arrive and be processed on the parent branch up
                 // to the requested branch point. The repository code itself doesn't
                 // require it, but if we start to receive WAL on the new timeline,
                 // decoding the new WAL might need to look up previous pages, relation
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
-                ancestor_timeline.wait_lsn(start_lsn)?;
-            }
-            start_lsn = start_lsn.align();
+                ancestor_timeline.wait_lsn(lsn)?;
 
-            let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
-            if ancestor_ancestor_lsn > start_lsn {
-                // can we safely just branch from the ancestor instead?
-                anyhow::bail!(
+                let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
+                if ancestor_ancestor_lsn > lsn {
+                    // can we safely just branch from the ancestor instead?
+                    anyhow::bail!(
                     "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
-                    start_lsn,
+                    lsn,
                     ancestor_timeline_id,
                     ancestor_ancestor_lsn,
                 );
+                }
             }
-            repo.branch_timeline(ancestor_timeline_id, new_timeline_id, start_lsn)?;
+
+            repo.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?;
             // load the timeline into memory
             let loaded_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
