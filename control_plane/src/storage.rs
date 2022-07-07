@@ -427,7 +427,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                data_checksums: Some(true),
+                data_checksums_enabled: Some(true),
             })
             .send()?
             .error_from_body()?

@@ -266,11 +266,14 @@ pub fn create_tenant_repository(
             Ok(None)
         }
         Entry::Vacant(v) => {
-            let data_checksums = tenant_conf
-                .data_checksums
+            let data_checksums_enabled = tenant_conf
+                .data_checksums_enabled
                 .unwrap_or(tenant_config::defaults::DEFAULT_DATA_CHECKSUMS);
-            let wal_redo_manager =
-                Arc::new(PostgresRedoManager::new(conf, data_checksums, tenant_id));
+            let wal_redo_manager = Arc::new(PostgresRedoManager::new(
+                conf,
+                data_checksums_enabled,
+                tenant_id,
+            ));
             let repo = timelines::create_repo(
                 conf,
                 tenant_conf,
@@ -576,11 +579,11 @@ fn load_local_repo(
 
     let mut m = tenants_state::write_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
-        let data_checksums = tenant_conf
-            .data_checksums
+        let data_checksums_enabled = tenant_conf
+            .data_checksums_enabled
             .unwrap_or(tenant_config::defaults::DEFAULT_DATA_CHECKSUMS);
         // Set up a WAL redo manager, for applying WAL records.
-        let walredo_mgr = PostgresRedoManager::new(conf, data_checksums, tenant_id);
+        let walredo_mgr = PostgresRedoManager::new(conf, data_checksums_enabled, tenant_id);
 
         // Set up an object repository, for actual data storage.
         let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(

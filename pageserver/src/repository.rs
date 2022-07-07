@@ -473,7 +473,7 @@ pub mod repo_harness {
                 walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
-                data_checksums: Some(tenant_conf.data_checksums),
+                data_checksums_enabled: Some(tenant_conf.data_checksums_enabled),
             }
         }
     }

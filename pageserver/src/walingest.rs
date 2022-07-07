@@ -313,7 +313,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             if !page_is_new(&image) {
                 page_set_lsn(&mut image, lsn)
             }
-            page_set_checksum(&mut image, blk.blkno);
+            unsafe { page_set_checksum(&mut image, blk.blkno) };
 
             assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;

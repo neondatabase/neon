@@ -494,7 +494,7 @@ components:
           type: string
         compaction_threshold:
           type: string
-        data_checksums:
+        data_checksums_enabled:
           type: boolean
     TenantConfigInfo:
       type: object

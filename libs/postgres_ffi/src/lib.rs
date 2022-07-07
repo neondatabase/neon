@@ -60,13 +60,17 @@ pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
 
 /// Calculate page checksum and stamp it onto the page.
 /// NB: this will zero out and ignore any existing checksum.
-pub fn page_set_checksum(page: &mut [u8], blkno: u32) {
+/// # Safety
+/// See safety notes for `pg_checksum_page`
+pub unsafe fn page_set_checksum(page: &mut [u8], blkno: u32) {
     let checksum = pg_checksum_page(page, blkno);
     page[8..10].copy_from_slice(&checksum.to_le_bytes());
 }
 
 /// Check if page checksum is valid.
-pub fn page_verify_checksum(page: &[u8], blkno: u32) -> bool {
+/// # Safety
+/// See safety notes for `pg_checksum_page`
+pub unsafe fn page_verify_checksum(page: &[u8], blkno: u32) -> bool {
     let checksum = pg_checksum_page(page, blkno);
     checksum == u16::from_le_bytes(page[8..10].try_into().unwrap())
 }
@@ -86,7 +90,7 @@ mod tests {
         }
 
         // Calculate the checksum.
-        let checksum = pg_checksum_page(&page[..], 0);
+        let checksum = unsafe { pg_checksum_page(&page[..], 0) };
 
         // Sanity check: random bytes in the checksum attribute should not be
         // a valid checksum.
@@ -96,12 +100,12 @@ mod tests {
         );
 
         // Set the actual checksum.
-        page_set_checksum(&mut page, 0);
+        unsafe { page_set_checksum(&mut page, 0) };
 
         // Verify the checksum.
-        assert!(page_verify_checksum(&page[..], 0));
+        assert!(unsafe { page_verify_checksum(&page[..], 0) });
 
         // Checksum is not valid with another block number.
-        assert!(!page_verify_checksum(&page[..], 1));
+        assert!(!unsafe { page_verify_checksum(&page[..], 1) });
     }
 }

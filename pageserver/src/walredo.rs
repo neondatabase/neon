@@ -132,7 +132,7 @@ lazy_static! {
 pub struct PostgresRedoManager {
     tenantid: ZTenantId,
     conf: &'static PageServerConf,
-    data_checksums: bool,
+    data_checksums_enabled: bool,
 
     process: Mutex<Option<PostgresRedoProcess>>,
 }
@@ -233,14 +233,14 @@ impl PostgresRedoManager {
     ///
     pub fn new(
         conf: &'static PageServerConf,
-        data_checksums: bool,
+        data_checksums_enabled: bool,
         tenantid: ZTenantId,
     ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
             tenantid,
             conf,
-            data_checksums,
+            data_checksums_enabled,
             process: Mutex::new(None),
         }
     }
@@ -280,7 +280,7 @@ impl PostgresRedoManager {
                 base_img,
                 records,
                 wal_redo_timeout,
-                self.data_checksums,
+                self.data_checksums_enabled,
             )
             .map_err(WalRedoError::IoError);
 
@@ -730,7 +730,7 @@ impl PostgresRedoProcess {
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
-        data_checksums: bool,
+        data_checksums_enabled: bool,
     ) -> Result<Bytes, std::io::Error> {
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -742,7 +742,7 @@ impl PostgresRedoProcess {
         if let Some(img) = base_img {
             // Checksums could be not stamped for old tenants, so check them only if they
             // are enabled (this is controlled by per-tenant config).
-            if data_checksums && !page_verify_checksum(&img, tag.blknum) {
+            if data_checksums_enabled && !unsafe { page_verify_checksum(&img, tag.blknum) } {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("block {} of relation {} is invalid", tag.blknum, tag.rel),
