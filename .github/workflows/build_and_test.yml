@@ -22,9 +22,7 @@ env:
 
 jobs:
   build-postgres:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
       fail-fast: false
       matrix:
@@ -68,9 +66,7 @@ jobs:
 
 
   build-neon:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
@@ -207,9 +203,7 @@ jobs:
 
 
   pg_regress-tests:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -236,9 +230,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   other-tests:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -264,9 +256,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -295,9 +285,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   coverage-report:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -376,9 +364,7 @@ jobs:
             }"
 
   trigger-e2e-tests:
-    runs-on: dev
-    container:
-      image: ghcr.io/catthehacker/ubuntu:act-22.04
+    runs-on: [ self-hosted, Linux, k8s-runner ]
    needs: [ build-neon ]
    steps:
      - name: Set PR's status to pending and request a remote CI test
