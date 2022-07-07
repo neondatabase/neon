@@ -154,7 +154,7 @@ impl PostgresServer {
         bail!("Connection timed out");
     }
 
-    pub fn kill(&mut self) {
+    pub fn kill(mut self) {
         self.process.kill().unwrap();
         self.process.wait().unwrap();
     }

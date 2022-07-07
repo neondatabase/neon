@@ -85,7 +85,7 @@ fn main() -> Result<()> {
                 datadir: arg_matches.value_of("datadir").unwrap().into(),
             };
             cfg.initdb()?;
-            let mut srv = cfg.start_server()?;
+            let srv = cfg.start_server()?;
             wal_craft(arg_matches, &mut srv.connect_with_timeout()?)?;
             srv.kill();
             Ok(())
