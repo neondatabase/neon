@@ -24,8 +24,7 @@ jobs:
   build-postgres:
     name: 'build-postgres'
     runs-on: [ dev ]
-    container:
-      image: node:18-bullseye
+    container: ghcr.io/catthehacker/ubuntu:act-22.04
     strategy:
       fail-fast: false
       matrix:
