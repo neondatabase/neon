@@ -270,7 +270,12 @@ impl Repository for LayeredRepository {
     }
 
     /// Branch a timeline
-    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
+    fn branch_timeline(
+        &self,
+        src: ZTimelineId,
+        dst: ZTimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<()> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -283,6 +288,14 @@ impl Repository for LayeredRepository {
             .context("failed to load timeline for branching")?
             .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+
+        // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
+        let start_lsn = start_lsn.unwrap_or_else(|| {
+            let lsn = src_timeline.get_last_record_lsn();
+            info!("branching timeline {dst} from timeline {src} at last record LSN: {lsn}");
+            lsn
+        });
+
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
@@ -2874,7 +2887,7 @@ pub mod tests {
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
@@ -2933,7 +2946,7 @@ pub mod tests {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
