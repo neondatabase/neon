@@ -1929,7 +1929,7 @@ class SafekeeperHttpClient(requests.Session):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
     def timeline_status(self, tenant_id: str, timeline_id: str) -> SafekeeperTimelineStatus:
-        res = self.get(f"http://localhost:{self.port}/v1/timeline/{tenant_id}/{timeline_id}")
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(acceptor_epoch=resj['acceptor_state']['epoch'],
