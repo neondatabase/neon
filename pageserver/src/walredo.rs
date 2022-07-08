@@ -48,7 +48,8 @@ use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
 use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
-use postgres_ffi::pg_constants;
+use postgres_ffi::xlog_utils::wal_record_verify_checksum;
+use postgres_ffi::{page_verify_checksum, pg_constants, XLogRecord};
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -131,6 +132,7 @@ lazy_static! {
 pub struct PostgresRedoManager {
     tenantid: ZTenantId,
     conf: &'static PageServerConf,
+    data_checksums_enabled: bool,
 
     process: Mutex<Option<PostgresRedoProcess>>,
 }
@@ -229,11 +231,16 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenantid: ZTenantId) -> PostgresRedoManager {
+    pub fn new(
+        conf: &'static PageServerConf,
+        data_checksums_enabled: bool,
+        tenantid: ZTenantId,
+    ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
             tenantid,
             conf,
+            data_checksums_enabled,
             process: Mutex::new(None),
         }
     }
@@ -268,7 +275,13 @@ impl PostgresRedoManager {
         // Relational WAL records are applied using wal-redo-postgres
         let buf_tag = BufferTag { rel, blknum };
         let result = process
-            .apply_wal_records(buf_tag, base_img, records, wal_redo_timeout)
+            .apply_wal_records(
+                buf_tag,
+                base_img,
+                records,
+                wal_redo_timeout,
+                self.data_checksums_enabled,
+            )
             .map_err(WalRedoError::IoError);
 
         let end_time = Instant::now();
@@ -619,6 +632,7 @@ impl PostgresRedoProcess {
         info!("running initdb in {:?}", datadir.display());
         let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
+            .arg("--data-checksums")
             .arg("-N")
             .env_clear()
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
@@ -716,6 +730,7 @@ impl PostgresRedoProcess {
         base_img: Option<Bytes>,
         records: &[(Lsn, ZenithWalRecord)],
         wal_redo_timeout: Duration,
+        data_checksums_enabled: bool,
     ) -> Result<Bytes, std::io::Error> {
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -725,6 +740,15 @@ impl PostgresRedoProcess {
         let mut writebuf: Vec<u8> = Vec::new();
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
+            // Checksums could be not stamped for old tenants, so check them only if they
+            // are enabled (this is controlled by per-tenant config).
+            if data_checksums_enabled && !unsafe { page_verify_checksum(&img, tag.blknum) } {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("block {} of relation {} is invalid", tag.blknum, tag.rel),
+                ));
+            }
+
             build_push_page_msg(tag, &img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
@@ -733,6 +757,27 @@ impl PostgresRedoProcess {
                 rec: postgres_rec,
             } = rec
             {
+                let xlogrec = XLogRecord::from_buf(postgres_rec).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "could not deserialize WAL record for relation {} at LSN {}: {}",
+                            tag.rel, lsn, e
+                        ),
+                    )
+                })?;
+                // WAL records always have a checksum, check it before sending to redo process.
+                // It doesn't do these checks itself.
+                if !wal_record_verify_checksum(&xlogrec, postgres_rec) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "WAL record for relation {} at LSN {} is invalid",
+                            tag.rel, lsn
+                        ),
+                    ));
+                }
+
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
                 return Err(Error::new(

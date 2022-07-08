@@ -479,6 +479,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
 
+    // Turn on data checksums for all new tenants
+    tenant_conf.data_checksums_enabled = Some(request_data.data_checksums_enabled.unwrap_or(true));
+
     if let Some(compaction_period) = request_data.compaction_period {
         tenant_conf.compaction_period =
             Some(humantime::parse_duration(&compaction_period).map_err(ApiError::from_err)?);

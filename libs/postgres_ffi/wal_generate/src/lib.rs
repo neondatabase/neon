@@ -67,6 +67,7 @@ impl Conf {
             .new_pg_command("initdb")?
             .arg("-D")
             .arg(self.datadir.as_os_str())
+            .arg("--data-checksums")
             .args(&["-U", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
         debug!("initdb output: {:?}", output);

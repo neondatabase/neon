@@ -253,6 +253,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
         .args(&["-D", &initdbpath.to_string_lossy()])
         .args(&["-U", &conf.superuser])
         .args(&["-E", "utf8"])
+        .arg("--data-checksums")
         .arg("--no-instructions")
         // This is only used for a temporary installation that is deleted shortly after,
         // so no need to fsync it

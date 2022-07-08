@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use utils::lsn::Lsn;
+use utils::pg_checksum_page::pg_checksum_page;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
@@ -55,4 +56,56 @@ pub fn page_get_lsn(pg: &[u8]) -> Lsn {
 pub fn page_set_lsn(pg: &mut [u8], lsn: Lsn) {
     pg[0..4].copy_from_slice(&((lsn.0 >> 32) as u32).to_le_bytes());
     pg[4..8].copy_from_slice(&(lsn.0 as u32).to_le_bytes());
+}
+
+/// Calculate page checksum and stamp it onto the page.
+/// NB: this will zero out and ignore any existing checksum.
+/// # Safety
+/// See safety notes for `pg_checksum_page`
+pub unsafe fn page_set_checksum(page: &mut [u8], blkno: u32) {
+    let checksum = pg_checksum_page(page, blkno);
+    page[8..10].copy_from_slice(&checksum.to_le_bytes());
+}
+
+/// Check if page checksum is valid.
+/// # Safety
+/// See safety notes for `pg_checksum_page`
+pub unsafe fn page_verify_checksum(page: &[u8], blkno: u32) -> bool {
+    let checksum = pg_checksum_page(page, blkno);
+    checksum == u16::from_le_bytes(page[8..10].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::pg_constants::BLCKSZ;
+    use crate::{page_set_checksum, page_verify_checksum};
+    use utils::pg_checksum_page::pg_checksum_page;
+
+    #[test]
+    fn set_and_verify_checksum() {
+        // Create a page with some content and without a correct checksum.
+        let mut page: [u8; BLCKSZ as usize] = [0; BLCKSZ as usize];
+        for (i, byte) in page.iter_mut().enumerate().take(BLCKSZ as usize) {
+            *byte = i as u8;
+        }
+
+        // Calculate the checksum.
+        let checksum = unsafe { pg_checksum_page(&page[..], 0) };
+
+        // Sanity check: random bytes in the checksum attribute should not be
+        // a valid checksum.
+        assert_ne!(
+            checksum,
+            u16::from_le_bytes(page[8..10].try_into().unwrap())
+        );
+
+        // Set the actual checksum.
+        unsafe { page_set_checksum(&mut page, 0) };
+
+        // Verify the checksum.
+        assert!(unsafe { page_verify_checksum(&page[..], 0) });
+
+        // Checksum is not valid with another block number.
+        assert!(!unsafe { page_verify_checksum(&page[..], 1) });
+    }
 }

@@ -37,7 +37,7 @@ You can run all the tests with:
 
 If you want to run all the tests in a particular file:
 
-`./scripts/pytest test_pgbench.py`
+`./scripts/pytest test_runner/batch_others/test_restart_compute.py`
 
 If you want to run all tests that have the string "bench" in their names:
 

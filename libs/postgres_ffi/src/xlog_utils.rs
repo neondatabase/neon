@@ -477,6 +477,10 @@ impl XLogRecord {
         XLogRecord::des(buf)
     }
 
+    pub fn from_buf(buf: &[u8]) -> Result<XLogRecord, DeserializeError> {
+        XLogRecord::from_slice(&buf[0..XLOG_SIZE_OF_XLOG_RECORD])
+    }
+
     pub fn from_bytes<B: Buf>(buf: &mut B) -> Result<XLogRecord, DeserializeError> {
         use utils::bin_ser::LeSer;
         XLogRecord::des_from(&mut buf.reader())
@@ -741,4 +745,12 @@ mod tests {
         checkpoint.update_next_xid(1024);
         assert_eq!(checkpoint.nextXid.value, 2048);
     }
+}
+
+pub fn wal_record_verify_checksum(rec: &XLogRecord, recordbuf: &Bytes) -> bool {
+    let mut crc = 0;
+    crc = crc32c_append(crc, &recordbuf[XLOG_RECORD_CRC_OFFS + 4..]);
+    crc = crc32c_append(crc, &recordbuf[0..XLOG_RECORD_CRC_OFFS]);
+
+    crc == rec.xl_crc
 }

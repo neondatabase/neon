@@ -38,6 +38,7 @@ pub struct TenantCreateRequest {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub data_checksums_enabled: Option<bool>,
 }
 
 #[serde_as]
