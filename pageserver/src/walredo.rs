@@ -623,6 +623,7 @@ impl PostgresRedoProcess {
             .env_clear()
             .env("LD_LIBRARY_PATH", conf.pg_lib_dir())
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
+            .close_fds()
             .output()
             .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {}", e)))?;
 
