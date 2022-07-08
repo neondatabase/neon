@@ -302,6 +302,8 @@ def test_compute_restarts(neon_env_builder: NeonEnvBuilder):
 
 
 class BackgroundCompute(object):
+    MAX_QUERY_GAP_SECONDS = 2
+
     def __init__(self, index: int, env: NeonEnv, branch: str):
         self.index = index
         self.env = env
@@ -339,7 +341,7 @@ class BackgroundCompute(object):
 
             # With less sleep, there is a very big chance of not committing
             # anything or only 1 xact during test run.
-            await asyncio.sleep(2 * random.random())
+            await asyncio.sleep(random.uniform(0, self.MAX_QUERY_GAP_SECONDS))
         self.running = False
 
 
@@ -356,20 +358,34 @@ async def run_concurrent_computes(env: NeonEnv,
     background_tasks = [asyncio.create_task(compute.run()) for compute in computes]
 
     await asyncio.sleep(run_seconds)
+    log.info("stopping all tasks but one")
     for compute in computes[1:]:
         compute.stopped = True
+    await asyncio.gather(*background_tasks[1:])
     log.info("stopped all tasks but one")
 
     # work for some time with only one compute -- it should be able to make some xacts
-    await asyncio.sleep(8)
+    TIMEOUT_SECONDS = computes[0].MAX_QUERY_GAP_SECONDS + 3
+    initial_queries_by_0 = len(computes[0].successful_queries)
+    log.info(f'Waiting for another query by computes[0], '
+             f'it already had {initial_queries_by_0}, timeout is {TIMEOUT_SECONDS}s')
+    for _ in range(10 * TIMEOUT_SECONDS):
+        current_queries_by_0 = len(computes[0].successful_queries) - initial_queries_by_0
+        if current_queries_by_0 >= 1:
+            log.info(f'Found {current_queries_by_0} successful queries '
+                     f'by computes[0], completing the test')
+            break
+        await asyncio.sleep(0.1)
+    else:
+        assert False, "Timed out while waiting for another query by computes[0]"
     computes[0].stopped = True
 
-    await asyncio.gather(*background_tasks)
+    await asyncio.gather(background_tasks[0])
 
     result = await exec_compute_query(env, branch, 'SELECT * FROM query_log')
     # we should have inserted something while single compute was running
-    assert len(result) >= 4
-    log.info(f'Executed {len(result)} queries')
+    log.info(f'Executed {len(result)} queries, {current_queries_by_0} of them '
+             f'by computes[0] after we started stopping the others')
     for row in result:
         log.info(f'{row[0]} {row[1]} {row[2]}')
 
