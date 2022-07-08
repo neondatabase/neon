@@ -13,12 +13,15 @@ use anyhow::{anyhow, Context, Ok};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
+use tracing::log::warn;
 
 use crate::{config::PageServerConf, layered_repository::metadata::TimelineMetadata};
 use utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
+
+use super::download::TenantIndexParts;
 
 /// A part of the filesystem path, that needs a root to become a path again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -88,21 +91,27 @@ pub struct RemoteIndex(Arc<RwLock<RemoteTimelineIndex>>);
 impl RemoteIndex {
     pub fn from_parts(
         conf: &'static PageServerConf,
-        index_parts: HashMap<ZTenantId, HashMap<ZTimelineId, IndexPart>>,
+        index_parts: HashMap<ZTenantId, TenantIndexParts>,
     ) -> anyhow::Result<Self> {
         let mut entries: HashMap<ZTenantId, TenantEntry> = HashMap::new();
 
-        for (tenant_id, timelines) in index_parts {
-            for (timeline_id, index_part) in timelines {
-                let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
-                let remote_timeline =
-                    RemoteTimeline::from_index_part(&timeline_path, index_part)
-                        .context("Failed to restore remote timeline data from index part")?;
+        for (tenant_id, index_parts) in index_parts {
+            match index_parts {
+                // TODO: should we schedule a retry so it can be recovered? otherwise there is no way to revive it other restarting whole pageserver
+                TenantIndexParts::Poisoned(id) => warn!("skipping tenant_id set up for remote index because the index download has failed for timeline {id}"),
+                TenantIndexParts::Present(timelines) => {
+                    for (timeline_id, index_part) in timelines {
+                        let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
+                        let remote_timeline =
+                            RemoteTimeline::from_index_part(&timeline_path, index_part)
+                                .context("Failed to restore remote timeline data from index part")?;
 
-                entries
-                    .entry(tenant_id)
-                    .or_default()
-                    .insert(timeline_id, remote_timeline);
+                        entries
+                            .entry(tenant_id)
+                            .or_default()
+                            .insert(timeline_id, remote_timeline);
+                    }
+                },
             }
         }
 
