@@ -597,7 +597,7 @@ mod tests {
     fn init_logging() {
         let _ = env_logger::Builder::from_env(
             env_logger::Env::default()
-                .default_filter_or("wal_generate=info,postgres_ffi::xlog_utils=trace"),
+                .default_filter_or("wal_craft=info,postgres_ffi::xlog_utils=trace"),
         )
         .is_test(true)
         .try_init();
@@ -609,7 +609,7 @@ mod tests {
         expected_end_of_wal_non_partial: Lsn,
         last_segment: &str,
     ) {
-        use wal_generate::*;
+        use wal_craft::*;
         // 1. Generate some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -683,7 +683,7 @@ mod tests {
         init_logging();
         test_end_of_wal(
             "test_find_end_of_wal_simple",
-            wal_generate::generate_simple,
+            wal_craft::generate_simple,
             "0/2000000".parse::<Lsn>().unwrap(),
             "000000010000000000000001",
         );
@@ -694,7 +694,7 @@ mod tests {
         init_logging();
         test_end_of_wal(
             "test_find_end_of_wal_crossing_segment_followed_by_small_one",
-            wal_generate::generate_wal_record_crossing_segment_followed_by_small_one,
+            wal_craft::generate_wal_record_crossing_segment_followed_by_small_one,
             "0/3000000".parse::<Lsn>().unwrap(),
             "000000010000000000000002",
         );
@@ -706,7 +706,7 @@ mod tests {
         init_logging();
         test_end_of_wal(
             "test_find_end_of_wal_last_crossing_segment",
-            wal_generate::generate_last_wal_record_crossing_segment,
+            wal_craft::generate_last_wal_record_crossing_segment,
             "0/3000000".parse::<Lsn>().unwrap(),
             "000000010000000000000002",
         );

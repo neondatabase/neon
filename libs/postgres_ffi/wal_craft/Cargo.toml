@@ -1,5 +1,5 @@
 [package]
-name = "wal_generate"
+name = "wal_craft"
 version = "0.1.0"
 edition = "2021"
 

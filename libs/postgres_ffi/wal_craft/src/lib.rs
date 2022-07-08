@@ -218,7 +218,7 @@ pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result
     Ok(())
 }
 
-fn generate_internal<C: postgres::GenericClient>(
+fn craft_internal<C: postgres::GenericClient>(
     client: &mut C,
     f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
 ) -> Result<PgLsn> {
@@ -230,7 +230,7 @@ fn generate_internal<C: postgres::GenericClient>(
     let last_lsn = match f(client, initial_lsn)? {
         None => client.pg_current_wal_insert_lsn()?,
         Some(last_lsn) => match last_lsn.cmp(&client.pg_current_wal_insert_lsn()?) {
-            Ordering::Less => bail!("Some records were inserted after the generated WAL"),
+            Ordering::Less => bail!("Some records were inserted after the crafted WAL"),
             Ordering::Equal => last_lsn,
             Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
         },
@@ -239,7 +239,7 @@ fn generate_internal<C: postgres::GenericClient>(
     // Some records may be not flushed, e.g. non-transactional logical messages.
     client.execute("select neon_xlogflush(pg_current_wal_insert_lsn())", &[])?;
     match last_lsn.cmp(&client.pg_current_wal_flush_lsn()?) {
-        Ordering::Less => bail!("Some records were flushed after the generated WAL"),
+        Ordering::Less => bail!("Some records were flushed after the crafted WAL"),
         Ordering::Equal => {}
         Ordering::Greater => bail!("Reported LSN is greater than flush_lsn"),
     }
@@ -247,7 +247,7 @@ fn generate_internal<C: postgres::GenericClient>(
 }
 
 pub fn generate_simple(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
-    generate_internal(client, |client, _| {
+    craft_internal(client, |client, _| {
         client.execute("CREATE table t(x int)", &[])?;
         Ok(None)
     })
@@ -256,7 +256,7 @@ pub fn generate_simple(client: &mut impl postgres::GenericClient) -> Result<PgLs
 pub fn generate_last_wal_record_xlog_switch(
     client: &mut impl postgres::GenericClient,
 ) -> Result<PgLsn> {
-    // Do not use generate_internal because here we end up with flush_lsn exactly on
+    // Do not use craft_internal because here we end up with flush_lsn exactly on
     // the segment boundary and insert_lsn after the initial page header, which is unusual.
     ensure_server_config(client)?;
 
@@ -275,7 +275,7 @@ pub fn generate_last_wal_record_xlog_switch(
 pub fn generate_last_wal_record_xlog_switch_ends_on_page_boundary(
     client: &mut impl postgres::GenericClient,
 ) -> Result<PgLsn> {
-    // Do not use generate_internal because here we end up with flush_lsn exactly on
+    // Do not use craft_internal because here we end up with flush_lsn exactly on
     // the segment boundary and insert_lsn after the initial page header, which is unusual.
     ensure_server_config(client)?;
 
@@ -336,11 +336,11 @@ pub fn generate_last_wal_record_xlog_switch_ends_on_page_boundary(
     Ok(next_segment)
 }
 
-fn generate_single_logical_message(
+fn craft_single_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
 ) -> Result<PgLsn> {
-    generate_internal(client, |client, initial_lsn| {
+    craft_internal(client, |client, initial_lsn| {
         ensure!(
             initial_lsn < PgLsn::from(0x0200_0000 - 1024 * 1024),
             "Initial LSN is too far in the future"
@@ -381,11 +381,11 @@ fn generate_single_logical_message(
 pub fn generate_wal_record_crossing_segment_followed_by_small_one(
     client: &mut impl postgres::GenericClient,
 ) -> Result<PgLsn> {
-    generate_single_logical_message(client, true)
+    craft_single_logical_message(client, true)
 }
 
 pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
     client: &mut C,
 ) -> Result<PgLsn> {
-    generate_single_logical_message(client, false)
+    craft_single_logical_message(client, false)
 }
