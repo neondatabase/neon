@@ -107,7 +107,7 @@ jobs:
 
             export CARGO_INCREMENTAL=0
             export CACHEPOT_BUCKET=zenith-rust-cachepot
-            export RUSTC_WRAPPER=cachepot
+            export RUSTC_WRAPPER=""
             export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
             mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
