@@ -1,4 +1,4 @@
-from fixtures.neon_fixtures import NeonEnvBuilder, WalGenerate
+from fixtures.neon_fixtures import NeonEnvBuilder, WalCraft
 from fixtures.log_helper import log
 import pytest
 
@@ -20,8 +20,8 @@ def test_crafted_wal_end(neon_env_builder: NeonEnvBuilder, wal_type: str):
     env.neon_cli.create_branch('test_crafted_wal_end')
 
     pg = env.postgres.create('test_crafted_wal_end')
-    gen = WalGenerate(env)
-    pg.config(gen.postgres_config())
+    wal_craft = WalCraft(env)
+    pg.config(wal_craft.postgres_config())
     pg.start()
     res = pg.safe_psql_many(queries=[
         'CREATE TABLE keys(key int primary key)',
@@ -30,7 +30,7 @@ def test_crafted_wal_end(neon_env_builder: NeonEnvBuilder, wal_type: str):
     ])
     assert res[-1][0] == (5050, )
 
-    gen.in_existing(wal_type, pg.connstr())
+    wal_craft.in_existing(wal_type, pg.connstr())
 
     log.info("Restarting all safekeepers and pageservers")
     env.pageserver.stop()
