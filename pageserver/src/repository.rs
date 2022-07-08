@@ -7,7 +7,6 @@ use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fmt::Display;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
@@ -182,20 +181,6 @@ impl Value {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum TimelineSyncStatusUpdate {
-    Downloaded,
-}
-
-impl Display for TimelineSyncStatusUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            TimelineSyncStatusUpdate::Downloaded => "Downloaded",
-        };
-        f.write_str(s)
-    }
-}
-
 ///
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
@@ -204,11 +189,7 @@ pub trait Repository: Send + Sync {
 
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()>;
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
@@ -230,7 +211,12 @@ pub trait Repository: Send + Sync {
     ) -> Result<Arc<Self::Timeline>>;
 
     /// Branch a timeline
-    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
+    fn branch_timeline(
+        &self,
+        src: ZTimelineId,
+        dst: ZTimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<()>;
 
     /// Flush all data to disk.
     ///
@@ -260,10 +246,10 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    /// detaches timeline-related in-memory data.
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
+    /// removes timeline-related in-memory data
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()>;
 
-    // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
+    /// Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
     fn get_remote_index(&self) -> &RemoteIndex;
 }
 
@@ -537,7 +523,7 @@ pub mod repo_harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
-                RemoteIndex::empty(),
+                RemoteIndex::default(),
                 false,
             );
             // populate repo with locally available timelines
@@ -553,10 +539,7 @@ pub mod repo_harness {
                     .parse()
                     .unwrap();
 
-                repo.apply_timeline_remote_sync_status_update(
-                    timeline_id,
-                    TimelineSyncStatusUpdate::Downloaded,
-                )?;
+                repo.attach_timeline(timeline_id)?;
             }
 
             Ok(repo)
@@ -684,7 +667,7 @@ mod tests {
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -766,7 +749,7 @@ mod tests {
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(err.to_string().contains("invalid branch start lsn"));
@@ -787,7 +770,7 @@ mod tests {
 
         repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(&err.to_string().contains("invalid branch start lsn"));
@@ -832,7 +815,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -848,7 +831,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -906,7 +889,7 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
 
-            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
 
             let newtline = repo
                 .get_timeline_load(NEW_TIMELINE_ID)

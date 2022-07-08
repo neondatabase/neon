@@ -1,8 +1,12 @@
 use anyhow::*;
 use core::time::Duration;
 use log::*;
+use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
+use postgres_ffi::xlog_utils::{
+    XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +25,16 @@ pub struct PostgresServer {
     _unix_socket_dir: TempDir,
     client_config: postgres::Config,
 }
+
+pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec![
+        "wal_keep_size=50MB",            // Ensure old WAL is not removed
+        "shared_preload_libraries=neon", // can only be loaded at startup
+        // Disable background processes as much as possible
+        "wal_writer_delay=10s",
+        "autovacuum=off",
+    ]
+});
 
 impl Conf {
     fn pg_bin_dir(&self) -> PathBuf {
@@ -85,12 +99,8 @@ impl Conf {
             .arg(unix_socket_dir_path.as_os_str())
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(&["-c", "wal_keep_size=50MB"]) // Ensure old WAL is not removed
             .args(&["-c", "logging_collector=on"]) // stderr will mess up with tests output
-            .args(&["-c", "shared_preload_libraries=neon"]) // can only be loaded at startup
-            // Disable background processes as much as possible
-            .args(&["-c", "wal_writer_delay=10s"])
-            .args(&["-c", "autovacuum=off"])
+            .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .stderr(Stdio::from(log_file))
             .spawn()?;
         let server = PostgresServer {
@@ -181,11 +191,15 @@ pub trait PostgresClientExt: postgres::GenericClient {
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-fn generate_internal<C: postgres::GenericClient>(
-    client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
-) -> Result<PgLsn> {
+pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result<()> {
     client.execute("create extension if not exists neon_test_utils", &[])?;
+
+    let wal_keep_size: String = client.query_one("SHOW wal_keep_size", &[])?.get(0);
+    ensure!(wal_keep_size == "50MB");
+    let wal_writer_delay: String = client.query_one("SHOW wal_writer_delay", &[])?.get(0);
+    ensure!(wal_writer_delay == "10s");
+    let autovacuum: String = client.query_one("SHOW autovacuum", &[])?.get(0);
+    ensure!(autovacuum == "off");
 
     let wal_segment_size = client.query_one(
         "select cast(setting as bigint) as setting, unit \
@@ -200,6 +214,15 @@ fn generate_internal<C: postgres::GenericClient>(
         wal_segment_size.get::<_, i64>("setting") == 16 * 1024 * 1024,
         "Unexpected wal_segment_size in bytes"
     );
+
+    Ok(())
+}
+
+fn generate_internal<C: postgres::GenericClient>(
+    client: &mut C,
+    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
+) -> Result<PgLsn> {
+    ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
     info!("LSN initial = {}", initial_lsn);
@@ -228,6 +251,89 @@ pub fn generate_simple(client: &mut impl postgres::GenericClient) -> Result<PgLs
         client.execute("CREATE table t(x int)", &[])?;
         Ok(None)
     })
+}
+
+pub fn generate_last_wal_record_xlog_switch(
+    client: &mut impl postgres::GenericClient,
+) -> Result<PgLsn> {
+    // Do not use generate_internal because here we end up with flush_lsn exactly on
+    // the segment boundary and insert_lsn after the initial page header, which is unusual.
+    ensure_server_config(client)?;
+
+    client.execute("CREATE table t(x int)", &[])?;
+    let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+    let next_segment = PgLsn::from(0x0200_0000);
+    ensure!(
+        after_xlog_switch <= next_segment,
+        "XLOG_SWITCH message ended after the expected segment boundary: {} > {}",
+        after_xlog_switch,
+        next_segment
+    );
+    Ok(next_segment)
+}
+
+pub fn generate_last_wal_record_xlog_switch_ends_on_page_boundary(
+    client: &mut impl postgres::GenericClient,
+) -> Result<PgLsn> {
+    // Do not use generate_internal because here we end up with flush_lsn exactly on
+    // the segment boundary and insert_lsn after the initial page header, which is unusual.
+    ensure_server_config(client)?;
+
+    client.execute("CREATE table t(x int)", &[])?;
+
+    // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.
+    // We will use logical message as the padding. We start with detecting how much WAL
+    // it takes for one logical message, considering all alignments and headers.
+    let base_wal_advance = {
+        let before_lsn = client.pg_current_wal_insert_lsn()?;
+        // Small non-empty message bigger than few bytes is more likely than an empty
+        // message to have the same format as the big padding message.
+        client.execute(
+            "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', 10))",
+            &[],
+        )?;
+        // The XLOG_SWITCH record has no data => its size is exactly XLOG_SIZE_OF_XLOG_RECORD.
+        (u64::from(client.pg_current_wal_insert_lsn()?) - u64::from(before_lsn)) as usize
+            + XLOG_SIZE_OF_XLOG_RECORD
+    };
+    let mut remaining_lsn =
+        XLOG_BLCKSZ - u64::from(client.pg_current_wal_insert_lsn()?) as usize % XLOG_BLCKSZ;
+    if remaining_lsn < base_wal_advance {
+        remaining_lsn += XLOG_BLCKSZ;
+    }
+    let repeats = 10 + remaining_lsn - base_wal_advance;
+    info!(
+        "current_wal_insert_lsn={}, remaining_lsn={}, base_wal_advance={}, repeats={}",
+        client.pg_current_wal_insert_lsn()?,
+        remaining_lsn,
+        base_wal_advance,
+        repeats
+    );
+    client.execute(
+        "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
+        &[&(repeats as i32)],
+    )?;
+    info!(
+        "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
+        client.pg_current_wal_insert_lsn()?,
+        XLOG_SIZE_OF_XLOG_RECORD
+    );
+
+    // Emit the XLOG_SWITCH
+    let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+    let next_segment = PgLsn::from(0x0200_0000);
+    ensure!(
+        after_xlog_switch < next_segment,
+        "XLOG_SWITCH message ended on or after the expected segment boundary: {} > {}",
+        after_xlog_switch,
+        next_segment
+    );
+    ensure!(
+        u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ == XLOG_SIZE_OF_XLOG_SHORT_PHD,
+        "XLOG_SWITCH message ended not on page boundary: {}",
+        after_xlog_switch
+    );
+    Ok(next_segment)
 }
 
 fn generate_single_logical_message(

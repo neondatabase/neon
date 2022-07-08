@@ -10,5 +10,7 @@ anyhow = "1.0"
 clap = "3.0"
 env_logger = "0.9"
 log = "0.4"
+once_cell = "1.8.0"
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+postgres_ffi = { path = "../" }
 tempfile = "3.2"

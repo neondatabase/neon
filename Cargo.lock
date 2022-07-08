@@ -3760,7 +3760,9 @@ dependencies = [
  "clap 3.0.14",
  "env_logger",
  "log",
+ "once_cell",
  "postgres",
+ "postgres_ffi",
  "tempfile",
 ]
 

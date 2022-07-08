@@ -48,9 +48,6 @@ jobs:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         TEST_OUTPUT: /tmp/test_output
         POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-        # this variable will be embedded in perf test report
-        # and is needed to distinguish different environments
-        PLATFORM: github-actions-selfhosted
       shell: bash -ex {0}
       run: |
         # Test framework expects we have psql binary;

@@ -5,6 +5,7 @@
 //! volume is mounted to the local FS.
 
 use std::{
+    borrow::Cow,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -17,9 +18,15 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::{path_with_suffix_extension, Download, DownloadError};
+use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectName};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
+
+impl RemoteObjectName for PathBuf {
+    fn object_name(&self) -> Option<&str> {
+        self.file_stem().and_then(|n| n.to_str())
+    }
+}
 
 pub struct LocalFs {
     working_directory: PathBuf,
@@ -101,7 +108,18 @@ impl RemoteStorage for LocalFs {
     }
 
     async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
-        get_all_files(&self.storage_root).await
+        get_all_files(&self.storage_root, true).await
+    }
+
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        let path = match prefix {
+            Some(prefix) => Cow::Owned(self.storage_root.join(prefix)),
+            None => Cow::Borrowed(&self.storage_root),
+        };
+        get_all_files(path.as_ref(), false).await
     }
 
     async fn upload(
@@ -299,6 +317,7 @@ fn storage_metadata_path(original_path: &Path) -> PathBuf {
 
 fn get_all_files<'a, P>(
     directory_path: P,
+    recursive: bool,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<PathBuf>>> + Send + Sync + 'a>>
 where
     P: AsRef<Path> + Send + Sync + 'a,
@@ -315,7 +334,11 @@ where
                     if file_type.is_symlink() {
                         debug!("{:?} us a symlink, skipping", entry_path)
                     } else if file_type.is_dir() {
-                        paths.extend(get_all_files(entry_path).await?.into_iter())
+                        if recursive {
+                            paths.extend(get_all_files(entry_path, true).await?.into_iter())
+                        } else {
+                            paths.push(dir_entry.path())
+                        }
                     } else {
                         paths.push(dir_entry.path());
                     }

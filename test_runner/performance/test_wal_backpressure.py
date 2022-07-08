@@ -116,7 +116,6 @@ def start_pgbench_simple_update_workload(env: PgCompare, duration: int):
             '-c10',
             '-N',
             f'-T{duration}',
-            '-Mprepared',
             env.pg.connstr(options="-csynchronous_commit=off")
         ])
         env.flush()

@@ -38,9 +38,7 @@ use crate::keyspace::KeySpace;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
-};
+use crate::repository::{GcResult, Repository, RepositoryTimeline, Timeline, TimelineWriter};
 use crate::repository::{Key, Value};
 use crate::tenant_mgr;
 use crate::thread_mgr;
@@ -272,7 +270,12 @@ impl Repository for LayeredRepository {
     }
 
     /// Branch a timeline
-    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
+    fn branch_timeline(
+        &self,
+        src: ZTimelineId,
+        dst: ZTimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<()> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -285,6 +288,14 @@ impl Repository for LayeredRepository {
             .context("failed to load timeline for branching")?
             .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+
+        // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
+        let start_lsn = start_lsn.unwrap_or_else(|| {
+            let lsn = src_timeline.get_last_record_lsn();
+            info!("branching timeline {dst} from timeline {src} at last record LSN: {lsn}");
+            lsn
+        });
+
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
@@ -331,19 +342,19 @@ impl Repository for LayeredRepository {
     /// metrics collection.
     fn gc_iteration(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        let timeline_str = target_timelineid
+        let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
         STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
+                self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
             })
     }
 
@@ -410,50 +421,60 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+        // in order to be retriable detach needs to be idempotent
+        // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
-        // check no child timelines, because detach will remove files, which will brake child branches
-        // FIXME this can still be violated because we do not guarantee
-        //   that all ancestors are downloaded/attached to the same pageserver
-        let num_children = timelines
+
+        // Ensure that there are no child timelines **attached to that pageserver**,
+        // because detach removes files, which will break child branches
+        let children_exist = timelines
             .iter()
-            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
-            .count();
+            .any(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id));
 
         ensure!(
-            num_children == 0,
+            !children_exist,
             "Cannot detach timeline which has child timelines"
         );
+        let timeline_entry = match timelines.entry(timeline_id) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(_) => bail!("timeline not found"),
+        };
 
-        ensure!(
-            timelines.remove(&timeline_id).is_some(),
-            "Cannot detach timeline {timeline_id} that is not available locally"
-        );
+        // try to acquire gc and compaction locks to prevent errors from missing files
+        let _gc_guard = self
+            .gc_cs
+            .try_lock()
+            .map_err(|e| anyhow::anyhow!("cannot acquire gc lock {e}"))?;
+
+        let compaction_guard = timeline_entry.get().compaction_guard()?;
+
+        let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+            format!(
+                "Failed to remove local timeline directory '{}'",
+                local_timeline_directory.display()
+            )
+        })?;
+        info!("detach removed files");
+
+        drop(compaction_guard);
+        timeline_entry.remove();
+
         Ok(())
     }
 
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()> {
-        debug!(
-            "apply_timeline_remote_sync_status_update timeline_id: {} update: {:?}",
-            timeline_id, timeline_sync_status_update
-        );
-        match timeline_sync_status_update {
-            TimelineSyncStatusUpdate::Downloaded => {
-                match self.timelines.lock().unwrap().entry(timeline_id) {
-                    Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
-                    Entry::Vacant(entry) => {
-                        // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                        let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
-                        // finally we make newly downloaded timeline visible to repository
-                        entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
-                    },
-                };
-            }
-        }
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+        debug!("attach timeline_id: {}", timeline_id,);
+        match self.timelines.lock().unwrap().entry(timeline_id) {
+            Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
+            Entry::Vacant(entry) => {
+                // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
+                let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
+                // finally we make newly downloaded timeline visible to repository
+                entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
+            },
+        };
         Ok(())
     }
 
@@ -501,6 +522,18 @@ impl LayeredTimelineEntry {
             LayeredTimelineEntry::Unloaded { .. } => {
                 anyhow::bail!("timeline is unloaded")
             }
+        }
+    }
+
+    fn compaction_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
+        match self {
+            LayeredTimelineEntry::Loaded(timeline) => timeline
+                .compaction_cs
+                .try_lock()
+                .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+                .map(Some),
+
+            LayeredTimelineEntry::Unloaded { .. } => Ok(None),
         }
     }
 }
@@ -839,13 +872,13 @@ impl LayeredRepository {
     //   we do.
     fn gc_iteration_internal(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timelineid)
+            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timeline_id)
                 .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -859,6 +892,12 @@ impl LayeredRepository {
         let mut timeline_ids = Vec::new();
         let mut timelines = self.timelines.lock().unwrap();
 
+        if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+            if timelines.get(target_timeline_id).is_none() {
+                bail!("gc target timeline does not exist")
+            }
+        };
+
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
@@ -867,7 +906,7 @@ impl LayeredRepository {
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
                 // If target_timeline is specified, we only need to know branchpoints of its children
-                if let Some(timelineid) = target_timelineid {
+                if let Some(timelineid) = target_timeline_id {
                     if ancestor_timeline_id == &timelineid {
                         all_branchpoints
                             .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
@@ -882,7 +921,7 @@ impl LayeredRepository {
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
-        for timelineid in timeline_ids.into_iter() {
+        for timeline_id in timeline_ids.into_iter() {
             if thread_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
@@ -891,12 +930,12 @@ impl LayeredRepository {
 
             // Timeline is known to be local and loaded.
             let timeline = self
-                .get_timeline_load_internal(timelineid, &mut *timelines)?
+                .get_timeline_load_internal(timeline_id, &mut *timelines)?
                 .expect("checked above that timeline is local and loaded");
 
             // If target_timeline is specified, only GC it
-            if let Some(target_timelineid) = target_timelineid {
-                if timelineid != target_timelineid {
+            if let Some(target_timelineid) = target_timeline_id {
+                if timeline_id != target_timelineid {
                     continue;
                 }
             }
@@ -905,8 +944,8 @@ impl LayeredRepository {
                 drop(timelines);
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
-                        Included((timelineid, Lsn(0))),
-                        Included((timelineid, Lsn(u64::MAX))),
+                        Included((timeline_id, Lsn(0))),
+                        Included((timeline_id, Lsn(u64::MAX))),
                     ))
                     .map(|&x| x.1)
                     .collect();
@@ -916,7 +955,7 @@ impl LayeredRepository {
                 // used in tests, so we want as deterministic results as possible.
                 if checkpoint_before_gc {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
-                    info!("timeline {} checkpoint_before_gc done", timelineid);
+                    info!("timeline {} checkpoint_before_gc done", timeline_id);
                 }
                 timeline.update_gc_info(branchpoints, cutoff, pitr);
                 let result = timeline.gc()?;
@@ -2848,7 +2887,7 @@ pub mod tests {
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
@@ -2907,7 +2946,7 @@ pub mod tests {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
