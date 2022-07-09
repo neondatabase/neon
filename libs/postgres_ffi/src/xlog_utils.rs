@@ -382,14 +382,12 @@ fn find_end_of_wal_segment(
 
 ///
 /// Scan a directory that contains PostgreSQL WAL files, for the end of WAL.
-/// If precise, returns end LSN (next insertion point, basically);
-/// otherwise, start of the last segment.
+/// Returns next insertion LSN.
 /// Returns (0, 0) if there is no WAL.
 ///
 pub fn find_end_of_wal(
     data_dir: &Path,
     wal_seg_size: usize,
-    precise: bool,
     start_lsn: Lsn, // start reading WAL at this point or later
 ) -> anyhow::Result<(XLogRecPtr, TimeLineID)> {
     let mut high_segno: XLogSegNo = 0;
@@ -431,7 +429,7 @@ pub fn find_end_of_wal(
          */
         if !high_ispartial {
             high_segno += 1;
-        } else if precise {
+        } else {
             /* otherwise locate last record in last partial segment */
             if start_lsn.segment_number(wal_seg_size) > high_segno {
                 bail!(
@@ -462,7 +460,7 @@ pub fn find_end_of_wal(
 pub fn main() {
     let mut data_dir = PathBuf::new();
     data_dir.push(".");
-    let (wal_end, tli) = find_end_of_wal(&data_dir, WAL_SEGMENT_SIZE, true, Lsn(0)).unwrap();
+    let (wal_end, tli) = find_end_of_wal(&data_dir, WAL_SEGMENT_SIZE, Lsn(0)).unwrap();
     println!(
         "wal_end={:>08X}{:>08X}, tli={}",
         (wal_end >> 32) as u32,
@@ -717,8 +715,7 @@ mod tests {
         expected_end_of_wal_partial: Lsn,
     ) {
         // Check end_of_wal on non-partial WAL segment (we treat it as fully populated)
-        let (wal_end, tli) =
-            find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, true, start_lsn).unwrap();
+        let (wal_end, tli) = find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, start_lsn).unwrap();
         let wal_end = Lsn(wal_end);
         info!(
             "find_end_of_wal returned (wal_end={}, tli={}) with non-partial WAL segment",
@@ -732,8 +729,7 @@ mod tests {
             cfg.wal_dir().join(format!("{}.partial", last_segment)),
         )
         .unwrap();
-        let (wal_end, tli) =
-            find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, true, start_lsn).unwrap();
+        let (wal_end, tli) = find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, start_lsn).unwrap();
         let wal_end = Lsn(wal_end);
         info!(
             "find_end_of_wal returned (wal_end={}, tli={}) with partial WAL segment",
