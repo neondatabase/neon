@@ -2,6 +2,7 @@ extern crate bindgen;
 
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 use bindgen::callbacks::ParseCallbacks;
 
@@ -45,6 +46,45 @@ fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=pg_control_ffi.h");
 
+    // Finding the location of C headers for the Postgres server:
+    // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/tmp_install`
+    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/tmp_install/include/postgresql/server`
+    let mut pg_install_dir: PathBuf;
+    let inc_server_path: String;
+
+    if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
+        pg_install_dir = postgres_install_dir.into();
+    } else {
+        pg_install_dir = PathBuf::from("tmp_install")
+    }
+
+    if pg_install_dir.is_relative() {
+        let cwd = env::current_dir().unwrap();
+        pg_install_dir = cwd.join("..").join("..").join(pg_install_dir);
+    }
+
+    let pg_config_bin = pg_install_dir.join("bin").join("pg_config");
+    if pg_config_bin.exists() {
+        let output = Command::new(pg_config_bin)
+            .arg("--includedir-server")
+            .output()
+            .expect("failed to execute `pg_config --includedir-server`");
+
+        if !output.status.success() {
+            panic!("`pg_config --includedir-server` failed")
+        }
+
+        inc_server_path = String::from_utf8(output.stdout).unwrap().trim_end().into();
+    } else {
+        inc_server_path = pg_install_dir
+            .join("include")
+            .join("postgresql")
+            .join("server")
+            .into_os_string()
+            .into_string()
+            .unwrap();
+    }
+
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
@@ -81,15 +121,7 @@ fn main() {
         // explicit padding fields.
         .explicit_padding(true)
         //
-        // Path the server include dir. It is in tmp_install/include/server, if you did
-        // "configure --prefix=<path to tmp_install>". But if you used "configure --prefix=/",
-        // and used DESTDIR to move it into tmp_install, then it's in
-        // tmp_install/include/postgres/server
-        // 'pg_config --includedir-server' would perhaps be the more proper way to find it,
-        // but this will do for now.
-        //
-        .clang_arg("-I../../tmp_install/include/server")
-        .clang_arg("-I../../tmp_install/include/postgresql/server")
+        .clang_arg(format!("-I{inc_server_path}"))
         //
         // Finish the builder and generate the bindings.
         //
