@@ -621,8 +621,13 @@ mod tests {
         }
         cfg.initdb().unwrap();
         let srv = cfg.start_server().unwrap();
-        let expected_end_of_wal_partial: Lsn =
-            u64::from(C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap()).into();
+        let (intermediate_lsns, expected_end_of_wal_partial) =
+            C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap();
+        let intermediate_lsns: Vec<Lsn> = intermediate_lsns
+            .iter()
+            .map(|&lsn| u64::from(lsn).into())
+            .collect();
+        let expected_end_of_wal_partial: Lsn = u64::from(expected_end_of_wal_partial).into();
         srv.kill();
 
         // Check find_end_of_wal on the initial WAL
@@ -635,13 +640,44 @@ mod tests {
             .max()
             .unwrap();
         check_pg_waldump_end_of_wal(&cfg, &last_segment, expected_end_of_wal_partial);
-        check_end_of_wal(
-            &cfg,
-            &last_segment,
-            Lsn(0), // start from the beginning
-            expected_end_of_wal_non_partial,
-            expected_end_of_wal_partial,
-        );
+        for start_lsn in std::iter::once(Lsn(0))
+            .chain(intermediate_lsns)
+            .chain(std::iter::once(expected_end_of_wal_partial))
+        {
+            // Erase all WAL before `start_lsn` to ensure it's not used by `find_end_of_wal`.
+            // We assume that `start_lsn` is non-decreasing.
+            info!(
+                "Checking with start_lsn={}, erasing WAL before it",
+                start_lsn
+            );
+            for file in fs::read_dir(cfg.wal_dir()).unwrap().flatten() {
+                let fname = file.file_name().into_string().unwrap();
+                if !IsXLogFileName(&fname) {
+                    continue;
+                }
+                let (segno, _) = XLogFromFileName(&fname, WAL_SEGMENT_SIZE);
+                let seg_start_lsn = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
+                if seg_start_lsn > u64::from(start_lsn) {
+                    continue;
+                }
+                let mut f = File::options().write(true).open(file.path()).unwrap();
+                const ZEROS: [u8; WAL_SEGMENT_SIZE] = [0u8; WAL_SEGMENT_SIZE];
+                f.write_all(
+                    &ZEROS[0..min(
+                        WAL_SEGMENT_SIZE,
+                        (u64::from(start_lsn) - seg_start_lsn) as usize,
+                    )],
+                )
+                .unwrap();
+            }
+            check_end_of_wal(
+                &cfg,
+                &last_segment,
+                start_lsn,
+                expected_end_of_wal_non_partial,
+                expected_end_of_wal_partial,
+            );
+        }
     }
 
     fn check_pg_waldump_end_of_wal(
