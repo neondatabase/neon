@@ -226,20 +226,24 @@ pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result
 pub trait Crafter {
     const NAME: &'static str;
 
-    /// Generates WAL using the client `client`. Returns the expected end-of-wal LSN.
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn>;
+    /// Generates WAL using the client `client`. Returns a pair of:
+    /// * A vector of some valid "interesting" intermediate LSNs which one may start reading from.
+    ///   May include or exclude Lsn(0) and the end-of-wal.
+    /// * The expected end-of-wal LSN.
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)>;
 }
 
 fn craft_internal<C: postgres::GenericClient>(
     client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
-) -> Result<PgLsn> {
+    f: impl Fn(&mut C, PgLsn) -> Result<(Vec<PgLsn>, Option<PgLsn>)>,
+) -> Result<(Vec<PgLsn>, PgLsn)> {
     ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
     info!("LSN initial = {}", initial_lsn);
 
-    let last_lsn = match f(client, initial_lsn)? {
+    let (mut intermediate_lsns, last_lsn) = f(client, initial_lsn)?;
+    let last_lsn = match last_lsn {
         None => client.pg_current_wal_insert_lsn()?,
         Some(last_lsn) => match last_lsn.cmp(&client.pg_current_wal_insert_lsn()?) {
             Ordering::Less => bail!("Some records were inserted after the crafted WAL"),
@@ -247,6 +251,9 @@ fn craft_internal<C: postgres::GenericClient>(
             Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
         },
     };
+    if !intermediate_lsns.starts_with(&[initial_lsn]) {
+        intermediate_lsns.insert(0, initial_lsn);
+    }
 
     // Some records may be not flushed, e.g. non-transactional logical messages.
     client.execute("select neon_xlogflush(pg_current_wal_insert_lsn())", &[])?;
@@ -255,16 +262,16 @@ fn craft_internal<C: postgres::GenericClient>(
         Ordering::Equal => {}
         Ordering::Greater => bail!("Reported LSN is greater than flush_lsn"),
     }
-    Ok(last_lsn)
+    Ok((intermediate_lsns, last_lsn))
 }
 
 pub struct Simple;
 impl Crafter for Simple {
     const NAME: &'static str = "simple";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
         craft_internal(client, |client, _| {
             client.execute("CREATE table t(x int)", &[])?;
-            Ok(None)
+            Ok((Vec::new(), None))
         })
     }
 }
@@ -272,12 +279,13 @@ impl Crafter for Simple {
 pub struct LastWalRecordXlogSwitch;
 impl Crafter for LastWalRecordXlogSwitch {
     const NAME: &'static str = "last_wal_record_xlog_switch";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
         // Do not use generate_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
 
         client.execute("CREATE table t(x int)", &[])?;
+        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
         let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
         let next_segment = PgLsn::from(0x0200_0000);
         ensure!(
@@ -286,14 +294,14 @@ impl Crafter for LastWalRecordXlogSwitch {
             after_xlog_switch,
             next_segment
         );
-        Ok(next_segment)
+        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
     }
 }
 
 pub struct LastWalRecordXlogSwitchEndsOnPageBoundary;
 impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
     const NAME: &'static str = "last_wal_record_xlog_switch_ends_on_page_boundary";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
         // Do not use generate_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
@@ -339,6 +347,7 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
         );
 
         // Emit the XLOG_SWITCH
+        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
         let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
         let next_segment = PgLsn::from(0x0200_0000);
         ensure!(
@@ -352,14 +361,14 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
             "XLOG_SWITCH message ended not on page boundary: {}",
             after_xlog_switch
         );
-        Ok(next_segment)
+        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
     }
 }
 
 fn craft_single_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
-) -> Result<PgLsn> {
+) -> Result<(Vec<PgLsn>, PgLsn)> {
     craft_internal(client, |client, initial_lsn| {
         ensure!(
             initial_lsn < PgLsn::from(0x0200_0000 - 1024 * 1024),
@@ -391,9 +400,9 @@ fn craft_single_logical_message(
                 message_lsn < after_message_lsn,
                 "No record found after the emitted message"
             );
-            Ok(Some(after_message_lsn))
+            Ok((vec![message_lsn], Some(after_message_lsn)))
         } else {
-            Ok(Some(message_lsn))
+            Ok((Vec::new(), Some(message_lsn)))
         }
     })
 }
@@ -401,7 +410,7 @@ fn craft_single_logical_message(
 pub struct WalRecordCrossingSegmentFollowedBySmallOne;
 impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
     const NAME: &'static str = "wal_record_crossing_segment_followed_by_small_one";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
         craft_single_logical_message(client, true)
     }
 }
@@ -409,7 +418,7 @@ impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
 pub struct LastWalRecordCrossingSegment;
 impl Crafter for LastWalRecordCrossingSegment {
     const NAME: &'static str = "last_wal_record_crossing_segment";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
         craft_single_logical_message(client, false)
     }
 }

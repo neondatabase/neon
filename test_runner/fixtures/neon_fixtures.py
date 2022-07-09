@@ -1276,12 +1276,9 @@ class WalCraft(AbstractNeonCli):
         res.check_returncode()
         return res.stdout.split('\n')
 
-    def in_existing(self, type: str, connection: str) -> int:
+    def in_existing(self, type: str, connection: str) -> None:
         res = self.raw_cli(["in-existing", type, connection])
         res.check_returncode()
-        m = re.fullmatch(r'end_of_wal = (.*)\n', res.stdout)
-        assert m
-        return lsn_from_hex(m.group(1))
 
 
 class NeonPageserver(PgProtocol):
