@@ -4,6 +4,7 @@ use log::*;
 use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
+use postgres_ffi::pg_constants::WAL_SEGMENT_SIZE;
 use postgres_ffi::xlog_utils::{
     XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
@@ -43,6 +44,10 @@ impl Conf {
 
     fn pg_lib_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("lib")
+    }
+
+    pub fn wal_dir(&self) -> PathBuf {
+        self.datadir.join("pg_wal")
     }
 
     fn new_pg_command(&self, command: impl AsRef<Path>) -> Result<Command> {
@@ -211,7 +216,7 @@ pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result
         "Unexpected wal_segment_size unit"
     );
     ensure!(
-        wal_segment_size.get::<_, i64>("setting") == 16 * 1024 * 1024,
+        wal_segment_size.get::<_, i64>("setting") == WAL_SEGMENT_SIZE as i64,
         "Unexpected wal_segment_size in bytes"
     );
 
