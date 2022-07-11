@@ -37,7 +37,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+            - v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -54,7 +54,7 @@ jobs:
 
       - save_cache:
           name: Save postgres cache
-          key: v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+          key: v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
@@ -85,7 +85,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+            - v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
       - restore_cache:
           name: Restore rust cache
@@ -93,7 +93,7 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+            - v05-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
       - run:
@@ -115,7 +115,7 @@ jobs:
 
       - save_cache:
           name: Save rust cache
-          key: v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+          key: v05-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
