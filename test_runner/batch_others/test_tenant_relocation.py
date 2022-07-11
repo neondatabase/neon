@@ -426,7 +426,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         post_migration_check(pg_main, 500500, old_local_path_main)
         post_migration_check(pg_second, 1001000, old_local_path_second)
 
-            # ensure that we can successfully read all relations on the new pageserver
+        # ensure that we can successfully read all relations on the new pageserver
+        with pg_cur(pg_second) as cur:
             cur.execute('''
                 DO $$
                 DECLARE
