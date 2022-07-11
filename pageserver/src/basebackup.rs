@@ -10,8 +10,9 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, BytesMut};
+use itertools::Itertools;
 use log::*;
 use std::fmt::Write as FmtWrite;
 use std::io;
@@ -34,9 +35,11 @@ pub struct Basebackup<'a> {
     timeline: &'a Arc<dyn Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
+    full_backup: bool,
 }
 
-// Create basebackup with non-rel data in it. Omit relational data.
+// Create basebackup with non-rel data in it.
+// Only include relational data if 'full_backup' is true.
 //
 // Currently we use empty lsn in two cases:
 //  * During the basebackup right after timeline creation
@@ -48,6 +51,8 @@ impl<'a> Basebackup<'a> {
         write: &'a mut dyn Write,
         timeline: &'a Arc<dyn Timeline>,
         req_lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
+        full_backup: bool,
     ) -> Result<Basebackup<'a>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
@@ -82,16 +87,27 @@ impl<'a> Basebackup<'a> {
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
+        // Consolidate the derived and the provided prev_lsn values
+        let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+            if backup_prev != Lsn(0) {
+                anyhow::ensure!(backup_prev == provided_prev_lsn)
+            }
+            provided_prev_lsn
+        } else {
+            backup_prev
+        };
+
         info!(
-            "taking basebackup lsn={}, prev_lsn={}",
-            backup_lsn, backup_prev
+            "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
+            backup_lsn, prev_lsn, full_backup
         );
 
         Ok(Basebackup {
             ar: Builder::new(write),
             timeline,
             lsn: backup_lsn,
-            prev_record_lsn: backup_prev,
+            prev_record_lsn: prev_lsn,
+            full_backup,
         })
     }
 
@@ -130,10 +146,63 @@ impl<'a> Basebackup<'a> {
             }
         }
 
+        // Gather relational files if we are doing a full backup.
+        if self.full_backup {
+            let all_rels = self.timeline.list_rels(0, 0, self.lsn)?;
+            for rel in all_rels {
+                self.add_rel(rel)?;
+            }
+        }
+
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
         debug!("all tarred up!");
+        Ok(())
+    }
+
+    fn add_rel(&mut self, rel: RelishTag) -> anyhow::Result<()> {
+        let tag = match rel {
+            RelishTag::Relation(tag) => tag,
+            _ => {
+                return Err(anyhow!("expected RelishTag::Rel, got {:?}", rel));
+            }
+        };
+
+        // Function that adds relation segment data to archive
+        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
+            let file_name = tag.to_segfile_name(segment_index as u32);
+            let header = new_tar_header(&file_name, data.len() as u64)?;
+            self.ar.append(&header, data.as_slice())?;
+            Ok(())
+        };
+
+        let nblocks = match self.timeline.get_relish_size(rel, self.lsn)? {
+            Some(nblocks) => nblocks,
+            None => {
+                warn!("rel {} is truncated in timeline", tag);
+                return Ok(());
+            }
+        };
+
+        // If the relation is empty, create an empty file
+        if nblocks == 0 {
+            add_file(0, &vec![])?;
+            return Ok(());
+        }
+
+        // Add a file for each chunk of blocks (aka segment)
+        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        for (seg, blocks) in chunks.into_iter().enumerate() {
+            let mut segment_data: Vec<u8> = vec![];
+            for blknum in blocks {
+                let img = self.timeline.get_page_at_lsn(rel, blknum, self.lsn)?;
+                segment_data.extend_from_slice(&img[..]);
+            }
+
+            add_file(seg, &segment_data)?;
+        }
+
         Ok(())
     }
 

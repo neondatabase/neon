@@ -514,7 +514,9 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
         tenantid: ZTenantId,
+        full_backup: bool,
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
@@ -535,7 +537,9 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+
+            let mut basebackup =
+                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -635,7 +639,67 @@ impl postgres_backend::Handler for PageServerHandler {
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, None, tenantid, false)?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        // return pair of prev_lsn and last_lsn
+        else if query_string.starts_with("get_last_record_rlsn ") {
+            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            ensure!(
+                params.len() == 2,
+                "invalid param number for get_last_record_rlsn command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            self.check_permission(Some(tenantid))?;
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let end_of_timeline = timeline.get_last_record_rlsn();
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::text_col(b"prev_lsn"),
+                RowDescriptor::text_col(b"last_lsn"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(end_of_timeline.prev.to_string().as_bytes()),
+                Some(end_of_timeline.last.to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        // same as basebackup, but result includes relational data as well
+        else if query_string.starts_with("fullbackup ") {
+            let (_, params_raw) = query_string.split_at("fullbackup ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            ensure!(
+                params.len() >= 2,
+                "invalid param number for fullbackup command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            // The caller is responsible for providing correct lsn and prev_lsn.
+            let lsn = if params.len() > 2 {
+                Some(Lsn::from_str(params[2])?)
+            } else {
+                None
+            };
+            let prev_lsn = if params.len() > 3 {
+                Some(Lsn::from_str(params[3])?)
+            } else {
+                None
+            };
+
+            self.check_permission(Some(tenantid))?;
+
+            // Check that the timeline exists
+            self.handle_basebackup_request(pgb, timelineid, lsn, prev_lsn, tenantid, true)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("callmemaybe ") {
             // callmemaybe <zenith tenantid as hex string> <zenith timelineid as hex string> <connstr>
