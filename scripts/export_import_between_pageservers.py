@@ -589,6 +589,12 @@ def main(args: argparse.Namespace):
                 re_export_filename
             )
 
+            # Check the size is the same
+            old_size = os.path.getsize(tar_filename),
+            new_size = os.path.getsize(re_export_filename),
+            if old_size != new_size:
+                raise AssertionError(f"Sizes don't match old: {old_size} new: {new_size}")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
