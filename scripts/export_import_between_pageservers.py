@@ -367,6 +367,10 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
 ##############
 
 
+
+PSQL_ENV = {**os.environ, 'LD_LIBRARY_PATH': '/usr/local/lib/'}
+
+
 def pack_base(log_dir, restored_dir, output_tar):
     """Create tar file from basebackup, being careful to produce relative filenames."""
     tmp_tar_name = "tmp.tar"
@@ -459,6 +463,46 @@ def add_missing_rels(base_tar, output_tar, log_dir, pg_bin):
     touch_missing_rels(log_dir, base_tar, output_tar, reconstructed_paths)
 
 
+def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
+    conn = psycopg2.connect(pageserver_connstr)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cmd = f"get_last_record_rlsn {tenant_id} {timeline_id}"
+        cur.execute(cmd)
+        res = cur.fetchone()
+        prev_lsn = res[0]
+        last_lsn = res[1]
+    conn.close()
+
+    return last_lsn, prev_lsn
+
+
+def export(psql_path, pageserver_connstr, tenant_id, timeline_id, last_lsn, prev_lsn):
+    # Choose filenames
+    tar_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.tar")
+    incomplete_filename = tar_filename + ".incomplete"
+    stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
+
+    # Construct export command
+    query = f"fullbackup {tenant_id} {timeline_id} {last_lsn} {prev_lsn}"
+    cmd = [psql_path, "--no-psqlrc", pageserver_connstr, "-c", query]
+
+    # Run export command
+    print(f"Running: {cmd}")
+    with open(incomplete_filename, 'w') as stdout_f:
+        with open(stderr_filename, 'w') as stderr_f:
+            print(f"(capturing output to {incomplete_filename})")
+            subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=PSQL_ENV, check=True)
+
+    # Add missing rels
+    pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
+    add_missing_rels(incomplete_filename, tar_filename, args.work_dir, pg_bin)
+
+    # Log more info
+    file_size = os.path.getsize(tar_filename)
+    print(f"Done export: {tar_filename}, size {file_size}")
+
+
 def main(args: argparse.Namespace):
     psql_path = Path(args.pg_distrib_dir) / "bin" / "psql"
 
@@ -474,8 +518,6 @@ def main(args: argparse.Namespace):
     new_http_client.check_status()
     new_pageserver_connstr = f"postgresql://{new_pageserver_host}:{args.new_pageserver_pg_port}"
 
-    psql_env = {**os.environ, 'LD_LIBRARY_PATH': '/usr/local/lib/'}
-
     for tenant_id in tenants:
         print(f"Tenant: {tenant_id}")
         timelines = old_http_client.timeline_list(uuid.UUID(tenant_id))
@@ -489,39 +531,19 @@ def main(args: argparse.Namespace):
 
             # Export timelines from old pageserver
             if args.only_import is False:
-                conn = psycopg2.connect(old_pageserver_connstr)
-                conn.autocommit = True
-                with conn.cursor() as cur:
-                    cmd = f"get_last_record_rlsn {timeline['tenant_id']} {timeline['timeline_id']}"
-                    cur.execute(cmd)
-                    res = cur.fetchone()
-                    prev_lsn = res[0]
-                    last_lsn = res[1]
-
-                print(f"prev_lsn {prev_lsn} last_lsn {last_lsn}")
-                conn.close()
-
-                query = f"fullbackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {prev_lsn}"
-
-                cmd = [psql_path, "--no-psqlrc", old_pageserver_connstr, "-c", query]
-                print(f"Running: {cmd}")
-
-                tar_filename = path.join(args.work_dir,
-                                         f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
-                incomplete_filename = tar_filename + ".incomplete"
-                stderr_filename = path.join(
-                    args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
-
-                with open(incomplete_filename, 'w') as stdout_f:
-                    with open(stderr_filename, 'w') as stderr_f:
-                        print(f"(capturing output to {incomplete_filename})")
-                        subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=psql_env, check=True)
-
-                pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
-                add_missing_rels(incomplete_filename, tar_filename, args.work_dir, pg_bin)
-
-                file_size = os.path.getsize(tar_filename)
-                print(f"Done export: {tar_filename}, size {file_size}")
+                last_lsn, prev_lsn = get_rlsn(
+                    old_pageserver_connstr,
+                    timeline['tenant_id'],
+                    timeline['timeline_id'],
+                )
+                export(
+                    psql_path,
+                    old_pageserver_connstr,
+                    timeline['tenant_id'],
+                    timeline['timeline_id'],
+                    last_lsn,
+                    prev_lsn,
+                )
 
             # Import timelines to new pageserver
             import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {last_lsn}"
@@ -542,7 +564,7 @@ def main(args: argparse.Namespace):
                     subprocess.run(full_cmd,
                                    stdout=stdout_f,
                                    stderr=stderr_f,
-                                   env=psql_env,
+                                   env=PSQL_ENV,
                                    shell=True,
                                    check=True)
 
@@ -550,6 +572,8 @@ def main(args: argparse.Namespace):
 
             # Wait until pageserver persists the files
             wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(last_lsn))
+
+            # Re-export and compare
 
 
 if __name__ == '__main__':
