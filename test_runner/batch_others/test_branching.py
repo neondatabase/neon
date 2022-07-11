@@ -24,7 +24,6 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
              'gc_horizon': f'{1024 ** 2}',
              'checkpoint_distance': f'{1024 ** 2}',
              'compaction_target_size': f'{1024 ** 2}',
-             'compaction_period': '5 s',
              # set PITR interval to be small, so we can do GC
              'pitr_interval': '5 s'
          })
@@ -35,8 +34,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         log.info(f"Start a pgbench workload on pg {connstr}")
 
         pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', connstr])
-        pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -N -M prepared'.split() + [connstr])
-        pg_bin.run_capture(['pgbench'] + '-c 10 -T 10 -S -M prepared'.split() + [connstr])
+        pg_bin.run_capture(['pgbench', '-c10', '-T15', connstr])
 
     env.neon_cli.create_branch('b0', tenant_id=tenant)
     pgs: List[Postgres] = []
