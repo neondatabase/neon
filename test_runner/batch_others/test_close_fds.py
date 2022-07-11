@@ -30,7 +30,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
                 cur.execute("CREATE TABLE foo as SELECT x FROM generate_series(1,100000) x")
                 cur.execute("update foo set x=x+1")
 
-    workload_thread = threading.Thread(target=start_workload, args=())
+    workload_thread = threading.Thread(target=start_workload, args=(), daemon=True)
     workload_thread.start()
 
     path = os.path.join(env.repo_dir, "pageserver.pid")
