@@ -1,33 +1,31 @@
 use anyhow::*;
 use clap::{App, Arg, ArgMatches};
 use std::str::FromStr;
-use wal_generate::*;
+use wal_craft::*;
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("wal_generate=info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("wal_craft=info"))
+        .init();
     let type_arg = &Arg::new("type")
         .takes_value(true)
-        .help("Type of WAL to generate")
+        .help("Type of WAL to craft")
         .possible_values([
-            "simple",
-            "last_wal_record_xlog_switch",
-            "last_wal_record_xlog_switch_ends_on_page_boundary",
-            "last_wal_record_crossing_segment",
-            "wal_record_crossing_segment_followed_by_small_one",
+            Simple::NAME,
+            LastWalRecordXlogSwitch::NAME,
+            LastWalRecordXlogSwitchEndsOnPageBoundary::NAME,
+            WalRecordCrossingSegmentFollowedBySmallOne::NAME,
+            LastWalRecordCrossingSegment::NAME,
         ])
         .required(true);
-    let arg_matches = App::new("Postgres WAL generator")
-        .about("Generates Postgres databases with specific WAL properties")
+    let arg_matches = App::new("Postgres WAL crafter")
+        .about("Crafts Postgres databases with specific WAL properties")
         .subcommand(
             App::new("print-postgres-config")
                 .about("Print the configuration required for PostgreSQL server before running this script")
         )
         .subcommand(
             App::new("with-initdb")
-                .about("Generate WAL in a new data directory first initialized with initdb")
+                .about("Craft WAL in a new data directory first initialized with initdb")
                 .arg(type_arg)
                 .arg(
                     Arg::new("datadir")
@@ -45,7 +43,7 @@ fn main() -> Result<()> {
         )
         .subcommand(
             App::new("in-existing")
-                .about("Generate WAL at an existing recently created Postgres database. Note that server may append new WAL entries on shutdown.")
+                .about("Craft WAL at an existing recently created Postgres database. Note that server may append new WAL entries on shutdown.")
                 .arg(type_arg)
                 .arg(
                     Arg::new("connection")
@@ -56,19 +54,17 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let wal_generate = |arg_matches: &ArgMatches, client| {
+    let wal_craft = |arg_matches: &ArgMatches, client| {
         let lsn = match arg_matches.value_of("type").unwrap() {
-            "simple" => generate_simple(client)?,
-            "last_wal_record_xlog_switch" => generate_last_wal_record_xlog_switch(client)?,
-            "last_wal_record_xlog_switch_ends_on_page_boundary" => {
-                generate_last_wal_record_xlog_switch_ends_on_page_boundary(client)?
+            Simple::NAME => Simple::craft(client)?,
+            LastWalRecordXlogSwitch::NAME => LastWalRecordXlogSwitch::craft(client)?,
+            LastWalRecordXlogSwitchEndsOnPageBoundary::NAME => {
+                LastWalRecordXlogSwitchEndsOnPageBoundary::craft(client)?
             }
-            "last_wal_record_crossing_segment" => {
-                generate_last_wal_record_crossing_segment(client)?
+            WalRecordCrossingSegmentFollowedBySmallOne::NAME => {
+                WalRecordCrossingSegmentFollowedBySmallOne::craft(client)?
             }
-            "wal_record_crossing_segment_followed_by_small_one" => {
-                generate_wal_record_crossing_segment_followed_by_small_one(client)?
-            }
+            LastWalRecordCrossingSegment::NAME => LastWalRecordCrossingSegment::craft(client)?,
             a => panic!("Unknown --type argument: {}", a),
         };
         println!("end_of_wal = {}", lsn);
@@ -89,12 +85,12 @@ fn main() -> Result<()> {
                 datadir: arg_matches.value_of("datadir").unwrap().into(),
             };
             cfg.initdb()?;
-            let mut srv = cfg.start_server()?;
-            wal_generate(arg_matches, &mut srv.connect_with_timeout()?)?;
+            let srv = cfg.start_server()?;
+            wal_craft(arg_matches, &mut srv.connect_with_timeout()?)?;
             srv.kill();
             Ok(())
         }
-        Some(("in-existing", arg_matches)) => wal_generate(
+        Some(("in-existing", arg_matches)) => wal_craft(
             arg_matches,
             &mut postgres::Config::from_str(arg_matches.value_of("connection").unwrap())?
                 .connect(postgres::NoTls)?,

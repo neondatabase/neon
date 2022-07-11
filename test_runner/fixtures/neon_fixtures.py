@@ -1263,13 +1263,13 @@ class NeonCli(AbstractNeonCli):
         return self.raw_cli(args, check_return_code=check_return_code)
 
 
-class WalGenerate(AbstractNeonCli):
+class WalCraft(AbstractNeonCli):
     """
-    A typed wrapper around the `wal_generate` CLI tool.
+    A typed wrapper around the `wal_craft` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
 
-    COMMAND = 'wal_generate'
+    COMMAND = 'wal_craft'
 
     def postgres_config(self) -> List[str]:
         res = self.raw_cli(["print-postgres-config"])
