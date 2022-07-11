@@ -51,6 +51,7 @@ impl<'a> Basebackup<'a> {
         write: &'a mut dyn Write,
         timeline: &'a Arc<dyn Timeline>,
         req_lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
         full_backup: bool,
     ) -> Result<Basebackup<'a>> {
         // Compute postgres doesn't have any previous WAL files, but the first
@@ -86,16 +87,26 @@ impl<'a> Basebackup<'a> {
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
+        // Consolidate the derived and the provided prev_lsn values
+        let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+            if backup_prev != Lsn(0) {
+                ensure!(backup_prev == provided_prev_lsn)
+            }
+            provided_prev_lsn
+        } else {
+            backup_prev
+        };
+
         info!(
             "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
-            backup_lsn, backup_prev, full_backup
+            backup_lsn, prev_lsn, full_backup
         );
 
         Ok(Basebackup {
             ar: Builder::new(write),
             timeline,
             lsn: backup_lsn,
-            prev_record_lsn: backup_prev,
+            prev_record_lsn: prev_lsn,
             full_backup,
         })
     }
