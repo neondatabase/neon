@@ -24,7 +24,7 @@ jobs:
   build-postgres:
     name: 'build-postgres'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +70,7 @@ jobs:
   build-neon:
     name: 'build-neon'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
@@ -209,7 +209,7 @@ jobs:
   pg_regress-tests:
     name: 'pg_regress-tests'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -238,7 +238,7 @@ jobs:
   other-tests:
     name: 'other-tests'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -266,7 +266,7 @@ jobs:
   benchmarks:
     name: 'benchmarks'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -297,7 +297,7 @@ jobs:
   coverage-report:
     name: 'coverage-report'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    container: ghcr.io/catthehacker/ubuntu:act-20.04
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -378,7 +378,7 @@ jobs:
   trigger-e2e-tests:
    name: 'trigger-e2e-tests'
    runs-on: [ dev ]
-   container: ghcr.io/catthehacker/ubuntu:act-22.04
+   container: ghcr.io/catthehacker/ubuntu:act-20.04
    needs: [ build-neon ]
    steps:
      - name: Set PR's status to pending and request a remote CI test
