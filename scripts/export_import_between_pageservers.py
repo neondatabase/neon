@@ -477,9 +477,9 @@ def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
     return last_lsn, prev_lsn
 
 
-def export(psql_path, pageserver_connstr, tenant_id, timeline_id, last_lsn, prev_lsn):
+def export(args, psql_path, pageserver_connstr, tenant_id,
+           timeline_id, last_lsn, prev_lsn, tar_filename):
     # Choose filenames
-    tar_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.tar")
     incomplete_filename = tar_filename + ".incomplete"
     stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
 
@@ -528,6 +528,9 @@ def main(args: argparse.Namespace):
             new_http_client.tenant_create(uuid.UUID(tenant_id), args.ok_if_exists)
 
         for timeline in timelines:
+            # Choose filenames
+            tar_filename = path.join(
+                args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
 
             # Export timelines from old pageserver
             if args.only_import is False:
@@ -537,18 +540,18 @@ def main(args: argparse.Namespace):
                     timeline['timeline_id'],
                 )
                 export(
+                    args,
                     psql_path,
                     old_pageserver_connstr,
                     timeline['tenant_id'],
                     timeline['timeline_id'],
                     last_lsn,
                     prev_lsn,
+                    tar_filename,
                 )
 
             # Import timelines to new pageserver
             import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {last_lsn}"
-            tar_filename = path.join(args.work_dir,
-                                     f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
             full_cmd = rf"""cat {tar_filename} | {psql_path} {new_pageserver_connstr} -c '{import_cmd}' """
 
             stderr_filename2 = path.join(
@@ -574,6 +577,17 @@ def main(args: argparse.Namespace):
             wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(last_lsn))
 
             # Re-export and compare
+            re_export_filename = tar_filename + ".reexport"
+            export(
+                args,
+                psql_path,
+                new_pageserver_connstr,
+                timeline['tenant_id'],
+                timeline['timeline_id'],
+                last_lsn,
+                prev_lsn,
+                re_export_filename
+            )
 
 
 if __name__ == '__main__':
