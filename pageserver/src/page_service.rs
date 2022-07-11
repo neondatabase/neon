@@ -797,8 +797,8 @@ impl PageServerHandler {
         {
             let mut writer = CopyDataSink { pgb };
 
-            let basebackup = basebackup::Basebackup::new(
-                &mut writer, &timeline, lsn, prev_lsn, full_backup)?;
+            let basebackup =
+                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -946,7 +946,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let tenantid = ZTenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
 
-            // The caller is responsible for providing valid lsn and prev_lsn.
+            // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
                 Some(Lsn::from_str(params[2])?)
             } else {
@@ -987,7 +987,10 @@ impl postgres_backend::Handler for PageServerHandler {
 
             match self.handle_import_basebackup(pgb, tenant, timeline, base_lsn, end_lsn) {
                 Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?,
+                Err(e) => {
+                    error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
             };
         } else if query_string.starts_with("import wal ") {
             // Import the `pg_wal` section of a basebackup.
@@ -1006,7 +1009,10 @@ impl postgres_backend::Handler for PageServerHandler {
 
             match self.handle_import_wal(pgb, tenant, timeline, start_lsn, end_lsn) {
                 Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?,
+                Err(e) => {
+                    error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
             };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"

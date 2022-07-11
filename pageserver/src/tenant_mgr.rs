@@ -4,8 +4,8 @@
 use crate::config::PageServerConf;
 use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::pgdatadir_mapping::DatadirTimeline;
-use crate::repository::{Repository, TimelineSyncStatusUpdate};
-use crate::storage_sync::index::RemoteIndex;
+use crate::repository::Repository;
+use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr::ThreadKind;
@@ -13,11 +13,11 @@ use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use crate::{DatadirTimelineImpl, RepositoryImpl};
-use anyhow::{bail, Context};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -157,7 +157,13 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
             // loading a tenant is serious, but it's better to complete the startup and
             // serve other tenants, than fail completely.
             error!("Failed to initialize local tenant {tenant_id}: {:?}", err);
-            set_tenant_state(tenant_id, TenantState::Broken)?;
+
+            if let Err(err) = set_tenant_state(tenant_id, TenantState::Broken) {
+                error!(
+                    "Failed to set tenant state to broken {tenant_id}: {:?}",
+                    err
+                );
+            }
         }
     }
 
@@ -165,44 +171,51 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
 }
 
 pub enum LocalTimelineUpdate {
-    Detach(ZTenantTimelineId),
-    Attach(ZTenantTimelineId, Arc<DatadirTimelineImpl>),
+    Detach {
+        id: ZTenantTimelineId,
+        // used to signal to the detach caller that walreceiver successfully terminated for specified id
+        join_confirmation_sender: std::sync::mpsc::Sender<()>,
+    },
+    Attach {
+        id: ZTenantTimelineId,
+        datadir: Arc<DatadirTimelineImpl>,
+    },
 }
 
 impl std::fmt::Debug for LocalTimelineUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Detach(ttid) => f.debug_tuple("Remove").field(ttid).finish(),
-            Self::Attach(ttid, _) => f.debug_tuple("Add").field(ttid).finish(),
+            Self::Detach { id, .. } => f.debug_tuple("Remove").field(id).finish(),
+            Self::Attach { id, .. } => f.debug_tuple("Add").field(id).finish(),
         }
     }
 }
 
 /// Updates tenants' repositories, changing their timelines state in memory.
-pub fn apply_timeline_sync_status_updates(
+pub fn attach_downloaded_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
-    sync_status_updates: HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>,
+    sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>>,
 ) {
     if sync_status_updates.is_empty() {
-        debug!("no sync status updates to apply");
+        debug!("No sync status updates to apply");
         return;
     }
-    info!(
-        "Applying sync status updates for {} timelines",
-        sync_status_updates.len()
-    );
-    debug!("Sync status updates: {sync_status_updates:?}");
+    for (tenant_id, downloaded_timelines) in sync_status_updates {
+        info!(
+            "Registering downlloaded timelines for {tenant_id} {} timelines",
+            downloaded_timelines.len()
+        );
+        debug!("Downloaded timelines: {downloaded_timelines:?}");
 
-    for (tenant_id, status_updates) in sync_status_updates {
         let repo = match load_local_repo(conf, tenant_id, remote_index) {
             Ok(repo) => repo,
             Err(e) => {
-                error!("Failed to load repo for tenant {tenant_id} Error: {e:?}",);
+                error!("Failed to load repo for tenant {tenant_id} Error: {e:?}");
                 continue;
             }
         };
-        match apply_timeline_remote_sync_status_updates(&repo, status_updates) {
+        match attach_downloaded_tenant(&repo, downloaded_timelines) {
             Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
             Err(e) => error!(
                 "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
@@ -387,33 +400,86 @@ pub fn get_local_timeline_with_load(
     }
 }
 
-pub fn detach_timeline(
-    conf: &'static PageServerConf,
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> anyhow::Result<()> {
-    // shutdown the timeline threads (this shuts down the walreceiver)
-    thread_mgr::shutdown_threads(None, Some(tenant_id), Some(timeline_id));
+pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
+    // It is important that we do not take locks here, and do not check whether the timeline exists
+    // because if we hold tenants_state::write_tenants() while awaiting for the threads to join
+    // we cannot create new timelines and tenants, and that can take quite some time,
+    // it can even become stuck due to a bug making whole pageserver unavailable for some operations
+    // so this is the way how we deal with concurrent delete requests: shutdown everythig, wait for confirmation
+    // and then try to actually remove timeline from inmemory state and this is the point when concurrent requests
+    // will synchronize and either fail with the not found error or succeed
 
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
+        id: ZTenantTimelineId::new(tenant_id, timeline_id),
+        join_confirmation_sender: sender,
+    });
+
+    debug!("waiting for wal receiver to shutdown");
+    let _ = receiver.recv();
+    debug!("wal receiver shutdown confirmed");
+    debug!("waiting for threads to shutdown");
+    thread_mgr::shutdown_threads(None, None, Some(timeline_id));
+    debug!("thread shutdown completed");
     match tenants_state::write_tenants().get_mut(&tenant_id) {
         Some(tenant) => {
-            tenant
-                .repo
-                .detach_timeline(timeline_id)
-                .context("Failed to detach inmem tenant timeline")?;
+            tenant.repo.delete_timeline(timeline_id)?;
             tenant.local_timelines.remove(&timeline_id);
-            tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach(
-                ZTenantTimelineId::new(tenant_id, timeline_id),
-            ));
         }
-        None => bail!("Tenant {tenant_id} not found in local tenant state"),
+        None => anyhow::bail!("Tenant {tenant_id} not found in local tenant state"),
     }
 
-    let local_timeline_directory = conf.timeline_path(&timeline_id, &tenant_id);
-    std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+    Ok(())
+}
+
+pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> anyhow::Result<()> {
+    set_tenant_state(tenant_id, TenantState::Stopping)?;
+    // shutdown the tenant and timeline threads: gc, compaction, page service threads)
+    thread_mgr::shutdown_threads(None, Some(tenant_id), None);
+
+    // FIXME should we protect somehow from starting new threads/walreceivers when tenant is in stopping state?
+    // send stop signal to wal receiver and collect join handles while holding the lock
+    let walreceiver_join_handles = {
+        let tenants = tenants_state::write_tenants();
+        let tenant = tenants.get(&tenant_id).context("tenant not found")?;
+        let mut walreceiver_join_handles = Vec::with_capacity(tenant.local_timelines.len());
+        for timeline_id in tenant.local_timelines.keys() {
+            let (sender, receiver) = std::sync::mpsc::channel::<()>();
+            tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
+                id: ZTenantTimelineId::new(tenant_id, *timeline_id),
+                join_confirmation_sender: sender,
+            });
+            walreceiver_join_handles.push((*timeline_id, receiver));
+        }
+        // drop the tenants lock
+        walreceiver_join_handles
+    };
+
+    // wait for wal receivers to stop without holding the lock, because walreceiver
+    // will attempt to change tenant state which is protected by the same global tenants lock.
+    // TODO do we need a timeout here? how to handle it?
+    // recv_timeout is broken: https://github.com/rust-lang/rust/issues/94518#issuecomment-1057440631
+    // need to use crossbeam-channel
+    for (timeline_id, join_handle) in walreceiver_join_handles {
+        info!("waiting for wal receiver to shutdown timeline_id {timeline_id}");
+        join_handle.recv().context("failed to join walreceiver")?;
+        info!("wal receiver shutdown confirmed timeline_id {timeline_id}");
+    }
+
+    tenants_state::write_tenants().remove(&tenant_id);
+
+    // If removal fails there will be no way to successfully retry detach,
+    // because tenant no longer exists in in memory map. And it needs to be removed from it
+    // before we remove files because it contains references to repository
+    // which references ephemeral files which are deleted on drop. So if we keep these references
+    // code will attempt to remove files which no longer exist. This can be fixed by having shutdown
+    // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
+    let local_tenant_directory = conf.tenant_path(&tenant_id);
+    std::fs::remove_dir_all(&local_tenant_directory).with_context(|| {
         format!(
             "Failed to remove local timeline directory '{}'",
-            local_timeline_directory.display()
+            local_tenant_directory.display()
         )
     })?;
 
@@ -434,10 +500,10 @@ fn load_local_timeline(
     ));
     page_tline.init_logical_size()?;
 
-    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach(
-        ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
-        Arc::clone(&page_tline),
-    ));
+    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
+        id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
+        datadir: Arc::clone(&page_tline),
+    });
 
     Ok(page_tline)
 }
@@ -447,15 +513,27 @@ fn load_local_timeline(
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
-    pub state: TenantState,
+    pub state: Option<TenantState>,
+    pub has_in_progress_downloads: Option<bool>,
 }
 
-pub fn list_tenants() -> Vec<TenantInfo> {
+pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
     tenants_state::read_tenants()
         .iter()
-        .map(|(id, tenant)| TenantInfo {
-            id: *id,
-            state: tenant.state,
+        .map(|(id, tenant)| {
+            let has_in_progress_downloads = remote_index
+                .tenant_entry(id)
+                .map(|entry| entry.has_in_progress_downloads());
+
+            if has_in_progress_downloads.is_none() {
+                error!("timeline is not found in remote index while it is present in the tenants registry")
+            }
+
+            TenantInfo {
+                id: *id,
+                state: Some(tenant.state),
+                has_in_progress_downloads,
+            }
         })
         .collect()
 }
@@ -467,74 +545,73 @@ pub fn list_tenants() -> Vec<TenantInfo> {
 /// A timeline is categorized as broken when any of following conditions is true:
 /// - failed to load the timeline's metadata
 /// - the timeline's disk consistent LSN is zero
-fn check_broken_timeline(repo: &LayeredRepository, timeline_id: ZTimelineId) -> anyhow::Result<()> {
-    let metadata = load_metadata(repo.conf, timeline_id, repo.tenant_id())
-        .context("failed to load metadata")?;
+fn check_broken_timeline(
+    conf: &'static PageServerConf,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+) -> anyhow::Result<()> {
+    let metadata =
+        load_metadata(conf, timeline_id, tenant_id).context("failed to load metadata")?;
 
     // A timeline with zero disk consistent LSN can happen when the page server
     // failed to checkpoint the timeline import data when creating that timeline.
     if metadata.disk_consistent_lsn() == Lsn::INVALID {
-        bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
+        anyhow::bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
     }
 
     Ok(())
 }
 
+/// Note: all timelines are attached at once if and only if all of them are locally complete
 fn init_local_repository(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     local_timeline_init_statuses: HashMap<ZTimelineId, LocalTimelineInitStatus>,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<(), anyhow::Error> {
-    // initialize local tenant
-    let repo = load_local_repo(conf, tenant_id, remote_index)
-        .with_context(|| format!("Failed to load repo for tenant {tenant_id}"))?;
-
-    let mut status_updates = HashMap::with_capacity(local_timeline_init_statuses.len());
+    let mut timelines_to_attach = HashSet::new();
     for (timeline_id, init_status) in local_timeline_init_statuses {
         match init_status {
             LocalTimelineInitStatus::LocallyComplete => {
                 debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
-                if let Err(err) = check_broken_timeline(&repo, timeline_id) {
-                    info!(
-                        "Found a broken timeline {timeline_id} (err={err:?}), skip registering it in repository"
-                    );
-                } else {
-                    status_updates.insert(timeline_id, TimelineSyncStatusUpdate::Downloaded);
-                }
+                check_broken_timeline(conf, tenant_id, timeline_id)
+                    .context("found broken timeline")?;
+                timelines_to_attach.insert(timeline_id);
             }
             LocalTimelineInitStatus::NeedsSync => {
                 debug!(
                     "timeline {tenant_id} for tenant {timeline_id} needs sync, \
                      so skipped for adding into repository until sync is finished"
                 );
+                return Ok(());
             }
         }
     }
 
+    // initialize local tenant
+    let repo = load_local_repo(conf, tenant_id, remote_index)
+        .with_context(|| format!("Failed to load repo for tenant {tenant_id}"))?;
+
     // Lets fail here loudly to be on the safe side.
     // XXX: It may be a better api to actually distinguish between repository startup
     //   and processing of newly downloaded timelines.
-    apply_timeline_remote_sync_status_updates(&repo, status_updates)
+    attach_downloaded_tenant(&repo, timelines_to_attach)
         .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?;
     Ok(())
 }
 
-fn apply_timeline_remote_sync_status_updates(
+fn attach_downloaded_tenant(
     repo: &LayeredRepository,
-    status_updates: HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
+    downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
-    let mut registration_queue = Vec::with_capacity(status_updates.len());
+    let mut registration_queue = Vec::with_capacity(downloaded_timelines.len());
 
     // first need to register the in-mem representations, to avoid missing ancestors during the local disk data registration
-    for (timeline_id, status_update) in status_updates {
-        repo.apply_timeline_remote_sync_status_update(timeline_id, status_update)
-            .with_context(|| {
-                format!("Failed to load timeline {timeline_id} into in-memory repository")
-            })?;
-        match status_update {
-            TimelineSyncStatusUpdate::Downloaded => registration_queue.push(timeline_id),
-        }
+    for timeline_id in downloaded_timelines {
+        repo.attach_timeline(timeline_id).with_context(|| {
+            format!("Failed to load timeline {timeline_id} into in-memory repository")
+        })?;
+        registration_queue.push(timeline_id);
     }
 
     for timeline_id in registration_queue {
@@ -542,7 +619,7 @@ fn apply_timeline_remote_sync_status_updates(
         match tenants_state::write_tenants().get_mut(&tenant_id) {
             Some(tenant) => match tenant.local_timelines.entry(timeline_id) {
                 Entry::Occupied(_) => {
-                    bail!("Local timeline {timeline_id} already registered")
+                    anyhow::bail!("Local timeline {timeline_id} already registered")
                 }
                 Entry::Vacant(v) => {
                     v.insert(load_local_timeline(repo, timeline_id).with_context(|| {
@@ -550,7 +627,7 @@ fn apply_timeline_remote_sync_status_updates(
                     })?);
                 }
             },
-            None => bail!(
+            None => anyhow::bail!(
                 "Tenant {} not found in local tenant state",
                 repo.tenant_id()
             ),

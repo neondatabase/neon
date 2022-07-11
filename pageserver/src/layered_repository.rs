@@ -34,13 +34,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use self::metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME};
 use crate::config::PageServerConf;
-use crate::keyspace::KeySpace;
+use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{
-    GcResult, Repository, RepositoryTimeline, Timeline, TimelineSyncStatusUpdate, TimelineWriter,
-};
+use crate::repository::{GcResult, Repository, RepositoryTimeline, Timeline, TimelineWriter};
 use crate::repository::{Key, Value};
 use crate::tenant_mgr;
 use crate::thread_mgr;
@@ -272,7 +270,12 @@ impl Repository for LayeredRepository {
     }
 
     /// Branch a timeline
-    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()> {
+    fn branch_timeline(
+        &self,
+        src: ZTimelineId,
+        dst: ZTimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<()> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -285,6 +288,14 @@ impl Repository for LayeredRepository {
             .context("failed to load timeline for branching")?
             .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
+
+        // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
+        let start_lsn = start_lsn.unwrap_or_else(|| {
+            let lsn = src_timeline.get_last_record_lsn();
+            info!("branching timeline {dst} from timeline {src} at last record LSN: {lsn}");
+            lsn
+        });
+
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
@@ -331,19 +342,19 @@ impl Repository for LayeredRepository {
     /// metrics collection.
     fn gc_iteration(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        let timeline_str = target_timelineid
+        let timeline_str = target_timeline_id
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
         STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
-                self.gc_iteration_internal(target_timelineid, horizon, pitr, checkpoint_before_gc)
+                self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
             })
     }
 
@@ -410,50 +421,60 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+        // in order to be retriable detach needs to be idempotent
+        // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
-        // check no child timelines, because detach will remove files, which will brake child branches
-        // FIXME this can still be violated because we do not guarantee
-        //   that all ancestors are downloaded/attached to the same pageserver
-        let num_children = timelines
+
+        // Ensure that there are no child timelines **attached to that pageserver**,
+        // because detach removes files, which will break child branches
+        let children_exist = timelines
             .iter()
-            .filter(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id))
-            .count();
+            .any(|(_, entry)| entry.ancestor_timeline_id() == Some(timeline_id));
 
         ensure!(
-            num_children == 0,
+            !children_exist,
             "Cannot detach timeline which has child timelines"
         );
+        let timeline_entry = match timelines.entry(timeline_id) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(_) => bail!("timeline not found"),
+        };
 
-        ensure!(
-            timelines.remove(&timeline_id).is_some(),
-            "Cannot detach timeline {timeline_id} that is not available locally"
-        );
+        // try to acquire gc and compaction locks to prevent errors from missing files
+        let _gc_guard = self
+            .gc_cs
+            .try_lock()
+            .map_err(|e| anyhow::anyhow!("cannot acquire gc lock {e}"))?;
+
+        let compaction_guard = timeline_entry.get().compaction_guard()?;
+
+        let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
+            format!(
+                "Failed to remove local timeline directory '{}'",
+                local_timeline_directory.display()
+            )
+        })?;
+        info!("detach removed files");
+
+        drop(compaction_guard);
+        timeline_entry.remove();
+
         Ok(())
     }
 
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()> {
-        debug!(
-            "apply_timeline_remote_sync_status_update timeline_id: {} update: {:?}",
-            timeline_id, timeline_sync_status_update
-        );
-        match timeline_sync_status_update {
-            TimelineSyncStatusUpdate::Downloaded => {
-                match self.timelines.lock().unwrap().entry(timeline_id) {
-                    Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
-                    Entry::Vacant(entry) => {
-                        // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                        let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
-                        // finally we make newly downloaded timeline visible to repository
-                        entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
-                    },
-                };
-            }
-        }
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+        debug!("attach timeline_id: {}", timeline_id,);
+        match self.timelines.lock().unwrap().entry(timeline_id) {
+            Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
+            Entry::Vacant(entry) => {
+                // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
+                let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
+                // finally we make newly downloaded timeline visible to repository
+                entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata, })
+            },
+        };
         Ok(())
     }
 
@@ -501,6 +522,18 @@ impl LayeredTimelineEntry {
             LayeredTimelineEntry::Unloaded { .. } => {
                 anyhow::bail!("timeline is unloaded")
             }
+        }
+    }
+
+    fn compaction_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
+        match self {
+            LayeredTimelineEntry::Loaded(timeline) => timeline
+                .compaction_cs
+                .try_lock()
+                .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
+                .map(Some),
+
+            LayeredTimelineEntry::Unloaded { .. } => Ok(None),
         }
     }
 }
@@ -839,13 +872,13 @@ impl LayeredRepository {
     //   we do.
     fn gc_iteration_internal(
         &self,
-        target_timelineid: Option<ZTimelineId>,
+        target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
         let _span_guard =
-            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timelineid)
+            info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timeline_id)
                 .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -859,6 +892,12 @@ impl LayeredRepository {
         let mut timeline_ids = Vec::new();
         let mut timelines = self.timelines.lock().unwrap();
 
+        if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+            if timelines.get(target_timeline_id).is_none() {
+                bail!("gc target timeline does not exist")
+            }
+        };
+
         for (timeline_id, timeline_entry) in timelines.iter() {
             timeline_ids.push(*timeline_id);
 
@@ -867,7 +906,7 @@ impl LayeredRepository {
             // Somewhat related: https://github.com/zenithdb/zenith/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
                 // If target_timeline is specified, we only need to know branchpoints of its children
-                if let Some(timelineid) = target_timelineid {
+                if let Some(timelineid) = target_timeline_id {
                     if ancestor_timeline_id == &timelineid {
                         all_branchpoints
                             .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
@@ -882,7 +921,7 @@ impl LayeredRepository {
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
-        for timelineid in timeline_ids.into_iter() {
+        for timeline_id in timeline_ids.into_iter() {
             if thread_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
@@ -891,12 +930,12 @@ impl LayeredRepository {
 
             // Timeline is known to be local and loaded.
             let timeline = self
-                .get_timeline_load_internal(timelineid, &mut *timelines)?
+                .get_timeline_load_internal(timeline_id, &mut *timelines)?
                 .expect("checked above that timeline is local and loaded");
 
             // If target_timeline is specified, only GC it
-            if let Some(target_timelineid) = target_timelineid {
-                if timelineid != target_timelineid {
+            if let Some(target_timelineid) = target_timeline_id {
+                if timeline_id != target_timelineid {
                     continue;
                 }
             }
@@ -905,8 +944,8 @@ impl LayeredRepository {
                 drop(timelines);
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
-                        Included((timelineid, Lsn(0))),
-                        Included((timelineid, Lsn(u64::MAX))),
+                        Included((timeline_id, Lsn(0))),
+                        Included((timeline_id, Lsn(u64::MAX))),
                     ))
                     .map(|&x| x.1)
                     .collect();
@@ -916,7 +955,7 @@ impl LayeredRepository {
                 // used in tests, so we want as deterministic results as possible.
                 if checkpoint_before_gc {
                     timeline.checkpoint(CheckpointConfig::Forced)?;
-                    info!("timeline {} checkpoint_before_gc done", timelineid);
+                    info!("timeline {} checkpoint_before_gc done", timeline_id);
                 }
                 timeline.update_gc_info(branchpoints, cutoff, pitr);
                 let result = timeline.gc()?;
@@ -1601,7 +1640,7 @@ impl LayeredTimeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_value(key, lsn, val)?;
@@ -1729,24 +1768,29 @@ impl LayeredTimeline {
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
     fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
-        let new_delta = frozen_layer.write_to_disk()?;
-        let new_delta_path = new_delta.path();
+        let layer_paths_to_upload;
 
-        // Sync the new layer to disk.
-        //
-        // We must also fsync the timeline dir to ensure the directory entries for
-        // new layer files are durable
-        //
-        // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-        // files to flush, it might be better to first write them all, and then fsync
-        // them all in parallel.
-        par_fsync::par_fsync(&[
-            new_delta_path.clone(),
-            self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-        ])?;
+        // As a special case, when we have just imported an image into the repository,
+        // instead of writing out a L0 delta layer, we directly write out image layer
+        // files instead. This is possible as long as *all* the data imported into the
+        // repository have the same LSN.
+        let lsn_range = frozen_layer.get_lsn_range();
+        if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+            let pgdir = tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)?;
+            let (partitioning, _lsn) =
+                pgdir.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
+            layer_paths_to_upload =
+                self.create_image_layers(&partitioning, self.initdb_lsn, true)?;
+        } else {
+            // normal case, write out a L0 delta layer file.
+            let delta_path = self.create_delta_layer(&frozen_layer)?;
+            layer_paths_to_upload = HashSet::from([delta_path]);
+        }
+
         fail_point!("flush-frozen-before-sync");
 
-        // Finally, replace the frozen in-memory layer with the new on-disk layer
+        // The new on-disk layers are now in the layer map. We can remove the
+        // in-memory layer from the map now.
         {
             let mut layers = self.layers.write().unwrap();
             let l = layers.frozen_layers.pop_front();
@@ -1756,19 +1800,27 @@ impl LayeredTimeline {
             // layer to disk at the same time, that would not work.
             assert!(Arc::ptr_eq(&l.unwrap(), &frozen_layer));
 
-            // Add the new delta layer to the LayerMap
-            layers.insert_historic(Arc::new(new_delta));
-
             // release lock on 'layers'
         }
+
+        fail_point!("checkpoint-after-sync");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn = Lsn(frozen_layer.get_lsn_range().end.0 - 1);
-        fail_point!("checkpoint-after-sync");
+        let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
+        self.update_disk_consistent_lsn(disk_consistent_lsn, layer_paths_to_upload)?;
 
+        Ok(())
+    }
+
+    /// Update metadata file
+    fn update_disk_consistent_lsn(
+        &self,
+        disk_consistent_lsn: Lsn,
+        layer_paths_to_upload: HashSet<PathBuf>,
+    ) -> Result<()> {
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
         let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
@@ -1818,14 +1870,11 @@ impl LayeredTimeline {
                 false,
             )?;
 
-            NUM_PERSISTENT_FILES_CREATED.inc_by(1);
-            PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
-
             if self.upload_layers.load(atomic::Ordering::Relaxed) {
                 storage_sync::schedule_layer_upload(
                     self.tenant_id,
                     self.timeline_id,
-                    HashSet::from([new_delta_path]),
+                    layer_paths_to_upload,
                     Some(metadata),
                 );
             }
@@ -1835,6 +1884,37 @@ impl LayeredTimeline {
         }
 
         Ok(())
+    }
+
+    // Write out the given frozen in-memory layer as a new L0 delta file
+    fn create_delta_layer(&self, frozen_layer: &InMemoryLayer) -> Result<PathBuf> {
+        // Write it out
+        let new_delta = frozen_layer.write_to_disk()?;
+        let new_delta_path = new_delta.path();
+
+        // Sync it to disk.
+        //
+        // We must also fsync the timeline dir to ensure the directory entries for
+        // new layer files are durable
+        //
+        // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
+        // files to flush, it might be better to first write them all, and then fsync
+        // them all in parallel.
+        par_fsync::par_fsync(&[
+            new_delta_path.clone(),
+            self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+        ])?;
+
+        // Add it to the layer map
+        {
+            let mut layers = self.layers.write().unwrap();
+            layers.insert_historic(Arc::new(new_delta));
+        }
+
+        NUM_PERSISTENT_FILES_CREATED.inc_by(1);
+        PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
+
+        Ok(new_delta_path)
     }
 
     pub fn compact(&self) -> Result<()> {
@@ -1880,29 +1960,23 @@ impl LayeredTimeline {
         if let Ok(pgdir) =
             tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
         {
+            // 2. Create new image layers for partitions that have been modified
+            // "enough".
             let (partitioning, lsn) = pgdir.repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
             )?;
-            let timer = self.create_images_time_histo.start_timer();
-            // 2. Create new image layers for partitions that have been modified
-            // "enough".
-            let mut layer_paths_to_upload = HashSet::with_capacity(partitioning.parts.len());
-            for part in partitioning.parts.iter() {
-                if self.time_for_new_image_layer(part, lsn)? {
-                    let new_path = self.create_image_layer(part, lsn)?;
-                    layer_paths_to_upload.insert(new_path);
-                }
-            }
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
+            let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
+            if !layer_paths_to_upload.is_empty()
+                && self.upload_layers.load(atomic::Ordering::Relaxed)
+            {
                 storage_sync::schedule_layer_upload(
                     self.tenant_id,
                     self.timeline_id,
-                    layer_paths_to_upload,
+                    HashSet::from_iter(layer_paths_to_upload),
                     None,
                 );
             }
-            timer.stop_and_record();
 
             // 3. Compact
             let timer = self.compact_time_histo.start_timer();
@@ -1956,21 +2030,40 @@ impl LayeredTimeline {
         Ok(false)
     }
 
-    fn create_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<PathBuf> {
-        let img_range =
-            partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
-        let mut image_layer_writer =
-            ImageLayerWriter::new(self.conf, self.timeline_id, self.tenant_id, &img_range, lsn)?;
+    fn create_image_layers(
+        &self,
+        partitioning: &KeyPartitioning,
+        lsn: Lsn,
+        force: bool,
+    ) -> Result<HashSet<PathBuf>> {
+        let timer = self.create_images_time_histo.start_timer();
+        let mut image_layers: Vec<ImageLayer> = Vec::new();
+        let mut layer_paths_to_upload = HashSet::new();
+        for partition in partitioning.parts.iter() {
+            if force || self.time_for_new_image_layer(partition, lsn)? {
+                let img_range =
+                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
+                let mut image_layer_writer = ImageLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_id,
+                    &img_range,
+                    lsn,
+                )?;
 
-        for range in &partition.ranges {
-            let mut key = range.start;
-            while key < range.end {
-                let img = self.get(key, lsn)?;
-                image_layer_writer.put_image(key, &img)?;
-                key = key.next();
+                for range in &partition.ranges {
+                    let mut key = range.start;
+                    while key < range.end {
+                        let img = self.get(key, lsn)?;
+                        image_layer_writer.put_image(key, &img)?;
+                        key = key.next();
+                    }
+                }
+                let image_layer = image_layer_writer.finish()?;
+                layer_paths_to_upload.insert(image_layer.path());
+                image_layers.push(image_layer);
             }
         }
-        let image_layer = image_layer_writer.finish()?;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
         // we don't garbage collect something based on the new layer, before it has
@@ -1981,19 +2074,18 @@ impl LayeredTimeline {
         //
         // Compaction creates multiple image layers. It would be better to create them all
         // and fsync them all in parallel.
-        par_fsync::par_fsync(&[
-            image_layer.path(),
-            self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-        ])?;
-
-        // FIXME: Do we need to do something to upload it to remote storage here?
+        let mut all_paths = Vec::from_iter(layer_paths_to_upload.clone());
+        all_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
+        par_fsync::par_fsync(&all_paths)?;
 
         let mut layers = self.layers.write().unwrap();
-        let new_path = image_layer.path();
-        layers.insert_historic(Arc::new(image_layer));
+        for l in image_layers {
+            layers.insert_historic(Arc::new(l));
+        }
         drop(layers);
+        timer.stop_and_record();
 
-        Ok(new_path)
+        Ok(layer_paths_to_upload)
     }
 
     ///
@@ -2516,7 +2608,7 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()> {
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
@@ -2658,7 +2750,7 @@ pub mod tests {
         let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -2666,7 +2758,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -2674,7 +2766,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x30), Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer.put(TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -2682,7 +2774,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x40), Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer.put(TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -2720,7 +2812,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
                 drop(writer);
@@ -2766,7 +2858,7 @@ pub mod tests {
             writer.put(
                 test_key,
                 lsn,
-                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
@@ -2784,7 +2876,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
                 drop(writer);
@@ -2836,7 +2928,7 @@ pub mod tests {
             writer.put(
                 test_key,
                 lsn,
-                Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
@@ -2848,7 +2940,7 @@ pub mod tests {
         let mut tline_id = TIMELINE_ID;
         for _ in 0..50 {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
@@ -2860,7 +2952,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
@@ -2907,7 +2999,7 @@ pub mod tests {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
             let new_tline_id = ZTimelineId::generate();
-            repo.branch_timeline(tline_id, new_tline_id, lsn)?;
+            repo.branch_timeline(tline_id, new_tline_id, Some(lsn))?;
             tline = repo.get_timeline_load(new_tline_id)?;
             tline_id = new_tline_id;
 
@@ -2919,7 +3011,7 @@ pub mod tests {
                 writer.put(
                     test_key,
                     lsn,
-                    Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
                 )?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);

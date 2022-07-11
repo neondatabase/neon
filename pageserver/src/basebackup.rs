@@ -109,7 +109,7 @@ where
 
         info!(
             "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
-            backup_lsn, backup_prev, full_backup
+            backup_lsn, prev_lsn, full_backup
         );
 
         Ok(Basebackup {
