@@ -90,7 +90,7 @@ impl<'a> Basebackup<'a> {
         // Consolidate the derived and the provided prev_lsn values
         let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
             if backup_prev != Lsn(0) {
-                ensure!(backup_prev == provided_prev_lsn)
+                anyhow::ensure!(backup_prev == provided_prev_lsn)
             }
             provided_prev_lsn
         } else {
