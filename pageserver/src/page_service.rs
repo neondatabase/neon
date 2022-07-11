@@ -538,7 +538,7 @@ impl PageServerHandler {
         {
             let mut writer = CopyDataSink { pgb };
 
-            let basebackup =
+            let mut basebackup =
                 basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
@@ -656,10 +656,10 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(params[1])?;
 
             self.check_permission(Some(tenantid))?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+            let timeline = tenant_mgr::get_timeline_for_tenant_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;
 
-            let end_of_timeline = timeline.tline.get_last_record_rlsn();
+            let end_of_timeline = timeline.get_last_record_rlsn();
 
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::text_col(b"prev_lsn"),
