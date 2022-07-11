@@ -69,7 +69,7 @@ jobs:
   build-neon:
     name: 'build-neon'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-20.04
+    container: cimg/rust:1.45-node
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
