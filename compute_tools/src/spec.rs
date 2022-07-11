@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use log::{info, log_enabled, warn, Level};
+use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use serde::Deserialize;
 
@@ -349,9 +350,11 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     Ok(())
 }
 
-// Grant CREATE ON DATABASE to the database owner
-// to allow clients create trusted extensions.
-pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+/// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
+/// to allow users creating trusted extensions and re-creating `public` schema, for example.
+pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
+    let spec = &node.spec;
+
     info!("cluster spec grants:");
 
     // We now have a separate `web_access` role to connect to the database
@@ -378,6 +381,34 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         info!("grant query {}", &query);
 
         client.execute(query.as_str(), &[])?;
+    }
+
+    // Do some per-database access adjustments. We'd better do this at db creation time,
+    // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
+    // atomically.
+    let mut db_connstr = node.connstr.clone();
+    for db in &node.spec.cluster.databases {
+        // database name is always the last and the only component of the path
+        db_connstr.set_path(&db.name);
+
+        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+
+        // This will only change ownership on the schema itself, not the objects
+        // inside it. Without it owner of the `public` schema will be `cloud_admin`
+        // and database owner cannot do anything with it.
+        let alter_query = format!("ALTER SCHEMA public OWNER TO {}", db.owner.quote());
+        let res = db_client.simple_query(&alter_query);
+
+        if let Err(e) = res {
+            if e.code() == Some(&SqlState::INVALID_SCHEMA_NAME) {
+                // This is OK, db just don't have a `public` schema.
+                // Probably user dropped it manually.
+                info!("no 'public' schema found in the database {}", db.name);
+            } else {
+                // Something different happened, propagate the error
+                return Err(anyhow!(e));
+            }
+        }
     }
 
     Ok(())
