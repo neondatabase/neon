@@ -561,7 +561,6 @@ jobs:
       github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
-        env_name: []
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
     steps:
       - name: Checkout
@@ -605,7 +604,6 @@ jobs:
       github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
-        env_name: []
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
     env:
       KUBECONFIG: .kubeconfig
