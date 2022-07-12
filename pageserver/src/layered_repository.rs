@@ -2257,12 +2257,12 @@ impl LayeredTimeline {
         //  | +-----------+            |  |  |  |  |
         //  | |           |            |  |  |  |  |
         //  | +-----------+            +--+--+--+--+
-        //  | 
+        //  |
         //  +--------------> key
-        // 
-        // 
+        //
+        //
         // If one key (X) has a lot of page versions:
-        // 
+        //
         // LSN
         //  ^
         //  |                                 (X)
@@ -2275,8 +2275,8 @@ impl LayeredTimeline {
         //  | +-----------+            |  |  |  |  |
         //  | |           |            |  |  |  |  |
         //  | +-----------+            +--+--+--+--+
-        //  | 
-        //  +--------------> key              
+        //  |
+        //  +--------------> key
         // TODO: this actually divides the layers into fixed-size chunks, not
         // based on the partitioning.
         //
