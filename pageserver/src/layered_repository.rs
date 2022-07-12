@@ -1751,7 +1751,6 @@ impl LayeredTimeline {
                     distance, open_layer_size
                 );
 
-                // Yes. Freeze the current in-memory layer.
                 self.freeze_inmem_layer(true);
                 self.last_freeze_at.store(last_lsn);
 
