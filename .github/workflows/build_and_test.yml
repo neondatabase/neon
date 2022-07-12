@@ -395,7 +395,7 @@ jobs:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ pg_regress-tests, other-tests ]
     if: |
-      github.ref_name == 'main' &&
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -419,8 +419,27 @@ jobs:
 
       - name: Get build tag
         run: |
-          echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
         id: build-tag
+
+      - name: Get legacy build tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::latest
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+        id: legacy-build-tag
 
       - name: Build compute-tools Docker image
         uses: docker/build-push-action@v2
@@ -432,13 +451,13 @@ jobs:
             AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
           pull: true
           push: true
-          tags: neondatabase/neon:latest, neondatabase/neon:${{steps.build-tag.outputs.tag}}
+          tags: neondatabase/neon:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/neon:${{steps.build-tag.outputs.tag}}
 
   docker-image-compute:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ pg_regress-tests, other-tests ]
     if: |
-      github.ref_name == 'main' &&
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -462,8 +481,27 @@ jobs:
 
       - name: Get build tag
         run: |
-          echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
         id: build-tag
+
+      - name: Get legacy build tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::latest
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+        id: legacy-build-tag
 
       - name: Build compute-tools Docker image
         uses: docker/build-push-action@v2
@@ -476,7 +514,7 @@ jobs:
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:local
 
-      - name: Build and push compute-tools:latest Docker image
+      - name: Push compute-tools Docker image
         uses: docker/build-push-action@v2
         with:
           context: .
@@ -485,7 +523,7 @@ jobs:
             AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
           push: true
           file: Dockerfile.compute-tools
-          tags: neondatabase/compute-tools:latest
+          tags: neondatabase/compute-tools:${{steps.legacy-build-tag.outputs.tag}}
 
       - name: Build compute-node Docker image
         uses: docker/build-push-action@v2
@@ -494,17 +532,37 @@ jobs:
           build-args:
             COMPUTE_TOOLS_TAG=local
           push: true
-          tags: neondatabase/compute-node:latest, neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
+          tags: neondatabase/compute-node:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
 
-  deploy-main:
+  calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image ]
+    outputs:
+      matrix-include: ${{ steps.set-matrix.outputs.include }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
+            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
+            echo "::set-output name=include::[$STAGING, $NEON_STRESS]"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
+            echo "::set-output name=include::[$PRODUCTION]"
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
+
+  deploy:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ docker-image, calculate-deploy-targets ]
     if: |
-      github.ref_name == 'main' &&
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
-        env_name: [ staging, neon-stress ]
+        env_name: []
+        include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -520,7 +578,14 @@ jobs:
         run: |
           cd "$(pwd)/.circleci/ansible"
 
-          ./get_binaries.sh
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            ./get_binaries.sh
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            RELEASE=true ./get_binaries.sh
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
 
           eval $(ssh-agent)
           echo "${{ secrets.TELEPORT_SSH_KEY }}"  | tr -d '\n'| base64 --decode >ssh-key
@@ -534,22 +599,14 @@ jobs:
 
   deploy-proxy-main:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image ]
+    needs: [ docker-image, docker-image-compute,  calculate-deploy-targets ]
     if: |
-      github.ref_name == 'main' &&
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
-        include:
-          - env_name: "staging"
-            proxy_job: "neon-proxy"
-            proxy_config: "staging.proxy"
-            kubeconfig_secret: "STAGING_KUBECONFIG_DATA"
-
-          - env_name: "neon-stress"
-            proxy_job: "neon-stress-proxy"
-            proxy_config: "neon-stress.proxy"
-            kubeconfig_secret: "NEON_STRESS_KUBECONFIG_DATA"
+        env_name: []
+        include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
     env:
       KUBECONFIG: .kubeconfig
     steps:
