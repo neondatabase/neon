@@ -434,6 +434,7 @@ impl PageServerHandler {
         }
     }
 
+    #[allow(clippy::drop_non_drop)] // Only complains in CI, not sure why
     fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
