@@ -597,9 +597,9 @@ jobs:
           ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
 
-  deploy-proxy-main:
+  deploy-proxy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image, docker-image-compute,  calculate-deploy-targets ]
+    needs: [ docker-image, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
