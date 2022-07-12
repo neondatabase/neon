@@ -11,10 +11,12 @@ from performance.test_perf_pgbench import get_scales_matrix
 # Test branch creation
 #
 # This test spawns pgbench in a thread in the background, and creates a branch while
-# pgbench is running. Then it launches pgbench on the new branch, and creates another branch. Repeat `n_branches` times.
+# pgbench is running. Then it launches pgbench on the new branch, and creates another branch.
+# Repeat `n_branches` times.
+#
 # If 'ty' == 'cascade', each branch is created from the previous branch, so that you end
-# up with a branch of a branch of a branch ... of a branch. With 'ty' == 'flat', each branch is
-# created from the root.
+# up with a branch of a branch of a branch ... of a branch. With 'ty' == 'flat',
+# each branch is created from the root.
 @pytest.mark.parametrize("n_branches", [10])
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 @pytest.mark.parametrize("ty", ["cascade", "flat"])
@@ -25,7 +27,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
                                 ty: str):
     env = neon_simple_env
 
-    # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test  
+    # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
     tenant, _ = env.neon_cli.create_tenant(
          conf={
              'gc_period': '5 s',
