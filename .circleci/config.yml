@@ -142,11 +142,6 @@ jobs:
               jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
             )
 
-            test_exe_paths=$(
-              cargo test --message-format=json --no-run |
-              jq -r '.executable | select(. != null)'
-            )
-
             mkdir -p /tmp/zenith/bin
             mkdir -p /tmp/zenith/test_bin
             mkdir -p /tmp/zenith/etc
