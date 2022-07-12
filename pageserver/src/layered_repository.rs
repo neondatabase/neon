@@ -2241,6 +2241,42 @@ impl LayeredTimeline {
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
         //
+        // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
+        // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
+        // would be too large. In that case, we also split on the LSN dimension.
+        //
+        // LSN
+        //  ^
+        //  |
+        //  | +-----------+            +--+--+--+--+
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+     ==>    |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            +--+--+--+--+
+        //  | 
+        //  +--------------> key
+        // 
+        // 
+        // If one key (X) has a lot of page versions:
+        // 
+        // LSN
+        //  ^
+        //  |                                 (X)
+        //  | +-----------+            +--+--+--+--+
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  +--+  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+     ==>    |  |  |  |  |
+        //  | |           |            |  |  +--+  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            +--+--+--+--+
+        //  | 
+        //  +--------------> key              
         // TODO: this actually divides the layers into fixed-size chunks, not
         // based on the partitioning.
         //
