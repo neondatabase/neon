@@ -58,7 +58,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
             if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
                 pg_control = Some(control_file);
             }
-            modification.flush()?;
+            modification.flush(lsn)?;
         }
     }
 
@@ -321,7 +321,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush()?;
+                modification.flush(base_lsn)?;
             }
             tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);

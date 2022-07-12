@@ -920,7 +920,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self, lsn: Lsn) -> Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -934,7 +934,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let mut result: Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
+                result = writer.put(key, lsn, value);
                 false
             } else {
                 true
