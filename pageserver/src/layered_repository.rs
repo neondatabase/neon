@@ -2224,7 +2224,7 @@ impl LayeredTimeline {
                 }
             });
 
-        // This iterator walks through all keys and is needed to calculate range used by each key
+        // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = deltas_to_compact
             .iter()
             .map(|l| l.key_iter())
