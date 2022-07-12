@@ -94,11 +94,8 @@ pub enum ThreadKind {
     // Main walreceiver manager thread that ensures that every timeline spawns a connection to safekeeper, to fetch WAL.
     WalReceiverManager,
 
-    // Thread that handles compaction of all timelines for a tenant.
-    Compactor,
-
-    // Thread that handles GC of a tenant
-    GarbageCollector,
+    // Thread that schedules new compaction and gc jobs
+    TenantTaskManager,
 
     // Thread that flushes frozen in-memory layers to disk
     LayerFlushThread,

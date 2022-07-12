@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.neon_fixtures import NeonEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, assert_timeline_local, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 import pytest
@@ -91,14 +91,14 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     # Introduce failpoint in download
     env.pageserver.safe_psql(f"failpoints remote-storage-download-pre-rename=return")
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
-    # is there a better way to assert that fafilpoint triggered?
+    # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="Timeline download is already in progress"):
-        client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
+        client.tenant_attach(UUID(tenant_id))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail with active failpoint: %s", detail)
@@ -109,12 +109,12 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     env.pageserver.stop()
     env.pageserver.start()
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
     log.info("waiting for timeline redownload")
     wait_until(number_of_iterations=10,
                interval=1,
-               func=lambda: assert_local(client, UUID(tenant_id), UUID(timeline_id)))
+               func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     assert detail['local'] is not None

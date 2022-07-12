@@ -1,0 +1,71 @@
+name: Test Postgres client libraries
+
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '23 02 * * *' # run once a day, timezone is utc
+
+  workflow_dispatch:
+
+concurrency:
+   group: ${{ github.workflow }}-${{ github.ref }}
+   cancel-in-progress: true
+
+jobs:
+  test-postgres-client-libs:
+    runs-on: [ ubuntu-latest ]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+
+    - name: Cache poetry deps
+      id: cache_poetry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      shell: bash -ex {0}
+      run: ./scripts/pysync
+
+    - name: Run pytest
+      env:
+        REMOTE_ENV: 1
+        BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
+        TEST_OUTPUT: /tmp/test_output
+        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      shell: bash -ex {0}
+      run: |
+        # Test framework expects we have psql binary;
+        # but since we don't really need it in this test, let's mock it
+        mkdir -p "$POSTGRES_DISTRIB_DIR/bin" && touch "$POSTGRES_DISTRIB_DIR/bin/psql";
+        ./scripts/pytest \
+          --junitxml=$TEST_OUTPUT/junit.xml \
+          --tb=short \
+          --verbose \
+          -m "remote_cluster" \
+          -rA "test_runner/pg_clients"
+
+    - name: Post to a Slack channel
+      if: failure()
+      id: slack
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Testing Postgres clients: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

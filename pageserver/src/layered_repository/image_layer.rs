@@ -445,7 +445,10 @@ impl ImageLayerWriter {
             },
         );
         info!("new image layer {}", path.display());
-        let mut file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::open_with_options(
+            &path,
+            std::fs::OpenOptions::new().write(true).create_new(true),
+        )?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
         let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);

@@ -9,17 +9,19 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use rusoto_core::{
     credential::{InstanceMetadataProvider, StaticProvider},
-    HttpClient, Region,
+    HttpClient, Region, RusotoError,
 };
 use rusoto_s3::{
-    DeleteObjectRequest, GetObjectRequest, ListObjectsV2Request, PutObjectRequest, S3Client,
-    StreamingBody, S3,
+    DeleteObjectRequest, GetObjectError, GetObjectRequest, ListObjectsV2Request, PutObjectRequest,
+    S3Client, StreamingBody, S3,
 };
 use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
-use crate::{strip_path_prefix, RemoteStorage, S3Config};
+use crate::{
+    strip_path_prefix, Download, DownloadError, RemoteObjectName, RemoteStorage, S3Config,
+};
 
 use super::StorageMetadata;
 
@@ -117,6 +119,25 @@ impl S3ObjectKey {
     }
 }
 
+impl RemoteObjectName for S3ObjectKey {
+    /// Turn a/b/c or a/b/c/ into c
+    fn object_name(&self) -> Option<&str> {
+        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
+        // see https://github.com/rust-lang/rust/issues/88674
+        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
+            return None;
+        }
+
+        if self.0.ends_with(S3_PREFIX_SEPARATOR) {
+            self.0.rsplit(S3_PREFIX_SEPARATOR).nth(1)
+        } else {
+            self.0
+                .rsplit_once(S3_PREFIX_SEPARATOR)
+                .map(|(_, last)| last)
+        }
+    }
+}
+
 /// AWS S3 storage.
 pub struct S3Bucket {
     workdir: PathBuf,
@@ -187,6 +208,39 @@ impl S3Bucket {
             concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
         })
     }
+
+    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 download")
+            .map_err(DownloadError::Other)?;
+
+        metrics::inc_get_object();
+
+        match self.client.get_object(request).await {
+            Ok(object_output) => match object_output.body {
+                None => {
+                    metrics::inc_get_object_fail();
+                    Err(DownloadError::Other(anyhow::anyhow!(
+                        "Got no body for the S3 object given"
+                    )))
+                }
+                Some(body) => Ok(Download {
+                    metadata: object_output.metadata.map(StorageMetadata),
+                    download_stream: Box::pin(io::BufReader::new(body.into_async_read())),
+                }),
+            },
+            Err(RusotoError::Service(GetObjectError::NoSuchKey(_))) => Err(DownloadError::NotFound),
+            Err(e) => {
+                metrics::inc_get_object_fail();
+                Err(DownloadError::Other(anyhow::anyhow!(
+                    "Failed to download S3 object: {e}"
+                )))
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -250,6 +304,77 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
+    /// Note: it wont include empty "directories"
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        let list_prefix = match prefix {
+            Some(prefix) => {
+                let mut prefix_in_bucket = self.prefix_in_bucket.clone().unwrap_or_default();
+                // if there is no trailing / in default prefix and
+                // supplied prefix does not start with "/" insert it
+                if !(prefix_in_bucket.ends_with(S3_PREFIX_SEPARATOR)
+                    || prefix.0.starts_with(S3_PREFIX_SEPARATOR))
+                {
+                    prefix_in_bucket.push(S3_PREFIX_SEPARATOR);
+                }
+
+                prefix_in_bucket.push_str(&prefix.0);
+                // required to end with a separator
+                // otherwise request will return only the entry of a prefix
+                if !prefix_in_bucket.ends_with(S3_PREFIX_SEPARATOR) {
+                    prefix_in_bucket.push(S3_PREFIX_SEPARATOR);
+                }
+                Some(prefix_in_bucket)
+            }
+            None => self.prefix_in_bucket.clone(),
+        };
+
+        let mut document_keys = Vec::new();
+
+        let mut continuation_token = None;
+        loop {
+            let _guard = self
+                .concurrency_limiter
+                .acquire()
+                .await
+                .context("Concurrency limiter semaphore got closed during S3 list")?;
+
+            metrics::inc_list_objects();
+
+            let fetch_response = self
+                .client
+                .list_objects_v2(ListObjectsV2Request {
+                    bucket: self.bucket_name.clone(),
+                    prefix: list_prefix.clone(),
+                    continuation_token,
+                    delimiter: Some(S3_PREFIX_SEPARATOR.to_string()),
+                    ..ListObjectsV2Request::default()
+                })
+                .await
+                .map_err(|e| {
+                    metrics::inc_list_objects_fail();
+                    e
+                })?;
+
+            document_keys.extend(
+                fetch_response
+                    .common_prefixes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|o| Some(S3ObjectKey(o.prefix?))),
+            );
+
+            match fetch_response.continuation_token {
+                Some(new_token) => continuation_token = Some(new_token),
+                None => break,
+            }
+        }
+
+        Ok(document_keys)
+    }
+
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
@@ -283,38 +408,13 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(
-        &self,
-        from: &Self::RemoteObjectId,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 download")?;
-
-        metrics::inc_get_object();
-
-        let object_output = self
-            .client
-            .get_object(GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: from.key().to_owned(),
-                ..GetObjectRequest::default()
-            })
-            .await
-            .map_err(|e| {
-                metrics::inc_get_object_fail();
-                e
-            })?;
-
-        if let Some(body) = object_output.body {
-            let mut from = io::BufReader::new(body.into_async_read());
-            io::copy(&mut from, to).await?;
-        }
-
-        Ok(object_output.metadata.map(StorageMetadata))
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError> {
+        self.download_object(GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            key: from.key().to_owned(),
+            ..GetObjectRequest::default()
+        })
+        .await
     }
 
     async fn download_byte_range(
@@ -322,8 +422,7 @@ impl RemoteStorage for S3Bucket {
         from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>> {
+    ) -> Result<Download, DownloadError> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
         // and needs both ends to be exclusive
         let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
@@ -331,34 +430,14 @@ impl RemoteStorage for S3Bucket {
             Some(end_inclusive) => format!("bytes={}-{}", start_inclusive, end_inclusive),
             None => format!("bytes={}-", start_inclusive),
         });
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 range download")?;
 
-        metrics::inc_get_object();
-
-        let object_output = self
-            .client
-            .get_object(GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: from.key().to_owned(),
-                range,
-                ..GetObjectRequest::default()
-            })
-            .await
-            .map_err(|e| {
-                metrics::inc_get_object_fail();
-                e
-            })?;
-
-        if let Some(body) = object_output.body {
-            let mut from = io::BufReader::new(body.into_async_read());
-            io::copy(&mut from, to).await?;
-        }
-
-        Ok(object_output.metadata.map(StorageMetadata))
+        self.download_object(GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            key: from.key().to_owned(),
+            range,
+            ..GetObjectRequest::default()
+        })
+        .await
     }
 
     async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()> {
@@ -390,6 +469,25 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn object_name() {
+        let k = S3ObjectKey("a/b/c".to_owned());
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = S3ObjectKey("a/b/c/".to_owned());
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = S3ObjectKey("a/".to_owned());
+        assert_eq!(k.object_name(), Some("a"));
+
+        // XXX is it impossible to have an empty key?
+        let k = S3ObjectKey("".to_owned());
+        assert_eq!(k.object_name(), None);
+
+        let k = S3ObjectKey("/".to_owned());
+        assert_eq!(k.object_name(), None);
+    }
 
     #[test]
     fn download_destination() -> anyhow::Result<()> {

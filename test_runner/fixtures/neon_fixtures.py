@@ -4,6 +4,7 @@ from dataclasses import field
 from enum import Flag, auto
 import textwrap
 from cached_property import cached_property
+import abc
 import asyncpg
 import os
 import boto3
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Type, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
 import requests
@@ -324,7 +325,7 @@ class PgProtocol:
         # Convert options='-c<key>=<val>' to server_settings
         if 'options' in conn_options:
             options = conn_options.pop('options')
-            for match in re.finditer('-c(\w*)=(\w*)', options):
+            for match in re.finditer(r'-c(\w*)=(\w*)', options):
                 key = match.group(1)
                 val = match.group(2)
                 if 'server_options' in conn_options:
@@ -795,17 +796,48 @@ class NeonPageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def timeline_attach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+    def tenant_list(self) -> List[Dict[Any, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
+
+    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
         res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/attach",
+            f"http://localhost:{self.port}/v1/tenant",
+            json={
+                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
+            },
         )
+        self.verbose_error(res)
+        if res.status_code == 409:
+            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
+        new_tenant_id = res.json()
+        assert isinstance(new_tenant_id, str)
+        return uuid.UUID(new_tenant_id)
+
+    def tenant_attach(self, tenant_id: uuid.UUID):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/attach")
         self.verbose_error(res)
 
-    def timeline_detach(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/detach",
-        )
+    def tenant_detach(self, tenant_id: uuid.UUID):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/detach")
         self.verbose_error(res)
+
+    def tenant_status(self, tenant_id: uuid.UUID) -> Dict[Any, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[str, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, list)
+        return res_json
 
     def timeline_create(
         self,
@@ -831,34 +863,6 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_list(self) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
-            json={
-                'new_tenant_id': new_tenant_id.hex if new_tenant_id else None,
-            },
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f'could not create tenant: already exists for id {new_tenant_id}')
-        new_tenant_id = res.json()
-        assert isinstance(new_tenant_id, str)
-        return uuid.UUID(new_tenant_id)
-
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
@@ -866,6 +870,14 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_delete(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
         return res_json
 
     def wal_receiver_get(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
@@ -897,14 +909,89 @@ TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline
                                      re.MULTILINE)
 
 
-class NeonCli:
+class AbstractNeonCli(abc.ABC):
+    """
+    A typed wrapper around an arbitrary Neon CLI tool.
+    Supports a way to run arbitrary command directly via CLI.
+    Do not use directly, use specific subclasses instead.
+    """
+    def __init__(self, env: NeonEnv):
+        self.env = env
+
+    COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
+
+    def raw_cli(self,
+                arguments: List[str],
+                extra_env_vars: Optional[Dict[str, str]] = None,
+                check_return_code=True) -> 'subprocess.CompletedProcess[str]':
+        """
+        Run the command with the specified arguments.
+
+        Arguments must be in list form, e.g. ['pg', 'create']
+
+        Return both stdout and stderr, which can be accessed as
+
+        >>> result = env.neon_cli.raw_cli(...)
+        >>> assert result.stderr == ""
+        >>> log.info(result.stdout)
+
+        If `check_return_code`, on non-zero exit code logs failure and raises.
+        """
+
+        assert type(arguments) == list
+        assert type(self.COMMAND) == str
+
+        bin_neon = os.path.join(str(neon_binpath), self.COMMAND)
+
+        args = [bin_neon] + arguments
+        log.info('Running command "{}"'.format(' '.join(args)))
+        log.info(f'Running in "{self.env.repo_dir}"')
+
+        env_vars = os.environ.copy()
+        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
+        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
+        if self.env.rust_log_override is not None:
+            env_vars['RUST_LOG'] = self.env.rust_log_override
+        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+            env_vars[extra_env_key] = extra_env_value
+
+        # Pass coverage settings
+        var = 'LLVM_PROFILE_FILE'
+        val = os.environ.get(var)
+        if val:
+            env_vars[var] = val
+
+        # Intercept CalledProcessError and print more info
+        res = subprocess.run(args,
+                             env=env_vars,
+                             check=False,
+                             universal_newlines=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        if not res.returncode:
+            log.info(f"Run success: {res.stdout}")
+        elif check_return_code:
+            # this way command output will be in recorded and shown in CI in failure message
+            msg = f"""\
+            Run {res.args} failed:
+              stdout: {res.stdout}
+              stderr: {res.stderr}
+            """
+            log.info(msg)
+            raise Exception(msg) from subprocess.CalledProcessError(res.returncode,
+                                                                    res.args,
+                                                                    res.stdout,
+                                                                    res.stderr)
+        return res
+
+
+class NeonCli(AbstractNeonCli):
     """
     A typed wrapper around the `neon` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
     """
-    def __init__(self, env: NeonEnv):
-        self.env = env
-        pass
+
+    COMMAND = 'neon_local'
 
     def create_tenant(self,
                       tenant_id: Optional[uuid.UUID] = None,
@@ -1160,6 +1247,7 @@ class NeonCli:
         node_name: str,
         tenant_id: Optional[uuid.UUID] = None,
         destroy=False,
+        check_return_code=True,
     ) -> 'subprocess.CompletedProcess[str]':
         args = [
             'pg',
@@ -1172,69 +1260,28 @@ class NeonCli:
         if node_name is not None:
             args.append(node_name)
 
-        return self.raw_cli(args)
+        return self.raw_cli(args, check_return_code=check_return_code)
 
-    def raw_cli(self,
-                arguments: List[str],
-                extra_env_vars: Optional[Dict[str, str]] = None,
-                check_return_code=True) -> 'subprocess.CompletedProcess[str]':
-        """
-        Run "neon" with the specified arguments.
 
-        Arguments must be in list form, e.g. ['pg', 'create']
+class WalCraft(AbstractNeonCli):
+    """
+    A typed wrapper around the `wal_craft` CLI tool.
+    Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
+    """
 
-        Return both stdout and stderr, which can be accessed as
+    COMMAND = 'wal_craft'
 
-        >>> result = env.neon_cli.raw_cli(...)
-        >>> assert result.stderr == ""
-        >>> log.info(result.stdout)
-        """
+    def postgres_config(self) -> List[str]:
+        res = self.raw_cli(["print-postgres-config"])
+        res.check_returncode()
+        return res.stdout.split('\n')
 
-        assert type(arguments) == list
-
-        bin_neon = os.path.join(str(neon_binpath), 'neon_local')
-
-        args = [bin_neon] + arguments
-        log.info('Running command "{}"'.format(' '.join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
-
-        env_vars = os.environ.copy()
-        env_vars['NEON_REPO_DIR'] = str(self.env.repo_dir)
-        env_vars['POSTGRES_DISTRIB_DIR'] = str(pg_distrib_dir)
-        if self.env.rust_log_override is not None:
-            env_vars['RUST_LOG'] = self.env.rust_log_override
-        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
-            env_vars[extra_env_key] = extra_env_value
-
-        # Pass coverage settings
-        var = 'LLVM_PROFILE_FILE'
-        val = os.environ.get(var)
-        if val:
-            env_vars[var] = val
-
-        # Intercept CalledProcessError and print more info
-        try:
-            res = subprocess.run(args,
-                                 env=env_vars,
-                                 check=True,
-                                 universal_newlines=True,
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
-            log.info(f"Run success: {res.stdout}")
-        except subprocess.CalledProcessError as exc:
-            # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run failed: {exc}
-              stdout: {exc.stdout}
-              stderr: {exc.stderr}
-            """
-            log.info(msg)
-
-            raise Exception(msg) from exc
-
-        if check_return_code:
-            res.check_returncode()
-        return res
+    def in_existing(self, type: str, connection: str) -> int:
+        res = self.raw_cli(["in-existing", type, connection])
+        res.check_returncode()
+        m = re.fullmatch(r'end_of_wal = (.*)\n', res.stdout)
+        assert m
+        return lsn_from_hex(m.group(1))
 
 
 class NeonPageserver(PgProtocol):
@@ -1526,7 +1573,11 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-    def __init__(self, env: NeonEnv, tenant_id: uuid.UUID, port: int):
+    def __init__(self,
+                 env: NeonEnv,
+                 tenant_id: uuid.UUID,
+                 port: int,
+                 check_stop_result: bool = True):
         super().__init__(host='localhost', port=port, user='cloud_admin', dbname='postgres')
         self.env = env
         self.running = False
@@ -1534,6 +1585,7 @@ class Postgres(PgProtocol):
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.port = port
+        self.check_stop_result = check_stop_result
         # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
 
     def create(
@@ -1584,8 +1636,6 @@ class Postgres(PgProtocol):
                                                 tenant_id=self.tenant_id,
                                                 port=self.port)
         self.running = True
-
-        log.info(f"stdout: {run_result.stdout}")
 
         return self
 
@@ -1650,7 +1700,9 @@ class Postgres(PgProtocol):
 
         if self.running:
             assert self.node_name is not None
-            self.env.neon_cli.pg_stop(self.node_name, self.tenant_id)
+            self.env.neon_cli.pg_stop(self.node_name,
+                                      self.tenant_id,
+                                      check_return_code=self.check_stop_result)
             self.running = False
 
         return self
@@ -1662,7 +1714,10 @@ class Postgres(PgProtocol):
         """
 
         assert self.node_name is not None
-        self.env.neon_cli.pg_stop(self.node_name, self.tenant_id, True)
+        self.env.neon_cli.pg_stop(self.node_name,
+                                  self.tenant_id,
+                                  True,
+                                  check_return_code=self.check_stop_result)
         self.node_name = None
         self.running = False
 
@@ -1681,12 +1736,16 @@ class Postgres(PgProtocol):
         Returns self.
         """
 
+        started_at = time.time()
+
         self.create(
             branch_name=branch_name,
             node_name=node_name,
             config_lines=config_lines,
             lsn=lsn,
         ).start()
+
+        log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
         return self
 
@@ -1925,8 +1984,11 @@ class Etcd:
     datadir: str
     port: int
     peer_port: int
-    binary_path: Path = etcd_path()
+    binary_path: Path = field(init=False)
     handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
+
+    def __post_init__(self):
+        self.binary_path = etcd_path()
 
     def client_url(self):
         return f'http://127.0.0.1:{self.port}'
@@ -1984,7 +2046,7 @@ class Etcd:
 def get_test_output_dir(request: Any) -> pathlib.Path:
     """ Compute the working directory for an individual test. """
     test_name = request.node.name
-    test_dir = pathlib.Path(top_output_dir) / test_name
+    test_dir = pathlib.Path(top_output_dir) / test_name.replace("/", "-")
     log.info(f'get_test_output_dir is {test_dir}')
     # make mypy happy
     assert isinstance(test_dir, pathlib.Path)
@@ -2143,7 +2205,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
     assert (mismatch, error) == ([], [])
 
 
-def wait_until(number_of_iterations: int, interval: int, func):
+def wait_until(number_of_iterations: int, interval: float, func):
     """
     Wait until 'func' returns successfully, without exception. Returns the last return value
     from the the function.
@@ -2161,12 +2223,20 @@ def wait_until(number_of_iterations: int, interval: int, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_local(pageserver_http_client: NeonPageserverHttpClient,
-                 tenant: uuid.UUID,
-                 timeline: uuid.UUID):
+def assert_timeline_local(pageserver_http_client: NeonPageserverHttpClient,
+                          tenant: uuid.UUID,
+                          timeline: uuid.UUID):
     timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
     assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
     return timeline_detail
+
+
+def assert_no_in_progress_downloads_for_tenant(
+    pageserver_http_client: NeonPageserverHttpClient,
+    tenant: uuid.UUID,
+):
+    tenant_status = pageserver_http_client.tenant_status(tenant)
+    assert tenant_status['has_in_progress_downloads'] is False, tenant_status
 
 
 def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,

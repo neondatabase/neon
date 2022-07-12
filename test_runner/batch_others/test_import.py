@@ -90,7 +90,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Clean up
     # TODO it should clean itself
     client = env.pageserver.http_client()
-    client.timeline_detach(tenant, timeline)
+    client.timeline_delete(tenant, timeline)
 
     # Importing correct backup works
     import_tar(base_tar, wal_tar)

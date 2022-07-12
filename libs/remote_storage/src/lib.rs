@@ -12,8 +12,10 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::OsStr,
+    fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
+    pin::Pin,
 };
 
 use anyhow::{bail, Context};
@@ -40,13 +42,19 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
+pub trait RemoteObjectName {
+    // Needed to retrieve last component for RemoteObjectId.
+    // In other words a file name
+    fn object_name(&self) -> Option<&str>;
+}
+
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync {
     /// A way to uniquely reference a file in the remote storage.
-    type RemoteObjectId;
+    type RemoteObjectId: RemoteObjectName;
 
     /// Attempts to derive the storage path out of the local path, if the latter is correct.
     fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId>;
@@ -56,6 +64,12 @@ pub trait RemoteStorage: Send + Sync {
 
     /// Lists all items the storage has right now.
     async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
+
+    /// Lists all top level subdirectories for a given prefix
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -70,11 +84,7 @@ pub trait RemoteStorage: Send + Sync {
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(
-        &self,
-        from: &Self::RemoteObjectId,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>>;
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
@@ -83,11 +93,48 @@ pub trait RemoteStorage: Send + Sync {
         from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>>;
+    ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()>;
 }
+
+pub struct Download {
+    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send>>,
+    /// Extra key-value data, associated with the current remote file.
+    pub metadata: Option<StorageMetadata>,
+}
+
+impl Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Download")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum DownloadError {
+    /// Validation or other error happened due to user input.
+    BadInput(anyhow::Error),
+    /// The file was not found in the remote storage.
+    NotFound,
+    /// The file was found in the remote storage, but the download failed.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadError::BadInput(e) => {
+                write!(f, "Failed to download a remote file due to user input: {e}")
+            }
+            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DownloadError {}
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
@@ -180,7 +227,7 @@ pub struct S3Config {
     pub concurrency_limit: NonZeroUsize,
 }
 
-impl std::fmt::Debug for S3Config {
+impl Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
             .field("bucket_name", &self.bucket_name)
