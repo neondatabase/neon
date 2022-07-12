@@ -2258,7 +2258,7 @@ impl LayeredTimeline {
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
                 let mut next_key_size = 0u64;
-                // Determine size occupied by this key. We stop either at next key, either when size becomes larger than target_file_size
+                // Determine size occupied by this key. We stop at next key, or when size becomes larger than target_file_size
                 for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
                     next_key_size = next_size;
                     if key != next_key {
