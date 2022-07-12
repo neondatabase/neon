@@ -25,6 +25,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
                                 ty: str):
     env = neon_simple_env
 
+    # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test  
     tenant, _ = env.neon_cli.create_tenant(
          conf={
              'gc_period': '5 s',
