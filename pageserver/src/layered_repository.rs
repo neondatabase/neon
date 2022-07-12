@@ -1739,8 +1739,10 @@ impl LayeredTimeline {
             let open_layer_size = open_layer.size()?;
             drop(layers);
             let distance = last_lsn.widening_sub(self.last_freeze_at.load());
-            // Checkpointing of open layer is triggered both by layer size and LSN range
-            // because lst one determines how much WAL the safekeepers need to store.
+            // Checkpointing the open layer can be triggered by layer size or LSN range.
+            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
+            // we want to stay below that with a big margin.  The LSN distance determines how
+            // much WAL the safekeepers need to store.
             if distance >= self.get_checkpoint_distance().into()
                 || open_layer_size > self.get_checkpoint_distance()
             {
