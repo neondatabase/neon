@@ -558,7 +558,7 @@ def main(args: argparse.Namespace):
         for timeline in timelines:
             # Skip timelines we don't need to export
             if args.timelines and timeline['timeline_id'] not in args.timelines:
-                print("Skipping timeline {timeline['timeline_id']}")
+                print(f"Skipping timeline {timeline['timeline_id']}")
                 continue
 
             # Choose filenames
