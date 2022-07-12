@@ -477,6 +477,35 @@ def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
     return last_lsn, prev_lsn
 
 
+def import_timeline(args, psql_path, pageserver_connstr, pageserver_http, tenant_id,
+           timeline_id, last_lsn, prev_lsn, tar_filename):
+    # Import timelines to new pageserver
+    import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
+    full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
+
+    stderr_filename2 = path.join(
+        args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
+    stdout_filename = path.join(
+        args.work_dir, f"import_{tenant_id}_{timeline_id}.stdout")
+
+    print(f"Running: {full_cmd}")
+
+    with open(stdout_filename, 'w') as stdout_f:
+        with open(stderr_filename2, 'w') as stderr_f:
+            print(f"(capturing output to {stdout_filename})")
+            subprocess.run(full_cmd,
+                           stdout=stdout_f,
+                           stderr=stderr_f,
+                           env=PSQL_ENV,
+                           shell=True,
+                           check=True)
+
+            print(f"Done import")
+
+    # Wait until pageserver persists the files
+    wait_for_upload(pageserver_http, uuid.UUID(tenant_id), uuid.UUID(timeline_id), lsn_from_hex(last_lsn))
+
+
 def export(args, psql_path, pageserver_connstr, tenant_id,
            timeline_id, last_lsn, prev_lsn, tar_filename):
     # Choose filenames
@@ -501,6 +530,7 @@ def export(args, psql_path, pageserver_connstr, tenant_id,
     # Log more info
     file_size = os.path.getsize(tar_filename)
     print(f"Done export: {tar_filename}, size {file_size}")
+
 
 
 def main(args: argparse.Namespace):
@@ -532,7 +562,7 @@ def main(args: argparse.Namespace):
             tar_filename = path.join(
                 args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
 
-            # Export timelines from old pageserver
+            # Export timeline from old pageserver
             if args.only_import is False:
                 last_lsn, prev_lsn = get_rlsn(
                     old_pageserver_connstr,
@@ -550,31 +580,18 @@ def main(args: argparse.Namespace):
                     tar_filename,
                 )
 
-            # Import timelines to new pageserver
-            import_cmd = f"import basebackup {timeline['tenant_id']} {timeline['timeline_id']} {last_lsn} {last_lsn}"
-            full_cmd = rf"""cat {tar_filename} | {psql_path} {new_pageserver_connstr} -c '{import_cmd}' """
-
-            stderr_filename2 = path.join(
-                args.work_dir, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stderr")
-            stdout_filename = path.join(
-                args.work_dir, f"import_{timeline['tenant_id']}_{timeline['timeline_id']}.stdout")
-
-            print(f"Running: {full_cmd}")
-
-            with open(stdout_filename, 'w') as stdout_f:
-                with open(stderr_filename2, 'w') as stderr_f:
-                    print(f"(capturing output to {stdout_filename})")
-                    subprocess.run(full_cmd,
-                                   stdout=stdout_f,
-                                   stderr=stderr_f,
-                                   env=PSQL_ENV,
-                                   shell=True,
-                                   check=True)
-
-                    print(f"Done import")
-
-            # Wait until pageserver persists the files
-            wait_for_upload(new_http_client, uuid.UUID(timeline['tenant_id']), uuid.UUID(timeline['timeline_id']), lsn_from_hex(last_lsn))
+            # Import into new pageserver
+            import_timeline(
+                args,
+                psql_path,
+                new_pageserver_connstr,
+                new_http_client,
+                timeline['tenant_id'],
+                timeline['timeline_id'],
+                last_lsn,
+                prev_lsn,
+                tar_filename,
+            )
 
             # Re-export and compare
             re_export_filename = tar_filename + ".reexport"
