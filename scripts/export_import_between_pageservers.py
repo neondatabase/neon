@@ -506,8 +506,8 @@ def import_timeline(args, psql_path, pageserver_connstr, pageserver_http, tenant
     wait_for_upload(pageserver_http, uuid.UUID(tenant_id), uuid.UUID(timeline_id), lsn_from_hex(last_lsn))
 
 
-def export(args, psql_path, pageserver_connstr, tenant_id,
-           timeline_id, last_lsn, prev_lsn, tar_filename):
+def export_timeline(args, psql_path, pageserver_connstr, tenant_id,
+                    timeline_id, last_lsn, prev_lsn, tar_filename):
     # Choose filenames
     incomplete_filename = tar_filename + ".incomplete"
     stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
@@ -532,13 +532,11 @@ def export(args, psql_path, pageserver_connstr, tenant_id,
     print(f"Done export: {tar_filename}, size {file_size}")
 
 
-
 def main(args: argparse.Namespace):
     psql_path = Path(args.pg_distrib_dir) / "bin" / "psql"
 
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host
-    tenants = args.tenants
 
     old_http_client = NeonPageserverHttpClient(old_pageserver_host, args.old_pageserver_http_port)
     old_http_client.check_status()
@@ -548,16 +546,21 @@ def main(args: argparse.Namespace):
     new_http_client.check_status()
     new_pageserver_connstr = f"postgresql://{new_pageserver_host}:{args.new_pageserver_pg_port}"
 
-    for tenant_id in tenants:
+    for tenant_id in args.tenants:
         print(f"Tenant: {tenant_id}")
         timelines = old_http_client.timeline_list(uuid.UUID(tenant_id))
         print(f"Timelines: {timelines}")
 
         # Create tenant in new pageserver
-        if args.only_import is False:
+        if args.only_import is False and not args.timelines:
             new_http_client.tenant_create(uuid.UUID(tenant_id), args.ok_if_exists)
 
         for timeline in timelines:
+            # Skip timelines we don't need to export
+            if args.timelines and timeline['timeline_id'] not in args.timelines:
+                print("Skipping timeline {timeline['timeline_id']}")
+                continue
+
             # Choose filenames
             tar_filename = path.join(
                 args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
@@ -569,7 +572,7 @@ def main(args: argparse.Namespace):
                     timeline['tenant_id'],
                     timeline['timeline_id'],
                 )
-                export(
+                export_timeline(
                     args,
                     psql_path,
                     old_pageserver_connstr,
@@ -595,7 +598,7 @@ def main(args: argparse.Namespace):
 
             # Re-export and compare
             re_export_filename = tar_filename + ".reexport"
-            export(
+            export_timeline(
                 args,
                 psql_path,
                 new_pageserver_connstr,
@@ -621,6 +624,13 @@ if __name__ == '__main__':
         required=True,
         nargs='+',
         help='Id of the tenant to migrate. You can pass multiple arguments',
+    )
+    parser.add_argument(
+        '--timeline-id',
+        dest='timelines',
+        required=False,
+        nargs='+',
+        help='Id of the timeline to migrate. You can pass multiple arguments',
     )
     parser.add_argument(
         '--from-host',
