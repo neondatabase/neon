@@ -34,7 +34,7 @@ pub trait BlobCursor {
     ) -> Result<(), std::io::Error>;
 }
 
-impl<'a, R> BlobCursor for BlockCursor<R>
+impl<R> BlobCursor for BlockCursor<R>
 where
     R: BlockReader,
 {

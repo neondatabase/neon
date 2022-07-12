@@ -1690,24 +1690,24 @@ impl LayeredTimeline {
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
     fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
-        let layer_paths_to_upload;
-
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+
+        let layer_paths_to_upload = if lsn_range.start == self.initdb_lsn
+            && lsn_range.end == Lsn(self.initdb_lsn.0 + 1)
+        {
             let pgdir = tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)?;
             let (partitioning, _lsn) =
                 pgdir.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
-            layer_paths_to_upload =
-                self.create_image_layers(&partitioning, self.initdb_lsn, true)?;
+            self.create_image_layers(&partitioning, self.initdb_lsn, true)?
         } else {
             // normal case, write out a L0 delta layer file.
             let delta_path = self.create_delta_layer(&frozen_layer)?;
-            layer_paths_to_upload = HashSet::from([delta_path]);
-        }
+            HashSet::from([delta_path])
+        };
         fail_point!("checkpoint-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the

@@ -10,5 +10,6 @@ pub mod logger;
 pub mod compute;
 pub mod monitor;
 pub mod params;
+#[allow(clippy::format_push_string)] // Clippy's suggestion doesn't actually work
 pub mod pg_helpers;
 pub mod spec;
