@@ -8,6 +8,13 @@ from fixtures.log_helper import log
 from performance.test_perf_pgbench import get_scales_matrix
 
 
+# Test branch creation
+#
+# This test spawns pgbench in a thread in the background, and creates a branch while
+# pgbench is running. Then it launches pgbench on the new branch, and creates another branch. Repeat `n_branches` times.
+# If 'ty' == 'cascade', each branch is created from the previous branch, so that you end
+# up with a branch of a branch of a branch ... of a branch. With 'ty' == 'flat', each branch is
+# created from the root.
 @pytest.mark.parametrize("n_branches", [10])
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 @pytest.mark.parametrize("ty", ["cascade", "flat"])
