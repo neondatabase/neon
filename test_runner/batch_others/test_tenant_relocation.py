@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserverHttpClient,
+    PageserverPort,
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
@@ -115,13 +116,23 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
     log.info('load thread stopped')
 
 
-def populate_branch(pg: Postgres, create_table: bool,
-                    expected_sum: Optional[int]) -> Tuple[UUID, int]:
+def populate_branch(
+    pg: Postgres,
+    tenant_id: UUID,
+    ps_http: NeonPageserverHttpClient,
+    create_table: bool,
+    expected_sum: Optional[int],
+) -> Tuple[UUID, int]:
     # insert some data
     with pg_cur(pg) as cur:
         cur.execute("SHOW neon.timeline_id")
         timeline_id = UUID(cur.fetchone()[0])
         log.info("timeline to relocate %s", timeline_id.hex)
+
+        cur.execute("SELECT pg_current_wal_flush_lsn()")
+        log.info("pg_current_wal_flush_lsn() %s", lsn_from_hex(cur.fetchone()[0]))
+        log.info("timeline detail %s",
+                 ps_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id))
 
         # we rely upon autocommit after each statement
         # as waiting for acceptors happens there
@@ -237,6 +248,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
     # first branch is used for load, compute for second one is used to
     # check that data is not lost
 
+    pageserver_http = env.pageserver.http_client()
+
     tenant_id, initial_timeline_id = env.neon_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 
@@ -244,7 +257,13 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
     pg_main = env.postgres.create_start(branch_name='test_tenant_relocation_main',
                                         tenant_id=tenant_id)
 
-    timeline_id_main, current_lsn_main = populate_branch(pg_main, create_table=True, expected_sum=500500)
+    timeline_id_main, current_lsn_main = populate_branch(
+        pg_main,
+        tenant_id=tenant_id,
+        ps_http=pageserver_http,
+        create_table=True,
+        expected_sum=500500,
+    )
 
     env.neon_cli.create_branch(
         new_branch_name="test_tenant_relocation_second",
@@ -254,11 +273,13 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
     pg_second = env.postgres.create_start(branch_name='test_tenant_relocation_second',
                                           tenant_id=tenant_id)
 
-    # do not select sum for second branch, this select will wait until wal reaches pageserver
-    # try to check another case when pageserver didnt receive that wal and needs to get it from safekeeper
-    timeline_id_second, current_lsn_second = populate_branch(pg_second, create_table=False, expected_sum=1001000)
-
-    pageserver_http = env.pageserver.http_client()
+    timeline_id_second, current_lsn_second = populate_branch(
+        pg_second,
+        tenant_id=tenant_id,
+        ps_http=pageserver_http,
+        create_table=False,
+        expected_sum=1001000,
+    )
 
     # wait until pageserver receives that data
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_main, current_lsn_main)

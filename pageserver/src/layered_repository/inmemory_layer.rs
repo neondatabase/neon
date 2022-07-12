@@ -267,13 +267,13 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timelineid, lsn);
         let mut inner = self.inner.write().unwrap();
 
         inner.assert_writeable();
 
-        let off = inner.file.write_blob(&Value::ser(&val)?)?;
+        let off = inner.file.write_blob(&Value::ser(val)?)?;
 
         let vec_map = inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
