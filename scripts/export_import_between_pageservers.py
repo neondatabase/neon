@@ -446,7 +446,7 @@ def touch_missing_rels(log_dir, corrupt_tar, output_tar, paths):
             absolute_path = os.path.join(restored_dir, path)
             exists = os.path.exists(absolute_path)
             if not exists:
-                print("File {absolute_path} didn't exist. Creating..")
+                print(f"File {absolute_path} didn't exist. Creating..")
                 Path(absolute_path).touch()
 
         # Repackage
