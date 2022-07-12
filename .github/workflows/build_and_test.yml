@@ -536,6 +536,9 @@ jobs:
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
     outputs:
       matrix-include: ${{ steps.set-matrix.outputs.include }}
     steps:
