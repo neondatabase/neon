@@ -4,8 +4,13 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 
-# Test restarting page server, while safekeeper and compute node keep
-# running.
+# This test creates large number of tables which cause large catalog.
+# Right now Neon serialize directory as single key-value storage entry and so
+# it leads to layer filled mostly by one key.
+# Originally Neon implementation of checkpoint and compaction is not able to split key which leads
+# to large (several gigabytes) layer files (both ephemeral and delta layers).
+# It may cause problems with uploading to S3 and also degrade performance because ephemeral file swapping.
+#
 def test_large_schema(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
@@ -19,8 +24,10 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     for i in range(1, tables + 1):
         print(f'iteration {i} / {tables}')
 
-        # Kill and restart the pageserver.
+        # Restart compute. Restart is actually not strictly needed.
+        # It is done mostly because this test originally tries to model the problem reported by Ketteq.
         pg.stop()
+        # Kill and restart the pageserver.
         # env.pageserver.stop(immediate=True)
         # env.pageserver.start()
         pg.start()

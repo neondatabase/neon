@@ -837,13 +837,12 @@ impl<'a> DeltaValueIter<'a> {
 ///
 /// Iterator over all keys stored in a delta layer
 ///
-/// FIXME: This creates a Vector to hold the offsets of all key-offset pairs.
+/// FIXME: This creates a Vector to hold all keys.
 /// That takes up quite a lot of memory. Should do this in a more streaming
 /// fashion.
 ///
 struct DeltaKeyIter {
-    all_offsets: Vec<(DeltaKey, BlobRef)>,
-    size: u64,
+    all_keys: Vec<(DeltaKey, u64)>,
     next_idx: usize,
 }
 
@@ -851,21 +850,14 @@ impl Iterator for DeltaKeyIter {
     type Item = (Key, Lsn, u64);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next_idx < self.all_offsets.len() {
-            let (delta_key, blob_ref) = &self.all_offsets[self.next_idx];
+        if self.next_idx < self.all_keys.len() {
+            let (delta_key, size) = &self.all_keys[self.next_idx];
 
             let key = delta_key.key();
             let lsn = delta_key.lsn();
 
             self.next_idx += 1;
-
-            let next_pos = if self.next_idx < self.all_offsets.len() {
-                self.all_offsets[self.next_idx].1.pos()
-            } else {
-                self.size
-            };
-            assert!(next_pos > blob_ref.pos());
-            Some((key, lsn, next_pos - blob_ref.pos()))
+            Some((key, lsn, *size))
         } else {
             None
         }
@@ -881,19 +873,33 @@ impl<'a> DeltaKeyIter {
             file,
         );
 
-        let mut all_offsets: Vec<(DeltaKey, BlobRef)> = Vec::new();
+        let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
             |key, value| {
-                all_offsets.push((DeltaKey::from_slice(key), BlobRef(value)));
+                let delta_key = DeltaKey::from_slice(key);
+                let pos = BlobRef(value).pos();
+                if let Some(last) = all_keys.last_mut() {
+                    if last.0.key() == delta_key.key() {
+                        return true;
+                    } else {
+                        // subtract offset of new key BLOB and first blob of this key
+                        // to get total size if values associated with this key
+                        let first_pos = last.1;
+                        last.1 = pos - first_pos;
+                    }
+                }
+                all_keys.push((delta_key, pos));
                 true
             },
         )?;
-
+        if let Some(last) = all_keys.last_mut() {
+            // Last key occupies all space till end of layer
+            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+        }
         let iter = DeltaKeyIter {
-            all_offsets,
-            size: std::fs::metadata(&file.file.path)?.len(),
+            all_keys,
             next_idx: 0,
         };
 
