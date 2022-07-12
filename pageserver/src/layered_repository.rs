@@ -1562,7 +1562,7 @@ impl LayeredTimeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
         layer.put_value(key, lsn, val)?;
@@ -1708,22 +1708,7 @@ impl LayeredTimeline {
             let delta_path = self.create_delta_layer(&frozen_layer)?;
             layer_paths_to_upload = HashSet::from([delta_path]);
         }
-
-        // Sync the new layer to disk.
-        //
-        // We must also fsync the timeline dir to ensure the directory entries for
-        // new layer files are durable
-        //
-        // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-        // files to flush, it might be better to first write them all, and then fsync
-        // them all in parallel.
-        par_fsync::par_fsync(&[
-            new_delta_path.clone(),
-            self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-        ])?;
         fail_point!("checkpoint-before-sync");
-
-        fail_point!("flush-frozen");
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now.
@@ -2531,7 +2516,7 @@ impl Deref for LayeredTimelineWriter<'_> {
 }
 
 impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()> {
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 

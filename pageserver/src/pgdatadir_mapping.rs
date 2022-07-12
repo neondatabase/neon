@@ -916,7 +916,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let mut result: Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
+                result = writer.put(key, self.lsn, &value);
                 false
             } else {
                 true
@@ -945,7 +945,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, value)?;
+            writer.put(key, self.lsn, &value)?;
         }
         for key_range in self.pending_deletions {
             writer.delete(key_range.clone(), self.lsn)?;

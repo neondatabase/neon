@@ -523,7 +523,6 @@ impl PageServerHandler {
         base_lsn: Lsn,
         _end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         let _enter =
             info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
 
@@ -573,7 +572,6 @@ impl PageServerHandler {
         start_lsn: Lsn,
         end_lsn: Lsn,
     ) -> anyhow::Result<()> {
-        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         let _enter =
             info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
 
@@ -777,7 +775,7 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }

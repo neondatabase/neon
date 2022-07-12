@@ -406,7 +406,7 @@ pub trait TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()>;
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()>;
 
     fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
 
