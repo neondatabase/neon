@@ -3,36 +3,39 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import lsn_from_hex
 
 
-# Test the GC implementation when running with branching
+# Test the GC implementation when running with branching.
 # This test reproduces the issue https://github.com/neondatabase/neon/issues/707.
 #
-# Consider two LSNs `lsn1` and `lsn2` with some delta files as folows:
+# Consider two LSNs `lsn1` and `lsn2` with some delta files as follows:
 # ...
-# ... -> has an image layer xx_p with p < lsn1
+# p   -> has an image layer xx_p with p < lsn1
 # ...
 # lsn1
 # ...
-# ... -> has an image layer xx_q with lsn1 < q < lsn2
+# q   -> has an image layer yy_q with lsn1 < q < lsn2
 # ...
 # lsn2
 #
 # Consider running a GC iteration such that the GC horizon is between p and lsn1
 # ...
-# ... -> has an image layer xx_p with p < lsn1
+# p       -> has an image layer xx_p with p < lsn1
+# D_start -> is a delta layer D's start (e.g D = '...-...-D_start-D_end')
 # ...
-# ||| -------> a delta layer D's start
-# ... -> gc horizon h such that p < h < lsn1
+# GC_h    -> is a gc horizon such that p < GC_h < lsn1
+# ...
 # lsn1
-# ||| -------> a delta layer D's end
 # ...
-# ... -> has an image layer xx_q with lsn1 < q < lsn2
+# D_end   -> is a delta layer D's end
+# ...
+# q       -> has an image layer yy_q with lsn1 < q < lsn2
 # ...
 # lsn2
 #
 # As described in the issue #707, the image layer xx_p will be deleted as
-# there exists a newer image layer xx_q. However, removing xx_p will corrupt
-# any delta layers that depend on xx_p that are not deleted by GC.
-# For example, the delta layer D is corrupted in the above example.
+# its range is below the GC horizon and there exists a newer image layer yy_q (q > p).
+# However, removing xx_p will corrupt any delta layers that depend on xx_p that
+# are not deleted by GC. For example, the delta layer D is corrupted in the
+# above example because D depends on the image layer xx_p for value reconstruction.
 #
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
@@ -79,8 +82,8 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     lsn2 = main_cur.fetchone()[0]
     log.info(f'LSN2: {lsn2}')
 
-    # set the GC horizon such that it doesn't cover lsn1 so that
-    # we can create a new branch starting from lsn1
+    # Set the GC horizon so that lsn1 is inside the horizon, which means
+    # we can create a new branch starting from lsn1.
     env.pageserver.safe_psql(
         f'''do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}'''
     )
