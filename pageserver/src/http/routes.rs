@@ -14,6 +14,7 @@ use crate::repository::Repository;
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
+use crate::tenant_mgr::TenantInfo;
 use crate::timelines::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
@@ -209,9 +210,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     .await;
 
     if local_timeline_info.is_none() && remote_timeline_info.is_none() {
-        return Err(ApiError::NotFound(
-            "Timeline is not found neither locally nor remotely".to_string(),
-        ));
+        return Err(ApiError::NotFound(format!(
+            "Timeline {tenant_id}/{timeline_id} is not found neither locally nor remotely"
+        )));
     }
 
     let timeline_info = TimelineInfo {
@@ -241,122 +242,156 @@ async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Bod
     json_response(StatusCode::OK, &wal_receiver_entry)
 }
 
-async fn timeline_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+// TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
+async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
-    info!(
-        "Handling timeline {} attach for tenant: {}",
-        timeline_id, tenant_id,
-    );
+    info!("Handling tenant attach {}", tenant_id,);
 
     tokio::task::spawn_blocking(move || {
-        if tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id).is_ok() {
-            // TODO: maybe answer with 309 Not Modified here?
-            anyhow::bail!("Timeline is already present locally")
+        if tenant_mgr::get_tenant_state(tenant_id).is_some() {
+            anyhow::bail!("Tenant is already present locally")
         };
         Ok(())
     })
     .await
     .map_err(ApiError::from_err)??;
 
-    let sync_id = ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    };
     let state = get_state(&request);
     let remote_index = &state.remote_index;
 
     let mut index_accessor = remote_index.write().await;
-    if let Some(remote_timeline) = index_accessor.timeline_entry_mut(&sync_id) {
-        if remote_timeline.awaits_download {
+    if let Some(tenant_entry) = index_accessor.tenant_entry_mut(&tenant_id) {
+        if tenant_entry.has_in_progress_downloads() {
             return Err(ApiError::Conflict(
-                "Timeline download is already in progress".to_string(),
+                "Tenant download is already in progress".to_string(),
             ));
         }
 
-        remote_timeline.awaits_download = true;
-        storage_sync::schedule_layer_download(tenant_id, timeline_id);
-        return json_response(StatusCode::ACCEPTED, ());
-    } else {
-        // no timeline in the index, release the lock to make the potentially lengthy download opetation
-        drop(index_accessor);
-    }
-
-    let new_timeline = match try_download_index_part_data(state, sync_id).await {
-        Ok(Some(mut new_timeline)) => {
-            tokio::fs::create_dir_all(state.conf.timeline_path(&timeline_id, &tenant_id))
-                .await
-                .context("Failed to create new timeline directory")?;
-            new_timeline.awaits_download = true;
-            new_timeline
+        for (timeline_id, remote_timeline) in tenant_entry.iter_mut() {
+            storage_sync::schedule_layer_download(tenant_id, *timeline_id);
+            remote_timeline.awaits_download = true;
         }
-        Ok(None) => return Err(ApiError::NotFound("Unknown remote timeline".to_string())),
+        return json_response(StatusCode::ACCEPTED, ());
+    }
+    // no tenant in the index, release the lock to make the potentially lengthy download opetation
+    drop(index_accessor);
+
+    // download index parts for every tenant timeline
+    let remote_timelines = match gather_tenant_timelines_index_parts(state, tenant_id).await {
+        Ok(Some(remote_timelines)) => remote_timelines,
+        Ok(None) => return Err(ApiError::NotFound("Unknown remote tenant".to_string())),
         Err(e) => {
-            error!("Failed to retrieve remote timeline data: {:?}", e);
+            error!("Failed to retrieve remote tenant data: {:?}", e);
             return Err(ApiError::NotFound(
-                "Failed to retrieve remote timeline".to_string(),
+                "Failed to retrieve remote tenant".to_string(),
             ));
         }
     };
 
+    // recheck that download is not in progress because
+    // we've released the lock to avoid holding it during the download
     let mut index_accessor = remote_index.write().await;
-    match index_accessor.timeline_entry_mut(&sync_id) {
-        Some(remote_timeline) => {
-            if remote_timeline.awaits_download {
+    let tenant_entry = match index_accessor.tenant_entry_mut(&tenant_id) {
+        Some(tenant_entry) => {
+            if tenant_entry.has_in_progress_downloads() {
                 return Err(ApiError::Conflict(
-                    "Timeline download is already in progress".to_string(),
+                    "Tenant download is already in progress".to_string(),
                 ));
             }
-            remote_timeline.awaits_download = true;
+            tenant_entry
         }
-        None => index_accessor.add_timeline_entry(sync_id, new_timeline),
+        None => index_accessor.add_tenant_entry(tenant_id),
+    };
+
+    // populate remote index with the data from index part and create directories on the local filesystem
+    for (timeline_id, mut remote_timeline) in remote_timelines {
+        tokio::fs::create_dir_all(state.conf.timeline_path(&timeline_id, &tenant_id))
+            .await
+            .context("Failed to create new timeline directory")?;
+
+        remote_timeline.awaits_download = true;
+        tenant_entry.insert(timeline_id, remote_timeline);
+        // schedule actual download
+        storage_sync::schedule_layer_download(tenant_id, timeline_id);
     }
-    storage_sync::schedule_layer_download(tenant_id, timeline_id);
+
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn try_download_index_part_data(
+/// Note: is expensive from s3 access perspective,
+/// for details see comment to `storage_sync::gather_tenant_timelines_index_parts`
+async fn gather_tenant_timelines_index_parts(
     state: &State,
-    sync_id: ZTenantTimelineId,
-) -> anyhow::Result<Option<RemoteTimeline>> {
-    let index_part = match state.remote_storage.as_ref() {
+    tenant_id: ZTenantId,
+) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
+    let index_parts = match state.remote_storage.as_ref() {
         Some(GenericRemoteStorage::Local(local_storage)) => {
-            storage_sync::download_index_part(state.conf, local_storage, sync_id).await
+            storage_sync::gather_tenant_timelines_index_parts(state.conf, local_storage, tenant_id)
+                .await
         }
+        // FIXME here s3 storage contains its own limits, that are separate from sync storage thread ones
+        //       because it is a different instance. We can move this limit to some global static
+        //       or use one instance everywhere.
         Some(GenericRemoteStorage::S3(s3_storage)) => {
-            storage_sync::download_index_part(state.conf, s3_storage, sync_id).await
+            storage_sync::gather_tenant_timelines_index_parts(state.conf, s3_storage, tenant_id)
+                .await
         }
         None => return Ok(None),
     }
-    .with_context(|| format!("Failed to download index part for timeline {sync_id}"))?;
+    .with_context(|| format!("Failed to download index parts for tenant {tenant_id}"))?;
 
-    let timeline_path = state
-        .conf
-        .timeline_path(&sync_id.timeline_id, &sync_id.tenant_id);
-    RemoteTimeline::from_index_part(&timeline_path, index_part)
-        .map(Some)
-        .with_context(|| {
-            format!("Failed to convert index part into remote timeline for timeline {sync_id}")
-        })
+    let mut remote_timelines = Vec::with_capacity(index_parts.len());
+    for (timeline_id, index_part) in index_parts {
+        let timeline_path = state.conf.timeline_path(&timeline_id, &tenant_id);
+        let remote_timeline = RemoteTimeline::from_index_part(&timeline_path, index_part)
+            .with_context(|| {
+                format!("Failed to convert index part into remote timeline for timeline {tenant_id}/{timeline_id}")
+            })?;
+        remote_timelines.push((timeline_id, remote_timeline));
+    }
+    Ok(Some(remote_timelines))
 }
 
-async fn timeline_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
 
+    let state = get_state(&request);
     tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_detach_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
-        let state = get_state(&request);
-        tenant_mgr::detach_timeline(state.conf, tenant_id, timeline_id)
+        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        tenant_mgr::delete_timeline(tenant_id, timeline_id)
     })
     .await
     .map_err(ApiError::from_err)??;
+
+    let mut remote_index = state.remote_index.write().await;
+    remote_index.remove_timeline_entry(ZTenantTimelineId {
+        tenant_id,
+        timeline_id,
+    });
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+    let conf = state.conf;
+    tokio::task::spawn_blocking(move || {
+        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        tenant_mgr::detach_tenant(conf, tenant_id)
+    })
+    .await
+    .map_err(ApiError::from_err)??;
+
+    let mut remote_index = state.remote_index.write().await;
+    remote_index.remove_tenant_entry(&tenant_id);
 
     json_response(StatusCode::OK, ())
 }
@@ -365,14 +400,46 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     // check for management permission
     check_permission(&request, None)?;
 
+    let state = get_state(&request);
+    // clone to avoid holding the lock while awaiting for blocking task
+    let remote_index = state.remote_index.read().await.clone();
+
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_list").entered();
-        crate::tenant_mgr::list_tenants()
+        crate::tenant_mgr::list_tenants(&remote_index)
     })
     .await
     .map_err(ApiError::from_err)?;
 
     json_response(StatusCode::OK, response_data)
+}
+
+async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    // if tenant is in progress of downloading it can be absent in global tenant map
+    let tenant_state = tokio::task::spawn_blocking(move || tenant_mgr::get_tenant_state(tenant_id))
+        .await
+        .map_err(ApiError::from_err)?;
+
+    let state = get_state(&request);
+    let remote_index = &state.remote_index;
+
+    let index_accessor = remote_index.read().await;
+    let has_in_progress_downloads = index_accessor
+        .tenant_entry(&tenant_id)
+        .ok_or_else(|| ApiError::NotFound("Tenant not found in remote index".to_string()))?
+        .has_in_progress_downloads();
+
+    json_response(
+        StatusCode::OK,
+        TenantInfo {
+            id: tenant_id,
+            state: tenant_state,
+            has_in_progress_downloads: Some(has_in_progress_downloads),
+        },
+    )
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -520,24 +587,28 @@ pub fn make_router(
         .get("/v1/status", status_handler)
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
+        .get("/v1/tenant/:tenant_id", tenant_status)
         .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
+        .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
+        .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_detail_handler,
         )
+        .delete(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
+            timeline_delete_handler,
+        )
+        // for backward compatibility
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
+            timeline_delete_handler,
+        )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
             wal_receiver_get_handler,
-        )
-        .post(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/attach",
-            timeline_attach_handler,
-        )
-        .post(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
-            timeline_detach_handler,
         )
         .any(handler_404))
 }

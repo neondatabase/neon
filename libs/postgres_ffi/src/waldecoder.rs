@@ -82,7 +82,17 @@ impl WalStreamDecoder {
         // that cross page boundaries.
         loop {
             // parse and verify page boundaries as we go
-            if self.lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE) == 0 {
+            if self.padlen > 0 {
+                // We should first skip padding, as we may have to skip some page headers if we're processing the XLOG_SWITCH record.
+                if self.inputbuf.remaining() < self.padlen as usize {
+                    return Ok(None);
+                }
+
+                // skip padding
+                self.inputbuf.advance(self.padlen as usize);
+                self.lsn += self.padlen as u64;
+                self.padlen = 0;
+            } else if self.lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE) == 0 {
                 // parse long header
 
                 if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
@@ -128,15 +138,6 @@ impl WalStreamDecoder {
 
                 self.lsn += XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
                 continue;
-            } else if self.padlen > 0 {
-                if self.inputbuf.remaining() < self.padlen as usize {
-                    return Ok(None);
-                }
-
-                // skip padding
-                self.inputbuf.advance(self.padlen as usize);
-                self.lsn += self.padlen as u64;
-                self.padlen = 0;
             } else if self.contlen == 0 {
                 assert!(self.recordbuf.is_empty());
 
@@ -226,10 +227,10 @@ impl WalStreamDecoder {
             self.padlen = self.lsn.calc_padding(8u32) as u32;
         }
 
-        // Always align resulting LSN on 0x8 boundary -- that is important for getPage()
-        // and WalReceiver integration. Since this code is used both for WalReceiver and
-        // initial WAL import let's force alignment right here.
-        let result = (self.lsn.align(), recordbuf);
+        // We should return LSN of the next record, not the last byte of this record or
+        // the byte immediately after. Note that this handles both XLOG_SWITCH and usual
+        // records, the former "spans" until the next WAL segment (see test_xlog_switch).
+        let result = (self.lsn + self.padlen as u64, recordbuf);
         Ok(Some(result))
     }
 }

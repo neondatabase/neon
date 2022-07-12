@@ -24,7 +24,7 @@ def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
     assert res_2[0] == (5000050000, )
 
     pg.stop()
-    pageserver_http.timeline_detach(tenant_id, timeline_id)
+    pageserver_http.tenant_detach(tenant_id)
 
 
 @pytest.mark.parametrize('num_timelines,num_safekeepers', [(3, 1)])

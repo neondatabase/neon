@@ -30,7 +30,7 @@ def test_compare_pg_stats_rw_with_pgbench_default(neon_with_baseline: PgCompare,
 
     with env.record_pg_stats(pg_stats_rw):
         env.pg_bin.run_capture(
-            ['pgbench', f'-T{duration}', f'--random-seed={seed}', '-Mprepared', env.pg.connstr()])
+            ['pgbench', f'-T{duration}', f'--random-seed={seed}', env.pg.connstr()])
         env.flush()
 
 
@@ -48,14 +48,8 @@ def test_compare_pg_stats_wo_with_pgbench_simple_update(neon_with_baseline: PgCo
     env.flush()
 
     with env.record_pg_stats(pg_stats_wo):
-        env.pg_bin.run_capture([
-            'pgbench',
-            '-N',
-            f'-T{duration}',
-            f'--random-seed={seed}',
-            '-Mprepared',
-            env.pg.connstr()
-        ])
+        env.pg_bin.run_capture(
+            ['pgbench', '-N', f'-T{duration}', f'--random-seed={seed}', env.pg.connstr()])
         env.flush()
 
 
@@ -73,14 +67,8 @@ def test_compare_pg_stats_ro_with_pgbench_select_only(neon_with_baseline: PgComp
     env.flush()
 
     with env.record_pg_stats(pg_stats_ro):
-        env.pg_bin.run_capture([
-            'pgbench',
-            '-S',
-            f'-T{duration}',
-            f'--random-seed={seed}',
-            '-Mprepared',
-            env.pg.connstr()
-        ])
+        env.pg_bin.run_capture(
+            ['pgbench', '-S', f'-T{duration}', f'--random-seed={seed}', env.pg.connstr()])
         env.flush()
 
 
@@ -99,7 +87,7 @@ def test_compare_pg_stats_wal_with_pgbench_default(neon_with_baseline: PgCompare
 
     with env.record_pg_stats(pg_stats_wal):
         env.pg_bin.run_capture(
-            ['pgbench', f'-T{duration}', f'--random-seed={seed}', '-Mprepared', env.pg.connstr()])
+            ['pgbench', f'-T{duration}', f'--random-seed={seed}', env.pg.connstr()])
         env.flush()
 
 

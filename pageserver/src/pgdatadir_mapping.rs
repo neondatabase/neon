@@ -903,6 +903,57 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     ///
+    /// Flush changes accumulated so far to the underlying repository.
+    ///
+    /// Usually, changes made in DatadirModification are atomic, but this allows
+    /// you to flush them to the underlying repository before the final `commit`.
+    /// That allows to free up the memory used to hold the pending changes.
+    ///
+    /// Currently only used during bulk import of a data directory. In that
+    /// context, breaking the atomicity is OK. If the import is interrupted, the
+    /// whole import fails and the timeline will be deleted anyway.
+    /// (Or to be precise, it will be left behind for debugging purposes and
+    /// ignored, see https://github.com/neondatabase/neon/pull/1809)
+    ///
+    /// Note: A consequence of flushing the pending operations is that they
+    /// won't be visible to subsequent operations until `commit`. The function
+    /// retains all the metadata, but data pages are flushed. That's again OK
+    /// for bulk import, where you are just loading data pages and won't try to
+    /// modify the same pages twice.
+    pub fn flush(&mut self) -> Result<()> {
+        // Unless we have accumulated a decent amount of changes, it's not worth it
+        // to scan through the pending_updates list.
+        let pending_nblocks = self.pending_nblocks;
+        if pending_nblocks < 10000 {
+            return Ok(());
+        }
+
+        let writer = self.tline.tline.writer();
+
+        // Flush relation and  SLRU data blocks, keep metadata.
+        let mut result: Result<()> = Ok(());
+        self.pending_updates.retain(|&key, value| {
+            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
+                result = writer.put(key, self.lsn, value);
+                false
+            } else {
+                true
+            }
+        });
+        result?;
+
+        if pending_nblocks != 0 {
+            self.tline.current_logical_size.fetch_add(
+                pending_nblocks * pg_constants::BLCKSZ as isize,
+                Ordering::SeqCst,
+            );
+            self.pending_nblocks = 0;
+        }
+
+        Ok(())
+    }
+
+    ///
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
@@ -914,7 +965,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, value)?;
+            writer.put(key, lsn, &value)?;
         }
         for key_range in self.pending_deletions.drain(..) {
             writer.delete(key_range, lsn)?;
@@ -1319,6 +1370,10 @@ pub fn key_to_rel_block(key: Key) -> Result<(RelTag, BlockNumber)> {
     })
 }
 
+fn is_rel_block_key(key: Key) -> bool {
+    key.field1 == 0x00 && key.field4 != 0
+}
+
 pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
     Ok(match key.field1 {
         0x01 => {
@@ -1335,6 +1390,12 @@ pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
         }
         _ => bail!("unexpected value kind 0x{:02x}", key.field1),
     })
+}
+
+fn is_slru_block_key(key: Key) -> bool {
+    key.field1 == 0x01                // SLRU-related
+        && key.field3 == 0x00000001   // but not SlruDir
+        && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
 //

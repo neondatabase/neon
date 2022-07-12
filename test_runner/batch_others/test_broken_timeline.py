@@ -110,6 +110,6 @@ def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
     env.neon_cli.pageserver_stop(immediate=True)
     env.neon_cli.pageserver_start()
 
-    # Check that the "broken" timeline is not loaded
-    timelines = env.neon_cli.list_timelines(tenant_id)
-    assert len(timelines) == 1
+    # Check that tenant with "broken" timeline is not loaded.
+    with pytest.raises(Exception, match=f"Failed to get repo for tenant {tenant_id.hex}"):
+        env.neon_cli.list_timelines(tenant_id)
