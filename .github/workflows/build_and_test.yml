@@ -212,7 +212,7 @@ jobs:
   pg_regress-tests:
     name: 'pg_regress-tests'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-20.04
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -241,7 +241,7 @@ jobs:
   other-tests:
     name: 'other-tests'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-20.04
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -269,7 +269,7 @@ jobs:
   benchmarks:
     name: 'benchmarks'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-20.04
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -300,7 +300,7 @@ jobs:
   coverage-report:
     name: 'coverage-report'
     runs-on: [ dev ]
-    container: ghcr.io/catthehacker/ubuntu:act-20.04
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -381,7 +381,7 @@ jobs:
   trigger-e2e-tests:
    name: 'trigger-e2e-tests'
    runs-on: [ dev ]
-   container: ghcr.io/catthehacker/ubuntu:act-20.04
+   container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:latest
    needs: [ build-neon ]
    steps:
      - name: Set PR's status to pending and request a remote CI test
