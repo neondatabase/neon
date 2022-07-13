@@ -1,6 +1,7 @@
 [pageservers]
 #zenith-1-ps-1 console_region_id=1
 zenith-1-ps-2 console_region_id=1
+zenith-1-ps-3 console_region_id=1
 
 [safekeepers]
 zenith-1-sk-1 console_region_id=1
