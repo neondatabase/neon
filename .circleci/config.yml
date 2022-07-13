@@ -503,15 +503,14 @@ jobs:
           name: Build and push Docker image
           command: |
             echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            DOCKER_TAG="release-$(git log --oneline|wc -l)"
+            DOCKER_TAG="backport-f88fe021-import-patch-1"
             docker build \
               --pull \
               --build-arg GIT_VERSION=${CIRCLE_SHA1} \
               --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
               --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/neon:${DOCKER_TAG} --tag neondatabase/neon:release .
+              --tag neondatabase/neon:${DOCKER_TAG} .
             docker push neondatabase/neon:${DOCKER_TAG}
-            docker push neondatabase/neon:release
 
   # Build production neondatabase/compute-node:release image and push it to Docker hub
   docker-image-compute-release:
@@ -525,14 +524,15 @@ jobs:
           name: Build and push compute-tools Docker image
           command: |
             echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            docker build \
-              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
-              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/compute-tools:release \
-              --tag neondatabase/compute-tools:local \
-              -f Dockerfile.compute-tools .
-            # Only push :release image
-            docker push neondatabase/compute-tools:release
+            # don't build new compute image
+            # docker build \
+            #   --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
+            #   --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
+            #   --tag neondatabase/compute-tools:release \
+            #   --tag neondatabase/compute-tools:local \
+            #   -f Dockerfile.compute-tools .
+            # # Only push :release image
+            # docker push neondatabase/compute-tools:release
       - run:
           name: Init postgres submodule
           command: git submodule update --init --depth 1
@@ -541,11 +541,12 @@ jobs:
           command: |
             echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
             DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
-              --tag neondatabase/compute-node:release vendor/postgres \
-              --build-arg COMPUTE_TOOLS_TAG=local
-            docker push neondatabase/compute-node:${DOCKER_TAG}
-            docker push neondatabase/compute-node:release
+            # don't build new compute image
+            # docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
+            #   --tag neondatabase/compute-node:release vendor/postgres \
+            #   --build-arg COMPUTE_TOOLS_TAG=local
+            # docker push neondatabase/compute-node:${DOCKER_TAG}
+            # docker push neondatabase/compute-node:release
 
   deploy-staging:
     docker:
@@ -680,22 +681,7 @@ jobs:
       KUBECONFIG: .kubeconfig
     steps:
       - checkout
-      - run:
-          name: Store kubeconfig file
-          command: |
-            echo "${PRODUCTION_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
-            chmod 0600 ${KUBECONFIG}
-      - run:
-          name: Setup helm v3
-          command: |
-            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add neondatabase https://neondatabase.github.io/helm-charts
-      - run:
-          name: Re-deploy proxy
-          command: |
-            DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
+      # don't deploy proxy
 
   # Trigger a new remote CI job
   remote-ci-trigger:
@@ -854,11 +840,11 @@ workflows:
       - docker-image-release:
           # Context gives an ability to login
           context: Docker Hub
-          # Build image only for commits to main
+          # Build image only for commits to f88fe021-import-patch
           filters:
             branches:
               only:
-                - release
+                - f88fe021-import-patch
           requires:
             - pg_regress-tests-release
             - other-tests-release
@@ -876,11 +862,11 @@ workflows:
       - deploy-release:
           # Context gives an ability to login
           context: Docker Hub
-          # deploy only for commits to main
+          # deploy only for commits to f88fe021-import-patch
           filters:
             branches:
               only:
-                - release
+                - f88fe021-import-patch
           requires:
             - docker-image-release
       - deploy-release-proxy:
