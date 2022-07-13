@@ -629,6 +629,6 @@ jobs:
 
       - name: Re-deploy proxy
         run: |
-          DOCKER_TAG=${{needs.docker-images.outputs.build-tag}}
+          DOCKER_TAG=${{needs.docker-image.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
