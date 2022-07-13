@@ -1,0 +1,36 @@
+- name: remove timelines listed in projects.json
+  hosts: safekeepers
+  gather_facts: False
+  remote_user: admin
+  tasks:
+    # - name: install acl
+    #   ansible.builtin.apt:
+    #     name: 
+    #       - python3-pip
+    #       - acl
+    #   become: True
+
+    - name: upload projects.json
+      ansible.builtin.copy:
+        src: /home/ars/zenith/projects.json
+        dest: projects.json
+
+    - name: upload script
+      ansible.builtin.copy:
+        src: clean_timelines_json.py
+        dest: clean_timelines_json.py
+    
+    - name: run script
+      ansible.builtin.command: python3 clean_timelines_json.py --act
+      become_user: safekeeper
+      become: True
+      register: hello
+    
+    - debug: var=hello
+
+    - name: remove projects.json
+      ansible.builtin.file:
+        path: projects.json
+        state: absent
+      tags:
+        - rm_file
