@@ -1,3 +1,4 @@
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import lsn_from_hex
@@ -40,6 +41,7 @@ from fixtures.utils import lsn_from_hex
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
 #     could not find data for key ... at LSN ..., for request at LSN ...
+@pytest.mark.skip("")
 def test_branch_and_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
