@@ -176,13 +176,6 @@ pub struct LayeredRepository {
 
     tenant_id: ZTenantId,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
-    // This mutex prevents creation of new timelines during GC.
-    // Adding yet another mutex (in addition to `timelines`) is needed because holding
-    // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
-    // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
-    // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
-    // timeout...
-    gc_cs: Mutex<()>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
     // provides access to timeline data sitting in the remote storage
@@ -276,17 +269,16 @@ impl Repository for LayeredRepository {
         dst: ZTimelineId,
         start_lsn: Option<Lsn>,
     ) -> Result<()> {
-        // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
-        // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
-        // concurrently removes data that is needed by the new timeline.
-        let _gc_cs = self.gc_cs.lock().unwrap();
+        let src_timeline = {
+            let mut timelines = self.timelines.lock().unwrap();
+            self.get_timeline_load_internal(src, &mut timelines)
+                // message about timeline being remote is one .context up in the stack
+                .context("failed to load timeline for branching")?
+                .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?
+        };
 
-        let mut timelines = self.timelines.lock().unwrap();
-        let src_timeline = self
-            .get_timeline_load_internal(src, &mut timelines)
-            // message about timeline being remote is one .context up in the stack
-            .context("failed to load timeline for branching")?
-            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
+        let layer_removal_cs = src_timeline.layer_removal_cs.lock().unwrap();
+
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
         // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
@@ -329,7 +321,13 @@ impl Repository for LayeredRepository {
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
         Self::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-        timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
+
+        drop(layer_removal_cs);
+
+        self.timelines
+            .lock()
+            .unwrap()
+            .insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -440,13 +438,7 @@ impl Repository for LayeredRepository {
             Entry::Vacant(_) => bail!("timeline not found"),
         };
 
-        // try to acquire gc and compaction locks to prevent errors from missing files
-        let _gc_guard = self
-            .gc_cs
-            .try_lock()
-            .map_err(|e| anyhow::anyhow!("cannot acquire gc lock {e}"))?;
-
-        let compaction_guard = timeline_entry.get().compaction_guard()?;
+        let layer_removal_guard = timeline_entry.get().layer_removal_guard()?;
 
         let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
         std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
@@ -457,7 +449,7 @@ impl Repository for LayeredRepository {
         })?;
         info!("detach removed files");
 
-        drop(compaction_guard);
+        drop(layer_removal_guard);
         timeline_entry.remove();
 
         Ok(())
@@ -524,10 +516,10 @@ impl LayeredTimelineEntry {
         }
     }
 
-    fn compaction_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
+    fn layer_removal_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
         match self {
             LayeredTimelineEntry::Loaded(timeline) => timeline
-                .compaction_cs
+                .layer_removal_cs
                 .try_lock()
                 .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
                 .map(Some),
@@ -737,7 +729,6 @@ impl LayeredRepository {
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
-            gc_cs: Mutex::new(()),
             walredo_mgr,
             remote_index,
             upload_layers,
@@ -882,41 +873,42 @@ impl LayeredRepository {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        // grab mutex to prevent new timelines from being created here.
-        let _gc_cs = self.gc_cs.lock().unwrap();
-
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
         let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
-        let mut timeline_ids = Vec::new();
-        let mut timelines = self.timelines.lock().unwrap();
+        let timeline_ids = {
+            let timelines = self.timelines.lock().unwrap();
+            if let Some(target_timeline_id) = target_timeline_id.as_ref() {
+                if timelines.get(target_timeline_id).is_none() {
+                    bail!("gc target timeline does not exist")
+                }
+            };
 
-        if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-            if timelines.get(target_timeline_id).is_none() {
-                bail!("gc target timeline does not exist")
-            }
-        };
-
-        for (timeline_id, timeline_entry) in timelines.iter() {
-            timeline_ids.push(*timeline_id);
-
-            // This is unresolved question for now, how to do gc in presence of remote timelines
-            // especially when this is combined with branching.
-            // Somewhat related: https://github.com/neondatabase/neon/issues/999
-            if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
-                // If target_timeline is specified, we only need to know branchpoints of its children
-                if let Some(timelineid) = target_timeline_id {
-                    if ancestor_timeline_id == &timelineid {
-                        all_branchpoints
-                            .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
+            timelines
+                .iter()
+                .map(|(timeline_id, timeline_entry)| {
+                    // This is unresolved question for now, how to do gc in presence of remote timelines
+                    // especially when this is combined with branching.
+                    // Somewhat related: https://github.com/zenithdb/zenith/issues/999
+                    if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
+                        // If target_timeline is specified, we only need to know branchpoints of its children
+                        if let Some(timelineid) = target_timeline_id {
+                            if ancestor_timeline_id == &timelineid {
+                                all_branchpoints
+                                    .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
+                            }
+                        }
+                        // Collect branchpoints for all timelines
+                        else {
+                            all_branchpoints
+                                .insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
+                        }
                     }
-                }
-                // Collect branchpoints for all timelines
-                else {
-                    all_branchpoints.insert((*ancestor_timeline_id, timeline_entry.ancestor_lsn()));
-                }
-            }
-        }
+
+                    *timeline_id
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
@@ -928,9 +920,20 @@ impl LayeredRepository {
             }
 
             // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline_load_internal(timeline_id, &mut *timelines)?
-                .expect("checked above that timeline is local and loaded");
+            let timeline = {
+                let mut timelines = self.timelines.lock().unwrap();
+                match self.get_timeline_load_internal(timeline_id, &mut *timelines)? {
+                    Some(t) => t,
+                    None => {
+                        // We don't hold the `timelines` lock between constructing `timeline_ids` and
+                        // each GC iteration. It's possible that the above timeline is deleted in the middle.
+                        // It's fine because we don't really need to GC a timeline that is requested to be
+                        // deleted anyway.
+                        info!("Timeline {timeline_id} not found, skip GC");
+                        continue;
+                    }
+                }
+            };
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timelineid) = target_timeline_id {
@@ -940,7 +943,6 @@ impl LayeredRepository {
             }
 
             if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                drop(timelines);
                 let branchpoints: Vec<Lsn> = all_branchpoints
                     .range((
                         Included((timeline_id, Lsn(0))),
@@ -960,7 +962,6 @@ impl LayeredRepository {
                 let result = timeline.gc()?;
 
                 totals += result;
-                timelines = self.timelines.lock().unwrap();
             }
         }
 
@@ -1038,11 +1039,14 @@ pub struct LayeredTimeline {
     /// Used to ensure that there is only one thread
     layer_flush_lock: Mutex<()>,
 
-    // Prevent concurrent compactions.
-    // Compactions are normally performed by one thread. But compaction can also be manually
-    // requested by admin (that's used in tests). These forced compactions run in a different
-    // thread and could be triggered at the same time as a normal, timed compaction.
-    compaction_cs: Mutex<()>,
+    /// Layer removal lock.
+    /// A lock to ensure that no layer of the timeline is removed by other threads.
+    /// This lock is acquired in [`LayeredTimeline::gc`], [`LayeredTimeline::compact`],
+    /// and [`LayeredRepository::delete_timeline`].
+    ///
+    /// [`LayeredRepository::branch_timeline`] also requires to hold the removal lock
+    /// for the source timeline to prevent missing data (due to GC) when creating new branch.
+    layer_removal_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     latest_gc_cutoff_lsn: RwLock<Lsn>,
@@ -1324,7 +1328,7 @@ impl LayeredTimeline {
 
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
-            compaction_cs: Mutex::new(()),
+            layer_removal_cs: Mutex::new(()),
 
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
@@ -1950,7 +1954,7 @@ impl LayeredTimeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let _compaction_cs = self.compaction_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
 
         let target_file_size = self.get_checkpoint_distance();
 
@@ -2301,7 +2305,7 @@ impl LayeredTimeline {
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
-        let _compaction_cs = self.compaction_cs.lock().unwrap();
+        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
 
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
