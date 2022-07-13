@@ -558,7 +558,11 @@ jobs:
 
   deploy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image, calculate-deploy-targets ]
+    # We need both storage **and** compute images for deploy, because control plane
+    # picks the compute version based on the storage version. If it notices a fresh
+    # storage it may bump the compute version. And if compute image failed to build
+    # it may break things badly.
+    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -601,7 +605,9 @@ jobs:
 
   deploy-proxy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image, calculate-deploy-targets ]
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it
+    # to run all deploy jobs consistently.
+    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
