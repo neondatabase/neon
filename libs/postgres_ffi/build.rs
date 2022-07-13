@@ -50,8 +50,6 @@ fn main() {
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/tmp_install`
     // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/tmp_install/include/postgresql/server`
     let mut pg_install_dir: PathBuf;
-    let inc_server_path: String;
-
     if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
         pg_install_dir = postgres_install_dir.into();
     } else {
@@ -64,7 +62,7 @@ fn main() {
     }
 
     let pg_config_bin = pg_install_dir.join("bin").join("pg_config");
-    if pg_config_bin.exists() {
+    let inc_server_path: String = if pg_config_bin.exists() {
         let output = Command::new(pg_config_bin)
             .arg("--includedir-server")
             .output()
@@ -74,16 +72,16 @@ fn main() {
             panic!("`pg_config --includedir-server` failed")
         }
 
-        inc_server_path = String::from_utf8(output.stdout).unwrap().trim_end().into();
+        String::from_utf8(output.stdout).unwrap().trim_end().into()
     } else {
-        inc_server_path = pg_install_dir
+        pg_install_dir
             .join("include")
             .join("postgresql")
             .join("server")
             .into_os_string()
             .into_string()
-            .unwrap();
-    }
+            .unwrap()
+    };
 
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
