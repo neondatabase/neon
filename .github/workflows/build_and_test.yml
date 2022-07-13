@@ -545,11 +545,11 @@ jobs:
       - id: set-matrix
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
-            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
+            STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA", "slack_channel_id": "C033QLM5P7D"}'
+            NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA", "slack_channel_id": "C033QLM5P7D"}'
             echo "::set-output name=include::[$STAGING, $NEON_STRESS]"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
+            PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA", "slack_channel_id": "C03F5SM1N02"}'
             echo "::set-output name=include::[$PRODUCTION]"
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
@@ -577,6 +577,7 @@ jobs:
           pip install --progress-bar off --user ansible boto3
 
       - name: Redeploy
+        id: deploy
         run: |
           cd "$(pwd)/.github/ansible"
 
@@ -598,6 +599,16 @@ jobs:
 
           ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts
           rm -f neon_install.tar.gz .neon_current_version
+
+      - name: Post to a Slack channel
+        if: always()
+        id: slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ matrix.slack_channel_id }}
+          slack-message: "Neon deploy to ${{ matrix.env_name }}: ${{ job.status }}\nJob details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   deploy-proxy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
@@ -628,7 +639,18 @@ jobs:
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
 
       - name: Re-deploy proxy
+        id: deploy
         run: |
           DOCKER_TAG=${{needs.docker-image.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
+
+      - name: Post to a Slack channel
+        if: always()
+        id: slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ matrix.slack_channel_id }}
+          slack-message: "Proxy deploy to ${{ matrix.env_name }}: ${{ job.status }}\nJob details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
