@@ -19,7 +19,7 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     conn = pg.connect()
     cur = conn.cursor()
 
-    tables = 10
+    tables = 2 # 10 is too much for debug build
     partitions = 1000
     for i in range(1, tables + 1):
         print(f'iteration {i} / {tables}')
