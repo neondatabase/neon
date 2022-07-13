@@ -441,14 +441,14 @@ jobs:
           fi
         id: legacy-build-tag
 
-      - name: Build compute-tools Docker image
+      - name: Build neon Docker image
         uses: docker/build-push-action@v2
         with:
           context: .
           build-args: |
-            GIT_VERSION="${GITHUB_SHA}"
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           pull: true
           push: true
           tags: neondatabase/neon:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/neon:${{steps.build-tag.outputs.tag}}
@@ -508,8 +508,9 @@ jobs:
         with:
           context: .
           build-args: |
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           push: false
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:local
@@ -519,8 +520,9 @@ jobs:
         with:
           context: .
           build-args: |
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           push: true
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:${{steps.legacy-build-tag.outputs.tag}}
