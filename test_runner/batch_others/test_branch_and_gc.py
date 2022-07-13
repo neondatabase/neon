@@ -56,9 +56,9 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
             'compaction_target_size': f'{1024 ** 3}',
 
             # tweak the default settings to allow quickly create image layers and L1 layers
-            'compaction_period': '1 s',
+            'compaction_period': '10 s',
             'compaction_threshold': '2',
-            'image_creation_threshold': '1',
+            'image_creation_threshold': '2',
 
             # set PITR interval to be small, so we can do GC
             'pitr_interval': '1 s'
@@ -76,6 +76,9 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
     lsn1 = main_cur.fetchone()[0]
     log.info(f'LSN1: {lsn1}')
+
+    # trigger a manual compaction
+    env.pageserver.safe_psql(f'''compact {tenant.hex} {timeline_main.hex}''')
 
     main_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
