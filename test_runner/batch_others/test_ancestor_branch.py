@@ -6,8 +6,8 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiExc
 #
 # Create ancestor branches off the main branch.
 #
-@pytest.mark.parametrize("x", range(20))
-def test_ancestor_branch(neon_env_builder: NeonEnvBuilder, x: int):
+# @pytest.mark.parametrize("x", range(20))
+def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     # Override defaults, 1M gc_horizon and 4M checkpoint_distance.

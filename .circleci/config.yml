@@ -355,7 +355,7 @@ workflows:
           matrix:
             parameters:
               build_type: ["debug", "release"]
-          test_selection: batch_others/test_ancestor_branch.py
+          test_selection: batch_others
           requires:
             - build-neon-<< matrix.build_type >>
       - run-pytest:
