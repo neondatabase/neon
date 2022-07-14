@@ -11,8 +11,9 @@ defaults:
     shell: bash -ex {0}
 
 concurrency:
-   group: ${{ github.workflow }}-${{ github.ref }}
-   cancel-in-progress: true
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -441,14 +442,14 @@ jobs:
           fi
         id: legacy-build-tag
 
-      - name: Build compute-tools Docker image
+      - name: Build neon Docker image
         uses: docker/build-push-action@v2
         with:
           context: .
           build-args: |
-            GIT_VERSION="${GITHUB_SHA}"
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           pull: true
           push: true
           tags: neondatabase/neon:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/neon:${{steps.build-tag.outputs.tag}}
@@ -508,8 +509,9 @@ jobs:
         with:
           context: .
           build-args: |
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           push: false
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:local
@@ -519,8 +521,9 @@ jobs:
         with:
           context: .
           build-args: |
-            AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
-            AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
+            GIT_VERSION="${{github.sha}}"
+            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
           push: true
           file: Dockerfile.compute-tools
           tags: neondatabase/compute-tools:${{steps.legacy-build-tag.outputs.tag}}
@@ -558,7 +561,11 @@ jobs:
 
   deploy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image, calculate-deploy-targets ]
+    # We need both storage **and** compute images for deploy, because control plane
+    # picks the compute version based on the storage version. If it notices a fresh
+    # storage it may bump the compute version. And if compute image failed to build
+    # it may break things badly.
+    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -601,7 +608,9 @@ jobs:
 
   deploy-proxy:
     runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ docker-image, calculate-deploy-targets ]
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it
+    # to run all deploy jobs consistently.
+    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
