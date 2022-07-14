@@ -117,7 +117,15 @@ jobs:
             CARGO_FLAGS="--release --features profiling"
           fi
 
-          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --all --all-targets
+
+      - name: Check formatting
+        if: matrix.build_type == 'debug'
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        if: matrix.build_type == 'debug'
+        run: ./run_clippy.sh
 
       - name: Run cargo test
         run: |
@@ -195,6 +203,30 @@ jobs:
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
+  check-codestyle-python:
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Cache poetry deps
+        id: cache_poetry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: Run yapf to ensure code format
+        run: poetry run yapf --recursive --diff .
+
+      - name: Run mypy to check types
+        run: poetry run mypy .
 
   pg_regress-tests:
     runs-on: [ self-hosted, Linux, k8s-runner ]
