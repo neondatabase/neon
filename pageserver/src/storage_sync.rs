@@ -1557,6 +1557,7 @@ fn schedule_first_sync_tasks(
     local_timeline_init_statuses
 }
 
+/// bool in return value stands for awaits_download
 fn compare_local_and_remote_timeline(
     new_sync_tasks: &mut VecDeque<(ZTenantTimelineId, SyncTask)>,
     sync_id: ZTenantTimelineId,
@@ -1566,14 +1567,6 @@ fn compare_local_and_remote_timeline(
 ) -> (LocalTimelineInitStatus, bool) {
     let remote_files = remote_entry.stored_files();
 
-    // TODO probably here we need more sophisticated logic,
-    //   if more data is available remotely can we just download what's there?
-    //   without trying to upload something. It may be tricky, needs further investigation.
-    //   For now looks strange that we can request upload
-    //   and download for the same timeline simultaneously.
-    //   (upload needs to be only for previously unsynced files, not whole timeline dir).
-    //   If one of the tasks fails they will be reordered in the queue which can lead
-    //   to timeline being stuck in evicted state
     let number_of_layers_to_download = remote_files.difference(&local_files).count();
     let (initial_timeline_status, awaits_download) = if number_of_layers_to_download > 0 {
         new_sync_tasks.push_back((

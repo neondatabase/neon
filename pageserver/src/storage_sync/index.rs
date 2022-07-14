@@ -97,8 +97,8 @@ impl RemoteIndex {
 
         for (tenant_id, index_parts) in index_parts {
             match index_parts {
-                // TODO: should we schedule a retry so it can be recovered? otherwise there is no way to revive it other restarting whole pageserver
-                TenantIndexParts::Poisoned(id) => warn!("skipping tenant_id set up for remote index because the index download has failed for timeline {id}"),
+                // TODO: should we schedule a retry so it can be recovered? otherwise we can revive it only through detach/attach or pageserver restart
+                TenantIndexParts::Poisoned { missing, ..} => warn!("skipping tenant_id set up for remote index because the index download has failed for timeline(s): {missing:?}"),
                 TenantIndexParts::Present(timelines) => {
                     for (timeline_id, index_part) in timelines {
                         let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);

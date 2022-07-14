@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
+    mem,
     path::Path,
 };
 
@@ -32,8 +33,27 @@ pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 // Poisoned variant is returned.
 // When data is received succesfully without errors Present variant is used.
 pub enum TenantIndexParts {
-    Poisoned(ZTenantTimelineId),
+    Poisoned {
+        present: HashMap<ZTimelineId, IndexPart>,
+        missing: HashSet<ZTimelineId>,
+    },
     Present(HashMap<ZTimelineId, IndexPart>),
+}
+
+impl TenantIndexParts {
+    fn add_poisoned(&mut self, timeline_id: ZTimelineId) {
+        match self {
+            TenantIndexParts::Poisoned { missing, .. } => {
+                missing.insert(timeline_id);
+            }
+            TenantIndexParts::Present(present) => {
+                *self = TenantIndexParts::Poisoned {
+                    present: mem::take(present),
+                    missing: HashSet::from([timeline_id]),
+                }
+            }
+        }
+    }
 }
 
 impl Default for TenantIndexParts {
@@ -63,8 +83,8 @@ where
             Ok(index_part) => {
                 debug!("Successfully fetched index part for {id}");
                 match index_parts.entry(id.tenant_id).or_default() {
-                    TenantIndexParts::Poisoned(id) => {
-                        warn!("disgarding index part for poisoned tenant, poisoned by id: {id}")
+                    TenantIndexParts::Poisoned { present, .. } => {
+                        present.insert(id.timeline_id, index_part);
                     }
                     TenantIndexParts::Present(parts) => {
                         parts.insert(id.timeline_id, index_part);
@@ -77,8 +97,8 @@ where
                         // thats ok because it means that we didnt upload something we have locally for example
                     }
                     e => {
-                        *index_parts.entry(id.tenant_id).or_default() =
-                            TenantIndexParts::Poisoned(id);
+                        let tenant_parts = index_parts.entry(id.tenant_id).or_default();
+                        tenant_parts.add_poisoned(id.timeline_id);
                         error!(
                             "Failed to fetch index part for {id}: {e} poisoning tenant index parts"
                         );
@@ -144,8 +164,8 @@ where
         .remove(&tenant_id)
         .ok_or_else(|| anyhow::anyhow!("Missing tenant index parts. This is a bug."))?
     {
-        TenantIndexParts::Poisoned(id) => {
-            anyhow::bail!("failed to download index parts for all timeline: {id}")
+        TenantIndexParts::Poisoned { missing, .. } => {
+            anyhow::bail!("Failed to download index parts for all timelines. Missing {missing:?}")
         }
         TenantIndexParts::Present(parts) => Ok(parts),
     }
