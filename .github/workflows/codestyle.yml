@@ -28,7 +28,6 @@ jobs:
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
     timeout-minutes: 50
-    name: run regression test suite
     runs-on: ${{ matrix.os }}
 
     steps:
