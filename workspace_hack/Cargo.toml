@@ -33,7 +33,9 @@ itoa = { version = "0.4", features = ["i128", "std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std", "use_std"] }
-num-integer = { version = "0.1", default-features = false, features = ["i128"] }
+nom = { version = "7", features = ["alloc", "std"] }
+num-bigint = { version = "0.4", features = ["std"] }
+num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "std"] }
 prost = { version = "0.10", features = ["prost-derive", "std"] }
 rand = { version = "0.8", features = ["alloc", "getrandom", "libc", "rand_chacha", "rand_hc", "small_rng", "std", "std_rng"] }
@@ -41,10 +43,11 @@ regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cac
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 scopeguard = { version = "1", features = ["use_std"] }
 serde = { version = "1", features = ["alloc", "derive", "serde_derive", "std"] }
-tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc", "macros", "memchr", "mio", "net", "num_cpus", "once_cell", "process", "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros"] }
+time = { version = "0.3", features = ["alloc", "formatting", "itoa", "macros", "parsing", "quickcheck", "quickcheck-dep", "std", "time-macros"] }
+tokio = { version = "1", features = ["bytes", "fs", "io-std", "io-util", "libc", "macros", "memchr", "mio", "net", "num_cpus", "once_cell", "process", "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "winapi"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tracing = { version = "0.1", features = ["attributes", "log", "std", "tracing-attributes"] }
-tracing-core = { version = "0.1", features = ["lazy_static", "std"] }
+tracing-core = { version = "0.1", features = ["lazy_static", "std", "valuable"] }
 
 [build-dependencies]
 ahash = { version = "0.7", features = ["std"] }
@@ -57,6 +60,7 @@ indexmap = { version = "1", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits", "std"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2", features = ["std", "use_std"] }
+nom = { version = "7", features = ["alloc", "std"] }
 prost = { version = "0.10", features = ["prost-derive", "std"] }
 regex = { version = "1", features = ["aho-corasick", "memchr", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 regex-syntax = { version = "0.6", features = ["unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
