@@ -1,0 +1,13 @@
+# The binaries are really slow, if you compile them in 'dev' mode with the defaults.
+# Enable some optimizations even in 'dev' mode, to make tests faster. The basic
+# optimizations enabled by "opt-level=1" don't affect debuggability too much.
+#
+# See https://www.reddit.com/r/rust/comments/gvrgca/this_is_a_neat_trick_for_getting_good_runtime/
+#
+[profile.dev.package."*"]
+# Set the default for dependencies in Development mode.
+opt-level = 3
+
+[profile.dev]
+# Turn on a small amount of optimization in Development mode.
+opt-level = 1
