@@ -20,7 +20,6 @@ from performance.test_perf_pgbench import get_scales_matrix
 @pytest.mark.parametrize("n_branches", [10])
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 @pytest.mark.parametrize("ty", ["cascade", "flat"])
-@pytest.mark.skip("")
 def test_branching_with_pgbench(neon_simple_env: NeonEnv,
                                 pg_bin: PgBin,
                                 n_branches: int,
@@ -45,7 +44,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         log.info(f"Start a pgbench workload on pg {connstr}")
 
         pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', connstr])
-        pg_bin.run_capture(['pgbench', '-c10', '-T15', connstr])
+        pg_bin.run_capture(['pgbench', '-T15', connstr])
 
     env.neon_cli.create_branch('b0', tenant_id=tenant)
     pgs: List[Postgres] = []
