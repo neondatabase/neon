@@ -27,13 +27,11 @@ pub type Version = String;
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
-/// TODO: write a comment.
 pub type ComputeConnCfg = tokio_postgres::Config;
 
 /// Compute node connection params.
 pub struct NodeInfo {
-    pub config: ComputeConnCfg,
-    pub scram_keys: Option<ScramKeys>,
+    pub config: tokio_postgres::Config,
 }
 
 impl NodeInfo {
@@ -87,13 +85,8 @@ impl NodeInfo {
             .await
             .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
 
-        let mut config = self.config;
-        if let Some(scram_keys) = self.scram_keys {
-            config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(scram_keys));
-        }
-
         // TODO: establish a secure connection to the DB
-        let (client, conn) = config.connect_raw(&mut socket, NoTls).await?;
+        let (client, conn) = self.config.connect_raw(&mut socket, NoTls).await?;
         let version = conn
             .parameter("server_version")
             .ok_or(ConnectionError::FailedToFetchPgVersion)?

@@ -152,7 +152,6 @@ async fn handle_existing_user(
 
     Ok(compute::NodeInfo {
         config: db_info.into(),
-        scram_keys: None,
     })
 }
 

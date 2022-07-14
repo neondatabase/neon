@@ -187,10 +187,12 @@ where
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&BeParameterStatusMessage::encoding())?;
 
-    Ok(compute::NodeInfo {
-        config: wake_compute(endpoint).await?,
-        scram_keys,
-    })
+    let mut config = wake_compute(endpoint).await?;
+    if let Some(keys) = scram_keys {
+        config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(keys));
+    }
+
+    Ok(compute::NodeInfo { config })
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {
