@@ -11,13 +11,28 @@ from fixtures.log_helper import log
 from performance.test_perf_pgbench import run_pgbench
 
 
+def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
+    neon_compare.zenbenchmark.record("branch_creation_duration_max",
+                                     max(durs),
+                                     's',
+                                     MetricReport.LOWER_IS_BETTER)
+    neon_compare.zenbenchmark.record("branch_creation_duration_avg",
+                                     statistics.mean(durs),
+                                     's',
+                                     MetricReport.LOWER_IS_BETTER)
+    neon_compare.zenbenchmark.record("branch_creation_duration_stdev",
+                                     statistics.stdev(durs),
+                                     's',
+                                     MetricReport.LOWER_IS_BETTER)
+
+
 @pytest.mark.parametrize("n_branches", [20])
 # Test measures the latency of branch creation during a heavy [1] workload.
 #
 # [1]: to simulate a heavy workload, the test tweaks the GC and compaction settings
 # to increase the task's frequency. The test runs `pgbench` in each new branch.
 # Each branch is created from a randomly picked source branch.
-def test_branch_creation(neon_compare: NeonCompare, n_branches: int):
+def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int):
     env = neon_compare.env
     pg_bin = neon_compare.pg_bin
 
@@ -70,35 +85,27 @@ def test_branch_creation(neon_compare: NeonCompare, n_branches: int):
     for thread in threads:
         thread.join()
 
-    neon_compare.zenbenchmark.record("branch_creation_duration_max",
-                                     max(branch_creation_durations),
-                                     's',
-                                     MetricReport.LOWER_IS_BETTER)
-    neon_compare.zenbenchmark.record("branch_creation_duration_avg",
-                                     statistics.mean(branch_creation_durations),
-                                     's',
-                                     MetricReport.LOWER_IS_BETTER)
-    neon_compare.zenbenchmark.record("branch_creation_duration_stdev",
-                                     statistics.stdev(branch_creation_durations),
-                                     's',
-                                     MetricReport.LOWER_IS_BETTER)
+    _record_branch_creation_durations(neon_compare, branch_creation_durations)
 
 
 @pytest.mark.parametrize("n_branches", [1024])
-def test_branch_with_many_children(neon_compare: NeonCompare, n_branches: int):
+# Test measures the latency of branch creation when creating a lot of branches.
+def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
     env = neon_compare.env
 
     env.neon_cli.create_branch('b0')
-    env.neon_cli.create_branch('other')
 
-    pg0 = env.postgres.create_start('b0')
-    pg_other = env.postgres.create_start('other')
+    pg = env.postgres.create_start('b0')
+    neon_compare.pg_bin.run_capture(['pgbench', '-i', '-s10', pg.connstr()])
 
-    neon_compare.pg_bin.run_capture(['pgbench', '-i', '-s10', pg0.connstr()])
-    neon_compare.pg_bin.run_capture(['pgbench', '-i', '-s10', pg_other.connstr()])
+    branch_creation_durations = []
 
     for i in range(n_branches):
-        env.neon_cli.create_branch('b{}'.format(i + 1), 'b0')
+        # random a source branch
+        p = random.randint(0, i)
+        timer = timeit.default_timer()
+        env.neon_cli.create_branch('b{}'.format(i + 1), 'b{}'.format(p))
+        dur = timeit.default_timer() - timer
+        branch_creation_durations.append(dur)
 
-    run_pgbench(neon_compare, "many_children_branch", ['pgbench', '-c10', '-T10', pg0.connstr()])
-    run_pgbench(neon_compare, "no_children_branch", ['pgbench', '-c10', '-T10', pg_other.connstr()])
+    _record_branch_creation_durations(neon_compare, branch_creation_durations)
