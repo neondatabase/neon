@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
-use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use serde::Deserialize;
 
@@ -395,20 +394,34 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
 
         // This will only change ownership on the schema itself, not the objects
         // inside it. Without it owner of the `public` schema will be `cloud_admin`
-        // and database owner cannot do anything with it.
-        let alter_query = format!("ALTER SCHEMA public OWNER TO {}", db.owner.quote());
-        let res = db_client.simple_query(&alter_query);
-
-        if let Err(e) = res {
-            if e.code() == Some(&SqlState::INVALID_SCHEMA_NAME) {
-                // This is OK, db just don't have a `public` schema.
-                // Probably user dropped it manually.
-                info!("no 'public' schema found in the database {}", db.name);
-            } else {
-                // Something different happened, propagate the error
-                return Err(anyhow!(e));
-            }
-        }
+        // and database owner cannot do anything with it. SQL procedure ensures
+        // that it won't error out if schema `public` doesn't exist.
+        let alter_query = format!(
+            "DO $$\n\
+                DECLARE\n\
+                    schema_owner TEXT;\n\
+                BEGIN\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        SELECT nspowner::regrole::text\n\
+                            FROM pg_catalog.pg_namespace\n\
+                            WHERE nspname = 'public'\n\
+                            INTO schema_owner;\n\
+                \n\
+                        IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'\n\
+                        THEN\n\
+                            ALTER SCHEMA public OWNER TO {};\n\
+                        END IF;\n\
+                    END IF;\n\
+                END\n\
+            $$;",
+            db.owner.quote()
+        );
+        db_client.simple_query(&alter_query)?;
     }
 
     Ok(())
