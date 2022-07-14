@@ -716,7 +716,7 @@ impl PageServerHandler {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
-
+		assert!(req.latest);
         let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
