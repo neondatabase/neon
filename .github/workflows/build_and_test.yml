@@ -175,9 +175,6 @@ jobs:
             done
           fi
 
-      - name: Install postgres binaries
-        run: cp -a tmp_install /tmp/neon/pg_install
-
       - name: Prepare neon artifact
         run: tar -C /tmp/neon/ -czf ./neon.tgz .
 

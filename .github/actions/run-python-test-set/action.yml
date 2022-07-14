@@ -37,12 +37,25 @@ runs:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
         path: ./neon-artifact/
 
+    - name: Get Postgres artifact for restoration
+      uses: actions/download-artifact@v3
+      with:
+        name: postgres-${{ runner.os }}-${{ inputs.build_type }}-artifact
+        path: ./pg-artifact/
+
     - name: Extract Neon artifact
       shell: bash -ex {0}
       run: |
         mkdir -p /tmp/neon/
         tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
         rm -rf ./neon-artifact/
+
+    - name: Extract Postgres artifact
+      shell: bash -ex {0}
+      run: |
+        mkdir -p /tmp/neon/tmp_install
+        tar -xf ./pg-artifact/pg.tgz -C /tmp/neon/tmp_install
+        rm -rf ./pg-artifact/
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
@@ -65,7 +78,7 @@ runs:
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
-        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+        POSTGRES_DISTRIB_DIR: /tmp/neon/tmp_install
         TEST_OUTPUT: /tmp/test_output
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
