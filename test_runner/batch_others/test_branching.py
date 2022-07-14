@@ -54,11 +54,23 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
     threads.append(threading.Thread(target=run_pgbench, args=(pgs[0], ), daemon=True))
     threads[-1].start()
 
+    thread_limit = 4
+
     for i in range(n_branches):
         # random a delay between [0, 5]
         delay = random.random() * 5
         time.sleep(delay)
         log.info(f"Sleep {delay}s")
+
+        # If the number of concurrent threads exceeds a threshold,
+        # wait for all the threads to finish before spawning a new one.
+        #
+        # Because tests defined in `batch_others` are run concurrently in CI,
+        # we want to avoid the situation that one test exhausts resources for other tests.
+        if len(threads) >= thread_limit:
+            for thread in threads:
+                thread.join()
+            threads = []
 
         if ty == "cascade":
             env.neon_cli.create_branch('b{}'.format(i + 1), 'b{}'.format(i), tenant_id=tenant)
