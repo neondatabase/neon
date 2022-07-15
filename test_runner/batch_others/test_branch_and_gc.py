@@ -2,8 +2,9 @@ from contextlib import closing
 import time
 
 from cached_property import threading
+import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException
 from fixtures.utils import lsn_from_hex
 
 
@@ -147,10 +148,5 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     thread = threading.Thread(target=do_gc, daemon=True)
     thread.start()
 
-    # GC is delayed because of the failpoint, so the branch creation should succeed
-    env.neon_cli.create_branch('b1', 'b0', tenant_id=tenant, ancestor_start_lsn=lsn)
-    pg1 = env.postgres.create_start('b1', tenant_id=tenant)
-
-    thread.join()
-    res = pg1.safe_psql("select count(*) from t")
-    assert res[0] == (100000, )
+    with pytest.raises(NeonPageserverApiException, match="invalid branch start lsn"):
+        env.neon_cli.create_branch('b1', 'b0', tenant_id=tenant, ancestor_start_lsn=lsn)
