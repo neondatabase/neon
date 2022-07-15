@@ -60,7 +60,7 @@ jobs:
         run: tar -C tmp_install/ -czf ./pg.tgz .
 
       - name: Upload postgres artifact
-        run: aws s3 cp ./pg.tgz s3://neon-dev-bucket/$GITHUB_RUN_ID/pg.tgz
+        run: aws s3 cp ./pg.tgz s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-pg.tgz
 
 #      - name: Upload postgres artifact
 #        uses: actions/upload-artifact@v3
@@ -101,7 +101,7 @@ jobs:
 #          path: ./postgres-artifact/
 
       - name: Get postgres artifact
-        run: aws s3 cp s3://neon-dev-bucket/$GITHUB_RUN_ID/pg.tgz ./postgres-artifact/
+        run: aws s3 cp s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-pg.tgz ./postgres-artifact/
 
       - name: Extract postgres artifact
         run: |
