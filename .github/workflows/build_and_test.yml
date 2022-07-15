@@ -1,9 +1,10 @@
-name: Test
+name: Test and Deploy
 
 on:
   push:
     branches:
     - main
+    - release
   pull_request:
 
 defaults:
