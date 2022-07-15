@@ -91,9 +91,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Setup mold
-        uses: rui314/setup-mold@v1
-
 #      - name: Get postgres artifact for restoration
 #        uses: actions/download-artifact@v3
 #        with:
