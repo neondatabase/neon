@@ -319,12 +319,16 @@ impl DatadirTimeline for LayeredTimeline {
 
     fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if let Some((cached_lsn, _cached_nblocks)) = rel_size_cache.get(&tag) {
-            if lsn >= *cached_lsn {
-                rel_size_cache.insert(tag, (lsn, nblocks));
+        match rel_size_cache.entry(tag) {
+            Entry::Occupied(mut entry) => {
+                let cached_lsn = entry.get_mut();
+                if lsn >= cached_lsn.0 {
+                    *cached_lsn = (lsn, nblocks);
+                }
             }
-        } else {
-            rel_size_cache.insert(tag, (lsn, nblocks));
+            Entry::Vacant(entry) => {
+                entry.insert((lsn, nblocks));
+            }
         }
     }
 

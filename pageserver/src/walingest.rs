@@ -942,7 +942,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let last_lsn = self.timeline.get_last_record_lsn();
+        let last_lsn = modification.lsn;
         let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
             // create it with 0 size initially, the logic below will extend it
             modification.put_rel_creation(rel, 0)?;
