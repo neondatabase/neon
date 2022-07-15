@@ -302,7 +302,14 @@ impl Repository for LayeredRepository {
 
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context("invalid branch start lsn")?;
+            .context("invalid branch start lsn: less than latest GC cutoff")?;
+        {
+            let gc_info = src_timeline.gc_info.read().unwrap();
+            let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
+            if cutoff != Lsn(0) && start_lsn < cutoff {
+                bail!("invalid branch start lsn: less than planned GC cutoff");
+            }
+        }
 
         // Determine prev-LSN for the new timeline. We can only determine it if
         // the timeline was branched at the current end of the source timeline.

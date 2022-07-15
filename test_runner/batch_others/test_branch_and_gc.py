@@ -148,5 +148,5 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     thread = threading.Thread(target=do_gc, daemon=True)
     thread.start()
 
-    with pytest.raises(NeonPageserverApiException, match="invalid branch start lsn"):
+    with pytest.raises(Exception, match="invalid branch start lsn"):
         env.neon_cli.create_branch('b1', 'b0', tenant_id=tenant, ancestor_start_lsn=lsn)
