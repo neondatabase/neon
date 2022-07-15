@@ -175,6 +175,13 @@ pub struct LayeredRepository {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: ZTenantId,
+    // This mutex prevents creation of new timelines during GC.
+    // Adding yet another mutex (in addition to `timelines`) is needed because holding
+    // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
+    // may block for a long time `get_timeline`, `get_timelines_state`,... and other operations
+    // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
+    // timeout...
+    gc_cs: Mutex<()>,
     timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
@@ -269,6 +276,11 @@ impl Repository for LayeredRepository {
         dst: ZTimelineId,
         start_lsn: Option<Lsn>,
     ) -> Result<()> {
+        // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
+        // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
+        // concurrently removes data that is needed by the new timeline.
+        let _gc_cs = self.gc_cs.lock().unwrap();
+
         let src_timeline = {
             let mut timelines = self.timelines.lock().unwrap();
             self.get_timeline_load_internal(src, &mut timelines)
@@ -729,6 +741,7 @@ impl LayeredRepository {
             conf,
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
+            gc_cs: Mutex::new(()),
             walredo_mgr,
             remote_index,
             upload_layers,
@@ -873,11 +886,15 @@ impl LayeredRepository {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
+        // grab mutex to prevent new timelines from being created here.
+        let gc_cs = self.gc_cs.lock().unwrap();
+
+        let mut timelines = self.timelines.lock().unwrap();
+
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
         let mut all_branchpoints: BTreeSet<(ZTimelineId, Lsn)> = BTreeSet::new();
         let timeline_ids = {
-            let timelines = self.timelines.lock().unwrap();
             if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                 if timelines.get(target_timeline_id).is_none() {
                     bail!("gc target timeline does not exist")
@@ -912,28 +929,12 @@ impl LayeredRepository {
 
         // Ok, we now know all the branch points.
         // Perform GC for each timeline.
-        for timeline_id in timeline_ids.into_iter() {
-            if thread_mgr::is_shutdown_requested() {
-                // We were requested to shut down. Stop and return with the progress we
-                // made.
-                break;
-            }
-
+        let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
+        for timeline_id in timeline_ids {
             // Timeline is known to be local and loaded.
-            let timeline = {
-                let mut timelines = self.timelines.lock().unwrap();
-                match self.get_timeline_load_internal(timeline_id, &mut *timelines)? {
-                    Some(t) => t,
-                    None => {
-                        // We don't hold the `timelines` lock between constructing `timeline_ids` and
-                        // each GC iteration. It's possible that the above timeline is deleted in the middle.
-                        // It's fine because we don't really need to GC a timeline that is requested to be
-                        // deleted anyway.
-                        info!("Timeline {timeline_id} not found, skip GC");
-                        continue;
-                    }
-                }
-            };
+            let timeline = self
+                .get_timeline_load_internal(timeline_id, &mut *timelines)?
+                .expect("checked above that timeline is local and loaded");
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timelineid) = target_timeline_id {
@@ -950,19 +951,34 @@ impl LayeredRepository {
                     ))
                     .map(|&x| x.1)
                     .collect();
+                timeline.update_gc_info(branchpoints, cutoff, pitr)?;
 
-                // If requested, force flush all in-memory layers to disk first,
-                // so that they too can be garbage collected. That's
-                // used in tests, so we want as deterministic results as possible.
-                if checkpoint_before_gc {
-                    timeline.checkpoint(CheckpointConfig::Forced)?;
-                    info!("timeline {} checkpoint_before_gc done", timeline_id);
-                }
-                timeline.update_gc_info(branchpoints, cutoff, pitr);
-                let result = timeline.gc()?;
-
-                totals += result;
+                gc_timelines.push(timeline);
             }
+        }
+        drop(timelines);
+        drop(gc_cs);
+
+        for timeline in gc_timelines {
+            if thread_mgr::is_shutdown_requested() {
+                // We were requested to shut down. Stop and return with the progress we
+                // made.
+                break;
+            }
+
+            // If requested, force flush all in-memory layers to disk first,
+            // so that they too can be garbage collected. That's
+            // used in tests, so we want as deterministic results as possible.
+            if checkpoint_before_gc {
+                timeline.checkpoint(CheckpointConfig::Forced)?;
+                info!(
+                    "timeline {} checkpoint_before_gc done",
+                    timeline.timeline_id
+                );
+            }
+
+            let result = timeline.gc()?;
+            totals += result;
         }
 
         totals.elapsed = now.elapsed();
@@ -1083,12 +1099,12 @@ struct GcInfo {
     /// last-record LSN
     ///
     /// FIXME: is this inclusive or exclusive?
-    cutoff: Lsn,
+    horizon_cutoff: Lsn,
 
     /// In addition to 'retain_lsns', keep everything newer than 'SystemTime::now()'
     /// minus 'pitr_interval'
     ///
-    pitr: Duration,
+    pitr_cutoff: Lsn,
 }
 
 /// Public interface functions
@@ -1332,8 +1348,8 @@ impl LayeredTimeline {
 
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
-                cutoff: Lsn(0),
-                pitr: Duration::ZERO,
+                horizon_cutoff: Lsn(0),
+                pitr_cutoff: Lsn(0),
             }),
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
@@ -2286,34 +2302,16 @@ impl LayeredTimeline {
     /// the latest LSN subtracted by a constant, and doesn't do anything smart
     /// to figure out what read-only nodes might actually need.)
     ///
-    fn update_gc_info(&self, retain_lsns: Vec<Lsn>, cutoff: Lsn, pitr: Duration) {
+    fn update_gc_info(
+        &self,
+        retain_lsns: Vec<Lsn>,
+        cutoff_horizon: Lsn,
+        pitr: Duration,
+    ) -> Result<()> {
         let mut gc_info = self.gc_info.write().unwrap();
+
+        gc_info.horizon_cutoff = min(cutoff_horizon, self.get_disk_consistent_lsn());
         gc_info.retain_lsns = retain_lsns;
-        gc_info.cutoff = cutoff;
-        gc_info.pitr = pitr;
-    }
-
-    ///
-    /// Garbage collect layer files on a timeline that are no longer needed.
-    ///
-    /// Currently, we don't make any attempt at removing unneeded page versions
-    /// within a layer file. We can only remove the whole file if it's fully
-    /// obsolete.
-    ///
-    fn gc(&self) -> Result<GcResult> {
-        let now = SystemTime::now();
-        let mut result: GcResult = Default::default();
-        let disk_consistent_lsn = self.get_disk_consistent_lsn();
-
-        fail_point!("before-timeline-gc");
-
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
-
-        let gc_info = self.gc_info.read().unwrap();
-        let retain_lsns = &gc_info.retain_lsns;
-        let cutoff = min(gc_info.cutoff, disk_consistent_lsn);
-
-        let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
         // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
@@ -2322,6 +2320,7 @@ impl LayeredTimeline {
         if let Ok(timeline) =
             tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
         {
+            let now = SystemTime::now();
             // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
             // If we don't have enough data to convert to LSN,
             // play safe and don't remove any layers.
@@ -2332,7 +2331,7 @@ impl LayeredTimeline {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
-                        pitr_cutoff_lsn = cutoff;
+                        pitr_cutoff_lsn = gc_info.horizon_cutoff;
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
@@ -2346,22 +2345,47 @@ impl LayeredTimeline {
         } else if cfg!(test) {
             // We don't have local timeline in mocked cargo tests.
             // So, just ignore pitr_interval setting in this case.
-            pitr_cutoff_lsn = cutoff;
+            pitr_cutoff_lsn = gc_info.horizon_cutoff;
         }
+        gc_info.pitr_cutoff = pitr_cutoff_lsn;
 
-        let new_gc_cutoff = Lsn::min(cutoff, pitr_cutoff_lsn);
+        Ok(())
+    }
+
+    ///
+    /// Garbage collect layer files on a timeline that are no longer needed.
+    ///
+    /// Currently, we don't make any attempt at removing unneeded page versions
+    /// within a layer file. We can only remove the whole file if it's fully
+    /// obsolete.
+    ///
+    fn gc(&self) -> Result<GcResult> {
+        let mut result: GcResult = Default::default();
+        let now = SystemTime::now();
+
+        fail_point!("before-timeline-gc");
+
+        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
+
+        let gc_info = self.gc_info.read().unwrap();
+
+        let horizon_cutoff = gc_info.horizon_cutoff;
+        let pitr_cutoff = gc_info.pitr_cutoff;
+        let retain_lsns = &gc_info.retain_lsns;
+
+        let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
         // Nothing to GC. Return early.
-        if *self.get_latest_gc_cutoff_lsn() >= new_gc_cutoff {
+        let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();
+        if latest_gc_cutoff >= new_gc_cutoff {
             info!(
-                "Nothing to GC for timeline {}. cutoff_lsn {}",
-                self.timeline_id, new_gc_cutoff
+                "Nothing to GC for timeline {}: new_gc_cutoff_lsn {new_gc_cutoff}, latest_gc_cutoff_lsn {latest_gc_cutoff}",
+                self.timeline_id
             );
-            result.elapsed = now.elapsed()?;
             return Ok(result);
         }
 
-        let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %cutoff).entered();
+        let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
 
         // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.
@@ -2395,23 +2419,23 @@ impl LayeredTimeline {
 
             result.layers_total += 1;
 
-            // 1. Is it newer than cutoff point?
-            if l.get_lsn_range().end > cutoff {
+            // 1. Is it newer than GC horizon cutoff point?
+            if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
-                    "keeping {} because it's newer than cutoff {}",
+                    "keeping {} because it's newer than horizon_cutoff {}",
                     l.filename().display(),
-                    cutoff
+                    horizon_cutoff
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
 
             // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > pitr_cutoff_lsn {
+            if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
-                    "keeping {} because it's newer than pitr_cutoff_lsn {}",
+                    "keeping {} because it's newer than pitr_cutoff {}",
                     l.filename().display(),
-                    pitr_cutoff_lsn
+                    pitr_cutoff
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
