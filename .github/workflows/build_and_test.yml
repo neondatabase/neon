@@ -101,7 +101,7 @@ jobs:
 #          path: ./postgres-artifact/
 
       - name: Get postgres artifact
-        run: aws s3 cp s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-pg.tgz ./postgres-artifact/
+        run: aws s3 cp s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-pg.tgz ./postgres-artifact/pg.tgz
 
       - name: Extract postgres artifact
         run: |
