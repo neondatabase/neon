@@ -83,7 +83,9 @@ impl ElectionLeader {
     ) -> Result<bool> {
         let resp = self.client.leader(election_name).await?;
 
-        let kv = resp.kv().ok_or(anyhow!("failed to get leader response"))?;
+        let kv = resp
+            .kv()
+            .ok_or_else(|| anyhow!("failed to get leader response"))?;
         let leader = kv.value_str()?;
 
         Ok(leader == candidate_name)

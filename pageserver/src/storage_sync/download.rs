@@ -122,9 +122,7 @@ where
     download_index_parts(conf, storage, sync_ids)
         .await
         .remove(&tenant_id)
-        .ok_or(anyhow::anyhow!(
-            "Missing tenant index parts. This is a bug."
-        ))
+        .ok_or_else(|| anyhow::anyhow!("Missing tenant index parts. This is a bug."))
 }
 
 /// Retrieves index data from the remote storage for a given timeline.
