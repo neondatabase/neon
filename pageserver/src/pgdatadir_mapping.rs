@@ -16,7 +16,7 @@ use bytes::{Buf, Bytes};
 use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::ops::Range;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -122,7 +122,7 @@ pub trait DatadirTimeline: Timeline {
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
             return Ok(nblocks);
-        }
+
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
@@ -147,6 +147,15 @@ pub trait DatadirTimeline: Timeline {
     fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
+        // first try to lookup relation in cache
+        {
+            let relsize_cache = self.relsize_cache.read().unwrap();
+            if let Some((cached_lsn, _nblocks)) = relsize_cache.get(&tag) {
+                if lsn >= *cached_lsn {
+                    return Ok(true);
+                }
+            }
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.get(key, lsn)?;
@@ -476,6 +485,9 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     /// in the state in 'tline' yet.
     pub tline: &'a T,
 
+    /// Lsn assigned by create_modification
+    pub lsn: Lsn,
+
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
@@ -686,8 +698,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         self.pending_nblocks += nblocks as isize;
 
         // Update relation size cache
-        let last_lsn = self.tline.get_last_record_lsn();
-        self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
+        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
         // Even if nblocks > 0, we don't insert any actual blocks here. That's up to the
         // caller.
@@ -707,8 +718,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
         // Update relation size cache
-        let last_lsn = self.tline.get_last_record_lsn();
-        self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
+        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
         // Update logical database size.
         self.pending_nblocks -= old_size as isize - nblocks as isize;
@@ -730,8 +740,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
             self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
             // Update relation size cache
-            let last_lsn = self.tline.get_last_record_lsn();
-            self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
             self.pending_nblocks += nblocks as isize - old_size as isize;
         }
