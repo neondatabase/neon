@@ -1,3 +1,7 @@
+from contextlib import closing
+import time
+
+from cached_property import threading
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import lsn_from_hex
@@ -99,3 +103,54 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
 
     branch_cur.execute('SELECT count(*) FROM foo')
     assert branch_cur.fetchone() == (200000, )
+
+
+def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    # Disable background GC but set the `pitr_interval` to be small, so GC can delete something
+    tenant, _ = env.neon_cli.create_tenant(
+        conf={
+            # disable background GC
+            'gc_period': '10 m',
+            'gc_horizon': f'{10 * 1024 ** 3}',
+
+            # small checkpoint distance to create more delta layer files
+            'checkpoint_distance': f'{1024 ** 2}',
+
+            # set the target size to be large to allow the image layer to cover the whole key space
+            'compaction_target_size': f'{1024 ** 3}',
+
+            # tweak the default settings to allow quickly create image layers and L1 layers
+            'compaction_period': '1 s',
+            'compaction_threshold': '2',
+            'image_creation_threshold': '1',
+
+            # set PITR interval to be small, so we can do GC
+            'pitr_interval': '1 s'
+        })
+
+    b0 = env.neon_cli.create_branch('b0', tenant_id=tenant)
+    pg0 = env.postgres.create_start('b0', tenant_id=tenant)
+    res = pg0.safe_psql_many(queries=[
+        "CREATE TABLE t(key serial primary key)",
+        "INSERT INTO t SELECT FROM generate_series(1, 100000)",
+        "SELECT pg_current_wal_insert_lsn()",
+        "INSERT INTO t SELECT FROM generate_series(1, 100000)",
+    ])
+    lsn = res[2][0][0]
+
+    env.pageserver.safe_psql(f"failpoints before-timeline-gc=sleep(2000)")
+
+    def do_gc():
+        env.pageserver.safe_psql(f"do_gc {tenant.hex} {b0.hex} 0")
+
+    thread = threading.Thread(target=do_gc, daemon=True)
+    thread.start()
+
+    # GC is delayed because of the failpoint, so the branch creation should succeed
+    env.neon_cli.create_branch('b1', 'b0', tenant_id=tenant, ancestor_start_lsn=lsn)
+    pg1 = env.postgres.create_start('b1', tenant_id=tenant)
+
+    thread.join()
+    res = pg1.safe_psql("select count(*) from t")
+    assert res[0] == (100000, )

@@ -2305,11 +2305,14 @@ impl LayeredTimeline {
         let mut result: GcResult = Default::default();
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
+        fail_point!("before-timeline-gc");
+
         let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
 
         let gc_info = self.gc_info.read().unwrap();
         let retain_lsns = &gc_info.retain_lsns;
         let cutoff = min(gc_info.cutoff, disk_consistent_lsn);
+
         let pitr = gc_info.pitr;
 
         // Calculate pitr cutoff point.
