@@ -17,7 +17,7 @@ Storing the same information in two systems is a form of replication. And in the
 the console is primary, and Postgres catalog is a replica.
 
 This RFC proposes to address problems 1. and 2. by making Postgres a source of truth for roles/databases and
-only caching this info in Postgres. So using the replication analogy, now the Postgres catalog will be primary, and
+only caching this info in the console. So using the replication analogy, now the Postgres catalog will be primary, and
 the console will be a replica. Problem 3 is a bit different and could be addressed by ditching the web_access
 user and using, e.g., JWT auth for the @username user so that we do not introduce a new user (JWT is needed
 since we don't know users password).
