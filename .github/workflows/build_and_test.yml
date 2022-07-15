@@ -58,14 +58,17 @@ jobs:
       # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
       - name: Prepare postgres artifact
         run: tar -C tmp_install/ -czf ./pg.tgz .
-      - name: Upload postgres artifact
-        uses: actions/upload-artifact@v3
-        with:
-          retention-days: 7
-          if-no-files-found: error
-          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: ./pg.tgz
 
+      - name: Upload postgres artifact
+        run: aws s3 cp ./pg.tgz s3://neon-dev-bucket/$GITHUB_RUN_ID/pg.tgz
+
+#      - name: Upload postgres artifact
+#        uses: actions/upload-artifact@v3
+#        with:
+#          retention-days: 7
+#          if-no-files-found: error
+#          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+#          path: ./pg.tgz
 
   build-neon:
     name: 'build-neon'
@@ -88,14 +91,18 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Setup mold
-        uses: rui314/setup-mold@v1
+#      - name: Setup mold
+#        uses: rui314/setup-mold@v1
 
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: ./postgres-artifact/
+#      - name: Get postgres artifact for restoration
+#        uses: actions/download-artifact@v3
+#        with:
+#          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
+#          path: ./postgres-artifact/
+
+      - name: Get postgres artifact
+        run: aws s3 cp s3://neon-dev-bucket/$GITHUB_RUN_ID/pg.tgz ./postgres-artifact/
+
       - name: Extract postgres artifact
         run: |
           mkdir ./tmp_install/
