@@ -413,6 +413,7 @@ pub fn find_end_of_wal(
         if !ispartial && entry.metadata().unwrap().len() != wal_seg_size as u64 {
             continue;
         }
+        assert!(tli == 1);
         if segno > high_segno
             || (segno == high_segno && tli > high_tli)
             || (segno == high_segno && tli == high_tli && high_ispartial && !ispartial)
