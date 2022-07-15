@@ -124,6 +124,9 @@ jobs:
             v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
             v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
+      - name: Fix rustup
+        run: rustup override set 1.58
+
       - name: Run cargo build
         run: |
           if [[ $BUILD_TYPE == "debug" ]]; then
