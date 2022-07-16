@@ -928,7 +928,7 @@ fn storage_sync_loop<P, S>(
                     );
                     let mut sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>> =
                         HashMap::new();
-                    let index_accessor = runtime.block_on(index.write());
+                    let index_accessor = runtime.block_on(index.read());
                     for tenant_id in updated_tenants {
                         let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
                             Some(tenant_entry) => tenant_entry,
