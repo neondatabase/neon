@@ -85,7 +85,7 @@
                 "vartype": "bool"
             },
             {
-                "name": "wal_acceptors",
+                "name": "safekeepers",
                 "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
                 "vartype": "string"
             },
@@ -150,7 +150,7 @@
                 "vartype": "integer"
             },
             {
-                "name": "zenith.zenith_tenant",
+                "name": "neon.tenant_id",
                 "value": "b0554b632bd4d547a63b86c3630317e8",
                 "vartype": "string"
             },
@@ -160,13 +160,13 @@
                 "vartype": "integer"
             },
             {
-                "name": "zenith.zenith_timeline",
+                "name": "neon.timeline_id",
                 "value": "2414a61ffc94e428f14b5758fe308e13",
                 "vartype": "string"
             },
             {
                 "name": "shared_preload_libraries",
-                "value": "zenith",
+                "value": "neon",
                 "vartype": "string"
             },
             {
@@ -175,7 +175,7 @@
                 "vartype": "string"
             },
             {
-                "name": "zenith.page_server_connstring",
+                "name": "neon.pageserver_connstring",
                 "value": "host=127.0.0.1 port=6400",
                 "vartype": "string"
             }

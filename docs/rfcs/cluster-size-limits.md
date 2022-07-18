@@ -22,8 +22,8 @@ so we don't want to give users access to the functionality that we don't think i
 
 * pageserver - calculate the size consumed by a timeline and add it to the feedback message.
 * safekeeper - pass feedback message from pageserver to compute.
-* compute - receive feedback message, enforce size limit based on GUC `zenith.max_cluster_size`.
-* console - set and update `zenith.max_cluster_size` setting
+* compute - receive feedback message, enforce size limit based on GUC `neon.max_cluster_size`.
+* console - set and update `neon.max_cluster_size` setting
 
 ## Proposed implementation
 
@@ -36,12 +36,12 @@ This is how the `LOGICAL_TIMELINE_SIZE` metric is implemented in the pageserver.
 Alternatively, we could count only relation data. As in pg_database_size().
 This approach is somewhat more user-friendly because it is the data that is really affected by the user.
 On the other hand, it puts us in a weaker position than other services, i.e., RDS.
-We will need to refactor the timeline_size counter or add another counter to implement it. 
+We will need to refactor the timeline_size counter or add another counter to implement it.
 
 Timeline size is updated during wal digestion. It is not versioned and is valid at the last_received_lsn moment.
 Then this size should be reported to compute node.
 
-`current_timeline_size` value is included in the walreceiver's custom feedback message: `ZenithFeedback.`
+`current_timeline_size` value is included in the walreceiver's custom feedback message: `ReplicationFeedback.`
 
 (PR about protocol changes https://github.com/zenithdb/zenith/pull/1037).
 
@@ -49,7 +49,7 @@ This message is received by the safekeeper and propagated to compute node as a p
 
 Finally, when compute node receives the `current_timeline_size` from safekeeper (or from pageserver directly), it updates the global variable.
 
-And then every zenith_extend() operation checks if limit is reached `(current_timeline_size > zenith.max_cluster_size)` and throws `ERRCODE_DISK_FULL` error if so.
+And then every zenith_extend() operation checks if limit is reached `(current_timeline_size > neon.max_cluster_size)` and throws `ERRCODE_DISK_FULL` error if so.
 (see Postgres error codes [https://www.postgresql.org/docs/devel/errcodes-appendix.html](https://www.postgresql.org/docs/devel/errcodes-appendix.html))
 
 TODO:
@@ -64,16 +64,16 @@ We should warn users if the limit is soon to be reached.
 ### **Reliability, failure modes and corner cases**
 
 1. `current_timeline_size` is valid at the last received and digested by pageserver lsn.
-    
+
     If pageserver lags behind compute node, `current_timeline_size` will lag too. This lag can be tuned using backpressure, but it is not expected to be 0 all the time.
-    
+
     So transactions that happen in this lsn range may cause limit overflow. Especially operations that generate (i.e., CREATE DATABASE) or free (i.e., TRUNCATE) a lot of data pages while generating a small amount of WAL. Are there other operations like this?
-    
+
     Currently, CREATE DATABASE operations are restricted in the console. So this is not an issue.
 
 
 ### **Security implications**
 
 We treat compute as an untrusted component. That's why we try to isolate it with secure container runtime or a VM.
-Malicious users may change the `zenith.max_cluster_size`, so we need an extra size limit check.
+Malicious users may change the `neon.max_cluster_size`, so we need an extra size limit check.
 To cover this case, we also monitor the compute node size in the console.

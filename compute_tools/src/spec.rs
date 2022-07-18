@@ -2,9 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use log::{info, log_enabled, warn, Level};
-use postgres::Client;
+use postgres::{Client, NoTls};
 use serde::Deserialize;
 
+use crate::compute::ComputeNode;
 use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
@@ -97,18 +98,13 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Process delta operations first
     if let Some(ops) = &spec.delta_operations {
-        info!("processing delta operations on roles");
+        info!("processing role renames");
         for op in ops {
             match op.action.as_ref() {
-                // We do not check either role exists or not,
-                // Postgres will take care of it for us
                 "delete_role" => {
-                    let query: String = format!("DROP ROLE IF EXISTS {}", &op.name.quote());
-
-                    warn!("deleting role '{}'", &op.name);
-                    xact.execute(query.as_str(), &[])?;
+                    // no-op now, roles will be deleted at the end of configuration
                 }
-                // Renaming role drops its password, since tole name is
+                // Renaming role drops its password, since role name is
                 // used as a salt there.  It is important that this role
                 // is recorded with a new `name` in the `roles` list.
                 // Follow up roles update will set the new password.
@@ -182,7 +178,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             xact.execute(query.as_str(), &[])?;
 
             let grant_query = format!(
-                "grant pg_read_all_data, pg_write_all_data to {}",
+                "GRANT pg_read_all_data, pg_write_all_data TO {}",
                 name.quote()
             );
             xact.execute(grant_query.as_str(), &[])?;
@@ -193,6 +189,70 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     }
 
     xact.commit()?;
+
+    Ok(())
+}
+
+/// Reassign all dependent objects and delete requested roles.
+pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<()> {
+    let spec = &node.spec;
+
+    // First, reassign all dependent objects to db owners.
+    if let Some(ops) = &spec.delta_operations {
+        info!("reassigning dependent objects of to-be-deleted roles");
+        for op in ops {
+            if op.action == "delete_role" {
+                reassign_owned_objects(node, &op.name)?;
+            }
+        }
+    }
+
+    // Second, proceed with role deletions.
+    let mut xact = client.transaction()?;
+    if let Some(ops) = &spec.delta_operations {
+        info!("processing role deletions");
+        for op in ops {
+            // We do not check either role exists or not,
+            // Postgres will take care of it for us
+            if op.action == "delete_role" {
+                let query: String = format!("DROP ROLE IF EXISTS {}", &op.name.quote());
+
+                warn!("deleting role '{}'", &op.name);
+                xact.execute(query.as_str(), &[])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// Reassign all owned objects in all databases to the owner of the database.
+fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()> {
+    for db in &node.spec.cluster.databases {
+        if db.owner != *role_name {
+            let mut connstr = node.connstr.clone();
+            // database name is always the last and the only component of the path
+            connstr.set_path(&db.name);
+
+            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+
+            // This will reassign all dependent objects to the db owner
+            let reassign_query = format!(
+                "REASSIGN OWNED BY {} TO {}",
+                role_name.quote(),
+                db.owner.quote()
+            );
+            info!(
+                "reassigning objects owned by '{}' in db '{}' to '{}'",
+                role_name, &db.name, &db.owner
+            );
+            client.simple_query(&reassign_query)?;
+
+            // This now will only drop privileges of the role
+            let drop_query = format!("DROP OWNED BY {}", role_name.quote());
+            client.simple_query(&drop_query)?;
+        }
+    }
 
     Ok(())
 }
@@ -289,10 +349,25 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     Ok(())
 }
 
-// Grant CREATE ON DATABASE to the database owner
-// to allow clients create trusted extensions.
-pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+/// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
+/// to allow users creating trusted extensions and re-creating `public` schema, for example.
+pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
+    let spec = &node.spec;
+
     info!("cluster spec grants:");
+
+    // We now have a separate `web_access` role to connect to the database
+    // via the web interface and proxy link auth. And also we grant a
+    // read / write all data privilege to every role. So also grant
+    // create to everyone.
+    // XXX: later we should stop messing with Postgres ACL in such horrible
+    // ways.
+    let roles = spec
+        .cluster
+        .roles
+        .iter()
+        .map(|r| r.name.quote())
+        .collect::<Vec<_>>();
 
     for db in &spec.cluster.databases {
         let dbname = &db.name;
@@ -300,11 +375,53 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let query: String = format!(
             "GRANT CREATE ON DATABASE {} TO {}",
             dbname.quote(),
-            db.owner.quote()
+            roles.join(", ")
         );
         info!("grant query {}", &query);
 
         client.execute(query.as_str(), &[])?;
+    }
+
+    // Do some per-database access adjustments. We'd better do this at db creation time,
+    // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
+    // atomically.
+    let mut db_connstr = node.connstr.clone();
+    for db in &node.spec.cluster.databases {
+        // database name is always the last and the only component of the path
+        db_connstr.set_path(&db.name);
+
+        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+
+        // This will only change ownership on the schema itself, not the objects
+        // inside it. Without it owner of the `public` schema will be `cloud_admin`
+        // and database owner cannot do anything with it. SQL procedure ensures
+        // that it won't error out if schema `public` doesn't exist.
+        let alter_query = format!(
+            "DO $$\n\
+                DECLARE\n\
+                    schema_owner TEXT;\n\
+                BEGIN\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        SELECT nspowner::regrole::text\n\
+                            FROM pg_catalog.pg_namespace\n\
+                            WHERE nspname = 'public'\n\
+                            INTO schema_owner;\n\
+                \n\
+                        IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'\n\
+                        THEN\n\
+                            ALTER SCHEMA public OWNER TO {};\n\
+                        END IF;\n\
+                    END IF;\n\
+                END\n\
+            $$;",
+            db.owner.quote()
+        );
+        db_client.simple_query(&alter_query)?;
     }
 
     Ok(())

@@ -1,6 +1,6 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 
 
 #
@@ -9,9 +9,9 @@ from fixtures.zenith_fixtures import ZenithEnv
 # This is very similar to the 'test_branch_behind' test, but instead of
 # creating branches, creates read-only nodes.
 #
-def test_readonly_node(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch('test_readonly_node', 'empty')
+def test_readonly_node(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch('test_readonly_node', 'empty')
     pgmain = env.postgres.create_start('test_readonly_node')
     log.info("postgres is running on 'test_readonly_node' branch")
 

@@ -1,4 +1,4 @@
-use crate::auth_backend::console::DatabaseInfo;
+use crate::auth::DatabaseInfo;
 use crate::cancellation::CancelClosure;
 use crate::error::UserFacingError;
 use std::io;
@@ -37,7 +37,7 @@ pub struct NodeInfo {
 
 impl NodeInfo {
     async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
-        let host_port = format!("{}:{}", self.db_info.host, self.db_info.port);
+        let host_port = (self.db_info.host.as_str(), self.db_info.port);
         let socket = TcpStream::connect(host_port).await?;
         let socket_addr = socket.peer_addr()?;
         socket2::SockRef::from(&socket).set_keepalive(true)?;

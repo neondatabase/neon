@@ -81,6 +81,12 @@ mod profiling_impl {
 
     pub struct DummyProfilerGuard;
 
+    impl Drop for DummyProfilerGuard {
+        fn drop(&mut self) {
+            // do nothing, this exists to calm Clippy down
+        }
+    }
+
     pub fn profpoint_start(
         _conf: &PageServerConf,
         _point: ProfilingConfig,

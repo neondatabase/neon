@@ -1,15 +1,15 @@
 from contextlib import closing
 
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
 
 
 #
 # Test starting Postgres with custom options
 #
-def test_config(zenith_simple_env: ZenithEnv):
-    env = zenith_simple_env
-    env.zenith_cli.create_branch("test_config", "empty")
+def test_config(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_config", "empty")
 
     # change config
     pg = env.postgres.create_start('test_config', config_lines=['log_min_messages=debug1'])

@@ -19,18 +19,18 @@ jobs:
   bench:
     # this workflow runs on self hosteed runner
     # it's environment is quite different from usual guthub runner
-    # probably the most important difference is that it doesnt start from clean workspace each time
+    # probably the most important difference is that it doesn't start from clean workspace each time
     # e g if you install system packages they are not cleaned up since you install them directly in host machine
     # not a container or something
     # See documentation for more info: https://docs.github.com/en/actions/hosting-your-own-runners/about-self-hosted-runners
     runs-on: [self-hosted, zenith-benchmarker]
 
     env:
-      POSTGRES_DISTRIB_DIR: "/usr/pgsql-13"
+      POSTGRES_DISTRIB_DIR: "/usr/pgsql-14"
 
     steps:
     - name: Checkout zenith repo
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     # actions/setup-python@v2 is not working correctly on self-hosted runners
     # see https://github.com/actions/setup-python/issues/162
@@ -88,7 +88,7 @@ jobs:
         # Plus time needed to initialize the test databases.
         TEST_PG_BENCH_DURATIONS_MATRIX: "300"
         TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-        PLATFORM: "zenith-staging"
+        PLATFORM: "neon-staging"
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
       run: |
@@ -96,7 +96,7 @@ jobs:
         # since it might generate duplicates when calling ingest_perf_test_result.py
         rm -rf perf-report-staging
         mkdir -p perf-report-staging
-        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 3600
 
     - name: Submit result
       env:
@@ -104,3 +104,12 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       run: |
         REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

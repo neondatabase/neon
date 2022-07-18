@@ -9,8 +9,8 @@ tmp_install
 tmp_check_cli
 test_output
 .vscode
-.zenith
-integration_tests/.zenith
+.neon
+integration_tests/.neon
 .mypy_cache
 
 Dockerfile

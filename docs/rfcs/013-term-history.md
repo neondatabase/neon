@@ -7,13 +7,13 @@ and e.g. prevents electing two proposers with the same term -- it is actually
 called `term` in the code. The second, called `epoch`, reflects progress of log
 receival and this might lag behind `term`; safekeeper switches to epoch `n` when
 it has received all committed log records from all `< n` terms. This roughly
-correspones to proposed in
+corresponds to proposed in
 
 https://github.com/zenithdb/rfcs/pull/3/files
 
 
 This makes our biggest our difference from Raft. In Raft, every log record is
-stamped with term in which it was generated; while we essentialy store in
+stamped with term in which it was generated; while we essentially store in
 `epoch` only the term of the highest record on this safekeeper -- when we know
 it -- because during recovery generally we don't, and `epoch` is bumped directly
 to the term of the proposer who performs the recovery when it is finished. It is

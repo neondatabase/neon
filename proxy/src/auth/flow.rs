@@ -1,6 +1,6 @@
 //! Main authentication flow.
 
-use super::{AuthError, AuthErrorImpl};
+use super::AuthErrorImpl;
 use crate::stream::PqStream;
 use crate::{sasl, scram};
 use std::io;
@@ -32,7 +32,7 @@ impl AuthMethod for Scram<'_> {
 pub struct AuthFlow<'a, Stream, State> {
     /// The underlying stream which implements libpq's protocol.
     stream: &'a mut PqStream<Stream>,
-    /// State might contain ancillary data (see [`AuthFlow::begin`]).
+    /// State might contain ancillary data (see [`Self::begin`]).
     state: State,
 }
 
@@ -60,7 +60,7 @@ impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn authenticate(self) -> Result<scram::ScramKey, AuthError> {
+    pub async fn authenticate(self) -> super::Result<scram::ScramKey> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;

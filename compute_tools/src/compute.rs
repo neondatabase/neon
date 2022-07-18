@@ -35,7 +35,8 @@ use crate::spec::*;
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
     pub start_time: DateTime<Utc>,
-    pub connstr: String,
+    // Url type maintains proper escaping
+    pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
     pub spec: ComputeSpec,
@@ -146,8 +147,14 @@ impl ComputeNode {
             _ => format!("basebackup {} {} {}", &self.tenant, &self.timeline, lsn),
         };
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
-        let mut ar = tar::Archive::new(copyreader);
 
+        // Read the archive directly from the `CopyOutReader`
+        //
+        // Set `ignore_zeros` so that unpack() reads all the Copy data and
+        // doesn't stop at the end-of-archive marker. Otherwise, if the server
+        // sends an Error after finishing the tarball, we will not notice it.
+        let mut ar = tar::Archive::new(copyreader);
+        ar.set_ignore_zeros(true);
         ar.unpack(&self.pgdata)?;
 
         self.metrics.basebackup_ms.store(
@@ -256,11 +263,39 @@ impl ComputeNode {
             .unwrap_or_else(|| "5432".to_string());
         wait_for_postgres(&mut pg, &port, pgdata_path)?;
 
-        let mut client = Client::connect(&self.connstr, NoTls)?;
+        // If connection fails,
+        // it may be the old node with `zenith_admin` superuser.
+        //
+        // In this case we need to connect with old `zenith_admin`name
+        // and create new user. We cannot simply rename connected user,
+        // but we can create a new one and grant it all privileges.
+        let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
+            Err(e) => {
+                info!(
+                    "cannot connect to postgres: {}, retrying with `zenith_admin` username",
+                    e
+                );
+                let mut zenith_admin_connstr = self.connstr.clone();
+
+                zenith_admin_connstr
+                    .set_username("zenith_admin")
+                    .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
+
+                let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
+                client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                drop(client);
+
+                // reconnect with connsting with expected name
+                Client::connect(self.connstr.as_str(), NoTls)?
+            }
+            Ok(client) => client,
+        };
 
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
-        handle_grants(&self.spec, &mut client)?;
+        handle_role_deletions(self, &mut client)?;
+        handle_grants(self, &mut client)?;
         create_writablity_check_data(&mut client)?;
 
         // 'Close' connection

@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream};
@@ -138,9 +139,11 @@ impl Role {
             // Now we also support SCRAM-SHA-256 and to preserve compatibility
             // we treat all encrypted_password as md5 unless they starts with SCRAM-SHA-256.
             if pass.starts_with("SCRAM-SHA-256") {
-                params.push_str(&format!(" PASSWORD '{}'", pass));
+                write!(params, " PASSWORD '{pass}'")
+                    .expect("String is documented to not to error during write operations");
             } else {
-                params.push_str(&format!(" PASSWORD 'md5{}'", pass));
+                write!(params, " PASSWORD 'md5{pass}'")
+                    .expect("String is documented to not to error during write operations");
             }
         } else {
             params.push_str(" PASSWORD NULL");
@@ -158,7 +161,8 @@ impl Database {
     /// it may require a proper quoting too.
     pub fn to_pg_options(&self) -> String {
         let mut params: String = self.options.as_pg_options();
-        params.push_str(&format!(" OWNER {}", &self.owner.quote()));
+        write!(params, " OWNER {}", &self.owner.quote())
+            .expect("String is documented to not to error during write operations");
 
         params
     }
@@ -244,18 +248,20 @@ pub fn wait_for_postgres(pg: &mut Child, port: &str, pgdata: &Path) -> Result<()
             bail!("Postgres exited unexpectedly with code {}", code);
         }
 
-        if pid_path.exists() {
-            let file = BufReader::new(File::open(&pid_path)?);
-            let status = file
-                .lines()
-                .last()
-                .unwrap()
-                .unwrap_or_else(|_| "unknown".to_string());
-            let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
+        // Check that we can open pid file first.
+        if let Ok(file) = File::open(&pid_path) {
+            let file = BufReader::new(file);
+            let last_line = file.lines().last();
 
-            // Now Postgres is ready to accept connections
-            if status.trim() == "ready" && can_connect {
-                break;
+            // Pid file could be there and we could read it, but it could be empty, for example.
+            if let Some(Ok(line)) = last_line {
+                let status = line.trim();
+                let can_connect = TcpStream::connect_timeout(&addr, timeout).is_ok();
+
+                // Now Postgres is ready to accept connections
+                if status == "ready" && can_connect {
+                    break;
+                }
             }
         }
 

@@ -29,12 +29,11 @@ pub struct SafekeeperPostgresHandler {
     pub ztenantid: Option<ZTenantId>,
     pub ztimelineid: Option<ZTimelineId>,
     pub timeline: Option<Arc<Timeline>>,
-    pageserver_connstr: Option<String>,
 }
 
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
-    StartWalPush { pageserver_connstr: Option<String> },
+    StartWalPush,
     StartReplication { start_lsn: Lsn },
     IdentifySystem,
     JSONCtrl { cmd: AppendLogicalMessage },
@@ -42,11 +41,7 @@ enum SafekeeperPostgresCommand {
 
 fn parse_cmd(cmd: &str) -> Result<SafekeeperPostgresCommand> {
     if cmd.starts_with("START_WAL_PUSH") {
-        let re = Regex::new(r"START_WAL_PUSH(?: (.+))?").unwrap();
-
-        let caps = re.captures(cmd).unwrap();
-        let pageserver_connstr = caps.get(1).map(|m| m.as_str().to_owned());
-        Ok(SafekeeperPostgresCommand::StartWalPush { pageserver_connstr })
+        Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
         let re =
             Regex::new(r"START_REPLICATION(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
@@ -86,8 +81,6 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                 self.appname = Some(app_name.clone());
             }
 
-            self.pageserver_connstr = params.get("pageserver_connstr").cloned();
-
             Ok(())
         } else {
             bail!("Safekeeper received unexpected initial message: {:?}", sm);
@@ -113,14 +106,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         }
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush { pageserver_connstr } => {
-                ReceiveWalConn::new(pgb, pageserver_connstr)
+            SafekeeperPostgresCommand::StartWalPush => {
+                ReceiveWalConn::new(pgb)
                     .run(self)
                     .context("failed to run ReceiveWalConn")?;
             }
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
                 ReplicationConn::new(pgb)
-                    .run(self, pgb, start_lsn, self.pageserver_connstr.clone())
+                    .run(self, pgb, start_lsn)
                     .context("failed to run ReplicationConn")?;
             }
             SafekeeperPostgresCommand::IdentifySystem => {
@@ -142,7 +135,6 @@ impl SafekeeperPostgresHandler {
             ztenantid: None,
             ztimelineid: None,
             timeline: None,
-            pageserver_connstr: None,
         }
     }
 

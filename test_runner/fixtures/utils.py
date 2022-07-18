@@ -3,25 +3,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from typing import Any, List, Optional
+from typing import Any, List
 from fixtures.log_helper import log
 
 
 def get_self_dir() -> str:
     """ Get the path to the directory where this script lives. """
     return os.path.dirname(os.path.abspath(__file__))
-
-
-def mkdir_if_needed(path: str) -> None:
-    """ Create a directory if it doesn't already exist
-
-    Note this won't try to create intermediate directories.
-    """
-    try:
-        os.mkdir(path)
-    except FileExistsError:
-        pass
-    assert os.path.isdir(path)
 
 
 def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
@@ -95,6 +83,9 @@ def get_dir_size(path: str) -> int:
     totalbytes = 0
     for root, dirs, files in os.walk(path):
         for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
+            try:
+                totalbytes += os.path.getsize(os.path.join(root, name))
+            except FileNotFoundError as e:
+                pass  # file could be concurrently removed
 
     return totalbytes

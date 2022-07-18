@@ -26,6 +26,9 @@ impl Lsn {
     /// Maximum possible value for an LSN
     pub const MAX: Lsn = Lsn(u64::MAX);
 
+    /// Invalid value for InvalidXLogRecPtr, as defined in xlogdefs.h
+    pub const INVALID: Lsn = Lsn(0);
+
     /// Subtract a number, returning None on overflow.
     pub fn checked_sub<T: Into<u64>>(self, other: T) -> Option<Lsn> {
         let other: u64 = other.into();
@@ -102,6 +105,12 @@ impl Lsn {
     /// Align LSN on 8-byte boundary (alignment of WAL records).
     pub fn is_aligned(&self) -> bool {
         *self == self.align()
+    }
+
+    /// Return if the LSN is valid
+    /// mimics postgres XLogRecPtrIsInvalid macro
+    pub fn is_valid(self) -> bool {
+        self != Lsn::INVALID
     }
 }
 

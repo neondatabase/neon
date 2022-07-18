@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::net::TcpStream;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -11,6 +13,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
+use pageserver::tenant_mgr::TenantInfo;
 use pageserver::timelines::TimelineInfo;
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -25,8 +28,7 @@ use utils::{
 };
 
 use crate::local_env::LocalEnv;
-use crate::{fill_rust_env_vars, read_pidfile};
-use pageserver::tenant_mgr::TenantInfo;
+use crate::{fill_aws_secrets_vars, fill_rust_env_vars, read_pidfile};
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -35,6 +37,12 @@ pub enum PageserverHttpError {
 
     #[error("Error: {0}")]
     Response(String),
+}
+
+impl From<anyhow::Error> for PageserverHttpError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Response(e.to_string())
+    }
 }
 
 type Result<T> = result::Result<T, PageserverHttpError>;
@@ -410,6 +418,15 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()?,
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                walreceiver_connect_timeout: settings
+                    .get("walreceiver_connect_timeout")
+                    .map(|x| x.to_string()),
+                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                max_lsn_wal_lag: settings
+                    .get("max_lsn_wal_lag")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
             })
             .send()?
             .error_from_body()?
@@ -433,22 +450,41 @@ impl PageServerNode {
                 tenant_id,
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
                 compaction_target_size: settings
                     .get("compaction_target_size")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'compaction_target_size' as an integer")?,
                 compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
                 compaction_threshold: settings
                     .get("compaction_threshold")
-                    .map(|x| x.parse::<usize>().unwrap()),
+                    .map(|x| x.parse::<usize>())
+                    .transpose()
+                    .context("Failed to parse 'compaction_threshold' as an integer")?,
                 gc_horizon: settings
                     .get("gc_horizon")
-                    .map(|x| x.parse::<u64>().unwrap()),
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'gc_horizon' as an integer")?,
                 gc_period: settings.get("gc_period").map(|x| x.to_string()),
                 image_creation_threshold: settings
                     .get("image_creation_threshold")
-                    .map(|x| x.parse::<usize>().unwrap()),
+                    .map(|x| x.parse::<usize>())
+                    .transpose()
+                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
                 pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                walreceiver_connect_timeout: settings
+                    .get("walreceiver_connect_timeout")
+                    .map(|x| x.to_string()),
+                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                max_lsn_wal_lag: settings
+                    .get("max_lsn_wal_lag")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
             })
             .send()?
             .error_from_body()?;
@@ -492,13 +528,54 @@ impl PageServerNode {
 
         Ok(timeline_info_response)
     }
-}
 
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
-    for env_key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
-        if let Ok(value) = std::env::var(env_key) {
-            cmd = cmd.env(env_key, value);
+    /// Import a basebackup prepared using either:
+    /// a) `pg_basebackup -F tar`, or
+    /// b) The `fullbackup` pageserver endpoint
+    ///
+    /// # Arguments
+    /// * `tenant_id` - tenant to import into. Created if not exists
+    /// * `timeline_id` - id to assign to imported timeline
+    /// * `base` - (start lsn of basebackup, path to `base.tar` file)
+    /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
+    pub fn timeline_import(
+        &self,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        base: (Lsn, PathBuf),
+        pg_wal: Option<(Lsn, PathBuf)>,
+    ) -> anyhow::Result<()> {
+        let mut client = self.pg_connection_config.connect(NoTls).unwrap();
+
+        // Init base reader
+        let (start_lsn, base_tarfile_path) = base;
+        let base_tarfile = File::open(base_tarfile_path)?;
+        let mut base_reader = BufReader::new(base_tarfile);
+
+        // Init wal reader if necessary
+        let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
+            let wal_tarfile = File::open(wal_tarfile_path)?;
+            let wal_reader = BufReader::new(wal_tarfile);
+            (end_lsn, Some(wal_reader))
+        } else {
+            (start_lsn, None)
+        };
+
+        // Import base
+        let import_cmd =
+            format!("import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+        let mut writer = client.copy_in(&import_cmd)?;
+        io::copy(&mut base_reader, &mut writer)?;
+        writer.finish()?;
+
+        // Import wal if necessary
+        if let Some(mut wal_reader) = wal_reader {
+            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
+            let mut writer = client.copy_in(&import_cmd)?;
+            io::copy(&mut wal_reader, &mut writer)?;
+            writer.finish()?;
         }
+
+        Ok(())
     }
-    cmd
 }

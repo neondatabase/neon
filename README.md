@@ -5,6 +5,11 @@ Neon is a serverless open source alternative to AWS Aurora Postgres. It separate
 The project used to be called "Zenith". Many of the commands and code comments
 still refer to "zenith", but we are in the process of renaming things.
 
+## Quick start
+[Join the waitlist](https://neon.tech/) for our free tier to receive your serverless postgres instance. Then connect to it with your preferred postgres client (psql, dbeaver, etc) or use the online SQL editor.
+
+Alternatively, compile and run the project [locally](#running-local-installation).
+
 ## Architecture overview
 
 A Neon installation consists of compute nodes and Neon storage engine.
@@ -24,13 +29,18 @@ Pageserver consists of:
 ## Running local installation
 
 
-#### building on Ubuntu/ Debian (Linux)
+#### Installing dependencies on Linux
 1. Install build dependencies and other useful packages
 
-On Ubuntu or Debian this set of packages should be sufficient to build the code:
-```text
+* On Ubuntu or Debian this set of packages should be sufficient to build the code:
+```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
+libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
+```
+* On Fedora these packages are needed:
+```bash
+dnf install flex bison readline-devel zlib-devel openssl-devel \
+  libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -39,23 +49,11 @@ libssl-dev clang pkg-config libpq-dev libprotobuf-dev etcd
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-3. Install PostgreSQL Client
-```
-apt install postgresql-client
-```
-
-4. Build neon and patched postgres
-```sh
-git clone --recursive https://github.com/neondatabase/neon.git
-cd neon
-make -j5
-```
-
-#### building on OSX (12.3.1)
+#### Installing dependencies on OSX (12.3.1)
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf etcd
+brew install protobuf etcd openssl
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
@@ -71,11 +69,20 @@ brew install libpq
 brew link --force libpq
 ```
 
-4. Build neon and patched postgres
-```sh
+#### Building on Linux and OSX
+
+1. Build neon and patched postgres
+```
+# Note: The path to the neon sources can not contain a space.
+
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
-make -j5
+
+# The preferred and default is to make a debug build. This will create a 
+# demonstrably slower build than a release build. If you want to use a release
+# build, utilize "`BUILD_TYPE=release make -j`nproc``" 
+
+make -j`nproc`
 ```
 
 #### dependency installation notes
@@ -88,7 +95,7 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 #### running neon database
 1. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
-# Create repository in .zenith with proper paths to binaries and data
+# Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > ./target/debug/neon_local init
 initializing tenantid 9ef87a5bf0d92544f6fafeeb3239695c
@@ -98,17 +105,17 @@ pageserver init succeeded
 
 # start pageserver and safekeeper
 > ./target/debug/neon_local start
-Starting pageserver at '127.0.0.1:64000' in '.zenith'
+Starting pageserver at '127.0.0.1:64000' in '.neon'
 Pageserver started
 initializing for sk 1 for 7676
-Starting safekeeper at '127.0.0.1:5454' in '.zenith/safekeepers/sk1'
+Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'
 Safekeeper started
 
 # start postgres compute node
 > ./target/debug/neon_local pg start main
 Starting new postgres main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
-Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=postgres'
+Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
+Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
 # check list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -118,7 +125,7 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=zenith_admin dbname=po
 
 2. Now it is possible to connect to postgres and run some queries:
 ```text
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
 postgres=# insert into t values(1,1);
@@ -144,8 +151,8 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 # start postgres on that branch
 > ./target/debug/neon_local pg start migration_check --branch-name migration_check
 Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
-Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=postgres'
+Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
+Starting postgres node at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
 
 # check the new list of running postgres instances
 > ./target/debug/neon_local pg list
@@ -155,7 +162,7 @@ Starting postgres node at 'host=127.0.0.1 port=55433 user=zenith_admin dbname=po
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
-> psql -p55433 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55433 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -166,7 +173,7 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 
 # check that the new change doesn't affect the 'main' postgres
-> psql -p55432 -h 127.0.0.1 -U zenith_admin postgres
+> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -204,7 +211,7 @@ Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, wh
 To get more familiar with this aspect, refer to:
 
 - [Neon glossary](/docs/glossary.md)
-- [PostgreSQL glossary](https://www.postgresql.org/docs/13/glossary.html)
+- [PostgreSQL glossary](https://www.postgresql.org/docs/14/glossary.html)
 - Other PostgreSQL documentation and sources (Neon fork sources can be found [here](https://github.com/neondatabase/postgres))
 
 ## Join the development

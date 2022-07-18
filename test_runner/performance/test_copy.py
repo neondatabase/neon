@@ -1,8 +1,8 @@
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnv
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
-from fixtures.benchmark_fixture import MetricReport, ZenithBenchmarker
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
 from io import BufferedReader, RawIOBase
 from itertools import repeat
 
@@ -41,8 +41,8 @@ def copy_test_data(rows: int):
 #
 # COPY performance tests.
 #
-def test_copy(zenith_with_baseline: PgCompare):
-    env = zenith_with_baseline
+def test_copy(neon_with_baseline: PgCompare):
+    env = neon_with_baseline
 
     # Get the timeline ID of our branch. We need it for the pageserver 'checkpoint' command
     with closing(env.pg.connect()) as conn:

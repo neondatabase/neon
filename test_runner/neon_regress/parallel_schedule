@@ -1,0 +1,10 @@
+# ----------
+# Like in PostgreSQL src/test/regress/parallel_schedule, we put no
+# more than twenty tests in any one parallel group; this limits the
+# number of connections needed to run the tests.
+# ----------
+
+test: neon-cid
+test: neon-rel-truncate
+test: neon-clog
+test: neon-vacuum-full

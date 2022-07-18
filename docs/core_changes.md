@@ -1,3 +1,12 @@
+# Postgres core changes
+
+This lists all the changes that have been made to the PostgreSQL
+source tree, as a somewhat logical set of patches. The long-term goal
+is to eliminate all these changes, by submitting patches to upstream
+and refactoring code into extensions, so that you can run unmodified
+PostgreSQL against Neon storage.
+
+
 1. Add t_cid to XLOG record
 - Why?
   The cmin/cmax on a heap page is a real bummer. I don't see any other way to fix that than bite the bullet and modify the WAL-logging routine to include the cmin/cmax.
@@ -188,7 +197,7 @@ Not currently committed but proposed:
 3. Prefetching
 - Why?
   As far as pages in Zenith are loaded on demand, to reduce node startup time
-  and also sppedup some massive queries we need some mechanism for bulk loading to
+  and also speedup some massive queries we need some mechanism for bulk loading to
   reduce page request round-trip overhead.
 
   Currently Postgres is supporting prefetching only for bitmap scan.

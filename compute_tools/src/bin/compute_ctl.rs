@@ -21,7 +21,7 @@
 //! Usage example:
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
-//!             -C 'postgresql://zenith_admin@localhost/postgres' \
+//!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres
 //! ```
@@ -33,7 +33,7 @@ use std::process::exit;
 use std::sync::{Arc, RwLock};
 use std::{thread, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use log::{error, info};
@@ -45,6 +45,7 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::pg_helpers::*;
 use compute_tools::spec::*;
+use url::Url;
 
 fn main() -> Result<()> {
     // TODO: re-use `utils::logging` later
@@ -116,22 +117,22 @@ fn main() -> Result<()> {
     let pageserver_connstr = spec
         .cluster
         .settings
-        .find("zenith.page_server_connstring")
+        .find("neon.pageserver_connstring")
         .expect("pageserver connstr should be provided");
     let tenant = spec
         .cluster
         .settings
-        .find("zenith.zenith_tenant")
+        .find("neon.tenant_id")
         .expect("tenant id should be provided");
     let timeline = spec
         .cluster
         .settings
-        .find("zenith.zenith_timeline")
+        .find("neon.timeline_id")
         .expect("tenant id should be provided");
 
     let compute_state = ComputeNode {
         start_time: Utc::now(),
-        connstr: connstr.to_string(),
+        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         spec,

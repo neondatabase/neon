@@ -1,12 +1,12 @@
 # It's possible to run any regular test with the local fs remote storage via
-# env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/zenith_zzz/'}" poetry ......
+# env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import shutil, os
 from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.zenith_fixtures import ZenithEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, assert_timeline_local, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 import pytest
@@ -30,12 +30,15 @@ import pytest
 #
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder, storage_type: str):
-    # zenith_env_builder.rust_log_override = 'debug'
+def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, storage_type: str):
+    # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
+    # and this test needs SK to write data to pageserver, so it will be visible
+    neon_env_builder.safekeepers_id_start = 12
+
     if storage_type == 'local_fs':
-        zenith_env_builder.enable_local_fs_remote_storage()
+        neon_env_builder.enable_local_fs_remote_storage()
     elif storage_type == 'mock_s3':
-        zenith_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
+        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
     else:
         raise RuntimeError(f'Unknown storage type: {storage_type}')
 
@@ -43,13 +46,13 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     data_secret = 'very secret secret'
 
     ##### First start, insert secret data and upload it to the remote storage
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     pg = env.postgres.create_start('main')
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show zenith.zenith_tenant")[0][0]
-    timeline_id = pg.safe_psql("show zenith.zenith_timeline")[0][0]
+    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
 
     checkpoint_numbers = range(1, 3)
 
@@ -88,14 +91,14 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     # Introduce failpoint in download
     env.pageserver.safe_psql(f"failpoints remote-storage-download-pre-rename=return")
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
-    # is there a better way to assert that fafilpoint triggered?
+    # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="Timeline download is already in progress"):
-        client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
+        client.tenant_attach(UUID(tenant_id))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail with active failpoint: %s", detail)
@@ -106,17 +109,17 @@ def test_remote_storage_backup_and_restore(zenith_env_builder: ZenithEnvBuilder,
     env.pageserver.stop()
     env.pageserver.start()
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
     log.info("waiting for timeline redownload")
     wait_until(number_of_iterations=10,
                interval=1,
-               func=lambda: assert_local(client, UUID(tenant_id), UUID(timeline_id)))
+               func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     assert detail['local'] is not None
     log.info("Timeline detail after attach completed: %s", detail)
-    assert lsn_from_hex(detail['local']['last_record_lsn']) >= current_lsn, 'current db Lsn should shoud not be less than the one stored on remote storage'
+    assert lsn_from_hex(detail['local']['last_record_lsn']) >= current_lsn, 'current db Lsn should should not be less than the one stored on remote storage'
     assert not detail['remote']['awaits_download']
 
     pg = env.postgres.create_start('main')

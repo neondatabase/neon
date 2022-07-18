@@ -106,7 +106,9 @@ impl sasl::Mechanism for Exchange<'_> {
                 }
 
                 if client_final_message.nonce != server_first_message.nonce() {
-                    return Err(SaslError::AuthenticationFailed("bad nonce"));
+                    return Err(SaslError::AuthenticationFailed(
+                        "combined nonce doesn't match",
+                    ));
                 }
 
                 let signature_builder = SignatureBuilder {
@@ -120,7 +122,7 @@ impl sasl::Mechanism for Exchange<'_> {
                     .derive_client_key(&client_final_message.proof);
 
                 if client_key.sha256() != self.secret.stored_key {
-                    return Err(SaslError::AuthenticationFailed("keys don't match"));
+                    return Err(SaslError::AuthenticationFailed("password doesn't match"));
                 }
 
                 let msg = client_final_message

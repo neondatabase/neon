@@ -8,7 +8,7 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     "env",
     [
         # The test is too slow to run in CI, but fast enough to run with remote tests
-        pytest.param(lazy_fixture("zenith_compare"), id="zenith", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("neon_compare"), id="neon", marks=pytest.mark.slow),
         pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
         pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
     ])
@@ -18,6 +18,7 @@ def test_hot_page(env: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
+            cur.execute('drop table if exists t, f;')
 
             # Write many updates to the same row
             with env.record_duration('write'):

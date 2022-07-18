@@ -20,7 +20,7 @@
 //! assign a buffer for a page, you must hold the mapping lock and the lock on
 //! the slot at the same time.
 //!
-//! Whenever you need to hold both locks simultenously, the slot lock must be
+//! Whenever you need to hold both locks simultaneously, the slot lock must be
 //! acquired first. This consistent ordering avoids deadlocks. To look up a page
 //! in the cache, you would first look up the mapping, while holding the mapping
 //! lock, and then lock the slot. You must release the mapping lock in between,

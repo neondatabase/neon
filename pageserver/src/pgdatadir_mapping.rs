@@ -51,6 +51,7 @@ pub enum LsnForTimestamp {
     Present(Lsn),
     Future(Lsn),
     Past(Lsn),
+    NoData(Lsn),
 }
 
 impl<R: Repository> DatadirTimeline<R> {
@@ -121,6 +122,19 @@ impl<R: Repository> DatadirTimeline<R> {
 
         let key = rel_block_to_key(tag, blknum);
         self.tline.get(key, lsn)
+    }
+
+    // Get size of a database in blocks
+    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+        let mut total_blocks = 0;
+
+        let rels = self.list_rels(spcnode, dbnode, lsn)?;
+
+        for rel in rels {
+            let n_blocks = self.get_rel_size(rel, lsn)?;
+            total_blocks += n_blocks as usize;
+        }
+        Ok(total_blocks)
     }
 
     /// Get size of a relation file
@@ -250,7 +264,7 @@ impl<R: Repository> DatadirTimeline<R> {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                bail!("no commit timestamps found");
+                Ok(LsnForTimestamp::NoData(max_lsn))
             }
             (true, false) => {
                 // Didn't find any commit timestamps larger than the request
@@ -521,7 +535,7 @@ pub struct DatadirModification<'a, R: Repository> {
 
     lsn: Lsn,
 
-    // The modifications are not applied directly to the underyling key-value store.
+    // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_updates: HashMap<Key, Value>,
@@ -667,6 +681,10 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
+        let req_lsn = self.tline.get_last_record_lsn();
+
+        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn)?;
+
         // Remove entry from dbdir
         let buf = self.get(DBDIR_KEY)?;
         let mut dir = DbDirectory::des(&buf)?;
@@ -680,7 +698,8 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
             );
         }
 
-        // FIXME: update pending_nblocks
+        // Update logical database size.
+        self.pending_nblocks -= total_blocks as isize;
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
@@ -749,6 +768,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     /// Extend relation
+    /// If new size is smaller, do nothing.
     pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
 
@@ -756,10 +776,13 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
 
-        let buf = nblocks.to_le_bytes();
-        self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+        // only extend relation here. never decrease the size
+        if nblocks > old_size {
+            let buf = nblocks.to_le_bytes();
+            self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        self.pending_nblocks += nblocks as isize - old_size as isize;
+            self.pending_nblocks += nblocks as isize - old_size as isize;
+        }
         Ok(())
     }
 
@@ -880,6 +903,57 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     ///
+    /// Flush changes accumulated so far to the underlying repository.
+    ///
+    /// Usually, changes made in DatadirModification are atomic, but this allows
+    /// you to flush them to the underlying repository before the final `commit`.
+    /// That allows to free up the memory used to hold the pending changes.
+    ///
+    /// Currently only used during bulk import of a data directory. In that
+    /// context, breaking the atomicity is OK. If the import is interrupted, the
+    /// whole import fails and the timeline will be deleted anyway.
+    /// (Or to be precise, it will be left behind for debugging purposes and
+    /// ignored, see https://github.com/neondatabase/neon/pull/1809)
+    ///
+    /// Note: A consequence of flushing the pending operations is that they
+    /// won't be visible to subsequent operations until `commit`. The function
+    /// retains all the metadata, but data pages are flushed. That's again OK
+    /// for bulk import, where you are just loading data pages and won't try to
+    /// modify the same pages twice.
+    pub fn flush(&mut self) -> Result<()> {
+        // Unless we have accumulated a decent amount of changes, it's not worth it
+        // to scan through the pending_updates list.
+        let pending_nblocks = self.pending_nblocks;
+        if pending_nblocks < 10000 {
+            return Ok(());
+        }
+
+        let writer = self.tline.tline.writer();
+
+        // Flush relation and  SLRU data blocks, keep metadata.
+        let mut result: Result<()> = Ok(());
+        self.pending_updates.retain(|&key, value| {
+            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
+                result = writer.put(key, self.lsn, value);
+                false
+            } else {
+                true
+            }
+        });
+        result?;
+
+        if pending_nblocks != 0 {
+            self.tline.current_logical_size.fetch_add(
+                pending_nblocks * pg_constants::BLCKSZ as isize,
+                Ordering::SeqCst,
+            );
+            self.pending_nblocks = 0;
+        }
+
+        Ok(())
+    }
+
+    ///
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
     ///
@@ -889,7 +963,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let pending_nblocks = self.pending_nblocks;
 
         for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, value)?;
+            writer.put(key, self.lsn, &value)?;
         }
         for key_range in self.pending_deletions {
             writer.delete(key_range.clone(), self.lsn)?;
@@ -1294,6 +1368,10 @@ pub fn key_to_rel_block(key: Key) -> Result<(RelTag, BlockNumber)> {
     })
 }
 
+fn is_rel_block_key(key: Key) -> bool {
+    key.field1 == 0x00 && key.field4 != 0
+}
+
 pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
     Ok(match key.field1 {
         0x01 => {
@@ -1310,6 +1388,12 @@ pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
         }
         _ => bail!("unexpected value kind 0x{:02x}", key.field1),
     })
+}
+
+fn is_slru_block_key(key: Key) -> bool {
+    key.field1 == 0x01                // SLRU-related
+        && key.field3 == 0x00000001   // but not SlruDir
+        && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
 //

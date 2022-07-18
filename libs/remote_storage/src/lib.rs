@@ -12,12 +12,16 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::OsStr,
+    fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
+    pin::Pin,
 };
 
-use anyhow::Context;
+use anyhow::{bail, Context};
+
 use tokio::io;
+use toml_edit::Item;
 use tracing::info;
 
 pub use self::{
@@ -38,13 +42,19 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
+pub trait RemoteObjectName {
+    // Needed to retrieve last component for RemoteObjectId.
+    // In other words a file name
+    fn object_name(&self) -> Option<&str>;
+}
+
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync {
     /// A way to uniquely reference a file in the remote storage.
-    type RemoteObjectId;
+    type RemoteObjectId: RemoteObjectName;
 
     /// Attempts to derive the storage path out of the local path, if the latter is correct.
     fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId>;
@@ -54,6 +64,12 @@ pub trait RemoteStorage: Send + Sync {
 
     /// Lists all items the storage has right now.
     async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
+
+    /// Lists all top level subdirectories for a given prefix
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -68,11 +84,7 @@ pub trait RemoteStorage: Send + Sync {
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(
-        &self,
-        from: &Self::RemoteObjectId,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>>;
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
@@ -81,11 +93,48 @@ pub trait RemoteStorage: Send + Sync {
         from: &Self::RemoteObjectId,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        to: &mut (impl io::AsyncWrite + Unpin + Send + Sync),
-    ) -> anyhow::Result<Option<StorageMetadata>>;
+    ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()>;
 }
+
+pub struct Download {
+    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send>>,
+    /// Extra key-value data, associated with the current remote file.
+    pub metadata: Option<StorageMetadata>,
+}
+
+impl Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Download")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum DownloadError {
+    /// Validation or other error happened due to user input.
+    BadInput(anyhow::Error),
+    /// The file was not found in the remote storage.
+    NotFound,
+    /// The file was found in the remote storage, but the download failed.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadError::BadInput(e) => {
+                write!(f, "Failed to download a remote file due to user input: {e}")
+            }
+            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DownloadError {}
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
@@ -178,7 +227,7 @@ pub struct S3Config {
     pub concurrency_limit: NonZeroUsize,
 }
 
-impl std::fmt::Debug for S3Config {
+impl Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
             .field("bucket_name", &self.bucket_name)
@@ -201,6 +250,90 @@ pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str)
     original_path
         .as_ref()
         .with_extension(new_extension.as_ref())
+}
+
+impl RemoteStorageConfig {
+    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
+        let local_path = toml.get("local_path");
+        let bucket_name = toml.get("bucket_name");
+        let bucket_region = toml.get("bucket_region");
+
+        let max_concurrent_syncs = NonZeroUsize::new(
+            parse_optional_integer("max_concurrent_syncs", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
+        )
+        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
+
+        let max_sync_errors = NonZeroU32::new(
+            parse_optional_integer("max_sync_errors", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
+        )
+        .context("Failed to parse 'max_sync_errors' as a positive integer")?;
+
+        let concurrency_limit = NonZeroUsize::new(
+            parse_optional_integer("concurrency_limit", toml)?
+                .unwrap_or(DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+        )
+        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
+
+        let storage = match (local_path, bucket_name, bucket_region) {
+            (None, None, None) => bail!("no 'local_path' nor 'bucket_name' option"),
+            (_, Some(_), None) => {
+                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
+            }
+            (_, None, Some(_)) => {
+                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
+            }
+            (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
+                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
+                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
+                prefix_in_bucket: toml
+                    .get("prefix_in_bucket")
+                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
+                    .transpose()?,
+                endpoint: toml
+                    .get("endpoint")
+                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
+                    .transpose()?,
+                concurrency_limit,
+            }),
+            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
+                parse_toml_string("local_path", local_path)?,
+            )),
+            (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
+        };
+
+        Ok(RemoteStorageConfig {
+            max_concurrent_syncs,
+            max_sync_errors,
+            storage,
+        })
+    }
+}
+
+// Helper functions to parse a toml Item
+fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
+where
+    I: TryFrom<i64, Error = E>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let toml_integer = match item.get(name) {
+        Some(item) => item
+            .as_integer()
+            .with_context(|| format!("configure option {name} is not an integer"))?,
+        None => return Ok(None),
+    };
+
+    I::try_from(toml_integer)
+        .map(Some)
+        .with_context(|| format!("configure option {name} is too large"))
+}
+
+fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
+    let s = item
+        .as_str()
+        .with_context(|| format!("configure option {name} is not a string"))?;
+    Ok(s.to_string())
 }
 
 #[cfg(test)]

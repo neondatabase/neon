@@ -7,14 +7,13 @@
 //     *status* -- show actual info about this pageserver,
 //     *pagestream* -- enter mode where smgr and pageserver talk with their
 //  custom protocol.
-//     *callmemaybe <zenith timelineid> $url* -- ask pageserver to start walreceiver on $url
 //
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::io;
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -30,6 +29,8 @@ use utils::{
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
+use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
+use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -38,7 +39,6 @@ use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::walreceiver;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
@@ -202,6 +202,96 @@ impl PagestreamBeMessage {
     }
 }
 
+/// Implements Read for the server side of CopyIn
+struct CopyInReader<'a> {
+    pgb: &'a mut PostgresBackend,
+
+    /// Overflow buffer for bytes sent in CopyData messages
+    /// that the reader (caller of read) hasn't asked for yet.
+    /// TODO use BytesMut?
+    buf: Vec<u8>,
+
+    /// Bytes before `buf_begin` are considered as dropped.
+    /// This allows us to implement O(1) pop_front on Vec<u8>.
+    /// The Vec won't grow large because we only add to it
+    /// when it's empty.
+    buf_begin: usize,
+}
+
+impl<'a> CopyInReader<'a> {
+    // NOTE: pgb should be in copy in state already
+    fn new(pgb: &'a mut PostgresBackend) -> Self {
+        Self {
+            pgb,
+            buf: Vec::<_>::new(),
+            buf_begin: 0,
+        }
+    }
+}
+
+impl<'a> Drop for CopyInReader<'a> {
+    fn drop(&mut self) {
+        // Finalize copy protocol so that self.pgb can be reused
+        // TODO instead, maybe take ownership of pgb and give it back at the end
+        let mut buf: Vec<u8> = vec![];
+        let _ = self.read_to_end(&mut buf);
+    }
+}
+
+impl<'a> Read for CopyInReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while !thread_mgr::is_shutdown_requested() {
+            // Return from buffer if nonempty
+            if self.buf_begin < self.buf.len() {
+                let bytes_to_read = std::cmp::min(buf.len(), self.buf.len() - self.buf_begin);
+                buf[..bytes_to_read].copy_from_slice(&self.buf[self.buf_begin..][..bytes_to_read]);
+                self.buf_begin += bytes_to_read;
+                return Ok(bytes_to_read);
+            }
+
+            // Delete garbage
+            self.buf.clear();
+            self.buf_begin = 0;
+
+            // Wait for client to send CopyData bytes
+            match self.pgb.read_message() {
+                Ok(Some(message)) => {
+                    let copy_data_bytes = match message {
+                        FeMessage::CopyData(bytes) => bytes,
+                        FeMessage::CopyDone => return Ok(0),
+                        FeMessage::Sync => continue,
+                        m => {
+                            let msg = format!("unexpected message {:?}", m);
+                            self.pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            return Err(io::Error::new(io::ErrorKind::Other, msg));
+                        }
+                    };
+
+                    // Return as much as we can, saving the rest in self.buf
+                    let mut reader = copy_data_bytes.reader();
+                    let bytes_read = reader.read(buf)?;
+                    reader.read_to_end(&mut self.buf)?;
+                    return Ok(bytes_read);
+                }
+                Ok(None) => {
+                    let msg = "client closed connection";
+                    self.pgb.write_message(&BeMessage::ErrorResponse(msg))?;
+                    return Err(io::Error::new(io::ErrorKind::Other, msg));
+                }
+                Err(e) => {
+                    if !is_socket_read_timed_out(&e) {
+                        return Err(io::Error::new(io::ErrorKind::Other, e));
+                    }
+                }
+            }
+        }
+
+        // Shutting down
+        let msg = "Importer thread was shut down";
+        Err(io::Error::new(io::ErrorKind::Other, msg))
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 ///
@@ -305,7 +395,29 @@ fn page_service_conn_main(
 
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None, true)?;
-    pgbackend.run(&mut conn_handler)
+    match pgbackend.run(&mut conn_handler) {
+        Ok(()) => {
+            // we've been requested to shut down
+            Ok(())
+        }
+        Err(err) => {
+            let root_cause_io_err_kind = err
+                .root_cause()
+                .downcast_ref::<io::Error>()
+                .map(|e| e.kind());
+
+            // `ConnectionReset` error happens when the Postgres client closes the connection.
+            // As this disconnection happens quite often and is expected,
+            // we decided to downgrade the logging level to `INFO`.
+            // See: https://github.com/neondatabase/neon/issues/1683.
+            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
+                info!("Postgres client disconnected");
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -349,6 +461,10 @@ impl PageServerHandler {
         tenantid: ZTenantId,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
+
+        // NOTE: pagerequests handler exits when connection is closed,
+        //       so there is no need to reset the association
+        thread_mgr::associate_with(Some(tenantid), Some(timelineid));
 
         // Check that the timeline exists
         let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
@@ -420,6 +536,98 @@ impl PageServerHandler {
             }
             drop(profiling_guard);
         }
+        Ok(())
+    }
+
+    fn handle_import_basebackup(
+        &self,
+        pgb: &mut PostgresBackend,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        base_lsn: Lsn,
+        _end_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        let _enter =
+            info_span!("import basebackup", timeline = %timeline_id, tenant = %tenant_id).entered();
+
+        // Create empty timeline
+        info!("creating new timeline");
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let timeline = repo.create_empty_timeline(timeline_id, base_lsn)?;
+        let repartition_distance = repo.get_checkpoint_distance();
+        let mut datadir_timeline =
+            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
+
+        // TODO mark timeline as not ready until it reaches end_lsn.
+        // We might have some wal to import as well, and we should prevent compute
+        // from connecting before that and writing conflicting wal.
+        //
+        // This is not relevant for pageserver->pageserver migrations, since there's
+        // no wal to import. But should be fixed if we want to import from postgres.
+
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
+
+        // Import basebackup provided via CopyData
+        info!("importing basebackup");
+        pgb.write_message(&BeMessage::CopyInResponse)?;
+        let reader = CopyInReader::new(pgb);
+        import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
+
+        // TODO check checksum
+        // Meanwhile you can verify client-side by taking fullbackup
+        // and checking that it matches in size with what was imported.
+        // It wouldn't work if base came from vanilla postgres though,
+        // since we discard some log files.
+
+        // Flush data to disk, then upload to s3
+        info!("flushing layers");
+        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+
+        info!("done");
+        Ok(())
+    }
+
+    fn handle_import_wal(
+        &self,
+        pgb: &mut PostgresBackend,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
+        start_lsn: Lsn,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        let _enter =
+            info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
+
+        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
+        let timeline = repo.get_timeline_load(timeline_id)?;
+        ensure!(timeline.get_last_record_lsn() == start_lsn);
+
+        let repartition_distance = repo.get_checkpoint_distance();
+        let mut datadir_timeline =
+            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
+
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
+
+        // Import wal provided via CopyData
+        info!("importing wal");
+        pgb.write_message(&BeMessage::CopyInResponse)?;
+        let reader = CopyInReader::new(pgb);
+        import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
+
+        // TODO Does it make sense to overshoot?
+        ensure!(datadir_timeline.tline.get_last_record_lsn() >= end_lsn);
+
+        // Flush data to disk, then upload to s3. No need for a forced checkpoint.
+        // We only want to persist the data, and it doesn't matter if it's in the
+        // shape of deltas or images.
+        info!("flushing layers");
+        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+
+        info!("done");
         Ok(())
     }
 
@@ -525,17 +733,10 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let all_rels = timeline.list_rels(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
-        let mut total_blocks: i64 = 0;
+        let total_blocks =
+            timeline.get_db_size(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
 
-        for rel in all_rels {
-            if rel.forknum == 0 {
-                let n_blocks = timeline.get_rel_size(rel, lsn).unwrap_or(0);
-                total_blocks += n_blocks as i64;
-            }
-        }
-
-        let db_size = total_blocks * pg_constants::BLCKSZ as i64;
+        let db_size = total_blocks as i64 * pg_constants::BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
             db_size,
@@ -571,7 +772,9 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
         tenantid: ZTenantId,
+        full_backup: bool,
     ) -> anyhow::Result<()> {
         let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
         let _enter = span.enter();
@@ -593,7 +796,9 @@ impl PageServerHandler {
         /* Send a tarball of the latest layer on the timeline */
         {
             let mut writer = CopyDataSink { pgb };
-            let mut basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn)?;
+
+            let basebackup =
+                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -611,7 +816,7 @@ impl PageServerHandler {
             return Ok(());
         }
         // auth is some, just checked above, when auth is some
-        // then claims are always present because of checks during connetion init
+        // then claims are always present because of checks during connection init
         // so this expect won't trigger
         let claims = self
             .claims
@@ -649,6 +854,10 @@ impl postgres_backend::Handler for PageServerHandler {
 
         self.claims = Some(data.claims);
         Ok(())
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        thread_mgr::is_shutdown_requested()
     }
 
     fn process_query(
@@ -692,32 +901,119 @@ impl postgres_backend::Handler for PageServerHandler {
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, None, tenantid, false)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("callmemaybe ") {
-            // callmemaybe <zenith tenantid as hex string> <zenith timelineid as hex string> <connstr>
-            // TODO lazy static
-            let re = Regex::new(r"^callmemaybe ([[:xdigit:]]+) ([[:xdigit:]]+) (.*)$").unwrap();
-            let caps = re
-                .captures(query_string)
-                .with_context(|| format!("invalid callmemaybe: '{}'", query_string))?;
+        }
+        // return pair of prev_lsn and last_lsn
+        else if query_string.starts_with("get_last_record_rlsn ") {
+            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let connstr = caps.get(3).unwrap().as_str().to_owned();
+            ensure!(
+                params.len() == 2,
+                "invalid param number for get_last_record_rlsn command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            self.check_permission(Some(tenantid))?;
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let end_of_timeline = timeline.tline.get_last_record_rlsn();
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::text_col(b"prev_lsn"),
+                RowDescriptor::text_col(b"last_lsn"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(end_of_timeline.prev.to_string().as_bytes()),
+                Some(end_of_timeline.last.to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        // same as basebackup, but result includes relational data as well
+        else if query_string.starts_with("fullbackup ") {
+            let (_, params_raw) = query_string.split_at("fullbackup ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            ensure!(
+                params.len() >= 2,
+                "invalid param number for fullbackup command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            // The caller is responsible for providing correct lsn and prev_lsn.
+            let lsn = if params.len() > 2 {
+                Some(Lsn::from_str(params[2])?)
+            } else {
+                None
+            };
+            let prev_lsn = if params.len() > 3 {
+                Some(Lsn::from_str(params[3])?)
+            } else {
+                None
+            };
 
             self.check_permission(Some(tenantid))?;
 
-            let _enter =
-                info_span!("callmemaybe", timeline = %timelineid, tenant = %tenantid).entered();
-
             // Check that the timeline exists
-            tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
-
-            walreceiver::launch_wal_receiver(self.conf, tenantid, timelineid, &connstr)?;
-
+            self.handle_basebackup_request(pgb, timelineid, lsn, prev_lsn, tenantid, true)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("import basebackup ") {
+            // Import the `base` section (everything but the wal) of a basebackup.
+            // Assumes the tenant already exists on this pageserver.
+            //
+            // Files are scheduled to be persisted to remote storage, and the
+            // caller should poll the http api to check when that is done.
+            //
+            // Example import command:
+            // 1. Get start/end LSN from backup_manifest file
+            // 2. Run:
+            // cat my_backup/base.tar | psql -h $PAGESERVER \
+            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN"
+            let (_, params_raw) = query_string.split_at("import basebackup ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            ensure!(params.len() == 4);
+            let tenant = ZTenantId::from_str(params[0])?;
+            let timeline = ZTimelineId::from_str(params[1])?;
+            let base_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[3])?;
+
+            self.check_permission(Some(tenant))?;
+
+            match self.handle_import_basebackup(pgb, tenant, timeline, base_lsn, end_lsn) {
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Err(e) => {
+                    error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
+            };
+        } else if query_string.starts_with("import wal ") {
+            // Import the `pg_wal` section of a basebackup.
+            //
+            // Files are scheduled to be persisted to remote storage, and the
+            // caller should poll the http api to check when that is done.
+            let (_, params_raw) = query_string.split_at("import wal ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            ensure!(params.len() == 4);
+            let tenant = ZTenantId::from_str(params[0])?;
+            let timeline = ZTimelineId::from_str(params[1])?;
+            let start_lsn = Lsn::from_str(params[2])?;
+            let end_lsn = Lsn::from_str(params[3])?;
+
+            self.check_permission(Some(tenant))?;
+
+            match self.handle_import_wal(pgb, tenant, timeline, start_lsn, end_lsn) {
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Err(e) => {
+                    error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?
+                }
+            };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
@@ -805,7 +1101,6 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
-            let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             // Use tenant's pitr setting
             let pitr = repo.get_pitr_interval();
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;
@@ -898,6 +1193,7 @@ impl postgres_backend::Handler for PageServerHandler {
                 LsnForTimestamp::Present(lsn) => format!("{}", lsn),
                 LsnForTimestamp::Future(_lsn) => "future".into(),
                 LsnForTimestamp::Past(_lsn) => "past".into(),
+                LsnForTimestamp::NoData(_lsn) => "nodata".into(),
             };
             pgb.write_message_noflush(&BeMessage::DataRow(&[Some(result.as_bytes())]))?;
             pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;

@@ -31,7 +31,7 @@ Ideally, just one binary that incorporates all elements we need.
 
 #### Components:
 
-- **zenith-CLI** - interface for end-users.  Turns commands to REST requests and handles responces to show them in a user-friendly way.  
+- **zenith-CLI** - interface for end-users.  Turns commands to REST requests and handles responses to show them in a user-friendly way.  
 CLI proposal is here https://github.com/libzenith/rfcs/blob/003-laptop-cli.md/003-laptop-cli.md
 WIP code is here: https://github.com/libzenith/postgres/tree/main/pageserver/src/bin/cli
 

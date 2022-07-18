@@ -5,27 +5,27 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.utils import print_gc_result
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
 # Check pitr_interval GC behavior.
 # Insert some data, run GC and create a branch in the past.
 #
-def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
+def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
-    zenith_env_builder.num_safekeepers = 1
+    neon_env_builder.num_safekeepers = 1
     # Set pitr interval such that we need to keep the data
-    zenith_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
+    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
 
-    env = zenith_env_builder.init_start()
+    env = neon_env_builder.init_start()
     pgmain = env.postgres.create_start('main')
     log.info("postgres is running on 'main' branch")
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
 
-    main_cur.execute("SHOW zenith.zenith_timeline")
+    main_cur.execute("SHOW neon.timeline_id")
     timeline = main_cur.fetchone()[0]
 
     # Create table
@@ -55,14 +55,14 @@ def test_pitr_gc(zenith_env_builder: ZenithEnvBuilder):
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
             pscur.execute(f"compact {env.initial_tenant.hex} {timeline}")
-            # perform agressive GC. Data still should be kept because of the PITR setting.
+            # perform aggressive GC. Data still should be kept because of the PITR setting.
             pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
             row = pscur.fetchone()
             print_gc_result(row)
 
     # Branch at the point where only 100 rows were inserted
     # It must have been preserved by PITR setting
-    env.zenith_cli.create_branch('test_pitr_gc_hundred', 'main', ancestor_start_lsn=lsn_a)
+    env.neon_cli.create_branch('test_pitr_gc_hundred', 'main', ancestor_start_lsn=lsn_a)
 
     pg_hundred = env.postgres.create_start('test_pitr_gc_hundred')
 

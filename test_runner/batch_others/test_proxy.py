@@ -2,7 +2,7 @@ import pytest
 
 
 def test_proxy_select_1(static_proxy):
-    static_proxy.safe_psql("select 1;")
+    static_proxy.safe_psql("select 1;", options="project=generic-project-name")
 
 
 # Pass extra options to the server.

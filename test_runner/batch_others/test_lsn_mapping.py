@@ -4,7 +4,7 @@ import math
 from uuid import UUID
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.zenith_fixtures import ZenithEnv, ZenithEnvBuilder, Postgres
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.log_helper import log
 import time
 
@@ -12,11 +12,11 @@ import time
 #
 # Test pageserver get_lsn_by_timestamp API
 #
-def test_lsn_mapping(zenith_env_builder: ZenithEnvBuilder):
-    zenith_env_builder.num_safekeepers = 1
-    env = zenith_env_builder.init_start()
+def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
 
-    new_timeline_id = env.zenith_cli.create_branch('test_lsn_mapping')
+    new_timeline_id = env.neon_cli.create_branch('test_lsn_mapping')
     pgmain = env.postgres.create_start("test_lsn_mapping")
     log.info("postgres is running on 'test_lsn_mapping' branch")
 

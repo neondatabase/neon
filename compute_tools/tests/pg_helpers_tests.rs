@@ -28,7 +28,7 @@ mod pg_helpers_tests {
 
         assert_eq!(
             spec.cluster.settings.as_pg_settings(),
-            "fsync = off\nwal_level = replica\nhot_standby = on\nwal_acceptors = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'\nwal_log_hints = on\nlog_connections = on\nshared_buffers = 32768\nport = 55432\nmax_connections = 100\nmax_wal_senders = 10\nlisten_addresses = '0.0.0.0'\nwal_sender_timeout = 0\npassword_encryption = md5\nmaintenance_work_mem = 65536\nmax_parallel_workers = 8\nmax_worker_processes = 8\nzenith.zenith_tenant = 'b0554b632bd4d547a63b86c3630317e8'\nmax_replication_slots = 10\nzenith.zenith_timeline = '2414a61ffc94e428f14b5758fe308e13'\nshared_preload_libraries = 'zenith'\nsynchronous_standby_names = 'walproposer'\nzenith.page_server_connstring = 'host=127.0.0.1 port=6400'"
+            "fsync = off\nwal_level = replica\nhot_standby = on\nsafekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'\nwal_log_hints = on\nlog_connections = on\nshared_buffers = 32768\nport = 55432\nmax_connections = 100\nmax_wal_senders = 10\nlisten_addresses = '0.0.0.0'\nwal_sender_timeout = 0\npassword_encryption = md5\nmaintenance_work_mem = 65536\nmax_parallel_workers = 8\nmax_worker_processes = 8\nneon.tenant_id = 'b0554b632bd4d547a63b86c3630317e8'\nmax_replication_slots = 10\nneon.timeline_id = '2414a61ffc94e428f14b5758fe308e13'\nshared_preload_libraries = 'neon'\nsynchronous_standby_names = 'walproposer'\nneon.pageserver_connstring = 'host=127.0.0.1 port=6400'"
         );
     }
 

@@ -40,7 +40,7 @@ b) overwrite older pages with the newer pages -- if there is no replica we proba
 
 I imagine that newly created pages would just be added to the back of PageStore (again in queue-like fashion) and this way there wouldn't be any meaningful ordering inside of that queue. When we are forming a new incremental snapshot we may prohibit any updates to the current set of pages in PageStore (giving up on single page version rule) and cut off that whole set when snapshot creation is complete.
 
-With option b) we can also treat PageStor as an uncompleted increamental snapshot.
+With option b) we can also treat PageStor as an uncompleted incremental snapshot.
 
 ### LocalStore
 
@@ -123,7 +123,7 @@ As far as I understand Bookfile/Aversion addresses versioning and serialization 
 As for exact data that should go to snapshots I think it is the following for each snapshot:
 
 * format version number
-* set of key/values to interpret content (e.g. is page compression enabled, is that a full or incremental snapshot, previous snapshot id, is there WAL at the end on file, etc) -- it is up to a reader to decide what to do if some keys are missing or some unknow key are present. If we add something backward compatible to the file we can keep the version number.
+* set of key/values to interpret content (e.g. is page compression enabled, is that a full or incremental snapshot, previous snapshot id, is there WAL at the end on file, etc) -- it is up to a reader to decide what to do if some keys are missing or some unknown key are present. If we add something backward compatible to the file we can keep the version number.
 * array of [BuffTag, corresponding offset in file] for pages -- IIUC that is analogous to ToC in Bookfile
 * array of [(BuffTag, LSN), corresponding offset in file] for the WAL records
 * pages, one by one
@@ -131,7 +131,7 @@ As for exact data that should go to snapshots I think it is the following for ea
 
 It is also important to be able to load metadata quickly since it would be one of the main factors impacting the time of page server start. E.g. if would store/cache about 10TB of data per page server, the size of uncompressed page references would be about 30GB (10TB / ( 8192 bytes page size / ( ~18 bytes per ObjectTag + 8 bytes offset in the file))).
 
-1) Since our ToC/array of entries can be sorted by ObjectTag we can store the whole BufferTag only when realtion_id is changed and store only delta-encoded offsets for a given relation. That would reduce the average per-page metadata size to something less than 4 bytes instead of 26 (assuming that pages would follow the same order and offset delatas would be small).
+1) Since our ToC/array of entries can be sorted by ObjectTag we can store the whole BufferTag only when relation_id is changed and store only delta-encoded offsets for a given relation. That would reduce the average per-page metadata size to something less than 4 bytes instead of 26 (assuming that pages would follow the same order and offset deltas would be small).
 2) It makes sense to keep ToC at the beginning of the file to avoid extra seeks to locate it. Doesn't matter too much with the local files but matters on S3 -- if we are accessing a lot of ~1Gb files with the size of metadata ~ 1Mb then the time to transfer this metadata would be comparable with access latency itself (which is about a half of a second). So by slurping metadata with one read of file header instead of N reads we can improve the speed of page server start by this N factor.
 
 I think both of that optimizations can be done later, but that is something to keep in mind when we are designing our storage serialization routines.

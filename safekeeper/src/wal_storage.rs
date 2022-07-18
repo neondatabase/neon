@@ -8,7 +8,9 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{anyhow, bail, Context, Result};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom};
+use std::pin::Pin;
+use tokio::io::AsyncRead;
 
 use lazy_static::lazy_static;
 use postgres_ffi::xlog_utils::{
@@ -26,25 +28,19 @@ use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::safekeeper::SafeKeeperState;
 
+use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
 use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
 
 use postgres_ffi::waldecoder::WalStreamDecoder;
 
-use metrics::{
-    register_gauge_vec, register_histogram_vec, Gauge, GaugeVec, Histogram, HistogramVec,
-    DISK_WRITE_SECONDS_BUCKETS,
-};
+use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
+
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 lazy_static! {
     // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
     // i64 is faster than f64, so update to u64 when available.
-    static ref FLUSH_LSN_GAUGE: GaugeVec = register_gauge_vec!(
-        "safekeeper_flush_lsn",
-        "Current flush_lsn, grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("Failed to register safekeeper_flush_lsn gauge vec");
     static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
@@ -69,7 +65,6 @@ lazy_static! {
 }
 
 struct WalStorageMetrics {
-    flush_lsn: Gauge,
     write_wal_bytes: Histogram,
     write_wal_seconds: Histogram,
     flush_wal_seconds: Histogram,
@@ -80,7 +75,6 @@ impl WalStorageMetrics {
         let tenant_id = zttid.tenant_id.to_string();
         let timeline_id = zttid.timeline_id.to_string();
         Self {
-            flush_lsn: FLUSH_LSN_GAUGE.with_label_values(&[&tenant_id, &timeline_id]),
             write_wal_bytes: WRITE_WAL_BYTES.with_label_values(&[&tenant_id, &timeline_id]),
             write_wal_seconds: WRITE_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
             flush_wal_seconds: FLUSH_WAL_SECONDS.with_label_values(&[&tenant_id, &timeline_id]),
@@ -126,7 +120,7 @@ pub struct PhysicalStorage {
     conf: SafeKeeperConf,
 
     // fields below are filled upon initialization
-    /// None if unitialized, Some(usize) if storage is initialized.
+    /// None if uninitialized, Some(usize) if storage is initialized.
     wal_seg_size: Option<usize>,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.
@@ -171,7 +165,6 @@ impl PhysicalStorage {
     /// Wrapper for flush_lsn updates that also updates metrics.
     fn update_flush_lsn(&mut self) {
         self.flush_record_lsn = self.write_record_lsn;
-        self.metrics.flush_lsn.set(self.flush_record_lsn.0 as f64);
     }
 
     /// Call fdatasync if config requires so.
@@ -456,7 +449,7 @@ impl Storage for PhysicalStorage {
             segno += 1;
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, wal_seg_size)?;
-            // TODO: better use fs::try_exists which is currenty avaialble only in nightly build
+            // TODO: better use fs::try_exists which is currently available only in nightly build
             if wal_file_path.exists() {
                 fs::remove_file(&wal_file_path)?;
             } else if wal_file_partial_path.exists() {
@@ -516,69 +509,122 @@ pub struct WalReader {
     timeline_dir: PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
-    file: Option<File>,
+    wal_segment: Option<Pin<Box<dyn AsyncRead>>>,
+
+    enable_remote_read: bool,
+    // S3 will be used to read WAL if LSN is not available locally
+    local_start_lsn: Lsn,
 }
 
 impl WalReader {
-    pub fn new(timeline_dir: PathBuf, wal_seg_size: usize, pos: Lsn) -> Self {
-        Self {
-            timeline_dir,
-            wal_seg_size,
-            pos,
-            file: None,
+    pub fn new(
+        timeline_dir: PathBuf,
+        state: &SafeKeeperState,
+        start_pos: Lsn,
+        enable_remote_read: bool,
+    ) -> Result<Self> {
+        if start_pos < state.timeline_start_lsn {
+            bail!(
+                "Requested streaming from {}, which is before the start of the timeline {}",
+                start_pos,
+                state.timeline_start_lsn
+            );
         }
+
+        // TODO: add state.timeline_start_lsn == Lsn(0) check
+        if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
+            bail!("state uninitialized, no data to read");
+        }
+
+        Ok(Self {
+            timeline_dir,
+            wal_seg_size: state.server.wal_seg_size as usize,
+            pos: start_pos,
+            wal_segment: None,
+            enable_remote_read,
+            local_start_lsn: state.local_start_lsn,
+        })
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        // Take the `File` from `wal_file`, or open a new file.
-        let mut file = match self.file.take() {
-            Some(file) => file,
-            None => {
-                // Open a new file.
-                let segno = self.pos.segment_number(self.wal_seg_size);
-                let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
-                let wal_file_path = self.timeline_dir.join(wal_file_name);
-                Self::open_wal_file(&wal_file_path)?
-            }
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut wal_segment = match self.wal_segment.take() {
+            Some(reader) => reader,
+            None => self.open_segment().await?,
         };
-
-        let xlogoff = self.pos.segment_offset(self.wal_seg_size) as usize;
 
         // How much to read and send in message? We cannot cross the WAL file
         // boundary, and we don't want send more than provided buffer.
+        let xlogoff = self.pos.segment_offset(self.wal_seg_size) as usize;
         let send_size = min(buf.len(), self.wal_seg_size - xlogoff);
 
         // Read some data from the file.
         let buf = &mut buf[0..send_size];
-        file.seek(SeekFrom::Start(xlogoff as u64))
-            .and_then(|_| file.read_exact(buf))
-            .context("Failed to read data from WAL file")?;
-
+        let send_size = wal_segment.read_exact(buf).await?;
         self.pos += send_size as u64;
 
-        // Decide whether to reuse this file. If we don't set wal_file here
-        // a new file will be opened next time.
+        // Decide whether to reuse this file. If we don't set wal_segment here
+        // a new reader will be opened next time.
         if self.pos.segment_offset(self.wal_seg_size) != 0 {
-            self.file = Some(file);
+            self.wal_segment = Some(wal_segment);
         }
 
         Ok(send_size)
     }
 
+    /// Open WAL segment at the current position of the reader.
+    async fn open_segment(&self) -> Result<Pin<Box<dyn AsyncRead>>> {
+        let xlogoff = self.pos.segment_offset(self.wal_seg_size) as usize;
+        let segno = self.pos.segment_number(self.wal_seg_size);
+        let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
+        let wal_file_path = self.timeline_dir.join(wal_file_name);
+
+        // Try to open local file, if we may have WAL locally
+        if self.pos >= self.local_start_lsn {
+            let res = Self::open_wal_file(&wal_file_path).await;
+            match res {
+                Ok(mut file) => {
+                    file.seek(SeekFrom::Start(xlogoff as u64)).await?;
+                    return Ok(Box::pin(file));
+                }
+                Err(e) => {
+                    let is_not_found = e.chain().any(|e| {
+                        if let Some(e) = e.downcast_ref::<io::Error>() {
+                            e.kind() == io::ErrorKind::NotFound
+                        } else {
+                            false
+                        }
+                    });
+                    if !is_not_found {
+                        return Err(e);
+                    }
+                    // NotFound is expected, fall through to remote read
+                }
+            };
+        }
+
+        // Try to open remote file, if remote reads are enabled
+        if self.enable_remote_read {
+            return read_object(wal_file_path, xlogoff as u64).await;
+        }
+
+        bail!("WAL segment is not found")
+    }
+
     /// Helper function for opening a wal file.
-    fn open_wal_file(wal_file_path: &Path) -> Result<File> {
+    async fn open_wal_file(wal_file_path: &Path) -> Result<tokio::fs::File> {
         // First try to open the .partial file.
         let mut partial_path = wal_file_path.to_owned();
         partial_path.set_extension("partial");
-        if let Ok(opened_file) = File::open(&partial_path) {
+        if let Ok(opened_file) = tokio::fs::File::open(&partial_path).await {
             return Ok(opened_file);
         }
 
         // If that failed, try it without the .partial extension.
-        File::open(&wal_file_path)
+        tokio::fs::File::open(&wal_file_path)
+            .await
             .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
             .map_err(|e| {
-                error!("{}", e);
+                warn!("{}", e);
                 e
             })
     }

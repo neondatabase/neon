@@ -1,21 +1,22 @@
 import pytest
+import concurrent.futures
 from contextlib import closing
-from fixtures.zenith_fixtures import ZenithEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv
 from fixtures.log_helper import log
 import os
 
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
+def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # One safekeeper is enough for this test.
-    zenith_env_builder.num_safekeepers = 3
-    env = zenith_env_builder.init_start()
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
 
     tenant_timelines = []
 
     for n in range(4):
-        tenant_id_uuid, timeline_id_uuid = env.zenith_cli.create_tenant()
+        tenant_id_uuid, timeline_id_uuid = env.neon_cli.create_tenant()
         tenant_id = tenant_id_uuid.hex
         timeline_id = timeline_id_uuid.hex
 
@@ -25,7 +26,7 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-                cur.execute("SHOW zenith.zenith_timeline")
+                cur.execute("SHOW neon.timeline_id")
                 timeline_id = cur.fetchone()[0]
         pg.stop()
         tenant_timelines.append((tenant_id, timeline_id, pg))
@@ -78,3 +79,37 @@ def test_broken_timeline(zenith_env_builder: ZenithEnvBuilder):
         with pytest.raises(Exception, match="Cannot load local timeline") as err:
             pg.start()
         log.info(f'compute startup failed as expected: {err}')
+
+
+def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(env.neon_cli.create_timeline,
+                            f"test-create-multiple-timelines-{i}",
+                            tenant_id) for i in range(4)
+        ]
+        for future in futures:
+            future.result()
+
+
+def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    # Introduce failpoint when creating a new timeline
+    env.pageserver.safe_psql(f"failpoints before-checkpoint-new-timeline=return")
+    with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
+        _ = env.neon_cli.create_timeline("test_fix_broken_timelines", tenant_id)
+
+    # Restart the page server
+    env.neon_cli.pageserver_stop(immediate=True)
+    env.neon_cli.pageserver_start()
+
+    # Check that tenant with "broken" timeline is not loaded.
+    with pytest.raises(Exception, match=f"Failed to get repo for tenant {tenant_id.hex}"):
+        env.neon_cli.list_timelines(tenant_id)

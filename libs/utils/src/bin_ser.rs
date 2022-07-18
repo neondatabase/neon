@@ -71,7 +71,7 @@ impl From<bincode::Error> for SerializeError {
 /// - Fixed integer encoding (i.e. 1u32 is 00000001 not 01)
 ///
 /// Does not allow trailing bytes in deserialization. If this is desired, you
-/// may set [`Options::allow_trailing_bytes`] to explicitly accomodate this.
+/// may set [`Options::allow_trailing_bytes`] to explicitly accommodate this.
 pub fn be_coder() -> impl Options {
     bincode::DefaultOptions::new()
         .with_big_endian()
@@ -85,7 +85,7 @@ pub fn be_coder() -> impl Options {
 /// - Fixed integer encoding (i.e. 1u32 is 00000001 not 01)
 ///
 /// Does not allow trailing bytes in deserialization. If this is desired, you
-/// may set [`Options::allow_trailing_bytes`] to explicitly accomodate this.
+/// may set [`Options::allow_trailing_bytes`] to explicitly accommodate this.
 pub fn le_coder() -> impl Options {
     bincode::DefaultOptions::new()
         .with_little_endian()

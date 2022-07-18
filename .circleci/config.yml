@@ -5,21 +5,12 @@ executors:
     resource_class: xlarge
     docker:
       # NB: when changed, do not forget to update rust image tag in all Dockerfiles
-      - image: zimg/rust:1.58
+      - image: neondatabase/rust:1.58
   neon-executor:
     docker:
-      - image: zimg/rust:1.58
+      - image: neondatabase/rust:1.58
 
 jobs:
-  check-codestyle-rust:
-    executor: neon-xlarge-executor
-    steps:
-      - checkout
-      - run:
-          name: rustfmt
-          when: always
-          command: cargo fmt --all -- --check
-
   # A job to build postgres
   build-postgres:
     executor: neon-xlarge-executor
@@ -46,7 +37,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+            - v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
         # Build postgres if the restore_cache didn't find a build.
         # `make` can't figure out whether the cache is valid, since
@@ -63,7 +54,7 @@ jobs:
 
       - save_cache:
           name: Save postgres cache
-          key: v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+          key: v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
           paths:
             - tmp_install
 
@@ -94,7 +85,7 @@ jobs:
           name: Restore postgres cache
           keys:
             # Restore ONLY if the rev key matches exactly
-            - v04-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
+            - v05-postgres-cache-<< parameters.build_type >>-{{ checksum "/tmp/cache-key-postgres" }}
 
       - restore_cache:
           name: Restore rust cache
@@ -102,31 +93,29 @@ jobs:
             # Require an exact match. While an out of date cache might speed up the build,
             # there's no way to clean out old packages, so the cache grows every time something
             # changes.
-            - v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+            - v05-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
 
         # Build the rust code, including test binaries
       - run:
           name: Rust build << parameters.build_type >>
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
               CARGO_FLAGS="--release --features profiling"
             fi
 
             export CARGO_INCREMENTAL=0
             export CACHEPOT_BUCKET=zenith-rust-cachepot
-            export RUSTC_WRAPPER=cachepot
+            export RUSTC_WRAPPER=""
             export AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}"
             export AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}"
-            "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+            mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
             cachepot -s
 
       - save_cache:
           name: Save rust cache
-          key: v04-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
+          key: v05-rust-cache-deps-<< parameters.build_type >>-{{ checksum "Cargo.lock" }}
           paths:
             - ~/.cargo/registry
             - ~/.cargo/git
@@ -137,33 +126,20 @@ jobs:
           name: cargo test
           command: |
             if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
               CARGO_FLAGS=
             elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
               CARGO_FLAGS=--release
             fi
 
-            "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+            cargo test $CARGO_FLAGS
 
         # Install the rust binaries, for use by test jobs
       - run:
           name: Install rust binaries
           command: |
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
             binaries=$(
-              "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+              cargo metadata --format-version=1 --no-deps |
               jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
-            )
-
-            test_exe_paths=$(
-              "${cov_prefix[@]}" cargo test --message-format=json --no-run |
-              jq -r '.executable | select(. != null)'
             )
 
             mkdir -p /tmp/zenith/bin
@@ -175,18 +151,7 @@ jobs:
               SRC=target/$BUILD_TYPE/$bin
               DST=/tmp/zenith/bin/$bin
               cp $SRC $DST
-              echo $DST >> /tmp/zenith/etc/binaries.list
             done
-
-            # Install test executables (for code coverage)
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              for bin in $test_exe_paths; do
-                SRC=$bin
-                DST=/tmp/zenith/test_bin/$(basename $bin)
-                cp $SRC $DST
-                echo $DST >> /tmp/zenith/etc/binaries.list
-              done
-            fi
 
         # Install the postgres binaries, for use by test jobs
       - run:
@@ -194,15 +159,7 @@ jobs:
           command: |
             cp -a tmp_install /tmp/zenith/pg_install
 
-      - run:
-          name: Merge coverage data
-          command: |
-            # This will speed up workspace uploads
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
-            fi
-
-        # Save the rust binaries and coverage data for other jobs in this workflow.
+      # Save rust binaries for other jobs in the workflow
       - persist_to_workspace:
           root: /tmp/zenith
           paths:
@@ -295,7 +252,7 @@ jobs:
           # no_output_timeout, specified here.
           no_output_timeout: 10m
           environment:
-            - ZENITH_BIN: /tmp/zenith/bin
+            - NEON_BIN: /tmp/zenith/bin
             - POSTGRES_DISTRIB_DIR: /tmp/zenith/pg_install
             - TEST_OUTPUT: /tmp/test_output
             # this variable will be embedded in perf test report
@@ -323,12 +280,6 @@ jobs:
 
             export GITHUB_SHA=$CIRCLE_SHA1
 
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              cov_prefix=(scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage run)
-            elif [[ $BUILD_TYPE == "release" ]]; then
-              cov_prefix=()
-            fi
-
             # Run the tests.
             #
             # The junit.xml file allows CircleCI to display more fine-grained test information
@@ -339,7 +290,7 @@ jobs:
             # -n4 uses four processes to run tests via pytest-xdist
             # -s is not used to prevent pytest from capturing output, because tests are running
             # in parallel and logs are mixed between different tests
-            "${cov_prefix[@]}" ./scripts/pytest \
+            ./scripts/pytest \
               --junitxml=$TEST_OUTPUT/junit.xml \
               --tb=short \
               --verbose \
@@ -368,383 +319,15 @@ jobs:
       # The store_test_results step tells CircleCI where to find the junit.xml file.
       - store_test_results:
           path: /tmp/test_output
-      - run:
-          name: Merge coverage data
-          command: |
-            # This will speed up workspace uploads
-            if [[ $BUILD_TYPE == "debug" ]]; then
-              scripts/coverage "--profraw-prefix=$CIRCLE_JOB" --dir=/tmp/zenith/coverage merge
-            fi
-      # Save coverage data (if any)
+      # Save data (if any)
       - persist_to_workspace:
           root: /tmp/zenith
           paths:
             - "*"
 
-  coverage-report:
-    executor: neon-xlarge-executor
-    steps:
-      - attach_workspace:
-          at: /tmp/zenith
-      - checkout
-      - restore_cache:
-          name: Restore rust cache
-          keys:
-            # Require an exact match. While an out of date cache might speed up the build,
-            # there's no way to clean out old packages, so the cache grows every time something
-            # changes.
-            - v04-rust-cache-deps-debug-{{ checksum "Cargo.lock" }}
-      - run:
-          name: Build coverage report
-          command: |
-            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
-
-            scripts/coverage \
-              --dir=/tmp/zenith/coverage report \
-              --input-objects=/tmp/zenith/etc/binaries.list \
-              --commit-url=$COMMIT_URL \
-              --format=github
-      - run:
-          name: Upload coverage report
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-            REPORT_URL=https://neondatabase.github.io/zenith-coverage-data/$CIRCLE_SHA1
-            COMMIT_URL=https://github.com/neondatabase/neon/commit/$CIRCLE_SHA1
-
-            scripts/git-upload \
-              --repo=https://$VIP_VAP_ACCESS_TOKEN@github.com/neondatabase/zenith-coverage-data.git \
-              --message="Add code coverage for $COMMIT_URL" \
-              copy /tmp/zenith/coverage/report $CIRCLE_SHA1 # COPY FROM TO_RELATIVE
-
-            # Add link to the coverage report to the commit
-            curl -f -X POST \
-            https://api.github.com/repos/$LOCAL_REPO/statuses/$CIRCLE_SHA1 \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"state\": \"success\",
-                \"context\": \"zenith-coverage\",
-                \"description\": \"Coverage report is ready\",
-                \"target_url\": \"$REPORT_URL\"
-              }"
-
-  # Build neondatabase/neon:latest image and push it to Docker hub
-  docker-image:
-    docker:
-      - image: cimg/base:2021.04
-    steps:
-      - checkout
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - run:
-          name: Init postgres submodule
-          command: git submodule update --init --depth 1
-      - run:
-          name: Build and push Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build \
-              --pull \
-              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
-              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
-              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/neon:${DOCKER_TAG} --tag neondatabase/neon:latest .
-            docker push neondatabase/neon:${DOCKER_TAG}
-            docker push neondatabase/neon:latest
-
-  # Build neondatabase/compute-node:latest image and push it to Docker hub
-  docker-image-compute:
-    docker:
-      - image: cimg/base:2021.04
-    steps:
-      - checkout
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - run:
-          name: Build and push compute-tools Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            docker build \
-              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
-              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/compute-tools:local \
-              --tag neondatabase/compute-tools:latest \
-              -f Dockerfile.compute-tools .
-            # Only push :latest image
-            docker push neondatabase/compute-tools:latest
-      - run:
-          name: Init postgres submodule
-          command: git submodule update --init --depth 1
-      - run:
-          name: Build and push compute-node Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            DOCKER_TAG=$(git log --oneline|wc -l)
-            docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
-              --tag neondatabase/compute-node:latest vendor/postgres \
-              --build-arg COMPUTE_TOOLS_TAG=local
-            docker push neondatabase/compute-node:${DOCKER_TAG}
-            docker push neondatabase/compute-node:latest
-
-  # Build production neondatabase/neon:release image and push it to Docker hub
-  docker-image-release:
-    docker:
-      - image: cimg/base:2021.04
-    steps:
-      - checkout
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - run:
-          name: Init postgres submodule
-          command: git submodule update --init --depth 1
-      - run:
-          name: Build and push Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build \
-              --pull \
-              --build-arg GIT_VERSION=${CIRCLE_SHA1} \
-              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
-              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/neon:${DOCKER_TAG} --tag neondatabase/neon:release .
-            docker push neondatabase/neon:${DOCKER_TAG}
-            docker push neondatabase/neon:release
-
-  # Build production neondatabase/compute-node:release image and push it to Docker hub
-  docker-image-compute-release:
-    docker:
-      - image: cimg/base:2021.04
-    steps:
-      - checkout
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - run:
-          name: Build and push compute-tools Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            docker build \
-              --build-arg AWS_ACCESS_KEY_ID="${CACHEPOT_AWS_ACCESS_KEY_ID}" \
-              --build-arg AWS_SECRET_ACCESS_KEY="${CACHEPOT_AWS_SECRET_ACCESS_KEY}" \
-              --tag neondatabase/compute-tools:release \
-              --tag neondatabase/compute-tools:local \
-              -f Dockerfile.compute-tools .
-            # Only push :release image
-            docker push neondatabase/compute-tools:release
-      - run:
-          name: Init postgres submodule
-          command: git submodule update --init --depth 1
-      - run:
-          name: Build and push compute-node Docker image
-          command: |
-            echo $NEON_DOCKER_PWD | docker login -u $NEON_DOCKER_LOGIN --password-stdin
-            DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            docker build --tag neondatabase/compute-node:${DOCKER_TAG} \
-              --tag neondatabase/compute-node:release vendor/postgres \
-              --build-arg COMPUTE_TOOLS_TAG=local
-            docker push neondatabase/compute-node:${DOCKER_TAG}
-            docker push neondatabase/compute-node:release
-
-  deploy-staging:
-    docker:
-      - image: cimg/python:3.10
-    steps:
-      - checkout
-      - setup_remote_docker
-      - run:
-          name: Setup ansible
-          command: |
-            pip install --progress-bar off --user ansible boto3
-      - run:
-          name: Redeploy
-          command: |
-            cd "$(pwd)/.circleci/ansible"
-
-            ./get_binaries.sh
-
-            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
-            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
-            chmod 0600 ssh-key
-            ssh-add ssh-key
-            rm -f ssh-key ssh-key-cert.pub
-
-            ansible-playbook deploy.yaml -i staging.hosts
-            rm -f neon_install.tar.gz .neon_current_version
-
-  deploy-staging-proxy:
-    docker:
-      - image: cimg/base:2021.04
-    environment:
-      KUBECONFIG: .kubeconfig
-    steps:
-      - checkout
-      - run:
-          name: Store kubeconfig file
-          command: |
-            echo "${STAGING_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
-            chmod 0600 ${KUBECONFIG}
-      - run:
-          name: Setup helm v3
-          command: |
-            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add neondatabase https://neondatabase.github.io/helm-charts
-      - run:
-          name: Re-deploy proxy
-          command: |
-            DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/staging.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
-
-  deploy-neon-stress:
-    docker:
-      - image: cimg/python:3.10
-    steps:
-      - checkout
-      - setup_remote_docker
-      - run:
-          name: Setup ansible
-          command: |
-            pip install --progress-bar off --user ansible boto3
-      - run:
-          name: Redeploy
-          command: |
-            cd "$(pwd)/.circleci/ansible"
-
-            ./get_binaries.sh
-
-            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
-            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
-            chmod 0600 ssh-key
-            ssh-add ssh-key
-            rm -f ssh-key ssh-key-cert.pub
-
-            ansible-playbook deploy.yaml -i neon-stress.hosts
-            rm -f neon_install.tar.gz .neon_current_version
-
-  deploy-neon-stress-proxy:
-    docker:
-      - image: cimg/base:2021.04
-    environment:
-      KUBECONFIG: .kubeconfig
-    steps:
-      - checkout
-      - run:
-          name: Store kubeconfig file
-          command: |
-            echo "${NEON_STRESS_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
-            chmod 0600 ${KUBECONFIG}
-      - run:
-          name: Setup helm v3
-          command: |
-            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add neondatabase https://neondatabase.github.io/helm-charts
-      - run:
-          name: Re-deploy proxy
-          command: |
-            DOCKER_TAG=$(git log --oneline|wc -l)
-            helm upgrade neon-stress-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/neon-stress.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-            helm upgrade neon-stress-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/neon-stress.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
-
-  deploy-release:
-    docker:
-      - image: cimg/python:3.10
-    steps:
-      - checkout
-      - setup_remote_docker
-      - run:
-          name: Setup ansible
-          command: |
-            pip install --progress-bar off --user ansible boto3
-      - run:
-          name: Redeploy
-          command: |
-            cd "$(pwd)/.circleci/ansible"
-
-            RELEASE=true ./get_binaries.sh
-
-            echo "${TELEPORT_SSH_KEY}"  | tr -d '\n'| base64 --decode >ssh-key
-            echo "${TELEPORT_SSH_CERT}" | tr -d '\n'| base64 --decode >ssh-key-cert.pub
-            chmod 0600 ssh-key
-            ssh-add ssh-key
-            rm -f ssh-key ssh-key-cert.pub
-
-            ansible-playbook deploy.yaml -i production.hosts
-            rm -f neon_install.tar.gz .neon_current_version
-
-  deploy-release-proxy:
-    docker:
-      - image: cimg/base:2021.04
-    environment:
-      KUBECONFIG: .kubeconfig
-    steps:
-      - checkout
-      - run:
-          name: Store kubeconfig file
-          command: |
-            echo "${PRODUCTION_KUBECONFIG_DATA}" | base64 --decode > ${KUBECONFIG}
-            chmod 0600 ${KUBECONFIG}
-      - run:
-          name: Setup helm v3
-          command: |
-            curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            helm repo add neondatabase https://neondatabase.github.io/helm-charts
-      - run:
-          name: Re-deploy proxy
-          command: |
-            DOCKER_TAG="release-$(git log --oneline|wc -l)"
-            helm upgrade neon-proxy       neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy.yaml --set image.tag=${DOCKER_TAG} --wait
-            helm upgrade neon-proxy-scram neondatabase/neon-proxy --install -f .circleci/helm-values/production.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --wait
-
-  # Trigger a new remote CI job
-  remote-ci-trigger:
-    docker:
-      - image: cimg/base:2021.04
-    parameters:
-      remote_repo:
-        type: string
-    environment:
-      REMOTE_REPO: << parameters.remote_repo >>
-    steps:
-      - run:
-          name: Set PR's status to pending
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-
-            curl -f -X POST \
-            https://api.github.com/repos/$LOCAL_REPO/statuses/$CIRCLE_SHA1 \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"state\": \"pending\",
-                \"context\": \"neon-cloud-e2e\",
-                \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
-              }"
-      - run:
-          name: Request a remote CI test
-          command: |
-            LOCAL_REPO=$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME
-
-            curl -f -X POST \
-            https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
-            -H "Accept: application/vnd.github.v3+json" \
-            --user "$CI_ACCESS_TOKEN" \
-            --data \
-              "{
-                \"ref\": \"main\",
-                \"inputs\": {
-                  \"ci_job_name\": \"neon-cloud-e2e\",
-                  \"commit_hash\": \"$CIRCLE_SHA1\",
-                  \"remote_repo\": \"$LOCAL_REPO\"
-                }
-              }"
-
 workflows:
   build_and_test:
     jobs:
-      - check-codestyle-rust
       - check-codestyle-python
       - build-postgres:
           name: build-postgres-<< matrix.build_type >>
@@ -760,7 +343,6 @@ workflows:
             - build-postgres-<< matrix.build_type >>
       - run-pytest:
           name: pg_regress-tests-<< matrix.build_type >>
-          context: PERF_TEST_RESULT_CONNSTR
           matrix:
             parameters:
               build_type: ["debug", "release"]
@@ -785,120 +367,3 @@ workflows:
           save_perf_report: true
           requires:
             - build-neon-release
-      - coverage-report:
-          # Context passes credentials for gh api
-          context: CI_ACCESS_TOKEN
-          requires:
-            # TODO: consider adding more
-            - other-tests-debug
-      - docker-image:
-          # Context gives an ability to login
-          context: Docker Hub
-          # Build image only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
-      - docker-image-compute:
-          # Context gives an ability to login
-          context: Docker Hub
-          # Build image only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
-      - deploy-staging:
-          # Context gives an ability to login
-          context: Docker Hub
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - docker-image
-      - deploy-staging-proxy:
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - docker-image
-
-      - deploy-neon-stress:
-          # Context gives an ability to login
-          context: Docker Hub
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - docker-image
-      - deploy-neon-stress-proxy:
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - main
-          requires:
-            - docker-image
-
-      - docker-image-release:
-          # Context gives an ability to login
-          context: Docker Hub
-          # Build image only for commits to main
-          filters:
-            branches:
-              only:
-                - release
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
-      - docker-image-compute-release:
-          # Context gives an ability to login
-          context: Docker Hub
-          # Build image only for commits to main
-          filters:
-            branches:
-              only:
-                - release
-          requires:
-            - pg_regress-tests-release
-            - other-tests-release
-      - deploy-release:
-          # Context gives an ability to login
-          context: Docker Hub
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - release
-          requires:
-            - docker-image-release
-      - deploy-release-proxy:
-          # deploy only for commits to main
-          filters:
-            branches:
-              only:
-                - release
-          requires:
-            - docker-image-release
-      - remote-ci-trigger:
-          # Context passes credentials for gh api
-          context: CI_ACCESS_TOKEN
-          remote_repo: "neondatabase/cloud"
-          requires:
-            # XXX: Successful build doesn't mean everything is OK, but
-            # the job to be triggered takes so much time to complete (~22 min)
-            # that it's better not to wait for the commented-out steps
-            - build-neon-release
-            # - pg_regress-tests-release
-            # - other-tests-release

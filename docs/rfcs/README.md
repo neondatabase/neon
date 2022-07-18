@@ -49,7 +49,7 @@ topics.
 
 RFC lifecycle:
 
-- Should be submitted in a pull request with and full RFC text in a commited markdown file and copy of the Summary and Motivation sections also included in the PR body.
+- Should be submitted in a pull request with and full RFC text in a committed markdown file and copy of the Summary and Motivation sections also included in the PR body.
 - RFC should be published for review before most of the actual code is written. This isn’t a strict rule, don’t hesitate to experiment and build a POC in parallel with writing an RFC.
 - Add labels to the PR in the same manner as you do Issues. Example TBD
 - Request the review from your peers. Reviewing the RFCs from your peers is a priority, same as reviewing the actual code.

@@ -13,12 +13,9 @@ use std::fmt;
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
-
-static PGBACKEND_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub trait Handler {
     /// Handle single query.
@@ -44,6 +41,10 @@ pub trait Handler {
     /// Check auth jwt
     fn check_auth_jwt(&mut self, _pgb: &mut PostgresBackend, _jwt_response: &[u8]) -> Result<()> {
         bail!("JWT auth failed")
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        false
     }
 }
 
@@ -274,7 +275,7 @@ impl PostgresBackend {
 
         let mut unnamed_query_string = Bytes::new();
 
-        while !PGBACKEND_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        while !handler.is_shutdown_requested() {
             match self.read_message() {
                 Ok(message) => {
                     if let Some(msg) = message {
@@ -336,11 +337,11 @@ impl PostgresBackend {
         let have_tls = self.tls_config.is_some();
         match msg {
             FeMessage::StartupPacket(m) => {
-                trace!("got startup message {:?}", m);
+                trace!("got startup message {m:?}");
 
                 match m {
                     FeStartupPacket::SslRequest => {
-                        info!("SSL requested");
+                        debug!("SSL requested");
 
                         self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
                         if have_tls {
@@ -349,7 +350,7 @@ impl PostgresBackend {
                         }
                     }
                     FeStartupPacket::GssEncRequest => {
-                        info!("GSS requested");
+                        debug!("GSS requested");
                         self.write_message(&BeMessage::EncryptionResponse(false))?;
                     }
                     FeStartupPacket::StartupMessage { .. } => {
@@ -433,12 +434,7 @@ impl PostgresBackend {
                     // full cause of the error, not just the top-level context + its trace.
                     // We don't want to send that in the ErrorResponse though,
                     // because it's not relevant to the compute node logs.
-                    if query_string.starts_with("callmemaybe") {
-                        // FIXME avoid printing a backtrace for tenant x not found errors until this is properly fixed
-                        error!("query handler for '{}' failed: {}", query_string, e);
-                    } else {
-                        error!("query handler for '{}' failed: {:?}", query_string, e);
-                    }
+                    error!("query handler for '{}' failed: {:?}", query_string, e);
                     self.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string()))?;
                     // TODO: untangle convoluted control flow
                     if e.to_string().contains("failed to run") {
@@ -475,7 +471,7 @@ impl PostgresBackend {
                     self.write_message(&BeMessage::ErrorResponse(&e.to_string()))?;
                 }
                 // NOTE there is no ReadyForQuery message. This handler is used
-                // for basebackup and it uses CopyOut which doesnt require
+                // for basebackup and it uses CopyOut which doesn't require
                 // ReadyForQuery message and backend just switches back to
                 // processing mode after sending CopyDone or ErrorResponse.
             }
@@ -497,9 +493,4 @@ impl PostgresBackend {
 
         Ok(ProcessMsgResult::Continue)
     }
-}
-
-// Set the flag to inform connections to cancel
-pub fn set_pgbackend_shutdown_requested() {
-    PGBACKEND_SHUTDOWN_REQUESTED.swap(true, Ordering::Relaxed);
 }

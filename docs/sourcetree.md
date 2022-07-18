@@ -10,7 +10,7 @@ Intended to be used in integration tests and in CLI tools for local installation
 
 `/docs`:
 
-Documentaion of the Zenith features and concepts.
+Documentation of the Zenith features and concepts.
 Now it is mostly dev documentation.
 
 `/monitoring`:
@@ -42,13 +42,13 @@ Integration tests, written in Python using the `pytest` framework.
 
 `/vendor/postgres`:
 
-PostgreSQL source tree, with the modifications needed for Zenith.
+PostgreSQL source tree, with the modifications needed for Neon.
 
-`/vendor/postgres/contrib/zenith`:
+`/vendor/postgres/contrib/neon`:
 
 PostgreSQL extension that implements storage manager API and network communications with remote page server.
 
-`/vendor/postgres/contrib/zenith_test_utils`:
+`/vendor/postgres/contrib/neon_test_utils`:
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
@@ -92,7 +92,7 @@ A single virtual environment with all dependencies is described in the single `P
 
 ### Prerequisites
 - Install Python 3.9 (the minimal supported version) or greater.
-    - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesnt work as expected.
+    - Our setup with poetry should work with newer python versions too. So feel free to open an issue with a `c/test-runner` label if something doesn't work as expected.
     - If you have some trouble with other version you can resolve it by installing Python 3.9 separately, via [pyenv](https://github.com/pyenv/pyenv) or via system package manager e.g.:
       ```bash
       # In Ubuntu

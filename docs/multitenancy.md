@@ -6,7 +6,7 @@ Zenith supports multitenancy. One pageserver can serve multiple tenants at once.
 
 ### Tenants in other commands
 
-By default during `zenith init` new tenant is created on the pageserver. Newly created tenant's id is saved to cli config, so other commands can use it automatically if no direct arugment `--tenantid=<tenantid>` is provided. So generally tenantid more frequently appears in internal pageserver interface. Its commands take tenantid argument to distinguish to which tenant operation should be applied. CLI support creation of new tenants.
+By default during `zenith init` new tenant is created on the pageserver. Newly created tenant's id is saved to cli config, so other commands can use it automatically if no direct argument `--tenantid=<tenantid>` is provided. So generally tenantid more frequently appears in internal pageserver interface. Its commands take tenantid argument to distinguish to which tenant operation should be applied. CLI support creation of new tenants.
 
 Examples for cli:
 

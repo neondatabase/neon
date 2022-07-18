@@ -1,10 +1,15 @@
-//! Timeline synchrnonization logic to fetch the layer files from remote storage into pageserver's local directory.
+//! Timeline synchronization logic to fetch the layer files from remote storage into pageserver's local directory.
 
-use std::{collections::HashSet, fmt::Debug, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    mem,
+    path::Path,
+};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use remote_storage::{path_with_suffix_extension, RemoteStorage};
+use remote_storage::{path_with_suffix_extension, DownloadError, RemoteObjectName, RemoteStorage};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -14,7 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
-use utils::zid::ZTenantTimelineId;
+use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 use super::{
     index::{IndexPart, RemoteTimeline},
@@ -23,12 +28,155 @@ use super::{
 
 pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
+// We collect timelines remotely available for each tenant
+// in case we failed to gather all index parts (due to an error)
+// Poisoned variant is returned.
+// When data is received succesfully without errors Present variant is used.
+pub enum TenantIndexParts {
+    Poisoned {
+        present: HashMap<ZTimelineId, IndexPart>,
+        missing: HashSet<ZTimelineId>,
+    },
+    Present(HashMap<ZTimelineId, IndexPart>),
+}
+
+impl TenantIndexParts {
+    fn add_poisoned(&mut self, timeline_id: ZTimelineId) {
+        match self {
+            TenantIndexParts::Poisoned { missing, .. } => {
+                missing.insert(timeline_id);
+            }
+            TenantIndexParts::Present(present) => {
+                *self = TenantIndexParts::Poisoned {
+                    present: mem::take(present),
+                    missing: HashSet::from([timeline_id]),
+                }
+            }
+        }
+    }
+}
+
+impl Default for TenantIndexParts {
+    fn default() -> Self {
+        TenantIndexParts::Present(HashMap::default())
+    }
+}
+
+pub async fn download_index_parts<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    keys: HashSet<ZTenantTimelineId>,
+) -> HashMap<ZTenantId, TenantIndexParts>
+where
+    P: Debug + Send + Sync + 'static,
+    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+{
+    let mut index_parts: HashMap<ZTenantId, TenantIndexParts> = HashMap::new();
+
+    let mut part_downloads = keys
+        .into_iter()
+        .map(|id| async move { (id, download_index_part(conf, storage, id).await) })
+        .collect::<FuturesUnordered<_>>();
+
+    while let Some((id, part_upload_result)) = part_downloads.next().await {
+        match part_upload_result {
+            Ok(index_part) => {
+                debug!("Successfully fetched index part for {id}");
+                match index_parts.entry(id.tenant_id).or_default() {
+                    TenantIndexParts::Poisoned { present, .. } => {
+                        present.insert(id.timeline_id, index_part);
+                    }
+                    TenantIndexParts::Present(parts) => {
+                        parts.insert(id.timeline_id, index_part);
+                    }
+                }
+            }
+            Err(download_error) => {
+                match download_error {
+                    DownloadError::NotFound => {
+                        // thats ok because it means that we didnt upload something we have locally for example
+                    }
+                    e => {
+                        let tenant_parts = index_parts.entry(id.tenant_id).or_default();
+                        tenant_parts.add_poisoned(id.timeline_id);
+                        error!(
+                            "Failed to fetch index part for {id}: {e} poisoning tenant index parts"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    index_parts
+}
+
+/// Note: The function is rather expensive from s3 access point of view, it will execute ceil(N/1000) + N requests.
+/// At least one request to obtain a list of tenant timelines (more requests is there are more than 1000 timelines).
+/// And then will attempt to download all index files that belong to these timelines.
+pub async fn gather_tenant_timelines_index_parts<P, S>(
+    conf: &'static PageServerConf,
+    storage: &S,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<HashMap<ZTimelineId, IndexPart>>
+where
+    P: RemoteObjectName + Debug + Send + Sync + 'static,
+    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+{
+    let tenant_path = conf.timelines_path(&tenant_id);
+    let tenant_storage_path = storage.remote_object_id(&tenant_path).with_context(|| {
+        format!(
+            "Failed to get tenant storage path for local path '{}'",
+            tenant_path.display()
+        )
+    })?;
+    let timelines = storage
+        .list_prefixes(Some(tenant_storage_path))
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to list tenant storage path to get remote timelines to download: {}",
+                tenant_id
+            )
+        })?;
+
+    let mut sync_ids = HashSet::new();
+
+    for timeline_remote_storage_key in timelines {
+        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
+        })?;
+
+        let timeline_id: ZTimelineId = object_name
+            .parse()
+            .with_context(|| {
+                format!("failed to parse object name into timeline id for tenant {tenant_id} '{object_name}'")
+            })?;
+
+        sync_ids.insert(ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        });
+    }
+
+    match download_index_parts(conf, storage, sync_ids)
+        .await
+        .remove(&tenant_id)
+        .ok_or_else(|| anyhow::anyhow!("Missing tenant index parts. This is a bug."))?
+    {
+        TenantIndexParts::Poisoned { missing, .. } => {
+            anyhow::bail!("Failed to download index parts for all timelines. Missing {missing:?}")
+        }
+        TenantIndexParts::Present(parts) => Ok(parts),
+    }
+}
+
 /// Retrieves index data from the remote storage for a given timeline.
-pub async fn download_index_part<P, S>(
+async fn download_index_part<P, S>(
     conf: &'static PageServerConf,
     storage: &S,
     sync_id: ZTenantTimelineId,
-) -> anyhow::Result<IndexPart>
+) -> Result<IndexPart, DownloadError>
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
@@ -43,18 +191,29 @@ where
                 "Failed to get the index part storage path for local path '{}'",
                 index_part_path.display()
             )
-        })?;
-    let mut index_part_bytes = Vec::new();
-    storage
-        .download(&part_storage_path, &mut index_part_bytes)
-        .await
-        .with_context(|| {
-            format!("Failed to download an index part from storage path {part_storage_path:?}")
-        })?;
+        })
+        .map_err(DownloadError::BadInput)?;
 
-    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes).with_context(|| {
-        format!("Failed to deserialize index part file from storage path '{part_storage_path:?}'")
-    })?;
+    let mut index_part_download = storage.download(&part_storage_path).await?;
+
+    let mut index_part_bytes = Vec::new();
+    io::copy(
+        &mut index_part_download.download_stream,
+        &mut index_part_bytes,
+    )
+    .await
+    .with_context(|| {
+        format!("Failed to download an index part from storage path {part_storage_path:?}")
+    })
+    .map_err(DownloadError::Other)?;
+
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
+        .with_context(|| {
+            format!(
+                "Failed to deserialize index part file from storage path '{part_storage_path:?}'"
+            )
+        })
+        .map_err(DownloadError::Other)?;
 
     let missing_files = index_part.missing_files();
     if !missing_files.is_empty() {
@@ -162,15 +321,19 @@ where
                             temp_file_path.display()
                         )
                     })?;
-
-                storage
-                    .download(&layer_storage_path, &mut destination_file)
+                let mut download = storage
+                    .download(&layer_storage_path)
                     .await
                     .with_context(|| {
                         format!(
-                            "Failed to download a layer from storage path '{layer_storage_path:?}'"
+                            "Failed to open a download stream for layer with remote storage path '{layer_storage_path:?}'"
                         )
                     })?;
+                io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
+                    format!(
+                        "Failed to download layer with remote storage path '{layer_storage_path:?}' into file '{}'", temp_file_path.display()
+                    )
+                })?;
 
                 // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
                 // A file will not be closed immediately when it goes out of scope if there are any IO operations

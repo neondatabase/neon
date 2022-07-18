@@ -3,6 +3,7 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use lazy_static::lazy_static;
+pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_gauge, Gauge};
 pub use prometheus::{register_gauge_vec, GaugeVec};

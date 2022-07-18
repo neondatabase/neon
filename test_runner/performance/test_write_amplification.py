@@ -13,13 +13,13 @@
 import os
 from contextlib import closing
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.zenith_fixtures import ZenithEnv
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, ZenithCompare
+from fixtures.neon_fixtures import NeonEnv
+from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
 from fixtures.log_helper import log
 
 
-def test_write_amplification(zenith_with_baseline: PgCompare):
-    env = zenith_with_baseline
+def test_write_amplification(neon_with_baseline: PgCompare):
+    env = neon_with_baseline
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:

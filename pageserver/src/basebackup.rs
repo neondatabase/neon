@@ -10,8 +10,10 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{BufMut, BytesMut};
+use fail::fail_point;
+use itertools::Itertools;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
@@ -20,7 +22,7 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
-use crate::reltag::SlruKind;
+use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Timeline;
 use crate::DatadirTimelineImpl;
 use postgres_ffi::xlog_utils::*;
@@ -30,26 +32,37 @@ use utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a> {
-    ar: Builder<&'a mut dyn Write>,
+pub struct Basebackup<'a, W>
+where
+    W: Write,
+{
+    ar: Builder<AbortableWrite<W>>,
     timeline: &'a Arc<DatadirTimelineImpl>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
+    full_backup: bool,
+    finished: bool,
 }
 
-// Create basebackup with non-rel data in it. Omit relational data.
+// Create basebackup with non-rel data in it.
+// Only include relational data if 'full_backup' is true.
 //
 // Currently we use empty lsn in two cases:
 //  * During the basebackup right after timeline creation
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a> Basebackup<'a> {
+impl<'a, W> Basebackup<'a, W>
+where
+    W: Write,
+{
     pub fn new(
-        write: &'a mut dyn Write,
+        write: W,
         timeline: &'a Arc<DatadirTimelineImpl>,
         req_lsn: Option<Lsn>,
-    ) -> Result<Basebackup<'a>> {
+        prev_lsn: Option<Lsn>,
+        full_backup: bool,
+    ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -84,20 +97,34 @@ impl<'a> Basebackup<'a> {
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
+        // Consolidate the derived and the provided prev_lsn values
+        let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+            if backup_prev != Lsn(0) {
+                ensure!(backup_prev == provided_prev_lsn)
+            }
+            provided_prev_lsn
+        } else {
+            backup_prev
+        };
+
         info!(
-            "taking basebackup lsn={}, prev_lsn={}",
-            backup_lsn, backup_prev
+            "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
+            backup_lsn, prev_lsn, full_backup
         );
 
         Ok(Basebackup {
-            ar: Builder::new(write),
+            ar: Builder::new(AbortableWrite::new(write)),
             timeline,
             lsn: backup_lsn,
-            prev_record_lsn: backup_prev,
+            prev_record_lsn: prev_lsn,
+            full_backup,
+            finished: false,
         })
     }
 
-    pub fn send_tarball(&mut self) -> anyhow::Result<()> {
+    pub fn send_tarball(mut self) -> anyhow::Result<()> {
+        // TODO include checksum
+
         // Create pgdata subdirs structure
         for dir in pg_constants::PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(*dir)?;
@@ -130,15 +157,59 @@ impl<'a> Basebackup<'a> {
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in self.timeline.list_dbdirs(self.lsn)? {
             self.add_dbdir(spcnode, dbnode, has_relmap_file)?;
+
+            // Gather and send relational files in each database if full backup is requested.
+            if self.full_backup {
+                for rel in self.timeline.list_rels(spcnode, dbnode, self.lsn)? {
+                    self.add_rel(rel)?;
+                }
+            }
         }
         for xid in self.timeline.list_twophase_files(self.lsn)? {
             self.add_twophase_file(xid)?;
         }
 
+        fail_point!("basebackup-before-control-file", |_| {
+            bail!("failpoint basebackup-before-control-file")
+        });
+
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file()?;
         self.ar.finish()?;
+        self.finished = true;
         debug!("all tarred up!");
+        Ok(())
+    }
+
+    fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+        let nblocks = self.timeline.get_rel_size(tag, self.lsn)?;
+
+        // Function that adds relation segment data to archive
+        let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
+            let file_name = tag.to_segfile_name(segment_index as u32);
+            let header = new_tar_header(&file_name, data.len() as u64)?;
+            self.ar.append(&header, data.as_slice())?;
+            Ok(())
+        };
+
+        // If the relation is empty, create an empty file
+        if nblocks == 0 {
+            add_file(0, &vec![])?;
+            return Ok(());
+        }
+
+        // Add a file for each chunk of blocks (aka segment)
+        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        for (seg, blocks) in chunks.into_iter().enumerate() {
+            let mut segment_data: Vec<u8> = vec![];
+            for blknum in blocks {
+                let img = self.timeline.get_rel_page_at_lsn(tag, blknum, self.lsn)?;
+                segment_data.extend_from_slice(&img[..]);
+            }
+
+            add_file(seg, &segment_data)?;
+        }
+
         Ok(())
     }
 
@@ -331,6 +402,19 @@ impl<'a> Basebackup<'a> {
     }
 }
 
+impl<'a, W> Drop for Basebackup<'a, W>
+where
+    W: Write,
+{
+    /// If the basebackup was not finished, prevent the Archive::drop() from
+    /// writing the end-of-archive marker.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.ar.get_mut().abort();
+        }
+    }
+}
+
 //
 // Create new tarball entry header
 //
@@ -365,4 +449,50 @@ fn new_tar_header_dir(path: &str) -> anyhow::Result<Header> {
     );
     header.set_cksum();
     Ok(header)
+}
+
+/// A wrapper that passes through all data to the underlying Write,
+/// until abort() is called.
+///
+/// tar::Builder has an annoying habit of finishing the archive with
+/// a valid tar end-of-archive marker (two 512-byte sectors of zeros),
+/// even if an error occurs and we don't finish building the archive.
+/// We'd rather abort writing the tarball immediately than construct
+/// a seemingly valid but incomplete archive. This wrapper allows us
+/// to swallow the end-of-archive marker that Builder::drop() emits,
+/// without writing it to the underlying sink.
+///
+struct AbortableWrite<W> {
+    w: W,
+    aborted: bool,
+}
+
+impl<W> AbortableWrite<W> {
+    pub fn new(w: W) -> Self {
+        AbortableWrite { w, aborted: false }
+    }
+
+    pub fn abort(&mut self) {
+        self.aborted = true;
+    }
+}
+
+impl<W> Write for AbortableWrite<W>
+where
+    W: Write,
+{
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.aborted {
+            Ok(data.len())
+        } else {
+            self.w.write(data)
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.aborted {
+            Ok(())
+        } else {
+            self.w.flush()
+        }
+    }
 }

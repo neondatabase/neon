@@ -39,6 +39,8 @@ utils = { path = "../libs/utils" }
 metrics = { path = "../libs/metrics" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
 
+x509-parser = "0.13.2"
+
 [dev-dependencies]
 rcgen = "0.8.14"
 rstest = "0.12"
