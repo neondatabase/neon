@@ -1,4 +1,4 @@
-# Overview
+# Pageserver storage
 
 The main responsibility of the Page Server is to process the incoming WAL, and
 reprocess it into a format that allows reasonably quick access to any page
