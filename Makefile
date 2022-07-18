@@ -1,3 +1,8 @@
+ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+
+# Where to install Postgres, default is ./tmp_install, maybe useful for package managers
+POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/tmp_install
+
 # Seccomp BPF is only available for Linux
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
@@ -55,55 +60,55 @@ zenith: postgres-headers
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
-tmp_install/build/config.status:
+$(POSTGRES_INSTALL_DIR)/build/config.status:
 	+@echo "Configuring postgres build"
-	mkdir -p tmp_install/build
-	(cd tmp_install/build && \
-	../../vendor/postgres/configure CFLAGS='$(PG_CFLAGS)' \
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build
+	(cd $(POSTGRES_INSTALL_DIR)/build && \
+	$(ROOT_PROJECT_DIR)/vendor/postgres/configure CFLAGS='$(PG_CFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		$(SECCOMP) \
-		--prefix=$(abspath tmp_install) > configure.log)
+		--prefix=$(abspath $(POSTGRES_INSTALL_DIR)) > configure.log)
 
 # nicer alias for running 'configure'
 .PHONY: postgres-configure
-postgres-configure: tmp_install/build/config.status
+postgres-configure: $(POSTGRES_INSTALL_DIR)/build/config.status
 
-# Install the PostgreSQL header files into tmp_install/include
+# Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/include
 .PHONY: postgres-headers
 postgres-headers: postgres-configure
 	+@echo "Installing PostgreSQL headers"
-	$(MAKE) -C tmp_install/build/src/include MAKELEVEL=0 install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/src/include MAKELEVEL=0 install
 
 # Compile and install PostgreSQL and contrib/neon
 .PHONY: postgres
 postgres: postgres-configure \
 		  postgres-headers # to prevent `make install` conflicts with zenith's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
-	$(MAKE) -C tmp_install/build MAKELEVEL=0 install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 install
 	+@echo "Compiling contrib/neon"
-	$(MAKE) -C tmp_install/build/contrib/neon install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon install
 	+@echo "Compiling contrib/neon_test_utils"
-	$(MAKE) -C tmp_install/build/contrib/neon_test_utils install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon_test_utils install
 	+@echo "Compiling pg_buffercache"
-	$(MAKE) -C tmp_install/build/contrib/pg_buffercache install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect"
-	$(MAKE) -C tmp_install/build/contrib/pageinspect install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pageinspect install
 
 
 .PHONY: postgres-clean
 postgres-clean:
-	$(MAKE) -C tmp_install/build MAKELEVEL=0 clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 clean
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
 clean:
-	cd tmp_install/build && $(MAKE) clean
+	cd $(POSTGRES_INSTALL_DIR)/build && $(MAKE) clean
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything
 .PHONY: distclean
 distclean:
-	rm -rf tmp_install
+	rm -rf $(POSTGRES_INSTALL_DIR)
 	$(CARGO_CMD_PREFIX) cargo clean
 
 .PHONY: fmt
@@ -112,4 +117,4 @@ fmt:
 
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
-	ln -s -f ../../pre-commit.py .git/hooks/pre-commit
+	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
