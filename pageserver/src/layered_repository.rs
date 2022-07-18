@@ -175,6 +175,7 @@ pub struct LayeredRepository {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: ZTenantId,
+    timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
@@ -182,7 +183,6 @@ pub struct LayeredRepository {
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
     gc_cs: Mutex<()>,
-    timelines: Mutex<HashMap<ZTimelineId, LayeredTimelineEntry>>,
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
     // provides access to timeline data sitting in the remote storage
@@ -281,13 +281,20 @@ impl Repository for LayeredRepository {
         // concurrently removes data that is needed by the new timeline.
         let _gc_cs = self.gc_cs.lock().unwrap();
 
-        let src_timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
-            self.get_timeline_load_internal(src, &mut timelines)
-                // message about timeline being remote is one .context up in the stack
-                .context("failed to load timeline for branching")?
-                .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?
-        };
+        // Besides GC lock, branch creation task doesn't need to hold the `layer_removal_cs` lock,
+        // hence doesn't need to wait for compaction/GC because it ensures that the starting LSN
+        // of the child branch is not out of scope in the middle of the creation task by
+        // 1. holding the GC lock to prevent overwritting timeline GC data
+        // 2. checking both the latest GC cutoff LSN and latest GC info of the source timeline
+        // to avoid initializing the new branch using data removed by past GC iterations
+        // or in-queue GC iterations.
+
+        let mut timelines = self.timelines.lock().unwrap();
+        let src_timeline = self
+            .get_timeline_load_internal(src, &mut timelines)
+            // message about timeline being remote is one .context up in the stack
+            .context("failed to load timeline for branching")?
+            .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?;
 
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
@@ -298,13 +305,16 @@ impl Repository for LayeredRepository {
             lsn
         });
 
+        // Check if the starting LSN is out of scope because it is less than
+        // 1. the latest GC cutoff LSN or
+        // 2. the planned GC cutoff LSN, which is from an in-queue GC iteration.
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn: less than latest GC cutoff")?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
-            if cutoff != Lsn(0) && start_lsn < cutoff {
+            if start_lsn < cutoff {
                 bail!("invalid branch start lsn: less than planned GC cutoff");
             }
         }
@@ -338,11 +348,7 @@ impl Repository for LayeredRepository {
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
         Self::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-
-        self.timelines
-            .lock()
-            .unwrap()
-            .insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
+        timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);
 
@@ -931,7 +937,7 @@ impl LayeredRepository {
         };
 
         // Ok, we now know all the branch points.
-        // Perform GC for each timeline.
+        // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
         for timeline_id in timeline_ids {
             // Timeline is known to be local and loaded.
@@ -962,6 +968,16 @@ impl LayeredRepository {
         drop(timelines);
         drop(gc_cs);
 
+        // Perform GC for each timeline.
+        //
+        // Note that we don't hold the GC lock here because we don't want
+        // to delay the branch creation task, which requires the GC lock.
+        // A timeline GC iteration can be slow because it may need to wait for
+        // compaction (both require `layer_removal_cs` lock),
+        // but the GC iteration can run concurrently with branch creation.
+        //
+        // See comments in [`LayeredRepository::branch_timeline`] for more information
+        // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if thread_mgr::is_shutdown_requested() {
                 // We were requested to shut down. Stop and return with the progress we
@@ -1059,12 +1075,9 @@ pub struct LayeredTimeline {
     layer_flush_lock: Mutex<()>,
 
     /// Layer removal lock.
-    /// A lock to ensure that no layer of the timeline is removed by other threads.
+    /// A lock to ensure that no layer of the timeline is removed concurrently by other threads.
     /// This lock is acquired in [`LayeredTimeline::gc`], [`LayeredTimeline::compact`],
     /// and [`LayeredRepository::delete_timeline`].
-    ///
-    /// [`LayeredRepository::branch_timeline`] also requires to hold the removal lock
-    /// for the source timeline to prevent missing data (due to GC) when creating new branch.
     layer_removal_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
@@ -1104,9 +1117,11 @@ struct GcInfo {
     /// FIXME: is this inclusive or exclusive?
     horizon_cutoff: Lsn,
 
-    /// In addition to 'retain_lsns', keep everything newer than 'SystemTime::now()'
-    /// minus 'pitr_interval'
+    /// In addition to 'retain_lsns' and 'horizon_cutoff', keep everything newer than this
+    /// point.
     ///
+    /// This is calculated by finding a number such that a record is needed for PITR
+    /// if only if its LSN is larger than 'pitr_cutoff'.
     pitr_cutoff: Lsn,
 }
 
@@ -2290,21 +2305,24 @@ impl LayeredTimeline {
     /// TODO: that's wishful thinking, compaction doesn't actually do that
     /// currently.
     ///
-    /// The caller specifies how much history is needed with the two arguments:
+    /// The caller specifies how much history is needed with the 3 arguments:
     ///
     /// retain_lsns: keep a version of each page at these LSNs
-    /// cutoff: also keep everything newer than this LSN
+    /// cutoff_horizon: also keep everything newer than this LSN
+    /// pitr: the time duration required to keep data for PITR
     ///
     /// The 'retain_lsns' list is currently used to prevent removing files that
     /// are needed by child timelines. In the future, the user might be able to
     /// name additional points in time to retain. The caller is responsible for
     /// collecting that information.
     ///
-    /// The 'cutoff' point is used to retain recent versions that might still be
+    /// The 'cutoff_horizon' point is used to retain recent versions that might still be
     /// needed by read-only nodes. (As of this writing, the caller just passes
     /// the latest LSN subtracted by a constant, and doesn't do anything smart
     /// to figure out what read-only nodes might actually need.)
     ///
+    /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
+    /// whether a record is needed for PITR.
     fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
