@@ -310,12 +310,16 @@ impl Repository for LayeredRepository {
         // 2. the planned GC cutoff LSN, which is from an in-queue GC iteration.
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context("invalid branch start lsn: less than latest GC cutoff")?;
+            .context(format!(
+                "invalid branch start lsn: less than latest GC cutoff {latest_gc_cutoff_lsn}"
+            ))?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
             if start_lsn < cutoff {
-                bail!("invalid branch start lsn: less than planned GC cutoff");
+                bail!(format!(
+                    "invalid branch start lsn: less than planned GC cutoff {cutoff}"
+                ));
             }
         }
 
@@ -2331,7 +2335,7 @@ impl LayeredTimeline {
     ) -> Result<()> {
         let mut gc_info = self.gc_info.write().unwrap();
 
-        gc_info.horizon_cutoff = min(cutoff_horizon, self.get_disk_consistent_lsn());
+        gc_info.horizon_cutoff = cutoff_horizon;
         gc_info.retain_lsns = retain_lsns;
 
         // Calculate pitr cutoff point.
@@ -2390,7 +2394,7 @@ impl LayeredTimeline {
 
         let gc_info = self.gc_info.read().unwrap();
 
-        let horizon_cutoff = gc_info.horizon_cutoff;
+        let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
         let pitr_cutoff = gc_info.pitr_cutoff;
         let retain_lsns = &gc_info.retain_lsns;
 
