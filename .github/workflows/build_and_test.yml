@@ -41,6 +41,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 1
+        run: id && ls -la
 
       - name: Set pg revision for caching
         id: pg_ver
