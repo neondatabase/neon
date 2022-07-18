@@ -1,0 +1,74 @@
+name: Manual Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_size:
+        description: "Database target size. Supports Gb/Mb/ pgbench scale"
+        require: false
+        default: "1gb"
+      duration:
+        description: "Duration of pgbench test (doesn't include pgbench init). Supports H/M/s"
+        require: false
+        default: "1h"
+      vacuum:
+        description: "Add vacuum option to commands"
+        type: boolean
+        require: false
+        default: true
+
+jobs:
+  bench:
+    runs-on: [self-hosted, dev]
+    timeout-minutes: 1440 # 24h
+
+    container:
+      image: python:3.9-buster
+
+    steps:
+    - name: Checkout Neon repo
+      uses: actions/checkout@v3
+
+    - name: Install Postgres
+      run: |
+        echo "deb http://apt.postgresql.org/pub/repos/apt buster-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+        apt -y update
+        apt install -y postgresql-14
+
+        psql --version
+        pgbench --version
+
+    - name: Install poetry & python deps
+      run: |
+        python3 -m pip install --upgrade poetry
+        ./scripts/pysync
+
+    - name: Wake up cluster
+      run: |
+        psql $BENCHMARK_CONNSTR -c "SELECT 1"
+      env:
+        BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
+
+    - name: Run benchmark
+      env:
+        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration }}"
+        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size }}"
+        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum }}"
+        PLATFORM: "neon-captest"
+        BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+        POSTGRES_DISTRIB_DIR: /usr
+
+      run: |
+        rm -rf perf-report-staging
+        mkdir -p perf-report-staging
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
+
+    - name: Upload pgbench logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        retention-days: 7
+        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
+        path: test_output/**/*pgbench_*.*

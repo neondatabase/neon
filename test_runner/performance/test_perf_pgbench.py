@@ -1,17 +1,15 @@
-from contextlib import closing
-from fixtures.neon_fixtures import PgBin, VanillaPostgres, NeonEnv, profiling_supported
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
-
-from fixtures.benchmark_fixture import PgBenchRunResult, MetricReport, NeonBenchmarker
-from fixtures.log_helper import log
-
-from pathlib import Path
-
-import pytest
-from datetime import datetime
 import calendar
 import os
 import timeit
+from datetime import datetime
+from pathlib import Path
+from typing import List
+
+import pytest
+from fixtures.benchmark_fixture import MetricReport, PgBenchRunResult
+from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.neon_fixtures import profiling_supported
+from fixtures.utils import get_scale_for_db
 
 
 def utc_now_timestamp() -> int:
@@ -71,30 +69,59 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 #
 # Currently, the # of connections is hardcoded at 4
 def run_test_pgbench(env: PgCompare, scale: int, duration: int):
+    no_vacuum = []
+    if os.getenv("TEST_PG_BENCH_VACUUM", default="true").lower() == "false":
+        no_vacuum = ["--no-vacuum"]
 
     # Record the scale and initialize
     env.zenbenchmark.record("scale", scale, '', MetricReport.TEST_PARAM)
-    init_pgbench(env, ['pgbench', f'-s{scale}', '-i', env.pg.connstr()])
+    init_pgbench(env, ['pgbench', f'-s{scale}', '-i'] + no_vacuum + [env.pg.connstr()])
 
     # Run simple-update workload
     run_pgbench(env,
-                "simple-update", ['pgbench', '-N', '-c4', f'-T{duration}', '-P2', env.pg.connstr()])
+                "simple-update",
+                ['pgbench', '-N', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
+                no_vacuum + [env.pg.connstr()])
 
     # Run SELECT workload
     run_pgbench(env,
-                "select-only", ['pgbench', '-S', '-c4', f'-T{duration}', '-P2', env.pg.connstr()])
+                "select-only",
+                ['pgbench', '-S', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
+                no_vacuum + [env.pg.connstr()])
 
     env.report_size()
 
 
-def get_durations_matrix(default: int = 45):
+def get_durations_matrix(default: int = 45) -> List[int]:
     durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default=str(default))
-    return list(map(int, durations.split(",")))
+    rv = []
+    for d in durations.split(","):
+        d = d.strip().lower()
+        if d.endswith('h'):
+            duration = int(d.removesuffix('h')) * 60 * 60
+        elif d.endswith('m'):
+            duration = int(d.removesuffix('m')) * 60
+        else:
+            duration = int(d.removesuffix('s'))
+        rv.append(duration)
+
+    return rv
 
 
-def get_scales_matrix(default: int = 10):
+def get_scales_matrix(default: int = 10) -> List[int]:
     scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default=str(default))
-    return list(map(int, scales.split(",")))
+    rv = []
+    for s in scales.split(","):
+        s = s.strip().lower()
+        if s.endswith('mb'):
+            scale = get_scale_for_db(int(s.removesuffix('mb')))
+        elif s.endswith('gb'):
+            scale = get_scale_for_db(int(s.removesuffix('gb')) * 1024)
+        else:
+            scale = int(s)
+        rv.append(scale)
+
+    return rv
 
 
 # Run the pgbench tests against vanilla Postgres and neon
