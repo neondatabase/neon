@@ -59,7 +59,7 @@ jobs:
       - name: Prepare postgres artifact
         run: tar -C tmp_install/ -czf ./pg.tgz .
 
-      - name: Upload postgres artifact
+      - name: Upload postgres artifact to s3
         run: aws s3 cp ./pg.tgz s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-pg.tgz
 
 #      - name: Upload postgres artifact
