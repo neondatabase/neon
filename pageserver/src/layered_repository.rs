@@ -289,8 +289,6 @@ impl Repository for LayeredRepository {
                 .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {}", &src))?
         };
 
-        let layer_removal_cs = src_timeline.layer_removal_cs.lock().unwrap();
-
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
 
         // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
@@ -340,8 +338,6 @@ impl Repository for LayeredRepository {
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
         Self::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-
-        drop(layer_removal_cs);
 
         self.timelines
             .lock()
