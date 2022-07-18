@@ -8,7 +8,6 @@ from typing import List
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
-from performance.test_perf_pgbench import run_pgbench
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
