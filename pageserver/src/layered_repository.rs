@@ -2861,7 +2861,7 @@ pub mod tests {
 
             let cutoff = tline.get_last_record_lsn();
 
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -2931,7 +2931,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;
@@ -3008,7 +3008,7 @@ pub mod tests {
             // Perform a cycle of checkpoint, compaction, and GC
             println!("checkpointing {}", lsn);
             let cutoff = tline.get_last_record_lsn();
-            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO);
+            tline.update_gc_info(Vec::new(), cutoff, Duration::ZERO)?;
             tline.checkpoint(CheckpointConfig::Forced)?;
             tline.compact()?;
             tline.gc()?;

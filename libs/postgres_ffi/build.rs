@@ -49,12 +49,12 @@ fn main() {
     // Finding the location of C headers for the Postgres server:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/tmp_install`
     // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/tmp_install/include/postgresql/server`
-    let mut pg_install_dir: PathBuf;
-    if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
-        pg_install_dir = postgres_install_dir.into();
+    let mut pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR")
+    {
+        postgres_install_dir.into()
     } else {
-        pg_install_dir = PathBuf::from("tmp_install")
-    }
+        PathBuf::from("tmp_install")
+    };
 
     if pg_install_dir.is_relative() {
         let cwd = env::current_dir().unwrap();
