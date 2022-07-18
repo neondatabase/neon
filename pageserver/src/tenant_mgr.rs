@@ -5,6 +5,7 @@ use crate::config::PageServerConf;
 use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::Repository;
+use crate::repository::Timeline;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
@@ -102,6 +103,64 @@ struct Tenant {
     /// Local timelines have more metadata that's loaded into memory,
     /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
     local_timelines: HashMap<ZTimelineId, Arc<DatadirTimelineImpl>>,
+}
+
+impl Tenant {
+    fn get_local_timeline_with_load(
+        &mut self,
+        timeline_id: ZTimelineId,
+    ) -> anyhow::Result<Arc<DatadirTimelineImpl>> {
+        if let Some(page_tline) = self.local_timelines.get(&timeline_id) {
+            Ok(Arc::clone(page_tline))
+        } else {
+            let page_tline = self
+                .load_local_timeline(timeline_id)
+                .with_context(|| format!("Failed to load local timeline {timeline_id}"))?;
+            self.local_timelines
+                .insert(timeline_id, Arc::clone(&page_tline));
+            Ok(page_tline)
+        }
+    }
+
+    fn load_local_timeline(
+        &mut self,
+        timeline_id: ZTimelineId,
+    ) -> anyhow::Result<Arc<DatadirTimeline<LayeredRepository>>> {
+        let inmem_timeline = self.repo.get_timeline_load(timeline_id).with_context(|| {
+            format!("Inmem timeline {timeline_id} not found in tenant's repository")
+        })?;
+        let repartition_distance = self.repo.get_checkpoint_distance() / 10;
+        let mut ancestor_logical_size: Option<usize> = None;
+        if let Some(ancestor_id) = inmem_timeline.get_ancestor_timeline_id() {
+            if let Ok(ancestor_pgdir) = self.get_local_timeline_with_load(ancestor_id) {
+                if ancestor_pgdir.tline.get_last_record_lsn() == inmem_timeline.get_ancestor_lsn() {
+                    ancestor_logical_size = Some(ancestor_pgdir.get_current_logical_size());
+                    debug!("Branching: copy ancestor logical size");
+                } else {
+                    debug!(
+                        "Brancing: ancestor LSN={}, branch LSN={}",
+                        ancestor_pgdir.tline.get_last_record_lsn(),
+                        inmem_timeline.get_ancestor_lsn()
+                    );
+                }
+            }
+        };
+        let pgdir = Arc::new(DatadirTimelineImpl::new(
+            inmem_timeline,
+            repartition_distance,
+        ));
+        if let Some(size) = ancestor_logical_size {
+            pgdir.copy_logical_size(size);
+        } else {
+            pgdir.init_logical_size()?;
+        }
+        tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
+            id: ZTenantTimelineId::new(self.repo.tenant_id(), timeline_id),
+            datadir: Arc::clone(&pgdir),
+        });
+
+        Ok(pgdir)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -387,17 +446,7 @@ pub fn get_local_timeline_with_load(
     let tenant = m
         .get_mut(&tenant_id)
         .with_context(|| format!("Tenant {tenant_id} not found"))?;
-
-    if let Some(page_tline) = tenant.local_timelines.get(&timeline_id) {
-        Ok(Arc::clone(page_tline))
-    } else {
-        let page_tline = load_local_timeline(&tenant.repo, timeline_id)
-            .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
-        tenant
-            .local_timelines
-            .insert(timeline_id, Arc::clone(&page_tline));
-        Ok(page_tline)
-    }
+    tenant.get_local_timeline_with_load(timeline_id)
 }
 
 pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
