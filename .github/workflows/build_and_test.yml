@@ -25,8 +25,8 @@ jobs:
     name: 'build-postgres'
     runs-on: [ dev ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2691120799
-      options: --user 1002
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2691226520
+      options: --user nonroot
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +41,6 @@ jobs:
         with:
           submodules: true
           fetch-depth: 1
-        run: id && ls -la
 
       - name: Set pg revision for caching
         id: pg_ver
@@ -77,8 +76,8 @@ jobs:
     name: 'build-neon'
     runs-on: [ dev ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2691120799
-      options: --user 1002
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2691226520
+      options: --user nonroot
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
@@ -142,7 +141,7 @@ jobs:
             CARGO_FLAGS="--release --features profiling"
           fi
 
-          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          whoami && "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
 
       - name: Run cargo test
         run: |
