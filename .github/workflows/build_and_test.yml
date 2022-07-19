@@ -145,24 +145,15 @@ jobs:
             cov_prefix=()
           fi
 
+          # FIXME: What's this for?
+          mkdir -p /tmp/neon/etc/
+
+          # Install target binaries
+          mkdir -p /tmp/neon/bin/
           binaries=$(
             "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
-
-          test_exe_paths=$(
-            "${cov_prefix[@]}" cargo test --message-format=json --no-run |
-            jq -r '.executable | select(. != null)'
-          )
-
-          mkdir -p /tmp/neon/bin/
-          mkdir -p /tmp/neon/test_bin/
-          mkdir -p /tmp/neon/etc/
-
-          # Keep bloated coverage data files away from the rest of the artifact
-          mkdir -p /tmp/coverage/
-
-          # Install target binaries
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
             DST=/tmp/neon/bin/$bin
@@ -171,9 +162,14 @@ jobs:
 
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
-            for bin in $binaries; do
-              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
-            done
+            # Keep bloated coverage data files away from the rest of the artifact
+            mkdir -p /tmp/coverage/
+
+            mkdir -p /tmp/neon/test_bin/
+            test_exe_paths=$(
+              "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+              jq -r '.executable | select(. != null)'
+            )
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
@@ -182,6 +178,10 @@ jobs:
               # the artifact smaller.
               strip "$SRC" -o "$DST"
               echo "$DST" >> /tmp/coverage/binaries.list
+            done
+
+            for bin in $binaries; do
+              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
 
