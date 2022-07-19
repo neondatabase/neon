@@ -84,6 +84,29 @@ jobs:
           submodules: true
           fetch-depth: 1
 
+      # Set some environment variables used by all the steps.
+      #
+      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
+      #   It also includes --features, if any
+      #
+      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
+      #   because "cargo metadata" doesn't accept --release or --debug options
+      #
+      - name: Set env variables
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FEATURES=""
+            CARGO_FLAGS=""
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=""
+            CARGO_FEATURES="--features profiling"
+            CARGO_FLAGS="--release $CARGO_FEATURES"
+          fi
+          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
+          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
+          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
@@ -115,54 +138,20 @@ jobs:
 
       - name: Run cargo build
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-            CARGO_FLAGS=
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-            CARGO_FLAGS="--release --features profiling"
-          fi
-
-          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
 
       - name: Run cargo test
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-            CARGO_FLAGS=
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-            CARGO_FLAGS=--release
-          fi
-
-          "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+          ${cov_prefix} cargo test $CARGO_FLAGS
 
       - name: Install rust binaries
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-          fi
-
+          # Install target binaries
+          mkdir -p /tmp/neon/bin/
           binaries=$(
-            "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
-
-          test_exe_paths=$(
-            "${cov_prefix[@]}" cargo test --message-format=json --no-run |
-            jq -r '.executable | select(. != null)'
-          )
-
-          mkdir -p /tmp/neon/bin/
-          mkdir -p /tmp/neon/test_bin/
-          mkdir -p /tmp/neon/etc/
-
-          # Keep bloated coverage data files away from the rest of the artifact
-          mkdir -p /tmp/coverage/
-
-          # Install target binaries
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
             DST=/tmp/neon/bin/$bin
@@ -171,9 +160,14 @@ jobs:
 
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
-            for bin in $binaries; do
-              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
-            done
+            # Keep bloated coverage data files away from the rest of the artifact
+            mkdir -p /tmp/coverage/
+
+            mkdir -p /tmp/neon/test_bin/
+            test_exe_paths=$(
+              ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
+              jq -r '.executable | select(. != null)'
+            )
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
@@ -182,6 +176,10 @@ jobs:
               # the artifact smaller.
               strip "$SRC" -o "$DST"
               echo "$DST" >> /tmp/coverage/binaries.list
+            done
+
+            for bin in $binaries; do
+              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
 
@@ -440,9 +438,9 @@ jobs:
       - name: Get legacy build tag
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::latest
+            echo "::set-output name=tag::latest"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release
+            echo "::set-output name=tag::release"
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
@@ -502,9 +500,9 @@ jobs:
       - name: Get legacy build tag
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::latest
+            echo "::set-output name=tag::latest"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release
+            echo "::set-output name=tag::release"
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
@@ -557,7 +555,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
             NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
-            echo "::set-output name=include::[$STAGING, $NEON_STRESS]"
+            echo "::set-output name=include::[$STAGING]"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
             echo "::set-output name=include::[$PRODUCTION]"

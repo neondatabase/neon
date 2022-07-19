@@ -55,7 +55,7 @@ fn main() -> Result<()> {
         .get_matches();
 
     let wal_craft = |arg_matches: &ArgMatches, client| {
-        let lsn = match arg_matches.value_of("type").unwrap() {
+        let (intermediate_lsns, end_of_wal_lsn) = match arg_matches.value_of("type").unwrap() {
             Simple::NAME => Simple::craft(client)?,
             LastWalRecordXlogSwitch::NAME => LastWalRecordXlogSwitch::craft(client)?,
             LastWalRecordXlogSwitchEndsOnPageBoundary::NAME => {
@@ -67,7 +67,10 @@ fn main() -> Result<()> {
             LastWalRecordCrossingSegment::NAME => LastWalRecordCrossingSegment::craft(client)?,
             a => panic!("Unknown --type argument: {}", a),
         };
-        println!("end_of_wal = {}", lsn);
+        for lsn in intermediate_lsns {
+            println!("intermediate_lsn = {}", lsn);
+        }
+        println!("end_of_wal = {}", end_of_wal_lsn);
         Ok(())
     };
 
