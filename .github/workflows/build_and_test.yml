@@ -24,7 +24,7 @@ jobs:
   build-postgres:
     name: 'build-postgres'
     runs-on: [ dev ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2691226520
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2691462046
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +73,7 @@ jobs:
   build-neon:
     name: 'build-neon'
     runs-on: [ dev ]
-    container: neondatabase/rust:1.58
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2691462046
     needs: [ build-postgres ]
     strategy:
       fail-fast: false
