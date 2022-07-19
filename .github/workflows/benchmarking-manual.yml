@@ -1,6 +1,8 @@
 name: Manual Benchmark
 
 on:
+  push:
+    branches: [ bigdb-perf-test-setup ]
   workflow_dispatch:
     inputs:
       db_size:
@@ -52,9 +54,9 @@ jobs:
 
     - name: Run benchmark
       env:
-        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration }}"
-        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size }}"
-        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum }}"
+        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
+        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
+        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
         PLATFORM: "neon-captest"
         BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
