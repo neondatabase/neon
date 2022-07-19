@@ -28,7 +28,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicBool};
+use std::sync::atomic::{self, AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -724,7 +724,7 @@ impl LayeredRepository {
             .map(LayeredTimelineEntry::Loaded);
         let _enter = info_span!("loading local timeline").entered();
 
-        let timeline = LayeredTimeline::new(
+        let mut timeline = LayeredTimeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
@@ -737,6 +737,10 @@ impl LayeredRepository {
         timeline
             .load_layer_map(disk_consistent_lsn)
             .context("failed to load layermap")?;
+
+        timeline
+            .init_physical_size()
+            .context("failed to initialize timeline's physical size")?;
 
         Ok(Arc::new(timeline))
     }
@@ -1099,6 +1103,9 @@ pub struct LayeredTimeline {
     // It can be unified with latest_gc_cutoff_lsn under some "first_valid_lsn",
     // though lets keep them both for better error visibility.
     initdb_lsn: Lsn,
+
+    /// Current physical size of the timeline at the lastest LSN
+    physical_size: AtomicU64,
 }
 
 ///
@@ -1256,26 +1263,8 @@ impl Timeline for LayeredTimeline {
         })
     }
 
-    fn get_physical_size(&self) -> Result<u64> {
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
-        let timeline_dir_entries =
-            std::fs::read_dir(&timeline_path).context("Failed to list timeline dir contents")?;
-
-        let mut sz = 0;
-        for entry in timeline_dir_entries {
-            let f = entry?;
-            if f.file_type()?.is_file() {
-                debug!("file: {}", f.path().to_str().unwrap());
-                sz += f.metadata()?.len();
-            }
-        }
-
-        debug!(
-            "physical size of timeline {} of tenant {}: {sz}",
-            self.timeline_id, self.tenant_id
-        );
-
-        Ok(sz)
+    fn get_physical_size(&self) -> u64 {
+        self.physical_size.load(atomic::Ordering::Acquire)
     }
 }
 
@@ -1399,6 +1388,8 @@ impl LayeredTimeline {
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
+
+            physical_size: AtomicU64::new(0),
         }
     }
 
@@ -2642,6 +2633,29 @@ impl LayeredTimeline {
                 Ok(img)
             }
         }
+    }
+
+    /// Initialize the physical size of the layered timeline on disk
+    pub fn init_physical_size(&mut self) -> Result<()> {
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        let timeline_dir_entries = std::fs::read_dir(&timeline_path)?;
+
+        let mut sz = 0;
+        for entry in timeline_dir_entries {
+            let f = entry?;
+            if f.file_type()?.is_file() {
+                debug!("timeline file: {}", f.path().to_str().unwrap());
+                sz += f.metadata()?.len();
+            }
+        }
+
+        debug!(
+            "physical size of timeline {} of tenant {}: {sz}",
+            self.timeline_id, self.tenant_id
+        );
+
+        self.physical_size.store(sz, atomic::Ordering::SeqCst);
+        Ok(())
     }
 }
 

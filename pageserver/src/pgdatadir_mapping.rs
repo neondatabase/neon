@@ -18,7 +18,7 @@ use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLockReadGuard};
 use tracing::{debug, error, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -44,9 +44,6 @@ where
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: AtomicIsize,
-
-    /// Current physical size of the "datadir", at the last LSN.
-    current_physical_size: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -63,7 +60,6 @@ impl<R: Repository> DatadirTimeline<R> {
             tline,
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             current_logical_size: AtomicIsize::new(0),
-            current_physical_size: AtomicU64::new(0),
             repartition_threshold,
         }
     }
@@ -77,13 +73,6 @@ impl<R: Repository> DatadirTimeline<R> {
             self.get_current_logical_size_non_incremental(last_lsn)? as isize,
             Ordering::SeqCst,
         );
-        Ok(())
-    }
-
-    /// (Re-)calculate the physical size of the database at the latest LSN.
-    pub fn init_physical_size(&self) -> Result<()> {
-        self.current_physical_size
-            .store(self.tline.get_physical_size()?, Ordering::SeqCst);
         Ok(())
     }
 
@@ -418,11 +407,6 @@ impl<R: Repository> DatadirTimeline<R> {
                 0
             }
         }
-    }
-
-    /// Retrieve current logical size of the timeline
-    pub fn get_current_physical_size(&self) -> u64 {
-        self.current_physical_size.load(Ordering::Acquire)
     }
 
     /// Does the same as get_current_logical_size but counted on demand.

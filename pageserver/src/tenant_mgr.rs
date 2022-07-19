@@ -499,7 +499,6 @@ fn load_local_timeline(
         repartition_distance,
     ));
     page_tline.init_logical_size()?;
-    page_tline.init_physical_size()?;
 
     tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
         id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
