@@ -21,7 +21,7 @@ env:
   COPT: '-Werror'
 
 jobs:
-  build-postgres:
+  build-neon:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     strategy:
       fail-fast: false
@@ -31,6 +31,7 @@ jobs:
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -41,48 +42,6 @@ jobs:
       - name: Set pg revision for caching
         id: pg_ver
         run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
-
-      - name: Cache postgres build
-        id: cache_pg
-        uses: actions/cache@v3
-        with:
-          path: tmp_install/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Build postgres
-        if: steps.cache_pg.outputs.cache-hit != 'true'
-        run: mold -run make postgres -j$(nproc)
-
-      # actions/cache@v3 does not allow concurrently using the same cache across job steps, so use a separate cache
-      - name: Prepare postgres artifact
-        run: tar -C tmp_install/ -czf ./pg.tgz .
-      - name: Upload postgres artifact
-        uses: actions/upload-artifact@v3
-        with:
-          retention-days: 7
-          if-no-files-found: error
-          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: ./pg.tgz
-
-
-  build-neon:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ build-postgres ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
-
-    env:
-      BUILD_TYPE: ${{ matrix.build_type }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
 
       # Set some environment variables used by all the steps.
       #
@@ -107,17 +66,6 @@ jobs:
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
 
-      - name: Get postgres artifact for restoration
-        uses: actions/download-artifact@v3
-        with:
-          name: postgres-${{ runner.os }}-${{ matrix.build_type }}-artifact
-          path: ./postgres-artifact/
-      - name: Extract postgres artifact
-        run: |
-          mkdir ./tmp_install/
-          tar -xf ./postgres-artifact/pg.tgz -C ./tmp_install/
-          rm -rf ./postgres-artifact/
-
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
@@ -135,6 +83,17 @@ jobs:
           key: |
             v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
             v2-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v3
+        with:
+          path: tmp_install/
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: mold -run make postgres -j$(nproc)
 
       - name: Run cargo build
         run: |
@@ -182,6 +141,9 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
+
+      - name: Install postgres binaries
+        run: cp -a tmp_install /tmp/neon/pg_install
 
       - name: Prepare neon artifact
         run: tar -C /tmp/neon/ -czf ./neon.tgz .
