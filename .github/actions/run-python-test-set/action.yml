@@ -41,7 +41,7 @@ runs:
       shell: bash -ex {0}
       run: |
         mkdir -p /tmp/neon/
-        tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
+        tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
         rm -rf ./neon-artifact/
 
     - name: Checkout

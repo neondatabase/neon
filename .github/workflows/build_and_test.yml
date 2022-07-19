@@ -146,7 +146,7 @@ jobs:
         run: cp -a tmp_install /tmp/neon/pg_install
 
       - name: Prepare neon artifact
-        run: tar -C /tmp/neon/ -czf ./neon.tgz .
+        run: ZSTD_NBTHREADS=0 tar -C /tmp/neon/ -cf ./neon.tar.zst --zstd .
 
       - name: Upload neon binaries
         uses: actions/upload-artifact@v3
@@ -154,7 +154,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
-          path: ./neon.tgz
+          path: ./neon.tar.zst
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
@@ -279,7 +279,7 @@ jobs:
       - name: Extract Neon artifact
         run: |
           mkdir -p /tmp/neon/
-          tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
+          tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
           rm -rf ./neon-artifact/
 
       - name: Restore coverage data
