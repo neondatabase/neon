@@ -84,6 +84,29 @@ jobs:
           submodules: true
           fetch-depth: 1
 
+      # Set some environment variables used by all the steps.
+      #
+      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
+      #   It also includes --features, if any
+      #
+      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
+      #   because "cargo metadata" doesn't accept --release or --debug options
+      #
+      - name: Set env variables
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FEATURES=""
+            CARGO_FLAGS=""
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=""
+            CARGO_FEATURES="--features profiling"
+            CARGO_FLAGS="--release $CARGO_FEATURES"
+          fi
+          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
+          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
+          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+
       - name: Get postgres artifact for restoration
         uses: actions/download-artifact@v3
         with:
@@ -115,43 +138,18 @@ jobs:
 
       - name: Run cargo build
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-            CARGO_FLAGS=
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-            CARGO_FLAGS="--release --features profiling"
-          fi
-
-          "${cov_prefix[@]}" mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
 
       - name: Run cargo test
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-            CARGO_FLAGS=
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-            CARGO_FLAGS=--release
-          fi
-
-          "${cov_prefix[@]}" cargo test $CARGO_FLAGS
+          ${cov_prefix} cargo test $CARGO_FLAGS
 
       - name: Install rust binaries
         run: |
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=()
-          fi
-
-          # FIXME: What's this for?
-          mkdir -p /tmp/neon/etc/
-
           # Install target binaries
           mkdir -p /tmp/neon/bin/
           binaries=$(
-            "${cov_prefix[@]}" cargo metadata --format-version=1 --no-deps |
+            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
           for bin in $binaries; do
@@ -167,7 +165,7 @@ jobs:
 
             mkdir -p /tmp/neon/test_bin/
             test_exe_paths=$(
-              "${cov_prefix[@]}" cargo test --message-format=json --no-run |
+              ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
             )
             for bin in $test_exe_paths; do
