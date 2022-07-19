@@ -555,7 +555,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             STAGING='{"env_name": "staging", "proxy_job": "neon-proxy", "proxy_config": "staging.proxy", "kubeconfig_secret": "STAGING_KUBECONFIG_DATA"}'
             NEON_STRESS='{"env_name": "neon-stress", "proxy_job": "neon-stress-proxy", "proxy_config": "neon-stress.proxy", "kubeconfig_secret": "NEON_STRESS_KUBECONFIG_DATA"}'
-            echo "::set-output name=include::[$STAGING, $NEON_STRESS]"
+            echo "::set-output name=include::[$STAGING]"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             PRODUCTION='{"env_name": "production", "proxy_job": "neon-proxy", "proxy_config": "production.proxy", "kubeconfig_secret": "PRODUCTION_KUBECONFIG_DATA"}'
             echo "::set-output name=include::[$PRODUCTION]"
