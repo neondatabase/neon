@@ -23,7 +23,7 @@ env:
 jobs:
   build-postgres:
     name: 'build-postgres'
-    runs-on: [ devtest ]
+    runs-on: [ dev ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2691462046
     strategy:
       fail-fast: false
@@ -72,7 +72,7 @@ jobs:
 
   build-neon:
     name: 'build-neon'
-    runs-on: [ devtest ]
+    runs-on: [ dev ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2691462046
     needs: [ build-postgres ]
     strategy:
