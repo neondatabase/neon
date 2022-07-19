@@ -420,6 +420,11 @@ impl<R: Repository> DatadirTimeline<R> {
         }
     }
 
+    /// Retrieve current logical size of the timeline
+    pub fn get_current_physical_size(&self) -> u64 {
+        self.current_physical_size.load(Ordering::Acquire)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///

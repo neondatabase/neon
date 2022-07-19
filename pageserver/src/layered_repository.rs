@@ -1265,6 +1265,7 @@ impl Timeline for LayeredTimeline {
         for entry in timeline_dir_entries {
             let f = entry?;
             if f.file_type()?.is_file() {
+                debug!("file: {}", f.path().to_str().unwrap());
                 sz += f.metadata()?.len();
             }
         }
