@@ -68,28 +68,35 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 # the test database.
 #
 # Currently, the # of connections is hardcoded at 4
-def run_test_pgbench(env: PgCompare, scale: int, duration: int):
+def run_test_pgbench(env: PgCompare, scale: int, duration: int, only: str = "all"):
     no_vacuum = []
     if os.getenv("TEST_PG_BENCH_VACUUM", default="true").lower() == "false":
         no_vacuum = ["--no-vacuum"]
 
-    # Record the scale and initialize
     env.zenbenchmark.record("scale", scale, '', MetricReport.TEST_PARAM)
-    init_pgbench(env, ['pgbench', f'-s{scale}', '-i'] + no_vacuum + [env.pg.connstr()])
 
-    # Run simple-update workload
-    run_pgbench(env,
-                "simple-update",
-                ['pgbench', '-N', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
-                no_vacuum + [env.pg.connstr()])
+    if only in ["all", "init"]:
+        # Record the scale and initialize
+        init_pgbench(env, ['pgbench', f'-s{scale}', '-i'] + no_vacuum + [env.pg.connstr()])
 
-    # Run SELECT workload
-    run_pgbench(env,
-                "select-only",
-                ['pgbench', '-S', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
-                no_vacuum + [env.pg.connstr()])
+    if only in ["all", "simple-update"]:
+        # Run simple-update workload
+        run_pgbench(
+            env,
+            "simple-update",
+            ['pgbench', '-N', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
+            no_vacuum + [env.pg.connstr()])
 
-    env.report_size()
+    if only in ["all", "select-only"]:
+        # Run SELECT workload
+        run_pgbench(
+            env,
+            "select-only",
+            ['pgbench', '-S', '-c4', '-j2', f'-T{duration}', '-P2', '--progress-timestamp'] +
+            no_vacuum + [env.pg.connstr()])
+
+    if only == "all":
+        env.report_size()
 
 
 def get_durations_matrix(default: int = 45) -> List[int]:
@@ -156,6 +163,7 @@ profiling="page_requests"
 # Run the pgbench tests against an existing Postgres cluster
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
+@pytest.mark.parametrize("only", ["init", "simple-update", "select-only"])
 @pytest.mark.remote_cluster
-def test_pgbench_remote(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration)
+def test_pgbench_remote(remote_compare: PgCompare, scale: int, duration: int, only: str):
+    run_test_pgbench(remote_compare, scale, duration, only)

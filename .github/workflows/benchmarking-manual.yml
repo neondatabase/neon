@@ -65,7 +65,7 @@ jobs:
       run: |
         rm -rf perf-report-staging
         mkdir -p perf-report-staging
-        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
 
     - name: Upload pgbench logs
       if: always()
