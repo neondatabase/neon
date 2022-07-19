@@ -1,8 +1,9 @@
 from contextlib import closing
 import os
+from uuid import UUID
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_timeline_local
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient, Postgres, assert_timeline_local
 from fixtures.log_helper import log
 import time
 
@@ -179,13 +180,10 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             log.info(f"pg_cluster_size = {pg_cluster_size}")
 
 
-def test_timeline_physical_size(neon_simple_env: NeonEnv):
+def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
     env = neon_simple_env
-
-    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size', 'empty')
-
-    client = env.pageserver.http_client()
-    pg = env.postgres.create_start("test_timeline_physical_size")
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_init')
+    pg = env.postgres.create_start("test_timeline_physical_size_init")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -196,12 +194,40 @@ def test_timeline_physical_size(neon_simple_env: NeonEnv):
                     FROM generate_series(1, 1000) g
             """)
 
-    # shutdown the pageserver to flush all changes in memory
+    # restart the pageserer to force calculating timeline's initial physical size
     env.pageserver.stop()
     env.pageserver.start()
 
-    res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
-    timeline_path = f"{env.repo_dir}/tenants/{env.initial_tenant.hex}/timelines/{new_timeline_id.hex}/"
+    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+
+
+def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
+    # Override default checkpointer settings to run it more often
+    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
+    env = neon_env_builder.init_start()
+
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_compaction')
+    pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+            cur.execute("""
+                INSERT INTO foo
+                    SELECT 'long string to consume some space' || g
+                    FROM generate_series(1, 100000) g
+            """)
+
+    env.pageserver.safe_psql(f"compact {env.initial_tenant.hex} {new_timeline_id.hex}")
+    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+
+
+def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
+    """Check the current physical size returned from timeline API
+    matches the total physical size of the timeline on disk"""
+    client = env.pageserver.http_client()
+    res = assert_timeline_local(client, tenant_id, timeline_id)
+    timeline_path = f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/"
     assert res["local"]["current_physical_size"] == get_dir_size(timeline_path)
 
 
