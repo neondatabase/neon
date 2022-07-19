@@ -1255,6 +1255,27 @@ impl Timeline for LayeredTimeline {
             _write_guard: self.write_lock.lock().unwrap(),
         })
     }
+
+    fn get_physical_size(&self) -> Result<u64> {
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        let timeline_dir_entries =
+            std::fs::read_dir(&timeline_path).context("Failed to list timeline dir contents")?;
+
+        let mut sz = 0;
+        for entry in timeline_dir_entries {
+            let f = entry?;
+            if f.file_type()?.is_file() {
+                sz += f.metadata()?.len();
+            }
+        }
+
+        debug!(
+            "physical size of timeline {} of tenant {}: {sz}",
+            self.timeline_id, self.tenant_id
+        );
+
+        Ok(sz)
+    }
 }
 
 impl LayeredTimeline {

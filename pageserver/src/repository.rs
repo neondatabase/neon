@@ -382,6 +382,9 @@ pub trait Timeline: Send + Sync {
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
     ) -> Result<()>;
+
+    /// Get the physical size of the timeline at the latest LSN
+    fn get_physical_size(&self) -> Result<u64>;
 }
 
 /// Various functions to mutate the timeline.
