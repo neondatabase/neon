@@ -1,4 +1,5 @@
 from contextlib import closing
+import os
 import psycopg2.extras
 import psycopg2.errors
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_timeline_local
@@ -176,3 +177,39 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
             log.info(f"pg_cluster_size = {pg_cluster_size}")
+
+
+def test_timeline_physical_size(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size', 'empty')
+
+    client = env.pageserver.http_client()
+    pg = env.postgres.create_start("test_timeline_physical_size")
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+            cur.execute("""
+                INSERT INTO foo
+                    SELECT 'long string to consume some space' || g
+                    FROM generate_series(1, 1000) g
+            """)
+
+    # shutdown the pageserver to flush all changes in memory
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
+    timeline_path = f"{env.repo_dir}/tenants/{env.initial_tenant.hex}/timelines/{new_timeline_id.hex}/"
+    assert res["local"]["current_physical_size"] == get_dir_size(timeline_path)
+
+
+def get_dir_size(path: str) -> int:
+    """Get the directory's total size (not including sub-directories)"""
+    sz = 0
+    for f in os.listdir(path):
+        f_path = os.path.join(path, f)
+        if os.path.isfile(f_path):
+            sz += os.path.getsize(f_path)
+    return sz
