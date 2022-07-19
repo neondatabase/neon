@@ -11,7 +11,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+use utils::pq_proto::BeMessage as Be;
 
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
@@ -106,7 +106,7 @@ async fn authenticate_proxy_client(
         }
 
         let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
-        println!("got auth info: #{:?}", auth_info);
+        println!("got auth info: {:?}", auth_info);
 
         use ProxyAuthResponse::*;
         let db_info = match auth_info {
@@ -146,11 +146,8 @@ async fn handle_existing_user(
     )
     .await?;
 
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
-
     Ok(compute::NodeInfo {
+        reported_auth_ok: false,
         config: db_info.into(),
     })
 }

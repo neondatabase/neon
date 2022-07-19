@@ -195,13 +195,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         let auth = creds.authenticate(&config.auth_urls, &mut stream).await;
         let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
 
-        let (db, version, cancel_closure) =
-            node.connect().or_else(|e| stream.throw_error(e)).await?;
+        let (db, cancel_closure) = node.connect().or_else(|e| stream.throw_error(e)).await?;
         let cancel_key_data = session.enable_cancellation(cancel_closure);
+
+        // Report authentication success if we haven't done this already.
+        if !node.reported_auth_ok {
+            stream
+                .write_message_noflush(&Be::AuthenticationOk)?
+                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+        }
 
         stream
             .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&version),
+                BeParameterStatusMessage::ServerVersion(&db.version),
             ))?
             .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
             .write_message(&BeMessage::ReadyForQuery)
@@ -215,7 +221,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         }
 
         // Starting from here we only proxy the client's traffic.
-        let mut db = MetricsStream::new(db, inc_proxied);
+        let mut db = MetricsStream::new(db.stream, inc_proxied);
         let mut client = MetricsStream::new(stream.into_inner(), inc_proxied);
         let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
 

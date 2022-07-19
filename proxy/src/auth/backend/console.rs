@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub type Result<T> = std::result::Result<T, ConsoleAuthError>;
 
@@ -183,16 +182,15 @@ where
         }
     };
 
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
-
     let mut config = wake_compute(endpoint).await?;
     if let Some(keys) = scram_keys {
         config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(keys));
     }
 
-    Ok(compute::NodeInfo { config })
+    Ok(compute::NodeInfo {
+        reported_auth_ok: false,
+        config,
+    })
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

@@ -166,7 +166,10 @@ impl BackendType<ClientCredentials> {
                 // We should use a password from payload as well.
                 config.password(payload.token);
 
-                return Ok(compute::NodeInfo { config });
+                return Ok(compute::NodeInfo {
+                    reported_auth_ok: false,
+                    config,
+                });
             }
         }
 

@@ -19,18 +19,31 @@ pub enum ConnectionError {
     FailedToFetchPgVersion,
 }
 
-impl UserFacingError for ConnectionError {}
-
-/// PostgreSQL version as [`String`].
-pub type Version = String;
+impl UserFacingError for ConnectionError {
+    fn to_string_client(&self) -> String {
+        use ConnectionError::*;
+        match self {
+            // This helps us drop irrelevant library-specific prefixes.
+            // TODO: propagate severity level and other parameters.
+            Postgres(err) => match err.as_db_error() {
+                Some(err) => err.message().to_string(),
+                None => err.to_string(),
+            },
+            other => other.to_string(),
+        }
+    }
+}
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
 pub type ComputeConnCfg = tokio_postgres::Config;
 
-/// Compute node connection params.
+/// Various compute node info for establishing connection etc.
 pub struct NodeInfo {
+    /// Did we send [`utils::pq_proto::BeMessage::AuthenticationOk`]?
+    pub reported_auth_ok: bool,
+    /// Compute node connection params.
     pub config: tokio_postgres::Config,
 }
 
@@ -77,16 +90,23 @@ impl NodeInfo {
             )
         }))
     }
+}
 
+pub struct PostgresConnection {
+    pub stream: TcpStream,
+    pub version: String,
+}
+
+impl NodeInfo {
     /// Connect to a corresponding compute node.
-    pub async fn connect(self) -> Result<(TcpStream, Version, CancelClosure), ConnectionError> {
-        let (socket_addr, mut socket) = self
+    pub async fn connect(&self) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+        let (socket_addr, mut stream) = self
             .connect_raw()
             .await
             .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
 
         // TODO: establish a secure connection to the DB
-        let (client, conn) = self.config.connect_raw(&mut socket, NoTls).await?;
+        let (client, conn) = self.config.connect_raw(&mut stream, NoTls).await?;
         let version = conn
             .parameter("server_version")
             .ok_or(ConnectionError::FailedToFetchPgVersion)?
@@ -94,6 +114,8 @@ impl NodeInfo {
 
         let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
 
-        Ok((socket, version, cancel_closure))
+        let db = PostgresConnection { stream, version };
+
+        Ok((db, cancel_closure))
     }
 }

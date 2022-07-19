@@ -1,8 +1,8 @@
 //! User credentials used in authentication.
 
 use crate::error::UserFacingError;
-use std::collections::HashMap;
 use thiserror::Error;
+use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub enum ClientCredsParseError {
@@ -41,7 +41,7 @@ impl ClientCredentials {
 
 impl ClientCredentials {
     pub fn parse(
-        mut options: HashMap<String, String>,
+        mut options: StartupMessageParams,
         sni: Option<&str>,
         common_name: Option<&str>,
     ) -> Result<Self, ClientCredsParseError> {
