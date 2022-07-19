@@ -84,7 +84,7 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BackendType<T> {
     /// Legacy Cloud API (V1) + link auth.
     LegacyConsole(T),
@@ -195,6 +195,39 @@ impl BackendType<ClientCredentials> {
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link => link::handle_user(&urls.auth_link_uri, client).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_type_map() {
+        let values = [
+            BackendType::LegacyConsole(0),
+            BackendType::Console(0),
+            BackendType::Postgres(0),
+            BackendType::Link,
+        ];
+
+        for value in values {
+            assert_eq!(value.map(|x| x), value);
+        }
+    }
+
+    #[test]
+    fn test_backend_type_transpose() {
+        let values = [
+            BackendType::LegacyConsole(Ok::<_, ()>(0)),
+            BackendType::Console(Ok(0)),
+            BackendType::Postgres(Ok(0)),
+            BackendType::Link,
+        ];
+
+        for value in values {
+            assert_eq!(value.map(Result::unwrap), value.transpose().unwrap());
         }
     }
 }

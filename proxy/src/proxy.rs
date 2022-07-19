@@ -360,7 +360,7 @@ mod tests {
         auth: impl TestAuth + Send,
     ) -> anyhow::Result<()> {
         let cancel_map = CancelMap::default();
-        let (mut stream, _creds) = handshake(client, tls.as_ref(), &cancel_map)
+        let (mut stream, _params) = handshake(client, tls.as_ref(), &cancel_map)
             .await?
             .context("handshake failed")?;
 
@@ -437,32 +437,6 @@ mod tests {
             .await?;
 
         proxy.await?
-    }
-
-    #[tokio::test]
-    async fn give_user_an_error_for_bad_creds() -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
-
-        let client_err = tokio_postgres::Config::new()
-            .ssl_mode(SslMode::Disable)
-            .connect_raw(server, NoTls)
-            .await
-            .err() // -> Option<E>
-            .context("client shouldn't be able to connect")?;
-
-        // TODO: this is ugly, but `format!` won't allow us to extract fmt string
-        assert!(client_err.to_string().contains("missing in startup packet"));
-
-        let server_err = proxy
-            .await?
-            .err() // -> Option<E>
-            .context("server shouldn't accept client")?;
-
-        assert!(client_err.to_string().contains(&server_err.to_string()));
-
-        Ok(())
     }
 
     #[tokio::test]

@@ -97,3 +97,104 @@ fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<String> {
         .strip_suffix('.')
         .map(str::to_owned)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_options<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> StartupMessageParams {
+        StartupMessageParams::from(pairs.map(|(k, v)| (k.to_owned(), v.to_owned())))
+    }
+
+    #[test]
+    #[ignore = "TODO: fix how database is handled"]
+    fn parse_bare_minimum() -> anyhow::Result<()> {
+        // According to postgresql, only `user` should be required.
+        let options = make_options([("user", "john_doe")]);
+
+        // TODO: check that `creds.dbname` is None.
+        let creds = ClientCredentials::parse(options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_missing_project() -> anyhow::Result<()> {
+        let options = make_options([("user", "john_doe"), ("database", "world")]);
+
+        let creds = ClientCredentials::parse(options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.dbname, "world");
+        assert_eq!(creds.project, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_project_from_sni() -> anyhow::Result<()> {
+        let options = make_options([("user", "john_doe"), ("database", "world")]);
+
+        let sni = Some("foo.localhost");
+        let common_name = Some("localhost");
+
+        let creds = ClientCredentials::parse(options, sni, common_name)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.dbname, "world");
+        assert_eq!(creds.project.as_deref(), Some("foo"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_project_from_options() -> anyhow::Result<()> {
+        let options = make_options([
+            ("user", "john_doe"),
+            ("database", "world"),
+            ("project", "bar"),
+        ]);
+
+        let creds = ClientCredentials::parse(options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.dbname, "world");
+        assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_projects_identical() -> anyhow::Result<()> {
+        let options = make_options([
+            ("user", "john_doe"),
+            ("database", "world"),
+            ("project", "baz"),
+        ]);
+
+        let sni = Some("baz.localhost");
+        let common_name = Some("localhost");
+
+        let creds = ClientCredentials::parse(options, sni, common_name)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.dbname, "world");
+        assert_eq!(creds.project.as_deref(), Some("baz"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_projects_different() {
+        let options = make_options([
+            ("user", "john_doe"),
+            ("database", "world"),
+            ("project", "first"),
+        ]);
+
+        let sni = Some("second.localhost");
+        let common_name = Some("localhost");
+
+        assert!(matches!(
+            ClientCredentials::parse(options, sni, common_name).expect_err("should fail"),
+            ClientCredsParseError::InconsistentProjectNames(_, _)
+        ));
+    }
+}

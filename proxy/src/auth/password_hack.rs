@@ -34,7 +34,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn todo() -> anyhow::Result<()> {
+    fn parse() -> anyhow::Result<()> {
         let (password, project) = ("password", "pie-in-the-sky");
         let payload = json!({
             "project": project,
