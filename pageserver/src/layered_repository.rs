@@ -281,12 +281,13 @@ impl Repository for LayeredRepository {
         // concurrently removes data that is needed by the new timeline.
         let _gc_cs = self.gc_cs.lock().unwrap();
 
-        // Besides GC lock, branch creation task doesn't need to hold the `layer_removal_cs` lock,
-        // hence doesn't need to wait for compaction/GC because it ensures that the starting LSN
-        // of the child branch is not out of scope in the middle of the creation task by
-        // 1. holding the GC lock to prevent overwritting timeline GC data
+        // In order for the branch creation task to not wait for GC/compaction,
+        // we need to make sure that the starting LSN of the child branch is not out of scope midway by
+        //
+        // 1. holding the GC lock to prevent overwritting timeline's GC data
         // 2. checking both the latest GC cutoff LSN and latest GC info of the source timeline
-        // to avoid initializing the new branch using data removed by past GC iterations
+        //
+        // Step 2 is to avoid initializing the new branch using data removed by past GC iterations
         // or in-queue GC iterations.
 
         let mut timelines = self.timelines.lock().unwrap();
