@@ -1,8 +1,8 @@
 //!
-//! Zenith repository implementation that keeps old data in files on disk, and
+//! Timeline repository implementation that keeps old data in files on disk, and
 //! the recent changes in memory. See layered_repository/*_layer.rs files.
 //! The functions here are responsible for locating the correct layer for the
-//! get/put call, tracing timeline branching history as needed.
+//! get/put call, walking back the timeline branching history as needed.
 //!
 //! The files are stored in the .neon/tenants/<tenantid>/timelines/<timelineid>
 //! directory. See layered_repository/README for how the files are managed.
@@ -300,12 +300,12 @@ impl Repository for LayeredRepository {
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context("invalid branch start lsn")?;
 
+        // Determine prev-LSN for the new timeline. We can only determine it if
+        // the timeline was branched at the current end of the source timeline.
         let RecordLsn {
             last: src_last,
             prev: src_prev,
         } = src_timeline.get_last_record_rlsn();
-
-        // Use src_prev from the source timeline only if we branched at the last record.
         let dst_prev = if src_last == start_lsn {
             Some(src_prev)
         } else {
@@ -314,7 +314,6 @@ impl Repository for LayeredRepository {
 
         // create a new timeline directory
         let timelinedir = self.conf.timeline_path(&dst, &self.tenant_id);
-
         crashsafe_dir::create_dir(&timelinedir)?;
 
         // Create the metadata file, noting the ancestor of the new timeline.
@@ -759,7 +758,7 @@ impl LayeredRepository {
         // https://github.com/neondatabase/neon/issues/1555
         if !target_config_path.exists() {
             info!(
-                "Zenith tenant config is not found in {}",
+                "tenant config not found in {}",
                 target_config_path.display()
             );
             return Ok(Default::default());
@@ -858,7 +857,7 @@ impl LayeredRepository {
     //                 +-----baz-------->
     //
     //
-    // 1. Grab a mutex to prevent new timelines from being created
+    // 1. Grab 'gc_cs' mutex to prevent new timelines from being created
     // 2. Scan all timelines, and on each timeline, make note of the
     //    all the points where other timelines have been branched off.
     //    We will refrain from removing page versions at those LSNs.
@@ -903,7 +902,7 @@ impl LayeredRepository {
 
             // This is unresolved question for now, how to do gc in presence of remote timelines
             // especially when this is combined with branching.
-            // Somewhat related: https://github.com/zenithdb/zenith/issues/999
+            // Somewhat related: https://github.com/neondatabase/neon/issues/999
             if let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id() {
                 // If target_timeline is specified, we only need to know branchpoints of its children
                 if let Some(timelineid) = target_timeline_id {
@@ -933,7 +932,7 @@ impl LayeredRepository {
                 .get_timeline_load_internal(timeline_id, &mut *timelines)?
                 .expect("checked above that timeline is local and loaded");
 
-            // If target_timeline is specified, only GC it
+            // If target_timeline is specified, ignore all other timelines
             if let Some(target_timelineid) = target_timeline_id {
                 if timeline_id != target_timelineid {
                     continue;
