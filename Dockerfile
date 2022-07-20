@@ -17,6 +17,10 @@ RUN set -e \
 FROM neondatabase/rust:1.58 AS build
 ARG GIT_VERSION=local
 
+# Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
+# Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
+# cachepot falls back to local filesystem if S3 is misconfigured, not failing the build.
+ARG RUSTC_WRAPPER=cachepot
 ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
