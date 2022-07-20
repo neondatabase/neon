@@ -15,6 +15,5 @@ git-version = "0.3.5"
 pageserver = { path = "../pageserver" }
 control_plane = { path = "../control_plane" }
 safekeeper = { path = "../safekeeper" }
-postgres_ffi = { path = "../libs/postgres_ffi" }
 utils = { path = "../libs/utils" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
