@@ -88,7 +88,9 @@ jobs:
         id: cache_pg
         uses: actions/cache@v3
         with:
-          path: tmp_install/
+          path: |
+            tmp_install/
+            build/src/test/regress/*.so
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
@@ -143,7 +145,12 @@ jobs:
           fi
 
       - name: Install postgres binaries
-        run: cp -a tmp_install /tmp/neon/pg_install
+        run: |
+          cp -a tmp_install /tmp/neon/pg_install
+
+          # Include modules needed by the Postgres regression tests
+          mkdir -p /tmp/neon/pg_build/src/test/regress
+          cp -a build/src/test/regress/*.so /tmp/neon/pg_build/src/test/regress
 
       - name: Prepare neon artifact
         run: ZSTD_NBTHREADS=0 tar -C /tmp/neon/ -cf ./neon.tar.zst --zstd .
