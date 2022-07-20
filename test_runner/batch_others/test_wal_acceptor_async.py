@@ -405,42 +405,47 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch('test_concurrent_computes')
     asyncio.run(run_concurrent_computes(env))
 
-async def delayed_safekeeper_start(sk: Safekeeper, start_delay_sec: int = 2):
+
+# Stop safekeeper and check that query cannot be executed while safekeeper is down.
+# Query will insert a single row into a table.
+async def check_unavailability(sk: Safekeeper,
+                               conn: asyncpg.Connection,
+                               key: int,
+                               start_delay_sec: int = 2):
+    # shutdown one of two acceptors, that is, majority
+    sk.stop()
+
+    bg_query = asyncio.create_task(conn.execute(f"INSERT INTO t values ({key}, 'payload')"))
+
     await asyncio.sleep(start_delay_sec)
+    # ensure that the query has not been executed yet
+    assert not bg_query.done()
+
+    # start safekeeper and await the query
     sk.start()
+    await bg_query
+    assert bg_query.done()
+
 
 async def run_unavailability(env: NeonEnv, pg: Postgres):
-    start_delay_sec = 2
     conn = await pg.connect_async()
 
     # check basic work with table
     await conn.execute('CREATE TABLE t(key int primary key, value text)')
     await conn.execute("INSERT INTO t values (1, 'payload')")
 
-    # shutdown one of two acceptors, that is, majority
-    env.safekeepers[0].stop()
+    # stop safekeeper and check that query cannot be executed while safekeeper is down
+    await check_unavailability(env.safekeepers[0], conn, 2)
 
-    delayed_start = asyncio.create_task(delayed_safekeeper_start(env.safekeepers[0], start_delay_sec))
-    start = time.time()
-    await conn.execute("INSERT INTO t values (2, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    await delayed_start
+    # for the world's balance, do the same with second safekeeper
+    await check_unavailability(env.safekeepers[1], conn, 3)
 
-    # for the world's balance, do the same with second acceptor
-    env.safekeepers[1].stop()
-
-    delayed_start = asyncio.create_task(delayed_safekeeper_start(env.safekeepers[1], start_delay_sec))
-    start = time.time()
-    await conn.execute("INSERT INTO t values (3, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    await delayed_start
-
+    # check that we can execute queries after restart
     await conn.execute("INSERT INTO t values (4, 'payload')")
 
     result_sum = await conn.fetchval('SELECT sum(key) FROM t')
     assert result_sum == 10
+
 
 # When majority of acceptors is offline, commits are expected to be frozen
 def test_unavailability(neon_env_builder: NeonEnvBuilder):

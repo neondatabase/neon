@@ -202,6 +202,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     cur.execute('SELECT sum(key) FROM t')
     assert cur.fetchone() == (500500, )
 
+
 # shut down random subset of acceptors, sleep, wake them up, rinse, repeat
 def xmas_garland(acceptors, stop):
     while not bool(stop.value):
