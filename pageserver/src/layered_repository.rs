@@ -2294,14 +2294,23 @@ impl LayeredTimeline {
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
                 let mut next_key_size = 0u64;
+                let is_dup_layer = dup_end_lsn.is_valid();
+                dup_start_lsn = Lsn::INVALID;
+                if !same_key {
+                    dup_end_lsn = Lsn::INVALID;
+                }
                 // Determine size occupied by this key. We stop at next key, or when size becomes larger than target_file_size
                 for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
                     next_key_size = next_size;
                     if key != next_key {
-                        dup_end_lsn = Lsn::INVALID;
+                        if dup_end_lsn.is_valid() {
+                            dup_start_lsn = dup_end_lsn;
+                            dup_end_lsn = lsn_range.end;
+                        }
                         break;
                     }
-                    if key_values_total_size + next_size > target_file_size {
+                    key_values_total_size += next_size;
+                    if key_values_total_size > target_file_size {
                         // split key between multiple layers: such layer can contain only single key
                         dup_start_lsn = if dup_end_lsn.is_valid() {
                             dup_end_lsn
@@ -2311,12 +2320,19 @@ impl LayeredTimeline {
                         dup_end_lsn = next_lsn;
                         break;
                     }
-                    key_values_total_size += next_size;
+                }
+                // handle case when loop reaches last key
+                if dup_end_lsn.is_valid() && !dup_start_lsn.is_valid() {
+                    dup_start_lsn = dup_end_lsn;
+                    dup_end_lsn = lsn_range.end;
                 }
                 if writer.is_some() {
                     let written_size = writer.as_mut().unwrap().size();
                     // check if key cause layer overflow
-                    if written_size + key_values_total_size > target_file_size {
+                    if is_dup_layer
+                        || dup_end_lsn.is_valid()
+                        || written_size + key_values_total_size > target_file_size
+                    {
                         new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
                         writer = None;
                     }
@@ -2329,10 +2345,12 @@ impl LayeredTimeline {
                     self.timeline_id,
                     self.tenant_id,
                     key,
-                    if dup_start_lsn.is_valid() {
+                    if dup_end_lsn.is_valid() {
                         // this is a layer containing slice of values of the same key
+                        debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
                         dup_start_lsn..dup_end_lsn
                     } else {
+                        debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                         lsn_range.clone()
                     },
                 )?);
