@@ -248,14 +248,15 @@ def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     client = env.pageserver.http_client()
     res = assert_timeline_local(client, tenant_id, timeline_id)
     timeline_path = f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/"
-    assert res["local"]["current_physical_size"] == get_dir_size(timeline_path)
+    assert res["local"]["current_physical_size"] == get_timeline_dir_size(timeline_path)
 
 
-def get_dir_size(path: str) -> int:
-    """Get the directory's total size (not including sub-directories)"""
+def get_timeline_dir_size(path: str) -> int:
+    """Get the timeline directory's total size, which only counts the layer files' size."""
     sz = 0
     for f in os.listdir(path):
         f_path = os.path.join(path, f)
-        if os.path.isfile(f_path):
+        # "simple" check if a file is a layer file
+        if os.path.isfile(f_path) and (not f.endswith('temp')) and ("__" in f):
             sz += os.path.getsize(f_path)
     return sz

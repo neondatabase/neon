@@ -724,7 +724,7 @@ impl LayeredRepository {
             .map(LayeredTimelineEntry::Loaded);
         let _enter = info_span!("loading local timeline").entered();
 
-        let mut timeline = LayeredTimeline::new(
+        let timeline = LayeredTimeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
@@ -737,10 +737,6 @@ impl LayeredRepository {
         timeline
             .load_layer_map(disk_consistent_lsn)
             .context("failed to load layermap")?;
-
-        timeline
-            .init_physical_size()
-            .context("failed to initialize timeline's physical size")?;
 
         Ok(Arc::new(timeline))
     }
@@ -1426,6 +1422,8 @@ impl LayeredTimeline {
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
                 trace!("found layer {}", layer.filename().display());
+                self.physical_size
+                    .fetch_add(layer.path().metadata()?.len(), atomic::Ordering::SeqCst);
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
@@ -1449,6 +1447,8 @@ impl LayeredTimeline {
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
                 trace!("found layer {}", layer.filename().display());
+                self.physical_size
+                    .fetch_add(layer.path().metadata()?.len(), atomic::Ordering::SeqCst);
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
@@ -2119,13 +2119,7 @@ impl LayeredTimeline {
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                let new_image_path = image_layer.path();
-
-                // update the timeline's physical size
-                let sz = new_image_path.metadata()?.len();
-                self.physical_size.fetch_add(sz, atomic::Ordering::SeqCst);
-
-                layer_paths_to_upload.insert(new_image_path);
+                layer_paths_to_upload.insert(image_layer.path());
                 image_layers.push(image_layer);
             }
         }
@@ -2145,6 +2139,8 @@ impl LayeredTimeline {
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
+            self.physical_size
+                .fetch_add(l.path().metadata()?.len(), atomic::Ordering::SeqCst);
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -2293,7 +2289,13 @@ impl LayeredTimeline {
         let mut layers = self.layers.write().unwrap();
         let mut new_layer_paths = HashSet::with_capacity(new_layers.len());
         for l in new_layers {
-            new_layer_paths.insert(l.path());
+            let new_delta_path = l.path();
+
+            // update the timeline's physical size
+            self.physical_size
+                .fetch_add(new_delta_path.metadata()?.len(), atomic::Ordering::SeqCst);
+
+            new_layer_paths.insert(new_delta_path);
             layers.insert_historic(Arc::new(l));
         }
 
@@ -2301,10 +2303,12 @@ impl LayeredTimeline {
         // delete the old ones
         let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            l.delete()?;
             if let Some(path) = l.local_path() {
+                self.physical_size
+                    .fetch_sub(path.metadata()?.len(), atomic::Ordering::SeqCst);
                 layer_paths_do_delete.insert(path);
             }
+            l.delete()?;
             layers.remove_historic(l);
         }
         drop(layers);
@@ -2554,10 +2558,12 @@ impl LayeredTimeline {
         // while iterating it. BTreeMap::retain() would be another option)
         let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
-            doomed_layer.delete()?;
             if let Some(path) = doomed_layer.local_path() {
+                self.physical_size
+                    .fetch_sub(path.metadata()?.len(), atomic::Ordering::SeqCst);
                 layer_paths_to_delete.insert(path);
             }
+            doomed_layer.delete()?;
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
         }
@@ -2644,29 +2650,6 @@ impl LayeredTimeline {
                 Ok(img)
             }
         }
-    }
-
-    /// Initialize the physical size of the layered timeline on disk
-    pub fn init_physical_size(&mut self) -> Result<()> {
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
-        let timeline_dir_entries = std::fs::read_dir(&timeline_path)?;
-
-        let mut sz = 0;
-        for entry in timeline_dir_entries {
-            let f = entry?;
-            if f.file_type()?.is_file() {
-                debug!("timeline file: {}", f.path().to_str().unwrap());
-                sz += f.metadata()?.len();
-            }
-        }
-
-        debug!(
-            "physical size of timeline {} of tenant {}: {sz}",
-            self.timeline_id, self.tenant_id
-        );
-
-        self.physical_size.store(sz, atomic::Ordering::SeqCst);
-        Ok(())
     }
 }
 
