@@ -138,7 +138,7 @@ impl Tenant {
                     debug!("Branching: copy ancestor logical size");
                 } else {
                     debug!(
-                        "Brancing: ancestor LSN={}, branch LSN={}",
+                        "Branching: ancestor LSN={}, branch LSN={}",
                         ancestor_pgdir.tline.get_last_record_lsn(),
                         inmem_timeline.get_ancestor_lsn()
                     );
