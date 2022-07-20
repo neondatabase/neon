@@ -9,12 +9,12 @@ use std::{
 use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
 use fail::fail_point;
+use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;

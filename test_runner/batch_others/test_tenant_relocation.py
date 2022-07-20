@@ -26,7 +26,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.utils import lsn_from_hex, subprocess_capture
+from fixtures.utils import lsn_from_hex, lsn_to_hex, subprocess_capture
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -268,6 +268,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
     env.neon_cli.create_branch(
         new_branch_name="test_tenant_relocation_second",
         ancestor_branch_name="test_tenant_relocation_main",
+        ancestor_start_lsn=lsn_to_hex(current_lsn_main),
         tenant_id=tenant_id,
     )
     pg_second = env.postgres.create_start(branch_name='test_tenant_relocation_second',

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libc = "0.2"
 anyhow = "1.0"
 chrono = "0.4"
 clap = "3.0"
