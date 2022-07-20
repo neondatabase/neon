@@ -107,13 +107,8 @@ jobs:
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: mold -run make postgres -j$(nproc)
 
-      - name: Fix rustup
-        run: rustup override set 1.58
-
       - name: Run cargo build
         run: |
-          export CACHEPOT_BUCKET=neon-dev-bucket
-          export GIT_VERSION="${{github.sha}}"
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
 
       - name: Run cargo test
