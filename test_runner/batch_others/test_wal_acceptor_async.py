@@ -404,3 +404,50 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
 
     env.neon_cli.create_branch('test_concurrent_computes')
     asyncio.run(run_concurrent_computes(env))
+
+async def delayed_safekeeper_start(sk: Safekeeper, start_delay_sec: int = 2):
+    await asyncio.sleep(start_delay_sec)
+    sk.start()
+
+async def run_unavailability(env: NeonEnv, pg: Postgres):
+    start_delay_sec = 2
+    conn = await pg.connect_async()
+
+    # check basic work with table
+    await conn.execute('CREATE TABLE t(key int primary key, value text)')
+    await conn.execute("INSERT INTO t values (1, 'payload')")
+
+    # shutdown one of two acceptors, that is, majority
+    env.safekeepers[0].stop()
+
+    delayed_start = asyncio.create_task(delayed_safekeeper_start(env.safekeepers[0], start_delay_sec))
+    start = time.time()
+    await conn.execute("INSERT INTO t values (2, 'payload')")
+    # ensure that the query above was hanging while acceptor was down
+    assert (time.time() - start) >= start_delay_sec
+    await delayed_start
+
+    # for the world's balance, do the same with second acceptor
+    env.safekeepers[1].stop()
+
+    delayed_start = asyncio.create_task(delayed_safekeeper_start(env.safekeepers[1], start_delay_sec))
+    start = time.time()
+    await conn.execute("INSERT INTO t values (3, 'payload')")
+    # ensure that the query above was hanging while acceptor was down
+    assert (time.time() - start) >= start_delay_sec
+    await delayed_start
+
+    await conn.execute("INSERT INTO t values (4, 'payload')")
+
+    result_sum = await conn.fetchval('SELECT sum(key) FROM t')
+    assert result_sum == 10
+
+# When majority of acceptors is offline, commits are expected to be frozen
+def test_unavailability(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 2
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch('test_safekeepers_unavailability')
+    pg = env.postgres.create_start('test_safekeepers_unavailability')
+
+    asyncio.run(run_unavailability(env, pg))
