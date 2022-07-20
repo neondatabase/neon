@@ -46,17 +46,17 @@ CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
 
 #
-# Top level Makefile to build Zenith and PostgreSQL
+# Top level Makefile to build Neon and PostgreSQL
 #
 .PHONY: all
-all: zenith postgres
+all: neon postgres
 
-### Zenith Rust bits
+### Neon Rust bits
 #
 # The 'postgres_ffi' depends on the Postgres headers.
-.PHONY: zenith
-zenith: postgres-headers
-	+@echo "Compiling Zenith"
+.PHONY: neon
+neon: postgres-headers
+	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
