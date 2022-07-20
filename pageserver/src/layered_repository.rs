@@ -1965,8 +1965,13 @@ impl LayeredTimeline {
             layers.insert_historic(Arc::new(new_delta));
         }
 
+        // update the timeline's physical size
+        let sz = new_delta_path.metadata()?.len();
+        self.physical_size.fetch_add(sz, atomic::Ordering::SeqCst);
+
+        // update metrics
         NUM_PERSISTENT_FILES_CREATED.inc_by(1);
-        PERSISTENT_BYTES_WRITTEN.inc_by(new_delta_path.metadata()?.len());
+        PERSISTENT_BYTES_WRITTEN.inc_by(sz);
 
         Ok(new_delta_path)
     }
@@ -2114,7 +2119,13 @@ impl LayeredTimeline {
                     }
                 }
                 let image_layer = image_layer_writer.finish()?;
-                layer_paths_to_upload.insert(image_layer.path());
+                let new_image_path = image_layer.path();
+
+                // update the timeline's physical size
+                let sz = new_image_path.metadata()?.len();
+                self.physical_size.fetch_add(sz, atomic::Ordering::SeqCst);
+
+                layer_paths_to_upload.insert(new_image_path);
                 image_layers.push(image_layer);
             }
         }

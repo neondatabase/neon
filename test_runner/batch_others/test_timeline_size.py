@@ -201,9 +201,28 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
 
+def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_init')
+    pg = env.postgres.create_start("test_timeline_physical_size_init")
+
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+            cur.execute("""
+                INSERT INTO foo
+                    SELECT 'long string to consume some space' || g
+                    FROM generate_series(1, 1000) g
+            """)
+
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    assert_physical_size(env, env.initial_tenant, new_timeline_id)
+
+
 def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
     # Override default checkpointer settings to run it more often
-    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
+    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance=10000,compaction_threshold=2,image_creation_threshold=1}"
+
     env = neon_env_builder.init_start()
 
     new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_compaction')
@@ -218,6 +237,7 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
                     FROM generate_series(1, 100000) g
             """)
 
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
     env.pageserver.safe_psql(f"compact {env.initial_tenant.hex} {new_timeline_id.hex}")
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
