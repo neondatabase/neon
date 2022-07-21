@@ -12,7 +12,7 @@ on:
       duration:
         description: "Duration of pgbench test (doesn't include pgbench init). Supports H/M/s"
         require: false
-        default: "10m"
+        default: "1h"
       vacuum:
         description: "Add vacuum option to commands"
         type: boolean
@@ -21,6 +21,11 @@ on:
 
 jobs:
   bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        connstr: [ CAPTEST_30GB_CONNSTR, CAPTEST_100GB_CONNSTR, CAPTEST_200GB_CONNSTR ]
+
     runs-on: [self-hosted, dev]
     timeout-minutes: 1440 # 24h
 
@@ -47,18 +52,24 @@ jobs:
         ./scripts/pysync
 
     - name: Benchmark init
+      shell: bash -ex {0}
       env:
         TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
-        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
         TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
         PLATFORM: "neon-captest"
-        BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
         REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
         POSTGRES_DISTRIB_DIR: /usr
 
       run: |
         rm -rf perf-report-staging
         mkdir -p perf-report-staging
+
+        TEST_PG_BENCH_SCALES_MATRIX=${{ matrix.connstr }}
+        TEST_PG_BENCH_SCALES_MATRIX=${TEST_PG_BENCH_SCALES_MATRIX#CAPTEST_}
+        TEST_PG_BENCH_SCALES_MATRIX=${TEST_PG_BENCH_SCALES_MATRIX%_CONNSTR}
+        export TEST_PG_BENCH_SCALES_MATRIX="${TEST_PG_BENCH_SCALES_MATRIX}"
+
         psql $BENCHMARK_CONNSTR -c "SELECT 1"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "init" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
 
@@ -70,50 +81,50 @@ jobs:
         name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
         path: test_output/**/*pgbench_*.*
 
-    - name: Benchmark simple-update
-      env:
-        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
-        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
-        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
-        PLATFORM: "neon-captest"
-        BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
-        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
-        POSTGRES_DISTRIB_DIR: /usr
+    # - name: Benchmark simple-update
+    #   env:
+    #     TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
+    #     TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
+    #     TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
+    #     PLATFORM: "neon-captest"
+    #     BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
+    #     REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+    #     POSTGRES_DISTRIB_DIR: /usr
 
-      run: |
-        rm -rf perf-report-staging
-        mkdir -p perf-report-staging
-        psql $BENCHMARK_CONNSTR -c "SELECT 1"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
+    #   run: |
+    #     rm -rf perf-report-staging
+    #     mkdir -p perf-report-staging
+    #     psql $BENCHMARK_CONNSTR -c "SELECT 1"
+    #     ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
 
-    - name: Upload pgbench logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        retention-days: 7
-        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
-        path: test_output/**/*pgbench_*.*
+    # - name: Upload pgbench logs
+    #   if: always()
+    #   uses: actions/upload-artifact@v3
+    #   with:
+    #     retention-days: 7
+    #     name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
+    #     path: test_output/**/*pgbench_*.*
 
-    - name: Benchmark select-only
-      env:
-        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
-        TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
-        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
-        PLATFORM: "neon-captest"
-        BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
-        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
-        POSTGRES_DISTRIB_DIR: /usr
+    # - name: Benchmark select-only
+    #   env:
+    #     TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '1h' }}"
+    #     TEST_PG_BENCH_SCALES_MATRIX: "${{ inputs.db_size || '100gb' }}"
+    #     TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || false }}"
+    #     PLATFORM: "neon-captest"
+    #     BENCHMARK_CONNSTR: "${{ secrets.BIGDB_CAPTEST_CONNSTR }}"
+    #     REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+    #     POSTGRES_DISTRIB_DIR: /usr
 
-      run: |
-        rm -rf perf-report-staging
-        mkdir -p perf-report-staging
-        psql $BENCHMARK_CONNSTR -c "SELECT 1"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
+    #   run: |
+    #     rm -rf perf-report-staging
+    #     mkdir -p perf-report-staging
+    #     psql $BENCHMARK_CONNSTR -c "SELECT 1"
+    #     ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 86400
 
-    - name: Upload pgbench logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        retention-days: 7
-        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
-        path: test_output/**/*pgbench_*.*
+    # - name: Upload pgbench logs
+    #   if: always()
+    #   uses: actions/upload-artifact@v3
+    #   with:
+    #     retention-days: 7
+    #     name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
+    #     path: test_output/**/*pgbench_*.*
