@@ -316,6 +316,18 @@ impl Layer for DeltaLayer {
         }
     }
 
+    fn key_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a> {
+        let inner = match self.load() {
+            Ok(inner) => inner,
+            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
+        };
+
+        match DeltaKeyIter::new(inner) {
+            Ok(iter) => Box::new(iter),
+            Err(e) => panic!("Layer index is corrupted: {e:?}"),
+        }
+    }
+
     fn delete(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
@@ -820,5 +832,77 @@ impl<'a> DeltaValueIter<'a> {
         } else {
             Ok(None)
         }
+    }
+}
+///
+/// Iterator over all keys stored in a delta layer
+///
+/// FIXME: This creates a Vector to hold all keys.
+/// That takes up quite a lot of memory. Should do this in a more streaming
+/// fashion.
+///
+struct DeltaKeyIter {
+    all_keys: Vec<(DeltaKey, u64)>,
+    next_idx: usize,
+}
+
+impl Iterator for DeltaKeyIter {
+    type Item = (Key, Lsn, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_idx < self.all_keys.len() {
+            let (delta_key, size) = &self.all_keys[self.next_idx];
+
+            let key = delta_key.key();
+            let lsn = delta_key.lsn();
+
+            self.next_idx += 1;
+            Some((key, lsn, *size))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> DeltaKeyIter {
+    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            inner.index_start_blk,
+            inner.index_root_blk,
+            file,
+        );
+
+        let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value| {
+                let delta_key = DeltaKey::from_slice(key);
+                let pos = BlobRef(value).pos();
+                if let Some(last) = all_keys.last_mut() {
+                    if last.0.key() == delta_key.key() {
+                        return true;
+                    } else {
+                        // subtract offset of new key BLOB and first blob of this key
+                        // to get total size if values associated with this key
+                        let first_pos = last.1;
+                        last.1 = pos - first_pos;
+                    }
+                }
+                all_keys.push((delta_key, pos));
+                true
+            },
+        )?;
+        if let Some(last) = all_keys.last_mut() {
+            // Last key occupies all space till end of layer
+            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+        }
+        let iter = DeltaKeyIter {
+            all_keys,
+            next_idx: 0,
+        };
+
+        Ok(iter)
     }
 }

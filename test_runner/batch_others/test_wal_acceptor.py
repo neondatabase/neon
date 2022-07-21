@@ -203,61 +203,6 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     assert cur.fetchone() == (500500, )
 
 
-start_delay_sec = 2
-
-
-def delayed_safekeeper_start(wa):
-    time.sleep(start_delay_sec)
-    wa.start()
-
-
-# When majority of acceptors is offline, commits are expected to be frozen
-def test_unavailability(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_safekeepers = 2
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch('test_safekeepers_unavailability')
-    pg = env.postgres.create_start('test_safekeepers_unavailability')
-
-    # we rely upon autocommit after each statement
-    # as waiting for acceptors happens there
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
-    # check basic work with table
-    cur.execute('CREATE TABLE t(key int primary key, value text)')
-    cur.execute("INSERT INTO t values (1, 'payload')")
-
-    # shutdown one of two acceptors, that is, majority
-    env.safekeepers[0].stop()
-
-    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[0], ))
-    proc.start()
-
-    start = time.time()
-    cur.execute("INSERT INTO t values (2, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    proc.join()
-
-    # for the world's balance, do the same with second acceptor
-    env.safekeepers[1].stop()
-
-    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[1], ))
-    proc.start()
-
-    start = time.time()
-    cur.execute("INSERT INTO t values (3, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    proc.join()
-
-    cur.execute("INSERT INTO t values (4, 'payload')")
-
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (10, )
-
-
 # shut down random subset of acceptors, sleep, wake them up, rinse, repeat
 def xmas_garland(acceptors, stop):
     while not bool(stop.value):
