@@ -1106,6 +1106,7 @@ pub struct LayeredTimeline {
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
 ///
+#[derive(Debug)]
 struct GcInfo {
     /// Specific LSNs that are needed.
     ///
@@ -2485,6 +2486,8 @@ impl LayeredTimeline {
             pitr_cutoff_lsn = gc_info.horizon_cutoff;
         }
         gc_info.pitr_cutoff = pitr_cutoff_lsn;
+
+        info!("new gc info: {gc_info:?}");
 
         Ok(())
     }
