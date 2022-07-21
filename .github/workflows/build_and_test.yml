@@ -215,34 +215,34 @@ jobs:
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
-  benchmarks:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ build-neon ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ release ]
-        rust_toolchain: [ 1.58 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
+  # benchmarks:
+  #   runs-on: [ self-hosted, Linux, k8s-runner ]
+  #   needs: [ build-neon ]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       build_type: [ release ]
+  #       rust_toolchain: [ 1.58 ]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v3
+  #       with:
+  #         submodules: true
+  #         fetch-depth: 2
 
-      - name: Pytest benchmarks
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: performance
-          run_in_parallel: false
-          save_perf_report: true
-        env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-      # XXX: no coverage data handling here, since benchmarks are run on release builds,
-      # while coverage is currently collected for the debug ones
+  #     - name: Pytest benchmarks
+  #       uses: ./.github/actions/run-python-test-set
+  #       with:
+  #         build_type: ${{ matrix.build_type }}
+  #         rust_toolchain: ${{ matrix.rust_toolchain }}
+  #         test_selection: performance
+  #         run_in_parallel: false
+  #         save_perf_report: true
+  #       env:
+  #         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+  #         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+  #     # XXX: no coverage data handling here, since benchmarks are run on release builds,
+  #     # while coverage is currently collected for the debug ones
 
   coverage-report:
     runs-on: [ self-hosted, Linux, k8s-runner ]

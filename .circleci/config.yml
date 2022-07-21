@@ -358,12 +358,12 @@ workflows:
           test_selection: batch_others
           requires:
             - build-neon-<< matrix.build_type >>
-      - run-pytest:
-          name: benchmarks
-          context: PERF_TEST_RESULT_CONNSTR
-          build_type: release
-          test_selection: performance
-          run_in_parallel: false
-          save_perf_report: true
-          requires:
-            - build-neon-release
+      # - run-pytest:
+      #     name: benchmarks
+      #     context: PERF_TEST_RESULT_CONNSTR
+      #     build_type: release
+      #     test_selection: performance
+      #     run_in_parallel: false
+      #     save_perf_report: true
+      #     requires:
+      #       - build-neon-release
