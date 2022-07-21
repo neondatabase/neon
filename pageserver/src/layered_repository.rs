@@ -970,6 +970,7 @@ impl LayeredRepository {
                 gc_timelines.push(timeline);
             }
         }
+        info!("Finishing collecting GC info for all timelines");
         drop(timelines);
         drop(gc_cs);
 

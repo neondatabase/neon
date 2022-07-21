@@ -1101,6 +1101,8 @@ impl postgres_backend::Handler for PageServerHandler {
                 .map(|h| h.as_str().parse())
                 .unwrap_or_else(|| Ok(repo.get_gc_horizon()))?;
 
+            info!("Starting gc for {timelineid}");
+
             // Use tenant's pitr setting
             let pitr = repo.get_pitr_interval();
             let result = repo.gc_iteration(Some(timelineid), gc_horizon, pitr, true)?;
