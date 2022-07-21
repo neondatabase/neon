@@ -522,7 +522,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn)?;
+                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true)?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
             }
@@ -1110,34 +1110,34 @@ mod tests {
 
         // Check page contents at each LSN
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false)?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1150,18 +1150,18 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false)?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x50))?, 3);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false)?,
             TEST_IMG("foo blk 2 at 5")
         );
 
@@ -1177,11 +1177,11 @@ mod tests {
         m.commit()?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70))?, 2);
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false)?,
             ZERO_PAGE
         );
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false)?,
             TEST_IMG("foo blk 1")
         );
 
@@ -1192,12 +1192,12 @@ mod tests {
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, 1501);
         for blk in 2..1500 {
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false)?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
-            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80))?,
+            tline.get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false)?,
             TEST_IMG("foo blk 1500")
         );
 
@@ -1273,7 +1273,7 @@ mod tests {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1291,7 +1291,7 @@ mod tests {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1302,7 +1302,7 @@ mod tests {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false)?,
                 TEST_IMG(&data)
             );
         }
@@ -1324,7 +1324,7 @@ mod tests {
             let lsn = Lsn(0x80);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80))?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false)?,
                 TEST_IMG(&data)
             );
         }
