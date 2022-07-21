@@ -282,9 +282,9 @@ impl InMemoryLayer {
         let off = {
             SER_BUFFER.with(|x| -> Result<_> {
                 let mut buf = x.borrow_mut();
+                buf.clear();
                 val.ser_into(&mut (*buf))?;
                 let off = inner.file.write_blob(&buf)?;
-                buf.clear();
                 Ok(off)
             })?
         };
