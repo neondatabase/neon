@@ -884,7 +884,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     match sub_match.subcommand() {
         Some(("start", start_match)) => {
             if let Err(e) = pageserver.start(&pageserver_config_overrides(start_match)) {
-                eprintln!("pageserver start failed: {}", e);
+                eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
         }
@@ -906,7 +906,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
 
             if let Err(e) = pageserver.start(&pageserver_config_overrides(restart_match)) {
-                eprintln!("pageserver start failed: {}", e);
+                eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
         }
