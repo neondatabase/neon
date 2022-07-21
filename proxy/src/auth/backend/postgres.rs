@@ -58,7 +58,10 @@ impl<'a> Api<'a> {
 
             // We shouldn't get more than one row anyway.
             [row, ..] => {
-                let entry = row.try_get(0).map_err(io_error)?;
+                let entry = row
+                    .try_get("rolpassword")
+                    .map_err(|e| io_error(format!("failed to read user's password: {e}")))?;
+
                 scram::ServerSecret::parse(entry)
                     .map(AuthInfo::Scram)
                     .or_else(|| {

@@ -93,7 +93,9 @@ impl NodeInfo {
 }
 
 pub struct PostgresConnection {
+    /// Socket connected to a compute node.
     pub stream: TcpStream,
+    /// PostgreSQL version of this instance.
     pub version: String,
 }
 
