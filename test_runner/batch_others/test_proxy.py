@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PSQL
+from fixtures.neon_fixtures import PgProtocol
 
 
 def test_proxy_select_1(static_proxy):
@@ -58,6 +59,15 @@ async def test_psql_session_id(link_proxy):
     log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
 
     # todo: second part of: test_project_psql_link_auth from cloud/tests_e2e/tests/test_project.py
+
+
+@pytest.mark.asyncio
+async def test_psql_session_id_second_attempt(link_proxy):
+    def notice_listener(connection, message):
+        log.info(f"connection {connection}")
+        log.info(f"message {message}")
+
+    await link_proxy.connect_async(callback=notice_listener, options="project=generic-project-name")
 
 
 # Pass extra options to the server.
