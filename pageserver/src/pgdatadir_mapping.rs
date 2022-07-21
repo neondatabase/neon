@@ -80,23 +80,25 @@ impl<R: Repository> DatadirTimeline<R> {
     /// the timeline.
     ///
     /// This provides a transaction-like interface to perform a bunch
-    /// of modifications atomically, all stamped with one LSN.
+    /// of modifications atomically.
     ///
-    /// To ingest a WAL record, call begin_modification(lsn) to get a
+    /// To ingest a WAL record, call begin_modification() to get a
     /// DatadirModification object. Use the functions in the object to
     /// modify the repository state, updating all the pages and metadata
-    /// that the WAL record affects. When you're done, call commit() to
-    /// commit the changes.
+    /// that the WAL record affects. When you're done, call commit(lsn) to
+    /// commit the changes. All the changes will be stamped with the specified LSN.
+    ///
+    /// Calling commit(lsn) will flush all the changes and reset the state,
+    /// so the `DatadirModification` struct can be reused to perform the next modification.
     ///
     /// Note that any pending modifications you make through the
     /// modification object won't be visible to calls to the 'get' and list
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification<R> {
+    pub fn begin_modification(&self) -> DatadirModification<R> {
         DatadirModification {
             tline: self,
-            lsn,
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
@@ -533,8 +535,6 @@ pub struct DatadirModification<'a, R: Repository> {
     /// in the state in 'tline' yet.
     pub tline: &'a DatadirTimeline<R>,
 
-    lsn: Lsn,
-
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
@@ -920,7 +920,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self, lsn: Lsn) -> Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -934,7 +934,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let mut result: Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
+                result = writer.put(key, lsn, value);
                 false
             } else {
                 true
@@ -956,20 +956,22 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     ///
     /// Finish this atomic update, writing all the updated keys to the
     /// underlying timeline.
+    /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(self) -> Result<()> {
+    pub fn commit(&mut self, lsn: Lsn) -> Result<()> {
         let writer = self.tline.tline.writer();
 
         let pending_nblocks = self.pending_nblocks;
+        self.pending_nblocks = 0;
 
-        for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, &value)?;
+        for (key, value) in self.pending_updates.drain() {
+            writer.put(key, lsn, &value)?;
         }
-        for key_range in self.pending_deletions {
-            writer.delete(key_range.clone(), self.lsn)?;
+        for key_range in self.pending_deletions.drain(..) {
+            writer.delete(key_range, lsn)?;
         }
 
-        writer.finish_write(self.lsn);
+        writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
             self.tline.current_logical_size.fetch_add(
@@ -1407,9 +1409,9 @@ pub fn create_test_timeline<R: Repository>(
 ) -> Result<Arc<crate::DatadirTimeline<R>>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let tline = DatadirTimeline::new(tline, 256 * 1024);
-    let mut m = tline.begin_modification(Lsn(8));
+    let mut m = tline.begin_modification();
     m.init_empty()?;
-    m.commit()?;
+    m.commit(Lsn(8))?;
     Ok(Arc::new(tline))
 }
 
