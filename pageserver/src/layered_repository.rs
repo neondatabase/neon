@@ -325,15 +325,20 @@ impl Repository for LayeredRepository {
             }
         }
         // Copy logical size from source timeline if we are branching on te last positon.
-        let src_pgdir = tenant_mgr::get_local_timeline_with_load(self.tenant_id, src)?;
-        let logical_size = src_pgdir.get_current_logical_size();
-        // Check LSN after gettig logical size to exclude rac condition:
-        // when ancestor timeline is concurrently updated
-        let init_logical_size = if src_timeline.get_last_record_lsn() == start_lsn {
-            Some(logical_size)
-        } else {
-            None
-        };
+        let init_logical_size =
+            if let Ok(src_pgdir) = tenant_mgr::get_local_timeline_with_load(self.tenant_id, src) {
+                let logical_size = src_pgdir.get_current_logical_size();
+                // Check LSN after gettig logical size to exclude rac condition:
+                // when ancestor timeline is concurrently updated
+                if src_timeline.get_last_record_lsn() == start_lsn {
+                    Some(logical_size)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Determine prev-LSN for the new timeline. We can only determine it if
         // the timeline was branched at the current end of the source timeline.
         let RecordLsn {
