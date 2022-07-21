@@ -2,11 +2,10 @@
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import shutil, os
-from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.neon_fixtures import NeonEnvBuilder, assert_timeline_local, wait_until, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, RemoteStorageKind, assert_timeline_local, available_remote_storages, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
 from fixtures.utils import lsn_from_hex, query_scalar
 import pytest
@@ -29,18 +28,19 @@ import pytest
 #   * queries the specific data, ensuring that it matches the one stored before
 #
 # The tests are done for all types of remote storage pageserver supports.
-@pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, storage_type: str):
+@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+def test_remote_storage_backup_and_restore(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storatge_kind: RemoteStorageKind,
+):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
-    if storage_type == 'local_fs':
-        neon_env_builder.enable_local_fs_remote_storage()
-    elif storage_type == 'mock_s3':
-        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
-    else:
-        raise RuntimeError(f'Unknown storage type: {storage_type}')
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storatge_kind,
+        test_name='test_remote_storage_backup_and_restore',
+    )
 
     data_id = 1
     data_secret = 'very secret secret'
