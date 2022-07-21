@@ -22,6 +22,7 @@ import subprocess
 import time
 import filecmp
 import tempfile
+import asyncio
 
 from contextlib import closing
 from pathlib import Path
@@ -32,6 +33,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing import Any, Callable, Dict, Iterator, List, Optional, Type, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
+from asyncio.subprocess import Process
 
 import requests
 import backoff  # type: ignore
@@ -1513,8 +1515,40 @@ def remote_pg(test_output_dir: Path) -> Iterator[RemotePostgres]:
         yield remote_pg
 
 
+class PSQL:
+    """
+    Helper class to make it easier to run psql in the proxy tests.
+    Copied and modified from PSQL from cloud/tests_e2e/common/psql.py
+    """
+
+    path: str
+    database_url: str
+
+    def __init__(
+        self,
+        path: str = "psql",
+        host: str = "localhost",
+        port: int = 5432,
+    ):
+        assert shutil.which(path)
+
+        self.path = path
+        self.database_url = f"postgres://{host}:{port}/main?options=project%3Dmy-cluster-123"
+
+    async def run(self, query=None) -> Union[tuple[int, str], Process]:
+        run_args = [self.path, self.database_url]
+        run_args += (["--command", query] if query is not None else [])
+
+        cmd_line = ' '.join(["'" + x + "'" if ' ' in x else x for x in run_args])
+        log.info(f"running psql with command line ::: {cmd_line}")
+        log.debug(f"running psql with command line ::: {cmd_line}")
+        return await asyncio.create_subprocess_exec(*run_args,
+                                                    stdout=subprocess.PIPE,
+                                                    stderr=subprocess.PIPE)
+
+
 class NeonProxy(PgProtocol):
-    def __init__(self, port: int, pg_port: int):
+    def __init__(self, port: int, pg_port=None):
         super().__init__(host="127.0.0.1",
                          user="proxy_user",
                          password="pytest2",
@@ -1525,9 +1559,14 @@ class NeonProxy(PgProtocol):
         self.port = port
         self.pg_port = pg_port
         self._popen: Optional[subprocess.Popen[bytes]] = None
+        self.link_auth_uri = "http://dummy-uri"
 
     def start(self) -> None:
+        """
+        Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
+        """
         assert self._popen is None
+        assert self.pg_port is not None
 
         # Start proxy
         bin_proxy = os.path.join(str(neon_binpath), 'proxy')
@@ -1537,6 +1576,24 @@ class NeonProxy(PgProtocol):
         args.extend(["--auth-backend", "postgres"])
         args.extend(
             ["--auth-endpoint", f"postgres://proxy_auth:pytest1@localhost:{self.pg_port}/postgres"])
+        self._popen = subprocess.Popen(args)
+        self._wait_until_ready()
+
+    def start_with_link_auth(self) -> None:
+        """
+        Starts a proxy with option '--auth-backend link' and a dummy authentication link '--uri dummy-auth-link'."
+        """
+        assert self._popen is None
+
+        # Start proxy
+        bin_proxy = os.path.join(str(neon_binpath), 'proxy')
+        args = [bin_proxy]
+        args.extend(["--http", f"{self.host}:{self.http_port}"])
+        args.extend(["--proxy", f"{self.host}:{self.port}"])
+        args.extend(["--auth-backend", "link"])
+        args.extend(["--uri", self.link_auth_uri])
+        arg_str = ' '.join(args)
+        log.info(f"starting proxy with command line ::: {arg_str}")
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1552,6 +1609,15 @@ class NeonProxy(PgProtocol):
             # NOTE the process will die when we're done with tests anyway, because
             # it's a child process. This is mostly to clean up in between different tests.
             self._popen.kill()
+
+
+@pytest.fixture(scope='function')
+def link_proxy(port_distributor) -> Iterator[NeonProxy]:
+    """Neon proxy that routes through link auth."""
+    port = port_distributor.get_port()
+    with NeonProxy(port) as proxy:
+        proxy.start_with_link_auth()
+        yield proxy
 
 
 @pytest.fixture(scope='function')
