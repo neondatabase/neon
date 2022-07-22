@@ -185,14 +185,12 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_init')
     pg = env.postgres.create_start("test_timeline_physical_size_init")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE TABLE foo (t text)")
-            cur.execute("""
-                INSERT INTO foo
-                    SELECT 'long string to consume some space' || g
-                    FROM generate_series(1, 1000) g
-            """)
+    pg.safe_psql_many([
+        "CREATE TABLE foo (t text)",
+        """INSERT INTO foo
+           SELECT 'long string to consume some space' || g
+           FROM generate_series(1, 1000) g""",
+    ])
 
     # restart the pageserer to force calculating timeline's initial physical size
     env.pageserver.stop()
@@ -229,14 +227,12 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_compaction')
     pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE TABLE foo (t text)")
-            cur.execute("""
-                INSERT INTO foo
-                    SELECT 'long string to consume some space' || g
-                    FROM generate_series(1, 100000) g
-            """)
+    pg.safe_psql_many([
+        "CREATE TABLE foo (t text)",
+        """INSERT INTO foo
+           SELECT 'long string to consume some space' || g
+           FROM generate_series(1, 100000) g""",
+    ])
 
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
     env.pageserver.safe_psql(f"compact {env.initial_tenant.hex} {new_timeline_id.hex}")
@@ -253,21 +249,19 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_compaction')
     pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE TABLE foo (t text)")
-            cur.execute("""
-                INSERT INTO foo
-                    SELECT 'long string to consume some space' || g
-                    FROM generate_series(1, 100000) g
-            """)
-            env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
-            cur.execute("""
-                INSERT INTO foo
-                    SELECT 'long string to consume some space' || g
-                    FROM generate_series(1, 100000) g
-            """)
-            env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    pg.safe_psql_many([
+        "CREATE TABLE foo (t text)",
+        """INSERT INTO foo
+           SELECT 'long string to consume some space' || g
+           FROM generate_series(1, 100000) g""",
+    ])
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    pg.safe_psql("""
+        INSERT INTO foo
+            SELECT 'long string to consume some space' || g
+            FROM generate_series(1, 100000) g
+    """)
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
 
     env.pageserver.safe_psql(f"do_gc {env.initial_tenant.hex} {new_timeline_id.hex} 0")
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
