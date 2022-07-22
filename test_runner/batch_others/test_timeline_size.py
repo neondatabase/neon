@@ -1,5 +1,6 @@
 from contextlib import closing
 import os
+import pathlib
 from uuid import UUID
 import psycopg2.extras
 import psycopg2.errors
@@ -272,16 +273,17 @@ def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     matches the total physical size of the timeline on disk"""
     client = env.pageserver.http_client()
     res = assert_timeline_local(client, tenant_id, timeline_id)
-    timeline_path = f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/"
+    timeline_path = pathlib.Path(
+        f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/")
     assert res["local"]["current_physical_size"] == get_timeline_dir_size(timeline_path)
 
 
-def get_timeline_dir_size(path: str) -> int:
+def get_timeline_dir_size(path: pathlib.Path) -> int:
     """Get the timeline directory's total size, which only counts the layer files' size."""
     sz = 0
     for f in os.listdir(path):
-        f_path = os.path.join(path, f)
+        f_path = path.joinpath(f)
         # "simple" check if a file is a layer file
         if os.path.isfile(f_path) and (not f.endswith('temp')) and ("__" in f):
-            sz += os.path.getsize(f_path)
+            sz += f_path.stat().st_size
     return sz
