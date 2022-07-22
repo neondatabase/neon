@@ -51,6 +51,7 @@ pub struct LocalTimelineInfo {
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
     pub current_physical_size: Option<i64>,  // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
+    pub current_physical_size_non_incremental: Option<i64>,
     pub timeline_state: LocalTimelineState,
 }
 
@@ -58,6 +59,7 @@ impl LocalTimelineInfo {
     pub fn from_loaded_timeline<R: Repository>(
         datadir_tline: &DatadirTimeline<R>,
         include_non_incremental_logical_size: bool,
+        include_non_incremental_physical_size: bool,
     ) -> anyhow::Result<Self> {
         let last_record_lsn = datadir_tline.tline.get_last_record_lsn();
         let info = LocalTimelineInfo {
@@ -77,6 +79,11 @@ impl LocalTimelineInfo {
             current_physical_size: Some(datadir_tline.tline.get_physical_size()),
             current_logical_size_non_incremental: if include_non_incremental_logical_size {
                 Some(datadir_tline.get_current_logical_size_non_incremental(last_record_lsn)?)
+            } else {
+                None
+            },
+            current_physical_size_non_incremental: if include_non_incremental_physical_size {
+                Some(datadir_tline.tline.get_physical_size_non_incremental()?)
             } else {
                 None
             },
@@ -101,6 +108,7 @@ impl LocalTimelineInfo {
             current_logical_size: None,
             current_physical_size: None,
             current_logical_size_non_incremental: None,
+            current_physical_size_non_incremental: None,
         }
     }
 
@@ -109,12 +117,17 @@ impl LocalTimelineInfo {
         timeline_id: ZTimelineId,
         repo_timeline: &RepositoryTimeline<T>,
         include_non_incremental_logical_size: bool,
+        include_non_incremental_physical_size: bool,
     ) -> anyhow::Result<Self> {
         match repo_timeline {
             RepositoryTimeline::Loaded(_) => {
                 let datadir_tline =
                     tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
-                Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
+                Self::from_loaded_timeline(
+                    &datadir_tline,
+                    include_non_incremental_logical_size,
+                    include_non_incremental_physical_size,
+                )
             }
             RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
         }
@@ -325,6 +338,7 @@ fn bootstrap_timeline<R: Repository>(
 pub(crate) fn get_local_timelines(
     tenant_id: ZTenantId,
     include_non_incremental_logical_size: bool,
+    include_non_incremental_physical_size: bool,
 ) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("Failed to get repo for tenant {}", tenant_id))?;
@@ -339,6 +353,7 @@ pub(crate) fn get_local_timelines(
                 timeline_id,
                 &repository_timeline,
                 include_non_incremental_logical_size,
+                include_non_incremental_physical_size,
             )?,
         ))
     }
@@ -392,7 +407,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let loaded_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&loaded_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&loaded_timeline, false, false)
                 .context("cannot fill timeline info")?
         }
         None => {
@@ -400,7 +415,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let new_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&new_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&new_timeline, false, false)
                 .context("cannot fill timeline info")?
         }
     };

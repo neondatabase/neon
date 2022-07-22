@@ -1270,6 +1270,26 @@ impl Timeline for LayeredTimeline {
     fn get_physical_size(&self) -> i64 {
         self.current_physical_size_gauge.get()
     }
+
+    fn get_physical_size_non_incremental(&self) -> anyhow::Result<i64> {
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        // total size of layer files in the current timeline directory
+        let mut total_physical_size = 0;
+
+        for direntry in fs::read_dir(timeline_path)? {
+            let direntry = direntry?;
+            let fname = direntry.file_name();
+            let fname = fname.to_string_lossy();
+
+            if ImageFileName::parse_str(&fname).is_some()
+                || DeltaFileName::parse_str(&fname).is_some()
+            {
+                total_physical_size += direntry.metadata()?.len();
+            }
+        }
+
+        Ok(total_physical_size as i64)
+    }
 }
 
 impl LayeredTimeline {
