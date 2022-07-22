@@ -16,6 +16,7 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Repository;
 use crate::repository::Timeline;
 use crate::walingest::WalIngest;
+use crate::walrecord::DecodedWALRecord;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
@@ -38,7 +39,7 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification(lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     // Import all but pg_wal
@@ -57,12 +58,12 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
             if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
                 pg_control = Some(control_file);
             }
-            modification.flush()?;
+            modification.flush(lsn)?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit()?;
+    modification.commit(lsn)?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -268,9 +269,11 @@ fn import_wal<R: Repository>(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
+        let mut modification = tline.begin_modification();
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -300,7 +303,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     base_lsn: Lsn,
 ) -> Result<()> {
     info!("importing base at {}", base_lsn);
-    let mut modification = tline.begin_modification(base_lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
@@ -318,7 +321,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush()?;
+                modification.flush(base_lsn)?;
             }
             tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -332,7 +335,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit()?;
+    modification.commit(base_lsn)?;
     Ok(())
 }
 
@@ -384,9 +387,11 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
+        let mut modification = tline.begin_modification();
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

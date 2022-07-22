@@ -1,5 +1,6 @@
 import threading
 import pytest
+import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import lsn_from_hex
@@ -138,7 +139,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             'image_creation_threshold': '1',
 
             # set PITR interval to be small, so we can do GC
-            'pitr_interval': '1 s'
+            'pitr_interval': '0 s'
         })
 
     b0 = env.neon_cli.create_branch('b0', tenant_id=tenant)
@@ -161,6 +162,11 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
 
     thread = threading.Thread(target=do_gc, daemon=True)
     thread.start()
+
+    # because of network latency and other factors, GC iteration might be processed
+    # after the `create_branch` request. Add a sleep here to make sure that GC is
+    # always processed before.
+    time.sleep(1.0)
 
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
     with pytest.raises(Exception, match="invalid branch start lsn"):
