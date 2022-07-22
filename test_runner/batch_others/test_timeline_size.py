@@ -207,14 +207,12 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_checkpoint')
     pg = env.postgres.create_start("test_timeline_physical_size_post_checkpoint")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE TABLE foo (t text)")
-            cur.execute("""
-                INSERT INTO foo
-                    SELECT 'long string to consume some space' || g
-                    FROM generate_series(1, 1000) g
-            """)
+    pg.safe_psql_many([
+        "CREATE TABLE foo (t text)",
+        """INSERT INTO foo
+           SELECT 'long string to consume some space' || g
+           FROM generate_series(1, 1000) g""",
+    ])
 
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
