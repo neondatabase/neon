@@ -28,7 +28,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::ops::{Bound::Included, Deref, Range};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicBool, AtomicU64};
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -126,6 +126,16 @@ lazy_static! {
     static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric");
+}
+
+// Metrics for determining timeline's physical size
+lazy_static! {
+    static ref CURRENT_PHYSICAL_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "pageserver_current_physical_size",
+        "Current physical size grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric");
@@ -1065,6 +1075,7 @@ pub struct LayeredTimeline {
     create_images_time_histo: Histogram,
     last_record_gauge: IntGauge,
     wait_lsn_time_histo: Histogram,
+    current_physical_size_gauge: IntGauge,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_layers: AtomicBool,
@@ -1099,9 +1110,6 @@ pub struct LayeredTimeline {
     // It can be unified with latest_gc_cutoff_lsn under some "first_valid_lsn",
     // though lets keep them both for better error visibility.
     initdb_lsn: Lsn,
-
-    /// Current physical size of the timeline at the lastest LSN
-    physical_size: AtomicU64,
 }
 
 ///
@@ -1259,8 +1267,8 @@ impl Timeline for LayeredTimeline {
         })
     }
 
-    fn get_physical_size(&self) -> u64 {
-        self.physical_size.load(atomic::Ordering::Acquire)
+    fn get_physical_size(&self) -> i64 {
+        self.current_physical_size_gauge.get()
     }
 }
 
@@ -1340,6 +1348,9 @@ impl LayeredTimeline {
         let wait_lsn_time_histo = WAIT_LSN_TIME
             .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
             .unwrap();
+        let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
+            .unwrap();
 
         LayeredTimeline {
             conf,
@@ -1369,6 +1380,7 @@ impl LayeredTimeline {
             create_images_time_histo,
             last_record_gauge,
             wait_lsn_time_histo,
+            current_physical_size_gauge,
 
             upload_layers: AtomicBool::new(upload_layers),
 
@@ -1384,8 +1396,6 @@ impl LayeredTimeline {
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
-
-            physical_size: AtomicU64::new(0),
         }
     }
 
@@ -1400,6 +1410,8 @@ impl LayeredTimeline {
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        // total size of layer files in the current timeline directory
+        let mut total_physical_size = 0;
 
         for direntry in fs::read_dir(timeline_path)? {
             let direntry = direntry?;
@@ -1422,8 +1434,7 @@ impl LayeredTimeline {
                     ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
 
                 trace!("found layer {}", layer.filename().display());
-                self.physical_size
-                    .fetch_add(layer.path().metadata()?.len(), atomic::Ordering::SeqCst);
+                total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
@@ -1447,8 +1458,7 @@ impl LayeredTimeline {
                     DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
 
                 trace!("found layer {}", layer.filename().display());
-                self.physical_size
-                    .fetch_add(layer.path().metadata()?.len(), atomic::Ordering::SeqCst);
+                total_physical_size += layer.path().metadata()?.len();
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
@@ -1465,9 +1475,11 @@ impl LayeredTimeline {
         layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
-            "loaded layer map with {} layers at {}",
-            num_layers, disk_consistent_lsn
+            "loaded layer map with {} layers at {}, total physical size: {}",
+            num_layers, disk_consistent_lsn, total_physical_size
         );
+        self.current_physical_size_gauge
+            .set(total_physical_size as i64);
 
         Ok(())
     }
@@ -1980,8 +1992,7 @@ impl LayeredTimeline {
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
-        self.physical_size.fetch_add(sz, atomic::Ordering::SeqCst);
-
+        self.current_physical_size_gauge.add(sz as i64);
         // update metrics
         NUM_PERSISTENT_FILES_CREATED.inc_by(1);
         PERSISTENT_BYTES_WRITTEN.inc_by(sz);
@@ -2152,8 +2163,8 @@ impl LayeredTimeline {
 
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
-            self.physical_size
-                .fetch_add(l.path().metadata()?.len(), atomic::Ordering::SeqCst);
+            self.current_physical_size_gauge
+                .add(l.path().metadata()?.len() as i64);
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -2402,8 +2413,8 @@ impl LayeredTimeline {
             let new_delta_path = l.path();
 
             // update the timeline's physical size
-            self.physical_size
-                .fetch_add(new_delta_path.metadata()?.len(), atomic::Ordering::SeqCst);
+            self.current_physical_size_gauge
+                .add(new_delta_path.metadata()?.len() as i64);
 
             new_layer_paths.insert(new_delta_path);
             layers.insert_historic(Arc::new(l));
@@ -2415,8 +2426,8 @@ impl LayeredTimeline {
         drop(all_keys_iter);
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
-                self.physical_size
-                    .fetch_sub(path.metadata()?.len(), atomic::Ordering::SeqCst);
+                self.current_physical_size_gauge
+                    .sub(path.metadata()?.len() as i64);
                 layer_paths_do_delete.insert(path);
             }
             l.delete()?;
@@ -2670,8 +2681,8 @@ impl LayeredTimeline {
         let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
-                self.physical_size
-                    .fetch_sub(path.metadata()?.len(), atomic::Ordering::SeqCst);
+                self.current_physical_size_gauge
+                    .sub(path.metadata()?.len() as i64);
                 layer_paths_to_delete.insert(path);
             }
             doomed_layer.delete()?;

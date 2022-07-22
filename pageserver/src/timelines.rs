@@ -49,7 +49,7 @@ pub struct LocalTimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
-    pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
+    pub current_physical_size: Option<i64>,  // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
     pub timeline_state: LocalTimelineState,
 }

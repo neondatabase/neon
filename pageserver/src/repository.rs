@@ -384,7 +384,7 @@ pub trait Timeline: Send + Sync {
     ) -> Result<()>;
 
     /// Get the physical size of the timeline at the latest LSN
-    fn get_physical_size(&self) -> u64;
+    fn get_physical_size(&self) -> i64;
 }
 
 /// Various functions to mutate the timeline.
