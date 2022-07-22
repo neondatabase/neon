@@ -131,7 +131,9 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
-// Metrics for determining timeline's physical size
+// Metrics for determining timeline's physical size.
+// A layered timeline's physical is defined as the total size of
+// (delta/image) layer files on disk.
 lazy_static! {
     static ref CURRENT_PHYSICAL_SIZE: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_current_physical_size",
