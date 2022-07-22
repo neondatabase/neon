@@ -17,6 +17,8 @@ def test_dup_key(env: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
+            cur.execute('drop table if exists t, f;')
+
             cur.execute("SET synchronous_commit=off")
             cur.execute("SET statement_timeout=0")
 
