@@ -203,8 +203,8 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
 
 def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_init')
-    pg = env.postgres.create_start("test_timeline_physical_size_init")
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_checkpoint')
+    pg = env.postgres.create_start("test_timeline_physical_size_post_checkpoint")
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -249,8 +249,8 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_compaction')
-    pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_post_gc')
+    pg = env.postgres.create_start("test_timeline_physical_size_post_gc")
 
     pg.safe_psql_many([
         "CREATE TABLE foo (t text)",
