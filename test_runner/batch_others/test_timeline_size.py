@@ -308,4 +308,6 @@ def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     res = assert_timeline_local(client, tenant_id, timeline_id)
     timeline_path = pathlib.Path(
         f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/")
+    assert res["local"]["current_physical_size"] == res["local"][
+        "current_physical_size_non_incremental"]
     assert res["local"]["current_physical_size"] == get_timeline_dir_size(timeline_path)
