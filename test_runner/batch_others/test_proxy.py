@@ -18,7 +18,7 @@ def test_password_hack(static_proxy):
 
     magic = encode(json.dumps({
         'project': 'irrelevant',
-        'token': encode(password),
+        'password': encode(password),
     }))
 
     static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)

@@ -83,8 +83,8 @@ pub(super) struct Api<'a> {
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self { endpoint, creds })
+    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
+        Self { endpoint, creds }
     }
 
     /// Authenticate the existing user or throw an error.

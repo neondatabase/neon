@@ -151,12 +151,12 @@ impl BackendType<ClientCredentials> {
 
                 let mut config = match &self {
                     Console(creds) => {
-                        console::Api::new(&urls.auth_endpoint, creds)?
+                        console::Api::new(&urls.auth_endpoint, creds)
                             .wake_compute()
                             .await?
                     }
                     Postgres(creds) => {
-                        postgres::Api::new(&urls.auth_endpoint, creds)?
+                        postgres::Api::new(&urls.auth_endpoint, creds)
                             .wake_compute()
                             .await?
                     }
@@ -164,7 +164,7 @@ impl BackendType<ClientCredentials> {
                 };
 
                 // We should use a password from payload as well.
-                config.password(payload.token);
+                config.password(payload.password);
 
                 return Ok(compute::NodeInfo {
                     reported_auth_ok: false,
@@ -184,12 +184,12 @@ impl BackendType<ClientCredentials> {
                 .await
             }
             Console(creds) => {
-                console::Api::new(&urls.auth_endpoint, &creds)?
+                console::Api::new(&urls.auth_endpoint, &creds)
                     .handle_user(client)
                     .await
             }
             Postgres(creds) => {
-                postgres::Api::new(&urls.auth_endpoint, &creds)?
+                postgres::Api::new(&urls.auth_endpoint, &creds)
                     .handle_user(client)
                     .await
             }

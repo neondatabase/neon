@@ -134,8 +134,9 @@ async fn handle_existing_user(
 
     // Read client's password hash
     let msg = client.read_password_message().await?;
-    let md5_response =
-        parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword("missing terminator"))?;
+    let md5_response = parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword(
+        "the password should be a valid null-terminated utf-8 string",
+    ))?;
 
     let db_info = authenticate_proxy_client(
         auth_endpoint,

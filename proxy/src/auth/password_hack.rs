@@ -7,7 +7,7 @@ pub struct PasswordHackPayload {
 
     /// Token is base64-encoded because it may contain arbitrary byte sequences.
     #[serde(deserialize_with = "deserialize_base64")]
-    pub token: Vec<u8>,
+    pub password: Vec<u8>,
 }
 
 fn deserialize_base64<'a, D: Deserializer<'a>>(des: D) -> Result<Vec<u8>, D::Error> {
@@ -38,12 +38,12 @@ mod tests {
         let (password, project) = ("password", "pie-in-the-sky");
         let payload = json!({
             "project": project,
-            "token": base64::encode(password),
+            "password": base64::encode(password),
         })
         .to_string();
 
         let payload: PasswordHackPayload = serde_json::from_str(&payload)?;
-        assert_eq!(payload.token, password.as_bytes());
+        assert_eq!(payload.password, password.as_bytes());
         assert_eq!(payload.project, project);
 
         Ok(())
