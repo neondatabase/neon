@@ -1,9 +1,10 @@
 import os
+import pathlib
 import shutil
 import subprocess
 from pathlib import Path
 
-from typing import Any, List
+from typing import Any, List, Tuple
 from fixtures.log_helper import log
 
 
@@ -89,3 +90,40 @@ def get_dir_size(path: str) -> int:
                 pass  # file could be concurrently removed
 
     return totalbytes
+
+
+def get_timeline_dir_size(path: pathlib.Path) -> int:
+    """Get the timeline directory's total size, which only counts the layer files' size."""
+    sz = 0
+    for f_name in os.listdir(path):
+        f_path = path.joinpath(f_name)
+        try:
+            # file is an image layer
+            _ = parse_image_layer(f_name)
+            sz += f_path.stat().st_size
+            continue
+        except:
+            pass
+        try:
+            # file is a delta layer
+            _ = parse_delta_layer(f_name)
+            sz += f_path.stat().st_size
+            continue
+        except:
+            pass
+    return sz
+
+
+def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
+    """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
+    parts = f_name.split("__")
+    key_parts = parts[0].split("-")
+    return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
+
+
+def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
+    """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
+    parts = f_name.split("__")
+    key_parts = parts[0].split("-")
+    lsn_parts = parts[1].split("-")
+    return int(key_parts[0], 16), int(key_parts[1], 16), int(lsn_parts[0], 16), int(lsn_parts[1], 16)
