@@ -1,5 +1,8 @@
-use serde::{de, Deserialize, Deserializer};
-use std::fmt;
+//! Payload for ad hoc authentication method for clients that don't support SNI.
+//! See the `impl` for [`super::backend::BackendType<ClientCredentials>`].
+//! Read more: <https://github.com/neondatabase/cloud/issues/1620#issuecomment-1165332290>.
+
+use serde::{Deserialize, Deserializer};
 
 #[derive(Deserialize)]
 pub struct PasswordHackPayload {
@@ -11,21 +14,8 @@ pub struct PasswordHackPayload {
 }
 
 fn deserialize_base64<'a, D: Deserializer<'a>>(des: D) -> Result<Vec<u8>, D::Error> {
-    struct Visitor;
-
-    impl<'a> de::Visitor<'a> for Visitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            base64::decode(v).map_err(E::custom)
-        }
-    }
-
-    des.deserialize_string(Visitor)
+    let base64: &str = Deserialize::deserialize(des)?;
+    base64::decode(base64).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
