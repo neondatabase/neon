@@ -324,7 +324,7 @@ impl Repository for LayeredRepository {
                 ));
             }
         }
-        // Copy logical size from source timeline if we are branching on te last positon.
+        // Copy logical size from source timeline if we are branching on the last position.
         let init_logical_size =
             if let Ok(src_pgdir) = tenant_mgr::get_local_timeline_with_load(self.tenant_id, src) {
                 let logical_size = src_pgdir.get_current_logical_size();
