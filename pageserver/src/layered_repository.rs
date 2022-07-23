@@ -1131,7 +1131,7 @@ pub struct LayeredTimeline {
     initdb_lsn: Lsn,
 
     // Initial logical size of timeline (if known).
-    // Logical size can be copied from ancestor timelien when new branch is create at last LSN
+    // Logical size can be copied from ancestor timeline when new branch is create at last LSN
     pub init_logical_size: Option<usize>,
 }
 
