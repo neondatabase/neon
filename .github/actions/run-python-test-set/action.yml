@@ -27,6 +27,12 @@ inputs:
     description: 'Whether to upload the performance report'
     required: false
     default: 'false'
+  aws-access-key-id-neon-tests-report:
+    description: 'AWS_ACCESS_KEY_ID for report publishing'
+    required: true
+  aws-secret-access-key-neon-tests-report:
+    description: 'AWS_SECRET_ACCESS_KEY for report publishing'
+    required: true
 
 runs:
   using: "composite"
@@ -109,6 +115,7 @@ runs:
         # in parallel and logs are mixed between different tests
         "${cov_prefix[@]}" ./scripts/pytest \
           --junitxml=$TEST_OUTPUT/junit.xml \
+          --alluredir=$TEST_OUTPUT/allure-results \
           --tb=short \
           --verbose \
           -m "not remote_cluster" \
@@ -121,6 +128,72 @@ runs:
             scripts/generate_and_push_perf_report.sh
           fi
         fi
+
+    - uses: actions/setup-java@v3
+      if: always()
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Install Allure
+      if: always()
+      shell: bash -ex {0}
+      run: |
+        ALLURE_ZIP=allure-${ALLURE_VERSION}.zip
+
+        wget -q https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/${ALLURE_ZIP}
+        echo "${ALLURE_ZIP_MD5}  ${ALLURE_ZIP}" | md5sum -c
+
+        unzip -q ${ALLURE_ZIP}
+        ./allure-${ALLURE_VERSION}/bin
+
+        echo "$(pwd)/allure-${ALLURE_VERSION}/bin" >> $GITHUB_PATH
+      env:
+        ALLURE_VERSION: 2.18.1
+        ALLURE_ZIP_MD5: 603d235e3d47844a848591e55e7a29f6
+
+    - name: Generate Allure Report
+      if: always()
+      shell: bash -ex {0}
+      run: |
+        cat <<EOF > $TEST_OUTPUT/allure-results/executor.json
+          {
+            "name": "GitHub Actions",
+            "type": "github",
+            "url": "https://neon-tests.s3.amazonaws.com/neon/index.html",
+            "buildOrder": ${GITHUB_RUN_ID},
+            "buildName": "GitHub Actions Run #${{ github.run_number }}",
+            "buildUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}",
+            "reportUrl": "https://neon-tests.s3.amazonaws.com/neon/${GITHUB_RUN_ID}/${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}/index.html",
+            "reportName": "Allure Report"
+          }
+        EOF
+
+        cat <<EOF > $TEST_OUTPUT/allure-results/environment.properties
+          TEST_SELECTION=${{ inputs.test_selection }}
+          OS=${{ runner.os }}
+          BUILD_TYPE=${{ inputs.build_type }}
+          RUST_TOOLCHAIN=${{ inputs.rust_toolchain }}
+        EOF
+
+        allure generate --clean --output $TEST_OUTPUT/allure-report $TEST_OUTPUT/allure-results
+      env:
+        TEST_OUTPUT: /tmp/test_output
+
+    - name: Upload Allure Report
+      if: always() && hashFiles('/tmp/test_output/allure-report') != '' # i.e. if /tmp/test_output/allure-report directory exists
+      shell: bash -ex {0}
+      run: |
+        REMOTE_DIR="neon/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}"
+        aws s3 cp "${TEST_OUTPUT}/allure-report" "s3://${BUCKET}/${REMOTE_DIR}" --recursive
+
+        # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
+        echo "[Allure Report](https://${BUCKET}.s3.amazonaws.com/${REMOTE_DIR}/index.html)" >> ${GITHUB_STEP_SUMMARY}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id-neon-tests-report }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key-neon-tests-report }}
+        BUCKET: neon-tests
+        TEST_OUTPUT: /tmp/test_output
 
     - name: Delete all data but logs
       shell: bash -ex {0}

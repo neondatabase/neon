@@ -14,6 +14,32 @@ psycopg2-binary = ">=2.8.4"
 sa = ["sqlalchemy[postgresql_psycopg2binary] (>=1.3,<1.5)"]
 
 [[package]]
+name = "allure-pytest"
+version = "2.9.45"
+description = "Allure pytest integration"
+category = "main"
+optional = false
+python-versions = "*"
+
+[package.dependencies]
+allure-python-commons = "2.9.45"
+pytest = ">=4.5.0"
+six = ">=1.9.0"
+
+[[package]]
+name = "allure-python-commons"
+version = "2.9.45"
+description = "Common module for integrate allure with python-based frameworks"
+category = "main"
+optional = false
+python-versions = ">=3.5"
+
+[package.dependencies]
+attrs = ">=16.0.0"
+pluggy = ">=0.4.0"
+six = ">=1.9.0"
+
+[[package]]
 name = "async-timeout"
 version = "4.0.2"
 description = "Timeout context manager for asyncio programs"
@@ -1351,12 +1377,20 @@ python-versions = "*"
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.9"
-content-hash = "be9c00bb5081535805824242fea2a03b2f82fa9466856d618e24b3140c7da6a0"
+content-hash = "2374d5971b8ec2918800e8875cea7007538726b31edf03ece9b67a2651fe7450"
 
 [metadata.files]
 aiopg = [
     {file = "aiopg-1.3.3-py3-none-any.whl", hash = "sha256:2842dd8741460eeef940032dcb577bfba4d4115205dd82a73ce13b3271f5bf0a"},
     {file = "aiopg-1.3.3.tar.gz", hash = "sha256:547c6ba4ea0d73c2a11a2f44387d7133cc01d3c6f3b8ed976c0ac1eff4f595d7"},
+]
+allure-pytest = [
+    {file = "allure-pytest-2.9.45.tar.gz", hash = "sha256:20620fde08a597578b157a60ff38bdcc300e312d12eaa38cf28e4a62e22bdaa3"},
+    {file = "allure_pytest-2.9.45-py3-none-any.whl", hash = "sha256:9b0325e06f8f79cf03289d4f4d741e57607d0fa12d9c094e243cbb042283f083"},
+]
+allure-python-commons = [
+    {file = "allure-python-commons-2.9.45.tar.gz", hash = "sha256:c238d28aeac35e8c7c517d8a2327e25ae5bbf2c30b5e2313d20ef11d75f5549d"},
+    {file = "allure_python_commons-2.9.45-py3-none-any.whl", hash = "sha256:3572f0526db3946fb14470c58b0b41d343483aad91d37d414e4641815e13691a"},
 ]
 async-timeout = [
     {file = "async-timeout-4.0.2.tar.gz", hash = "sha256:2163e1640ddb52b7a8c80d0a67a08587e5d245cc9c553a74a847056bc2976b15"},

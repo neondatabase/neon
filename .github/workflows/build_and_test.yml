@@ -185,6 +185,8 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_pg_regress
           needs_postgres_source: true
+          aws-access-key-id-neon-tests-report: ${{ secrets.AWS_ACCESS_KEY_ID_NEON_TESTS_REPORT }}
+          aws-secret-access-key-neon-tests-report: ${{ secrets.AWS_SECRET_ACCESS_KEY_NEON_TESTS_REPORT }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
@@ -211,6 +213,8 @@ jobs:
           build_type: ${{ matrix.build_type }}
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_others
+          aws-access-key-id-neon-tests-report: ${{ secrets.AWS_ACCESS_KEY_ID_NEON_TESTS_REPORT }}
+          aws-secret-access-key-neon-tests-report: ${{ secrets.AWS_SECRET_ACCESS_KEY_NEON_TESTS_REPORT }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
@@ -239,6 +243,8 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: true
+          aws-access-key-id-neon-tests-report: ${{ secrets.AWS_ACCESS_KEY_ID_NEON_TESTS_REPORT }}
+          aws-secret-access-key-neon-tests-report: ${{ secrets.AWS_SECRET_ACCESS_KEY_NEON_TESTS_REPORT }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
