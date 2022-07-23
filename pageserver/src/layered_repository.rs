@@ -328,7 +328,7 @@ impl Repository for LayeredRepository {
         let init_logical_size =
             if let Ok(src_pgdir) = tenant_mgr::get_local_timeline_with_load(self.tenant_id, src) {
                 let logical_size = src_pgdir.get_current_logical_size();
-                // Check LSN after gettig logical size to exclude rac condition:
+                // Check LSN after getting logical size to exclude race condition
                 // when ancestor timeline is concurrently updated
                 if src_timeline.get_last_record_lsn() == start_lsn {
                     Some(logical_size)
