@@ -44,6 +44,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 pub struct WalIngest<'a, T: DatadirTimeline> {
     timeline: &'a T,
 
+    pg_version: u32,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
 }
@@ -56,8 +57,12 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
         trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
 
+        let version_bytes = timeline.get_pg_version(startpoint)?;
+        let pg_version: u32 = std::str::from_utf8(&version_bytes)?.trim().parse()?;
+
         Ok(WalIngest {
             timeline,
+            pg_version,
             checkpoint,
             checkpoint_modified: false,
         })
@@ -79,7 +84,8 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
+        decode_wal_record(recdata, decoded, self.pg_version)
+            .context("failed decoding wal record")?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -110,18 +116,49 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             let truncate = XlSmgrTruncate::decode(&mut buf);
             self.ingest_xlog_smgr_truncate(modification, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
-            if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_CREATE
-            {
-                let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(modification, &createdb)?;
-            } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_DBASE_DROP
-            {
-                let dropdb = XlDropDatabase::decode(&mut buf);
-                for tablespace_id in dropdb.tablespace_ids {
-                    trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                    modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+            info!(
+                "handle RM_DBASE_ID for Postgres version {:?}",
+                self.pg_version
+            );
+            if self.pg_version == 14 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == pg_constants::XLOG_DBASE_CREATE_v14
+                {
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    info!("XLOG_DBASE_CREATE_v14");
+
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == pg_constants::XLOG_DBASE_DROP_v14
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
+                }
+            } else if self.pg_version == 15 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == pg_constants::XLOG_DBASE_CREATE_WAL_LOG_v15
+                {
+                    info!("XLOG_DBASE_CREATE_WAL_LOG_v15: noop");
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == pg_constants::XLOG_DBASE_CREATE_FILE_COPY_v15
+                {
+                    // The XLOG record was renamed between v14 and v15,
+                    // but the record format is the same.
+                    // So we can reuse XlCreateDatabase here.
+                    info!("XLOG_DBASE_CREATE_FILE_COPY_v15");
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    self.ingest_xlog_dbase_create(modification, &createdb)?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == pg_constants::XLOG_DBASE_DROP_v15
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification.drop_dbdir(tablespace_id, dropdb.db_id)?;
+                    }
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
@@ -288,7 +325,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
         // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED) == 0
+            && !pg_constants::bkpimage_is_compressed(blk.bimg_info, self.pg_version)
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;

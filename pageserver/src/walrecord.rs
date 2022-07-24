@@ -179,6 +179,9 @@ impl XlSmgrTruncate {
 
 #[repr(C)]
 #[derive(Debug)]
+/// In Postgres 14 corresponds to 'xl_dbase_create_rec' struct.
+/// In Postgres 15 corresponds to `xl_dbase_create_file_copy_rec` struct.
+///
 pub struct XlCreateDatabase {
     pub db_id: Oid,
     pub tablespace_id: Oid,
@@ -389,6 +392,15 @@ impl XlXactParsedRecord {
             xid = buf.get_u32_le();
             trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
         }
+        if xinfo & pg_constants::XACT_XINFO_HAS_DROPPED_STATS != 0 {
+            info!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STATS");
+            //FIXME: do we need to handle dropped stats here?
+
+            let nitems = buf.get_i32_le();
+            let sizeof_xl_xact_stats_item = 12 as usize;
+            buf.advance((nitems as usize) * sizeof_xl_xact_stats_item);
+        }
+
         XlXactParsedRecord {
             xid,
             info,
@@ -516,6 +528,7 @@ impl XlMultiXactTruncate {
 pub fn decode_wal_record(
     record: Bytes,
     decoded: &mut DecodedWALRecord,
+    pg_version: u32,
 ) -> Result<(), DeserializeError> {
     let mut rnode_spcnode: u32 = 0;
     let mut rnode_dbnode: u32 = 0;
@@ -609,9 +622,21 @@ pub fn decode_wal_record(
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = (blk.bimg_info & pg_constants::BKPIMAGE_APPLY) != 0;
+                    blk.apply_image = if pg_version == 14 {
+                        (blk.bimg_info & pg_constants::BKPIMAGE_APPLY_v14) != 0
+                    } else {
+                        assert_eq!(pg_version, 15);
+                        (blk.bimg_info & pg_constants::BKPIMAGE_APPLY_v15) != 0
+                    };
 
-                    if blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED != 0 {
+                    let blk_img_is_compressed =
+                        pg_constants::bkpimage_is_compressed(blk.bimg_info, pg_version);
+
+                    if blk_img_is_compressed {
+                        debug!("compressed block image , pg_version = {}", pg_version);
+                    }
+
+                    if blk_img_is_compressed {
                         if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0 {
                             blk.hole_length = buf.get_u16_le();
                         } else {
@@ -666,9 +691,7 @@ pub fn decode_wal_record(
                      * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
                      * flag is set.
                      */
-                    if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0)
-                        && blk.bimg_len == pg_constants::BLCKSZ
-                    {
+                    if !blk_img_is_compressed && blk.bimg_len == pg_constants::BLCKSZ {
                         // TODO
                         /*
                         report_invalid_record(state,
@@ -684,7 +707,7 @@ pub fn decode_wal_record(
                      * IS_COMPRESSED flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
-                        && blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0
+                        && !blk_img_is_compressed
                         && blk.bimg_len != pg_constants::BLCKSZ
                     {
                         // TODO

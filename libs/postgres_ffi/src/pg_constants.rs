@@ -112,6 +112,7 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
 // pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
 // pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
+pub const XACT_XINFO_HAS_DROPPED_STATS: u32 = 1u32 << 8;
 
 // From pg_control.h and rmgrlist.h
 pub const XLOG_NEXTOID: u8 = 0x30;
@@ -174,8 +175,12 @@ pub const XLR_INFO_MASK: u8 = 0x0F;
 pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
 
 // from dbcommands_xlog.h
-pub const XLOG_DBASE_CREATE: u8 = 0x00;
-pub const XLOG_DBASE_DROP: u8 = 0x10;
+pub const XLOG_DBASE_CREATE_v14: u8 = 0x00;
+pub const XLOG_DBASE_DROP_v14: u8 = 0x10;
+
+pub const XLOG_DBASE_CREATE_FILE_COPY_v15: u8 = 0x00;
+pub const XLOG_DBASE_CREATE_WAL_LOG_v15: u8 = 0x00;
+pub const XLOG_DBASE_DROP_v15: u8 = 0x20;
 
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
@@ -201,8 +206,24 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 
 /* Information stored in bimg_info */
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
-pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
-pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
+pub const BKPIMAGE_IS_COMPRESSED_v14: u8 = 0x02; /* page image is compressed */
+pub const BKPIMAGE_APPLY_v14: u8 = 0x04; /* page image should be restored during replay */
+
+pub const BKPIMAGE_APPLY_v15: u8 = 0x02; /* page image should be restored during replay */
+pub const BKPIMAGE_COMPRESS_PGLZ_v15: u8 = 0x04; /* page image is compressed */
+pub const BKPIMAGE_COMPRESS_LZ4_v15: u8 = 0x08; /* page image is compressed */
+pub const BKPIMAGE_COMPRESS_ZSTD_v15: u8 = 0x10; /* page image is compressed */
+
+pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> bool {
+    if version == 14 {
+        bimg_info & BKPIMAGE_IS_COMPRESSED_v14 != 0
+    } else {
+        assert_eq!(version, 15);
+        bimg_info & BKPIMAGE_COMPRESS_PGLZ_v15 != 0
+            || bimg_info & BKPIMAGE_COMPRESS_LZ4_v15 != 0
+            || bimg_info & BKPIMAGE_COMPRESS_ZSTD_v15 != 0
+    }
+}
 
 /* From transam.h */
 pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
@@ -217,8 +238,6 @@ pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
-
-pub const PG_MAJORVERSION: &str = "14";
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c

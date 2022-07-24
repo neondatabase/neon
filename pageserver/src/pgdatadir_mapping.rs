@@ -362,6 +362,10 @@ pub trait DatadirTimeline: Timeline {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
+    pub fn get_pg_version(&self, lsn: Lsn) -> Result<Bytes> {
+        self.tline.get(PG_VERSION_KEY, lsn)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -458,6 +462,7 @@ pub trait DatadirTimeline: Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
+        result.add_key(PG_VERSION_KEY);
 
         Ok(result.to_keyspace())
     }
@@ -630,6 +635,11 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
 
     pub fn put_checkpoint(&mut self, img: Bytes) -> Result<()> {
         self.put(CHECKPOINT_KEY, Value::Image(img));
+        Ok(())
+    }
+
+    pub fn put_pg_version(&mut self, version: Bytes) -> Result<()> {
+        self.put(PG_VERSION_KEY, Value::Image(version));
         Ok(())
     }
 
@@ -1053,6 +1063,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usiz
 // 03 misc
 //    controlfile
 //    checkpoint
+//    pg_version
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1091,7 +1102,9 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usiz
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
-
+//
+// PG_VERSION:
+// 03 00000000 00000000 00000000 00   00000002
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1313,6 +1326,15 @@ const CHECKPOINT_KEY: Key = Key {
     field4: 0,
     field5: 0,
     field6: 1,
+};
+
+const PG_VERSION_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 2,
 };
 
 // Reverse mappings for a few Keys.
