@@ -20,7 +20,6 @@ from fixtures.log_helper import log
 from typing import List, Optional, Any
 from uuid import uuid4
 
-
 @dataclass
 class TimelineMetrics:
     timeline_id: str
