@@ -176,7 +176,6 @@ use crate::{
     layered_repository::{
         ephemeral_file::is_ephemeral_file,
         metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
-        LayeredRepository,
     },
     storage_sync::{self, index::RemoteIndex},
     tenant_mgr::attach_downloaded_tenants,
@@ -1257,7 +1256,13 @@ async fn update_local_metadata(
             timeline_id,
         } = sync_id;
         tokio::task::spawn_blocking(move || {
-            LayeredRepository::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
+            crate::layered_repository::save_metadata(
+                conf,
+                timeline_id,
+                tenant_id,
+                &cloned_metadata,
+                true,
+            )
         })
         .await
         .with_context(|| {
