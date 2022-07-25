@@ -221,7 +221,7 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
 def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
-    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance=10000, compaction_period='10m'}"
+    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance=100000, compaction_period='10m'}"
 
     env = neon_env_builder.init_start()
 
@@ -244,7 +244,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
     neon_env_builder.pageserver_config_override = \
-        "tenant_config={checkpoint_distance=10000, compaction_period='10m', gc_period='10m', pitr_interval='1s'}"
+        "tenant_config={checkpoint_distance=100000, compaction_period='10m', gc_period='10m', pitr_interval='1s'}"
 
     env = neon_env_builder.init_start()
 
