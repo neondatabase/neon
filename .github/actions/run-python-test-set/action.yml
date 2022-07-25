@@ -145,8 +145,6 @@ runs:
         echo "${ALLURE_ZIP_MD5}  ${ALLURE_ZIP}" | md5sum -c
 
         unzip -q ${ALLURE_ZIP}
-        ./allure-${ALLURE_VERSION}/bin
-
         echo "$(pwd)/allure-${ALLURE_VERSION}/bin" >> $GITHUB_PATH
       env:
         ALLURE_VERSION: 2.18.1
@@ -180,8 +178,22 @@ runs:
       env:
         TEST_OUTPUT: /tmp/test_output
 
+    - name: Install AWS CLI
+      if: always()
+      shell: bash -ex {0}
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+
+        ./aws/install --install-dir "$(pwd)/aws-cli" --bin-dir "$(pwd)/bin-dir"
+
+        echo "$(pwd)/bin-dir" >> $GITHUB_PATH
+      env:
+        AWSCLI_VERSION: 2.7.18
+        AWSCLI_ZIP_MD5: df6c7c8fa261ed9e0bb5d2f42650295d
+
     - name: Upload Allure Report
-      if: always() && hashFiles('/tmp/test_output/allure-report') != '' # i.e. if /tmp/test_output/allure-report directory exists
+      if: always()
       shell: bash -ex {0}
       run: |
         REMOTE_DIR="neon/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}"
