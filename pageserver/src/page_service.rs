@@ -206,6 +206,9 @@ impl PagestreamBeMessage {
 struct CopyInReader<'a> {
     pgb: &'a mut PostgresBackend,
 
+    /// Whether we've received CopyDone
+    done: bool,
+
     /// Overflow buffer for bytes sent in CopyData messages
     /// that the reader (caller of read) hasn't asked for yet.
     /// TODO use BytesMut?
@@ -223,6 +226,7 @@ impl<'a> CopyInReader<'a> {
     fn new(pgb: &'a mut PostgresBackend) -> Self {
         Self {
             pgb,
+            done: false,
             buf: Vec::<_>::new(),
             buf_begin: 0,
         }
@@ -240,6 +244,10 @@ impl<'a> Drop for CopyInReader<'a> {
 
 impl<'a> Read for CopyInReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.done {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "no more data"));
+        }
+
         while !thread_mgr::is_shutdown_requested() {
             // Return from buffer if nonempty
             if self.buf_begin < self.buf.len() {
@@ -258,7 +266,13 @@ impl<'a> Read for CopyInReader<'a> {
                 Ok(Some(message)) => {
                     let copy_data_bytes = match message {
                         FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => return Ok(0),
+                        FeMessage::CopyDone => {
+                            self.done = true;
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "no more data",
+                            ));
+                        }
                         FeMessage::Sync => continue,
                         m => {
                             let msg = format!("unexpected message {:?}", m);

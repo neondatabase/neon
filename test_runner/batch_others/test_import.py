@@ -83,6 +83,12 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
             wal,
         ])
 
+    # Importing empty file fails
+    empty_file = os.path.join(test_output_dir, "empty_file")
+    with open(empty_file, 'w') as _:
+        with pytest.raises(Exception):
+            import_tar(empty_file, empty_file)
+
     # Importing corrupt backup fails
     with pytest.raises(Exception):
         import_tar(corrupt_base_tar, wal_tar)
