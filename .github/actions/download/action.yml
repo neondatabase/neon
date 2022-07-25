@@ -1,0 +1,51 @@
+name: "Download a Build artifact"
+description: "Custom download action with fallback to `actions/download-artifact`"
+inputs:
+  aws-access-key-id:
+    description: "AWS access key id to access your bucket"
+    required: false
+  aws-secret-access-key:
+    description: "AWS secret access key to access your bucket"
+    required: false
+  key:
+    description: "An explicit key for restoring and saving the cache"
+    required: true
+  artifacts:
+    description: "A list of files, directories and glob patterns to cache and restore"
+    required: true
+  force-github-artifacts:
+    description: "Force `actions/download-artifact` usage"
+    default: false
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Choose download backend
+      id: download-backend
+      run: |
+        if [[ "${FORCE_GITHUB_ARTIFACTS}" == "true" || -z "${AWS_ACCESS_KEY_ID}" || -z "${AWS_SECRET_ACCESS_KEY}" ]]; then
+          USE_S3=false
+        else
+          USE_S3=true
+        fi
+        echo ::set-output name=use_s3::${USE_S3}
+      shell: bash -ex {0}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        FORCE_GITHUB_ARTIFACTS: ${{ inputs.force-github-artifacts }}
+
+    - uses: ./.github/actions/action-s3-cache
+      if: ${{ steps.download-backend.outputs.use_s3 == 'true' }}
+      with:
+        action: get
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        key: ${{ github.run_id }}-${{ inputs.key }}
+
+    - uses: actions/download-artifact@v3
+      if: ${{ steps.download-backend.outputs.use_s3 == 'false' }}
+      with:
+        name: ${{ inputs.key }}
+        path: /tmp

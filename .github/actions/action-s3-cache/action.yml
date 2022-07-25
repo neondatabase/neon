@@ -1,0 +1,47 @@
+name: "S3 Cache for GitHub Actions"
+description: "Wrapper for `leroy-merlin-br/action-s3-cache` action. It sets some defaults and freezes its version"
+inputs:
+  action:
+    description: "Action to perform. Options are: put, get, delete"
+    required: true
+  aws-access-key-id:
+    description: "AWS access key id to access your bucket"
+    required: true
+  aws-secret-access-key:
+    description: "AWS secret access key to access your bucket"
+    required: true
+  key:
+    description: "An explicit key for restoring and saving the cache"
+    required: true
+  artifacts:
+    description: "A list of files, directories and glob patterns to cache and restore"
+    required: false
+  s3-class:
+    description: "Specifies the desired Storage Class for the object."
+    required: false
+    default: STANDARD
+
+runs:
+  using: "composite"
+  steps:
+    - uses: leroy-merlin-br/action-s3-cache@7fad0a81b31884660211f24b62e29b4777a6ac4c # v1.0.6
+      with:
+        action: ${{ inputs.action }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: us-east-1
+        bucket: neon-github-actions-cache
+        key: ${{ github.run_id }}-${{ inputs.key }}
+        artifacts: ${{ inputs.artifacts }}
+        s3-class: ${{ inputs.s3-class }}
+
+    - name: Add uploaded artifact to a workflow summary
+      shell: bash -ex {0}
+      if: ${{ inputs.action == 'put' }}
+      run: |
+        # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
+        echo "[${ARTIFACT_NAME}](https://${BUCKET}.s3.amazonaws.com/${ARTIFACT_PREFIX}${ARTIFACT_NAME})" >> ${GITHUB_STEP_SUMMARY}
+      env:
+        BUCKET: neon-github-actions-cache
+        ARTIFACT_PREFIX: ${{ github.run_id }}-
+        ARTIFACT_NAME: ${{ inputs.key }}.zip
