@@ -47,9 +47,11 @@ pub enum FeStartupPacket {
     StartupMessage {
         major_version: u32,
         minor_version: u32,
-        params: HashMap<String, String>,
+        params: StartupMessageParams,
     },
 }
+
+pub type StartupMessageParams = HashMap<String, String>;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CancelKeyData {
