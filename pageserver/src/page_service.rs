@@ -1159,13 +1159,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;
 
+            // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
             timeline.tline.checkpoint(CheckpointConfig::Forced)?;
-
-            // Also compact it.
-            //
-            // FIXME: This probably shouldn't be part of a "checkpoint" command, but a
-            // separate operation. Update the tests if you change this.
-            timeline.tline.compact()?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
