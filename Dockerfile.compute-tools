@@ -1,5 +1,5 @@
 # First transient image to build compute_tools binaries
-# NB: keep in sync with rust image version in .circle/config.yml
+# NB: keep in sync with rust image version in .github/workflows/build_and_test.yml
 FROM neondatabase/rust:1.58 AS rust-build
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.

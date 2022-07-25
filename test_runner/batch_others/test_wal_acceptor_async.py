@@ -146,9 +146,8 @@ async def run_restarts_under_load(env: NeonEnv,
                                   max_transfer=100,
                                   period_time=4,
                                   iterations=10):
-    # Set timeout for this test at 5 minutes. It should be enough for test to complete
-    # and less than CircleCI's no_output_timeout, taking into account that this timeout
-    # is checked only at the beginning of every iteration.
+    # Set timeout for this test at 5 minutes. It should be enough for test to complete,
+    # taking into account that this timeout is checked only at the beginning of every iteration.
     test_timeout_at = time.monotonic() + 5 * 60
 
     pg_conn = await pg.connect_async()

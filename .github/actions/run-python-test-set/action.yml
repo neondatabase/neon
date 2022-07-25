@@ -99,7 +99,7 @@ runs:
 
         # Run the tests.
         #
-        # The junit.xml file allows CircleCI to display more fine-grained test information
+        # The junit.xml file allows CI tools to display more fine-grained test information
         # in its "Tests" tab in the results page.
         # --verbose prints name of each test (helpful when there are
         # multiple tests in one file)
