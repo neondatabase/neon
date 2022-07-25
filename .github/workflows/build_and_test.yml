@@ -310,12 +310,18 @@ jobs:
           tar -xf /tmp/neon.tar.zst -C /tmp/neon/
           rm -rf /tmp/neon.tar.zst
 
-      - name: Restore coverage data
+      - name: Get coverage artifact for restoration
         uses: ./.github/actions/download
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
           key: coverage-data-artifact
+
+      - name: Extract coverage artifact
+        run: |
+          mkdir -p /tmp/coverage/
+          tar -xf /tmp/coverage.tar.zst -C /tmp/coverage/
+          rm -rf /tmp/coverage.tar.zst
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
