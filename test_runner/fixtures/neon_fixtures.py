@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing import Any, Callable, Dict, Iterator, List, Optional, Type, TypeVar, cast, Union, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
 import requests
@@ -280,20 +280,18 @@ class PgProtocol:
         return str(make_dsn(**self.conn_options(**kwargs)))
 
     def conn_options(self, **kwargs):
-        conn_options = self.default_options.copy()
+        result = self.default_options.copy()
         if 'dsn' in kwargs:
-            conn_options.update(parse_dsn(kwargs['dsn']))
-        conn_options.update(kwargs)
+            result.update(parse_dsn(kwargs['dsn']))
+        result.update(kwargs)
 
         # Individual statement timeout in seconds. 2 minutes should be
         # enough for our tests, but if you need a longer, you can
         # change it by calling "SET statement_timeout" after
         # connecting.
-        if 'options' in conn_options:
-            conn_options['options'] = f"-cstatement_timeout=120s " + conn_options['options']
-        else:
-            conn_options['options'] = "-cstatement_timeout=120s"
-        return conn_options
+        options = result.get('options', '')
+        result['options'] = f'-cstatement_timeout=120s {options}'
+        return result
 
     # autocommit=True here by default because that's what we need most of the time
     def connect(self, autocommit=True, **kwargs) -> PgConnection:
@@ -1514,29 +1512,25 @@ def remote_pg(test_output_dir: Path) -> Iterator[RemotePostgres]:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, port: int, pg_port: int):
-        super().__init__(host="127.0.0.1",
-                         user="proxy_user",
-                         password="pytest2",
-                         port=port,
-                         dbname='postgres')
-        self.http_port = 7001
-        self.host = "127.0.0.1"
-        self.port = port
-        self.pg_port = pg_port
+    def __init__(self, proxy_port: int, http_port: int, auth_endpoint: str):
+        super().__init__(dsn=auth_endpoint, port=proxy_port)
+        self.host = '127.0.0.1'
+        self.http_port = http_port
+        self.proxy_port = proxy_port
+        self.auth_endpoint = auth_endpoint
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start(self) -> None:
         assert self._popen is None
 
         # Start proxy
-        bin_proxy = os.path.join(str(neon_binpath), 'proxy')
-        args = [bin_proxy]
-        args.extend(["--http", f"{self.host}:{self.http_port}"])
-        args.extend(["--proxy", f"{self.host}:{self.port}"])
-        args.extend(["--auth-backend", "postgres"])
-        args.extend(
-            ["--auth-endpoint", f"postgres://proxy_auth:pytest1@localhost:{self.pg_port}/postgres"])
+        args = [
+            os.path.join(str(neon_binpath), 'proxy'),
+            *["--http", f"{self.host}:{self.http_port}"],
+            *["--proxy", f"{self.host}:{self.proxy_port}"],
+            *["--auth-backend", "postgres"],
+            *["--auth-endpoint", self.auth_endpoint],
+        ]
         self._popen = subprocess.Popen(args)
         self._wait_until_ready()
 
@@ -1557,13 +1551,21 @@ class NeonProxy(PgProtocol):
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
-    vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-    port = port_distributor.get_port()
-    pg_port = vanilla_pg.default_options['port']
-    with NeonProxy(port, pg_port) as proxy:
+    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
+
+    port = vanilla_pg.default_options['port']
+    host = vanilla_pg.default_options['host']
+    dbname = vanilla_pg.default_options['dbname']
+    auth_endpoint = f'postgres://proxy:password@{host}:{port}/{dbname}'
+
+    proxy_port = port_distributor.get_port()
+    http_port = port_distributor.get_port()
+
+    with NeonProxy(proxy_port=proxy_port, http_port=http_port,
+                   auth_endpoint=auth_endpoint) as proxy:
         proxy.start()
         yield proxy
 

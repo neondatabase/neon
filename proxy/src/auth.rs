@@ -1,10 +1,13 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::DatabaseInfo;
+pub use backend::{BackendType, DatabaseInfo};
 
 mod credentials;
 pub use credentials::ClientCredentials;
+
+mod password_hack;
+use password_hack::PasswordHackPayload;
 
 mod flow;
 pub use flow::*;
@@ -29,9 +32,8 @@ pub enum AuthErrorImpl {
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
 
-    /// For passwords that couldn't be processed by [`backend::legacy_console::parse_password`].
-    #[error("Malformed password message")]
-    MalformedPassword,
+    #[error("Malformed password message: {0}")]
+    MalformedPassword(&'static str),
 
     /// Errors produced by [`crate::stream::PqStream`].
     #[error(transparent)]
@@ -76,7 +78,7 @@ impl UserFacingError for AuthError {
             Console(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
-            MalformedPassword => self.to_string(),
+            MalformedPassword(_) => self.to_string(),
             _ => "Internal error".to_string(),
         }
     }
