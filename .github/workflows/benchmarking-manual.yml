@@ -27,7 +27,7 @@ jobs:
         connstr: [ CAPTEST_30GB_CONNSTR, CAPTEST_100GB_CONNSTR, CAPTEST_200GB_CONNSTR ]
 
     runs-on: [self-hosted, dev]
-    timeout-minutes: 1440 # 24h
+    timeout-minutes: 4320 # 3d
 
     container:
       image: python:3.9-buster
