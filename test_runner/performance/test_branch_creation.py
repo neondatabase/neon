@@ -47,21 +47,15 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
              'pitr_interval': '5 s'
          })
 
-    def run_pgbench(branch: str):
-        log.info(f"Start a pgbench workload on branch {branch}")
-
-        pg = env.postgres.create_start(branch, tenant_id=tenant)
-        connstr = pg.connstr()
-
-        pg_bin.run_capture(['pgbench', '-i', connstr])
-        pg_bin.run_capture(['pgbench', '-c10', '-T10', connstr])
-
-        pg.stop()
-
     env.neon_cli.create_branch('b0', tenant_id=tenant)
+    pg = env.postgres.create_start('b0', tenant_id=tenant)
+    pg_bin.run_capture(['pgbench', '-i', pg.connstr()])
 
     threads: List[threading.Thread] = []
-    threads.append(threading.Thread(target=run_pgbench, args=('b0', ), daemon=True))
+    threads.append(
+        threading.Thread(target=pg_bin.run_capture,
+                         args=(['pgbench', '-c10', '-T10', pg.connstr()], ),
+                         daemon=True))
     threads[-1].start()
 
     branch_creation_durations = []
@@ -69,16 +63,23 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         time.sleep(1.0)
 
         # random a source branch
-        p = random.randint(0, i)
+        p = f'b{random.randint(0, i)}'
+        b = f'b{i+1}'
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch('b{}'.format(i + 1), 'b{}'.format(p), tenant_id=tenant)
+        env.neon_cli.create_branch(b, p, tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
-        log.info(f"Creating branch b{i+1} took {dur}s")
+        log.info(f"Creating branch {b} took {dur}s")
         branch_creation_durations.append(dur)
 
-        threads.append(threading.Thread(target=run_pgbench, args=(f'b{i+1}', ), daemon=True))
+        pg = env.postgres.create_start(b, tenant_id=tenant)
+        pg_bin.run_capture(['pgbench', '-i', pg.connstr()])
+
+        threads.append(
+            threading.Thread(target=pg_bin.run_capture,
+                             args=(['pgbench', '-c10', '-T10', pg.connstr()], ),
+                             daemon=True))
         threads[-1].start()
 
     for thread in threads:
