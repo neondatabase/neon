@@ -1096,22 +1096,20 @@ class NeonCli(AbstractNeonCli):
         ]
         if ancestor_branch_name is not None:
             cmd.extend(['--ancestor-branch-name', ancestor_branch_name])
-            if ancestor_start_lsn is not None:
-                cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
-            else:
-                ancestor_pg = None
-                # find the ancestor branch's PG node
-                for pg in self.env.postgres.instances:
-                    if pg.node_name == f"{ancestor_branch_name}_pg_node":
-                        if not pg.running:
-                            pg.start()
-                        ancestor_pg = pg
-                # Initializing the child branch based on the ancestor branch's current flush LSN.
-                # Needs to specify the start LSN here to prevent the situation when the child
-                # branch is created before the ancestor branch finishes processing the WALs.
-                if ancestor_pg is not None:
-                    start_lsn = ancestor_pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
-                    cmd.extend(['--ancestor-start-lsn', start_lsn])
+        if ancestor_start_lsn is not None:
+            cmd.extend(['--ancestor-start-lsn', ancestor_start_lsn])
+        elif ancestor_branch_name is not None:
+            ancestor_pg = None
+            # Find the ancestor branch's PG node
+            for pg in self.env.postgres.instances:
+                if pg.node_name == f"{ancestor_branch_name}_pg_node" and pg.running:
+                    ancestor_pg = pg
+            # Initializing the child branch based on the ancestor branch's current flush LSN.
+            # Needs to specify the start LSN here to prevent the situation when the child
+            # branch is created before the ancestor branch finishes processing the WALs.
+            if ancestor_pg is not None:
+                start_lsn = ancestor_pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+                cmd.extend(['--ancestor-start-lsn', start_lsn])
 
         res = self.raw_cli(cmd)
         res.check_returncode()
