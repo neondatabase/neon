@@ -38,20 +38,16 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
              'pitr_interval': '5 s'
          })
 
-    def run_pgbench(pg: Postgres):
-        connstr = pg.connstr()
-
-        log.info(f"Start a pgbench workload on pg {connstr}")
-
-        pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', connstr])
-        pg_bin.run_capture(['pgbench', '-T15', connstr])
-
     env.neon_cli.create_branch('b0', tenant_id=tenant)
     pgs: List[Postgres] = []
     pgs.append(env.postgres.create_start('b0', tenant_id=tenant))
+    pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', pgs[-1].connstr()])
 
     threads: List[threading.Thread] = []
-    threads.append(threading.Thread(target=run_pgbench, args=(pgs[0], ), daemon=True))
+    threads.append(
+        threading.Thread(target=pg_bin.run_capture,
+                         args=(['pgbench', '-T15', pgs[-1].connstr()], ),
+                         daemon=True))
     threads[-1].start()
 
     thread_limit = 4
@@ -77,8 +73,12 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
             env.neon_cli.create_branch('b{}'.format(i + 1), 'b0', tenant_id=tenant)
 
         pgs.append(env.postgres.create_start('b{}'.format(i + 1), tenant_id=tenant))
+        pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', pgs[-1].connstr()])
 
-        threads.append(threading.Thread(target=run_pgbench, args=(pgs[-1], ), daemon=True))
+        threads.append(
+            threading.Thread(target=pg_bin.run_capture,
+                             args=(['pgbench', '-T15', pgs[-1].connstr()], ),
+                             daemon=True))
         threads[-1].start()
 
     for thread in threads:
