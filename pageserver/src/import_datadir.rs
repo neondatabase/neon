@@ -99,7 +99,7 @@ fn import_rel<R: Repository, Reader: Read>(
     len: usize,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
-    trace!("importing rel file {}", path.display());
+    info!("importing rel file {}", path.display());
 
     let filename = &path
         .file_name()
@@ -129,7 +129,7 @@ fn import_rel<R: Repository, Reader: Read>(
     // ignore "relation already exists" error
     if let Err(e) = modification.put_rel_creation(rel, nblocks as u32) {
         if e.to_string().contains("already exists") {
-            debug!("relation {} already exists. we must be extending it", rel);
+            info!("relation {} already exists. we must be extending it", rel);
         } else {
             return Err(e);
         }
@@ -163,6 +163,7 @@ fn import_rel<R: Repository, Reader: Read>(
     //
     // If we process rel segments out of order,
     // put_rel_extend will skip the update.
+    info!("updating rel {} size to {}", rel, blknum);
     modification.put_rel_extend(rel, blknum)?;
 
     Ok(())
@@ -457,7 +458,10 @@ pub fn import_file<R: Repository, Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                let version_bytes = read_all_bytes(reader)?;
+                modification.put_pg_version(version_bytes.clone())?;
+
+                debug!("imported PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
@@ -485,7 +489,10 @@ pub fn import_file<R: Repository, Reader: Read>(
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
-                debug!("ignored");
+                let version_bytes = read_all_bytes(reader)?;
+                modification.put_pg_version(version_bytes.clone())?;
+
+                debug!("imported PG_VERSION file");
             }
             _ => {
                 import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
