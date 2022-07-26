@@ -76,6 +76,12 @@ impl<R: Repository> DatadirTimeline<R> {
         Ok(())
     }
 
+    /// Set timeline logical size.
+    pub fn set_logical_size(&self, size: usize) {
+        self.current_logical_size
+            .store(size as isize, Ordering::SeqCst);
+    }
+
     /// Start ingesting a WAL record, or other atomic modification of
     /// the timeline.
     ///
