@@ -48,17 +48,17 @@ CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
 
 #
-# Top level Makefile to build Zenith and PostgreSQL
+# Top level Makefile to build Neon and PostgreSQL
 #
 .PHONY: all
-all: zenith postgres neon-pg-ext
+all: neon postgres neon-pg-ext
 
-### Zenith Rust bits
+### Neon Rust bits
 #
 # The 'postgres_ffi' depends on the Postgres headers.
-.PHONY: zenith
-zenith: postgres-headers
-	+@echo "Compiling Zenith"
+.PHONY: neon
+neon: postgres-headers
+	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
@@ -84,7 +84,7 @@ postgres-headers: postgres-configure
 # Compile and install PostgreSQL and contrib/neon
 .PHONY: postgres
 postgres: postgres-configure \
-		  postgres-headers # to prevent `make install` conflicts with zenith's `postgres-headers`
+		  postgres-headers # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 install
 	+@echo "Compiling libpq"
