@@ -3,6 +3,9 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use lazy_static::lazy_static;
+use prometheus::core::{AtomicU64, GenericGauge, GenericGaugeVec};
+pub use prometheus::opts;
+pub use prometheus::register;
 pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_gauge, Gauge};
@@ -17,6 +20,17 @@ pub use prometheus::{Encoder, TextEncoder};
 
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
+
+pub type UIntGauge = GenericGauge<AtomicU64>;
+pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;
+
+#[macro_export]
+macro_rules! register_uint_gauge_vec {
+    ($NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{
+        let gauge_vec = UIntGaugeVec::new($crate::opts!($NAME, $HELP), $LABELS_NAMES).unwrap();
+        $crate::register(Box::new(gauge_vec.clone())).map(|_| gauge_vec)
+    }};
+}
 
 /// Gathers all Prometheus metrics and records the I/O stats just before that.
 ///
