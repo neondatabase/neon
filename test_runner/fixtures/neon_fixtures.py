@@ -691,6 +691,10 @@ class NeonEnv:
         """ Get list of safekeeper endpoints suitable for safekeepers GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
+    def timeline_dir(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Path:
+        """Get a timeline directory's path based on the repo directory of the test environment"""
+        return self.repo_dir / "tenants" / tenant_id.hex / "timelines" / timeline_id.hex
+
     @cached_property
     def auth_keys(self) -> AuthKeys:
         pub = (Path(self.repo_dir) / 'auth_public_key.pem').read_bytes()

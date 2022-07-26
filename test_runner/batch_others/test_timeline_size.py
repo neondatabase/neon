@@ -294,8 +294,7 @@ def test_timeline_physical_size_metric(neon_simple_env: NeonEnv):
 
     # assert that the metric matches the actual physical size on disk
     tl_physical_size_metric = int(matches.group(1))
-    timeline_path = pathlib.Path(
-        f"{env.repo_dir}/tenants/{env.initial_tenant.hex}/timelines/{new_timeline_id.hex}/")
+    timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
 
@@ -304,8 +303,7 @@ def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     matches the total physical size of the timeline on disk"""
     client = env.pageserver.http_client()
     res = assert_timeline_local(client, tenant_id, timeline_id)
-    timeline_path = pathlib.Path(
-        f"{env.repo_dir}/tenants/{tenant_id.hex}/timelines/{timeline_id.hex}/")
+    timeline_path = env.timeline_dir(tenant_id, timeline_id)
     assert res["local"]["current_physical_size"] == res["local"][
         "current_physical_size_non_incremental"]
     assert res["local"]["current_physical_size"] == get_timeline_dir_size(timeline_path)
