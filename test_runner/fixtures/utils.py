@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pathlib
 import shutil
@@ -95,22 +96,18 @@ def get_dir_size(path: str) -> int:
 def get_timeline_dir_size(path: pathlib.Path) -> int:
     """Get the timeline directory's total size, which only counts the layer files' size."""
     sz = 0
-    for f_name in os.listdir(path):
-        f_path = path.joinpath(f_name)
-        try:
+    for dir_entry in path.iterdir():
+        with contextlib.suppress(Exception):
             # file is an image layer
-            _ = parse_image_layer(f_name)
-            sz += f_path.stat().st_size
+            _ = parse_image_layer(dir_entry.name)
+            sz += dir_entry.stat().st_size
             continue
-        except:
-            pass
-        try:
+
+        with contextlib.suppress(Exception):
             # file is a delta layer
-            _ = parse_delta_layer(f_name)
-            sz += f_path.stat().st_size
+            _ = parse_delta_layer(dir_entry.name)
+            sz += dir_entry.stat().st_size
             continue
-        except:
-            pass
     return sz
 
 
