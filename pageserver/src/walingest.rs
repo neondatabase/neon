@@ -22,8 +22,8 @@
 //! bespoken Rust code.
 
 use anyhow::Context;
-use postgres_ffi::nonrelfile_utils::clogpage_precedes;
-use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
+use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{page_is_new, page_set_lsn};
 
 use anyhow::Result;
@@ -33,10 +33,12 @@ use tracing::*;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::walrecord::*;
-use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
-use postgres_ffi::xlog_utils::*;
+use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::*;
+use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
-use postgres_ffi::{pg_constants, CheckPoint};
+use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
@@ -293,7 +295,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
             let img_offs = blk.bimg_offset as usize;
-            let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
+            let mut image = BytesMut::with_capacity(BLCKSZ as usize);
             image.extend_from_slice(&decoded.record[img_offs..img_offs + img_len]);
 
             if blk.hole_length != 0 {
@@ -309,7 +311,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             if !page_is_new(&image) {
                 page_set_lsn(&mut image, lsn)
             }
-            assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
+            assert_eq!(image.len(), BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
             let rec = ZenithWalRecord::Postgres {

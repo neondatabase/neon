@@ -13,8 +13,10 @@ use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
-use postgres_ffi::xlog_utils::TimestampTz;
-use postgres_ffi::{pg_constants, Oid, TransactionId};
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::TimestampTz;
+use postgres_ffi::BLCKSZ;
+use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -297,9 +299,9 @@ pub trait DatadirTimeline: Timeline {
                 let clog_page =
                     self.get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn)?;
 
-                if clog_page.len() == pg_constants::BLCKSZ as usize + 8 {
+                if clog_page.len() == BLCKSZ as usize + 8 {
                     let mut timestamp_bytes = [0u8; 8];
-                    timestamp_bytes.copy_from_slice(&clog_page[pg_constants::BLCKSZ as usize..]);
+                    timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
                     let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
 
                     if timestamp >= search_timestamp {
@@ -382,7 +384,7 @@ pub trait DatadirTimeline: Timeline {
                 total_size += relsize as usize;
             }
         }
-        Ok(total_size * pg_constants::BLCKSZ as usize)
+        Ok(total_size * BLCKSZ as usize)
     }
 
     ///
@@ -912,7 +914,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         result?;
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * pg_constants::BLCKSZ as isize);
+            writer.update_current_logical_size(pending_nblocks * BLCKSZ as isize);
             self.pending_nblocks = 0;
         }
 
@@ -940,7 +942,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * pg_constants::BLCKSZ as isize);
+            writer.update_current_logical_size(pending_nblocks * BLCKSZ as isize);
         }
 
         Ok(())
@@ -1014,7 +1016,7 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usize]);
+static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 
 // Layout of the Key address space
 //

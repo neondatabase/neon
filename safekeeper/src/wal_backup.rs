@@ -11,7 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use postgres_ffi::xlog_utils::{XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr, PG_TLI};
+use postgres_ffi::v14::xlog_utils::{XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr};
+use postgres_ffi::PG_TLI;
 use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::fs::File;
 use tokio::runtime::Builder;
