@@ -6,7 +6,7 @@ use crate::timeline::{ReplicaState, Timeline, TimelineTools};
 use crate::wal_storage::WalReader;
 use anyhow::{bail, Context, Result};
 
-use postgres_ffi::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
+use postgres_ffi::v14::xlog_utils::{get_current_timestamp, TimestampTz, MAX_SEND_SIZE};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};

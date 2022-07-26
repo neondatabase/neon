@@ -3,7 +3,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
-use postgres_ffi::ControlFileData;
+
 use std::{
     fs,
     path::Path,
@@ -69,16 +69,6 @@ pub fn create_repo(
     )))
 }
 
-// Returns checkpoint LSN from controlfile
-fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
-    // Read control file to extract the LSN
-    let controlfile_path = path.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&fs::read(controlfile_path)?)?;
-    let lsn = controlfile.checkPoint;
-
-    Ok(Lsn(lsn))
-}
-
 // Create the cluster temporarily in 'initdbpath' directory inside the repository
 // to get bootstrap data for timeline initialization.
 //
@@ -128,7 +118,7 @@ fn bootstrap_timeline<R: Repository>(
     run_initdb(conf, &initdb_path)?;
     let pgdata_path = initdb_path;
 
-    let lsn = get_lsn_from_controlfile(&pgdata_path)?.align();
+    let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
     // Import the contents of the data directory at the initial checkpoint
     // LSN, and any WAL after that.

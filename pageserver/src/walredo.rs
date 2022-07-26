@@ -44,11 +44,12 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
 use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
-use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_bitshift;
-use postgres_ffi::nonrelfile_utils::mx_offset_to_flags_offset;
-use postgres_ffi::nonrelfile_utils::mx_offset_to_member_offset;
-use postgres_ffi::nonrelfile_utils::transaction_id_set_status;
-use postgres_ffi::pg_constants;
+use postgres_ffi::v14::nonrelfile_utils::{
+    mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
+    transaction_id_set_status,
+};
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::BLCKSZ;
 
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
@@ -417,10 +418,10 @@ impl PostgresRedoManager {
                 }
 
                 // Append the timestamp
-                if page.len() == pg_constants::BLCKSZ as usize + 8 {
-                    page.truncate(pg_constants::BLCKSZ as usize);
+                if page.len() == BLCKSZ as usize + 8 {
+                    page.truncate(BLCKSZ as usize);
                 }
-                if page.len() == pg_constants::BLCKSZ as usize {
+                if page.len() == BLCKSZ as usize {
                     page.extend_from_slice(&timestamp.to_be_bytes());
                 } else {
                     warn!(
@@ -741,7 +742,7 @@ impl PostgresRedoProcess {
 
         // We expect the WAL redo process to respond with an 8k page image. We read it
         // into this buffer.
-        let mut resultbuf = vec![0; pg_constants::BLCKSZ.into()];
+        let mut resultbuf = vec![0; BLCKSZ.into()];
         let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
 
         // Prepare for calling poll()
@@ -754,7 +755,7 @@ impl PostgresRedoProcess {
         // We do three things simultaneously: send the old base image and WAL records to
         // the child process's stdin, read the result from child's stdout, and forward any logging
         // information that the child writes to its stderr to the page server's log.
-        while nresult < pg_constants::BLCKSZ.into() {
+        while nresult < BLCKSZ.into() {
             // If we have more data to write, wake up if 'stdin' becomes writeable or
             // we have data to read. Otherwise only wake up if there's data to read.
             let nfds = if nwrite < writebuf.len() { 3 } else { 2 };

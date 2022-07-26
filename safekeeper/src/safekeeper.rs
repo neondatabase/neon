@@ -5,9 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
-use postgres_ffi::xlog_utils::TimeLineID;
-
-use postgres_ffi::xlog_utils::XLogSegNo;
+use postgres_ffi::v14::xlog_utils::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -19,7 +17,6 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use utils::{
     bin_ser::LeSer,
     lsn::Lsn,

@@ -83,7 +83,7 @@ pub fn get() -> &'static PageCache {
     }
 }
 
-pub const PAGE_SZ: usize = postgres_ffi::pg_constants::BLCKSZ as usize;
+pub const PAGE_SZ: usize = postgres_ffi::BLCKSZ as usize;
 const MAX_USAGE_COUNT: u8 = 5;
 
 ///

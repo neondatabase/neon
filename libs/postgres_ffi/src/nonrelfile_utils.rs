@@ -1,11 +1,12 @@
 //!
 //! Common utilities for dealing with PostgreSQL non-relation files.
 //!
-use crate::{pg_constants, transaction_id_precedes};
+use crate::transaction_id_precedes;
+use super::pg_constants;
 use bytes::BytesMut;
 use log::*;
 
-use crate::MultiXactId;
+use super::bindings::MultiXactId;
 
 pub fn transaction_id_set_status(xid: u32, status: u8, page: &mut BytesMut) {
     trace!(

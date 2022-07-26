@@ -24,8 +24,13 @@ use tracing::*;
 
 use crate::reltag::{RelTag, SlruKind};
 use crate::DatadirTimeline;
-use postgres_ffi::xlog_utils::*;
-use postgres_ffi::*;
+
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFileName};
+use postgres_ffi::v14::{CheckPoint, ControlFileData};
+use postgres_ffi::TransactionId;
+use postgres_ffi::PG_TLI;
+use postgres_ffi::{BLCKSZ, RELSEG_SIZE};
 use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
@@ -200,7 +205,7 @@ where
         }
 
         // Add a file for each chunk of blocks (aka segment)
-        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        let chunks = (0..nblocks).chunks(RELSEG_SIZE as usize);
         for (seg, blocks) in chunks.into_iter().enumerate() {
             let mut segment_data: Vec<u8> = vec![];
             for blknum in blocks {
@@ -220,23 +225,19 @@ where
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
 
-        let mut slru_buf: Vec<u8> =
-            Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
+        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
 
             if slru == SlruKind::Clog {
-                ensure!(
-                    img.len() == pg_constants::BLCKSZ as usize
-                        || img.len() == pg_constants::BLCKSZ as usize + 8
-                );
+                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
             } else {
-                ensure!(img.len() == pg_constants::BLCKSZ as usize);
+                ensure!(img.len() == BLCKSZ as usize);
             }
 
-            slru_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
+            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);

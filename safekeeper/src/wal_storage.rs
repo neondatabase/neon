@@ -13,9 +13,10 @@ use std::pin::Pin;
 use tokio::io::AsyncRead;
 
 use once_cell::sync::Lazy;
-use postgres_ffi::xlog_utils::{
-    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName, XLogSegNo, PG_TLI,
+use postgres_ffi::v14::xlog_utils::{
+    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName, XLogSegNo,
 };
+use postgres_ffi::PG_TLI;
 use std::cmp::min;
 
 use std::fs::{self, remove_file, File, OpenOptions};
@@ -30,9 +31,10 @@ use crate::safekeeper::SafeKeeperState;
 
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
-use postgres_ffi::xlog_utils::{XLogFileName, XLOG_BLCKSZ};
+use postgres_ffi::v14::xlog_utils::XLogFileName;
+use postgres_ffi::XLOG_BLCKSZ;
 
-use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::v14::waldecoder::WalStreamDecoder;
 
 use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
 

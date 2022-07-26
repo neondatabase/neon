@@ -9,7 +9,7 @@ use crate::timeline::{Timeline, TimelineTools};
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
 
-use postgres_ffi::xlog_utils::PG_TLI;
+use postgres_ffi::PG_TLI;
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::Arc;

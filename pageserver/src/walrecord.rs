@@ -3,9 +3,10 @@
 //!
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use postgres_ffi::pg_constants;
-use postgres_ffi::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
-use postgres_ffi::XLogRecord;
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
+use postgres_ffi::v14::XLogRecord;
+use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, OffsetNumber};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -618,7 +619,7 @@ pub fn decode_wal_record(
                             blk.hole_length = 0;
                         }
                     } else {
-                        blk.hole_length = pg_constants::BLCKSZ - blk.bimg_len;
+                        blk.hole_length = BLCKSZ - blk.bimg_len;
                     }
                     datatotal += blk.bimg_len as u32;
                     blocks_total_len += blk.bimg_len as u32;
@@ -628,9 +629,7 @@ pub fn decode_wal_record(
                      * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0
-                        && (blk.hole_offset == 0
-                            || blk.hole_length == 0
-                            || blk.bimg_len == pg_constants::BLCKSZ)
+                        && (blk.hole_offset == 0 || blk.hole_length == 0 || blk.bimg_len == BLCKSZ)
                     {
                         // TODO
                         /*
@@ -667,7 +666,7 @@ pub fn decode_wal_record(
                      * flag is set.
                      */
                     if (blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0)
-                        && blk.bimg_len == pg_constants::BLCKSZ
+                        && blk.bimg_len == BLCKSZ
                     {
                         // TODO
                         /*
@@ -685,7 +684,7 @@ pub fn decode_wal_record(
                      */
                     if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
                         && blk.bimg_info & pg_constants::BKPIMAGE_IS_COMPRESSED == 0
-                        && blk.bimg_len != pg_constants::BLCKSZ
+                        && blk.bimg_len != BLCKSZ
                     {
                         // TODO
                         /*

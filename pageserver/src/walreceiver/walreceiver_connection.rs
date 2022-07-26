@@ -27,7 +27,7 @@ use crate::{
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
-use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::v14::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
 /// Status of the connection.

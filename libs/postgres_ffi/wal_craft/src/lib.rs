@@ -4,8 +4,8 @@ use log::*;
 use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
-use postgres_ffi::pg_constants::WAL_SEGMENT_SIZE;
-use postgres_ffi::xlog_utils::{
+use postgres_ffi::v14::pg_constants::WAL_SEGMENT_SIZE;
+use postgres_ffi::v14::xlog_utils::{
     XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
 use std::cmp::Ordering;
