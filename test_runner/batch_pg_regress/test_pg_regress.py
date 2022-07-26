@@ -20,8 +20,8 @@ def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: pathlib.Path, pg_
     (runpath / 'testtablespace').mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = os.path.join(pg_distrib_dir, 'build/src/test/regress')
-    src_path = os.path.join(base_dir, 'vendor/postgres/src/test/regress')
+    build_path = os.path.join(pg_distrib_dir, '../build/v14/src/test/regress')
+    src_path = os.path.join(base_dir, 'vendor/postgres-v14/src/test/regress')
     bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'parallel_schedule')
     pg_regress = os.path.join(build_path, 'pg_regress')

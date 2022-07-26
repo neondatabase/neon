@@ -3,9 +3,9 @@
 **/.pytest_cache
 
 .git
+pg_install
 target
 tmp_check
-tmp_install
 tmp_check_cli
 test_output
 .vscode

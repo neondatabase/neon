@@ -1,15 +1,7 @@
 ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# Where to install Postgres, default is ./tmp_install, maybe useful for package managers
-POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/tmp_install
-
-# Seccomp BPF is only available for Linux
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Linux)
-	SECCOMP = --with-libseccomp
-else
-	SECCOMP =
-endif
+# Where to install Postgres, default is ./pg_install, maybe useful for package managers
+POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
 #
 # We differentiate between release / debug build types using the BUILD_TYPE
@@ -27,6 +19,13 @@ else ifeq ($(BUILD_TYPE),debug)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
+
+# Seccomp BPF is only available for Linux
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+	PG_CONFIGURE_OPTS += --with-libseccomp
+endif
+
 
 # macOS with brew-installed openssl requires explicit paths
 # It can be configured with OPENSSL_PREFIX variable
@@ -62,49 +61,50 @@ neon: postgres-headers
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
-$(POSTGRES_INSTALL_DIR)/build/config.status:
-	+@echo "Configuring postgres build"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build
-	(cd $(POSTGRES_INSTALL_DIR)/build && \
-	$(ROOT_PROJECT_DIR)/vendor/postgres/configure CFLAGS='$(PG_CFLAGS)' \
+$(POSTGRES_INSTALL_DIR)/build/v14/config.status:
+	+@echo "Configuring Postgres v14 build"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/v14
+	(cd $(POSTGRES_INSTALL_DIR)/build/v14 && \
+	$(ROOT_PROJECT_DIR)/vendor/postgres-v14/configure CFLAGS='$(PG_CFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
-		$(SECCOMP) \
-		--prefix=$(abspath $(POSTGRES_INSTALL_DIR)) > configure.log)
+		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v14 > configure.log)
 
-# nicer alias for running 'configure'
-.PHONY: postgres-configure
-postgres-configure: $(POSTGRES_INSTALL_DIR)/build/config.status
+# nicer alias to run 'configure'
+.PHONY: postgres-v14-configure
+postgres-v14-configure: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
 
-# Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/include
-.PHONY: postgres-headers
-postgres-headers: postgres-configure
-	+@echo "Installing PostgreSQL headers"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/src/include MAKELEVEL=0 install
+
+# Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
+.PHONY: postgres-v14-headers
+postgres-v14-headers: postgres-v14-configure
+	+@echo "Installing PostgreSQL v14 headers"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/src/include MAKELEVEL=0 install
 
 # Compile and install PostgreSQL and contrib/neon
-.PHONY: postgres
-postgres: postgres-configure \
-		  postgres-headers # to prevent `make install` conflicts with neon's `postgres-headers`
+.PHONY: postgres-v14
+postgres-v14: postgres-v14-configure \
+		  postgres-v14-headers # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14 MAKELEVEL=0 install
 	+@echo "Compiling contrib/neon"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/neon install
 	+@echo "Compiling contrib/neon_test_utils"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon_test_utils install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/neon_test_utils install
 	+@echo "Compiling pg_buffercache"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pg_buffercache install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pageinspect install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
 
+# shorthand to build all Postgres versions
+postgres: postgres-v14
 
-.PHONY: postgres-clean
-postgres-clean:
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 clean
+postgres-headers: postgres-v14-headers
+
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
 clean:
-	cd $(POSTGRES_INSTALL_DIR)/build && $(MAKE) clean
+	cd $(POSTGRES_INSTALL_DIR)/build/v14 && $(MAKE) clean
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything

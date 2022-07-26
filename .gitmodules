@@ -1,4 +1,4 @@
-[submodule "vendor/postgres"]
-	path = vendor/postgres
+[submodule "vendor/postgres-v14"]
+	path = vendor/postgres-v14
 	url = https://github.com/zenithdb/postgres
 	branch = main

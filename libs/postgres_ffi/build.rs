@@ -47,14 +47,17 @@ fn main() {
     println!("cargo:rerun-if-changed=bindgen_deps.h");
 
     // Finding the location of C headers for the Postgres server:
-    // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/tmp_install`
-    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/tmp_install/include/postgresql/server`
+    // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
+    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/v14/include/postgresql/server`
     let mut pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR")
     {
         postgres_install_dir.into()
     } else {
-        PathBuf::from("tmp_install")
+        PathBuf::from("pg_install")
     };
+    // Currently, we only expect to find PostgreSQL v14 sources, in "pg_install/v14". In the
+    // future, we will run this for all supported PostgreSQL versions.
+    pg_install_dir.push("v14");
 
     if pg_install_dir.is_relative() {
         let cwd = env::current_dir().unwrap();
