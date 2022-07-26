@@ -289,13 +289,13 @@ impl LocalEnv {
         let mut env: LocalEnv = toml::from_str(toml)?;
 
         // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "tmp_install".
+        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install/v14".
         if env.pg_distrib_dir == Path::new("") {
             if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
                 env.pg_distrib_dir = postgres_bin.into();
             } else {
                 let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("tmp_install")
+                env.pg_distrib_dir = cwd.join("pg_install/v14")
             }
         }
 

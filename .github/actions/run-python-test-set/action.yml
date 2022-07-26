@@ -88,7 +88,7 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
       shell: bash -euxo pipefail {0}
       run: |
-        export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
+        export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install/v14}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1

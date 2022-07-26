@@ -449,7 +449,7 @@ mod tests {
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join("tmp_install"),
+            pg_distrib_dir: top_path.join("pg_install/v14"),
             datadir: top_path.join(format!("test_output/{}", test_name)),
         };
         if cfg.datadir.exists() {
