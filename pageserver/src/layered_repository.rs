@@ -752,7 +752,7 @@ impl LayeredRepository {
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().unwrap();
 
-        let mut timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock().unwrap();
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
@@ -789,15 +789,14 @@ impl LayeredRepository {
                 })
                 .collect::<Vec<_>>()
         };
+        drop(timelines);
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
         for timeline_id in timeline_ids {
             // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline_load_internal(timeline_id, &mut *timelines)?
-                .expect("checked above that timeline is local and loaded");
+            let timeline = self.get_timeline_load(timeline_id)?;
 
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timelineid) = target_timeline_id {
@@ -819,7 +818,6 @@ impl LayeredRepository {
                 gc_timelines.push(timeline);
             }
         }
-        drop(timelines);
         drop(gc_cs);
 
         // Perform GC for each timeline.
