@@ -10,9 +10,9 @@
 //! corresponding files are written to disk.
 //!
 
+use crate::layered_repository::inmemory_layer::InMemoryLayer;
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
-use crate::layered_repository::InMemoryLayer;
 use crate::repository::Key;
 use anyhow::Result;
 use lazy_static::lazy_static;

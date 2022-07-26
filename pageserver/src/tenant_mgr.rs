@@ -494,12 +494,16 @@ fn load_local_timeline(
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;
     let repartition_distance = repo.get_checkpoint_distance() / 10;
+    let init_logical_size = inmem_timeline.init_logical_size;
     let page_tline = Arc::new(DatadirTimelineImpl::new(
         inmem_timeline,
         repartition_distance,
     ));
-    page_tline.init_logical_size()?;
-
+    if let Some(logical_size) = init_logical_size {
+        page_tline.set_logical_size(logical_size);
+    } else {
+        page_tline.init_logical_size()?;
+    }
     tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
         id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
         datadir: Arc::clone(&page_tline),
