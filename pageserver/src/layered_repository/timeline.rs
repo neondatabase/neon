@@ -20,7 +20,8 @@ use std::time::{Duration, SystemTime};
 
 use metrics::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    register_uint_gauge_vec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 
 use crate::layered_repository::{
@@ -105,7 +106,7 @@ lazy_static! {
 // A layered timeline's physical is defined as the total size of
 // (delta/image) layer files on disk.
 lazy_static! {
-    static ref CURRENT_PHYSICAL_SIZE: IntGaugeVec = register_int_gauge_vec!(
+    static ref CURRENT_PHYSICAL_SIZE: UIntGaugeVec = register_uint_gauge_vec!(
         "pageserver_current_physical_size",
         "Current physical size grouped by timeline",
         &["tenant_id", "timeline_id"]
@@ -246,7 +247,7 @@ pub struct LayeredTimeline {
     create_images_time_histo: Histogram,
     last_record_gauge: IntGauge,
     wait_lsn_time_histo: Histogram,
-    current_physical_size_gauge: IntGauge,
+    current_physical_size_gauge: UIntGauge,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_layers: AtomicBool,
@@ -442,11 +443,11 @@ impl Timeline for LayeredTimeline {
         })
     }
 
-    fn get_physical_size(&self) -> i64 {
+    fn get_physical_size(&self) -> u64 {
         self.current_physical_size_gauge.get()
     }
 
-    fn get_physical_size_non_incremental(&self) -> anyhow::Result<i64> {
+    fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
@@ -463,7 +464,7 @@ impl Timeline for LayeredTimeline {
             }
         }
 
-        Ok(total_physical_size as i64)
+        Ok(total_physical_size)
     }
 }
 
@@ -675,8 +676,7 @@ impl LayeredTimeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.current_physical_size_gauge
-            .set(total_physical_size as i64);
+        self.current_physical_size_gauge.set(total_physical_size);
 
         Ok(())
     }
@@ -1189,7 +1189,7 @@ impl LayeredTimeline {
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
-        self.current_physical_size_gauge.add(sz as i64);
+        self.current_physical_size_gauge.add(sz);
         // update metrics
         NUM_PERSISTENT_FILES_CREATED.inc_by(1);
         PERSISTENT_BYTES_WRITTEN.inc_by(sz);
@@ -1361,7 +1361,7 @@ impl LayeredTimeline {
         let mut layers = self.layers.write().unwrap();
         for l in image_layers {
             self.current_physical_size_gauge
-                .add(l.path().metadata()?.len() as i64);
+                .add(l.path().metadata()?.len());
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -1611,7 +1611,7 @@ impl LayeredTimeline {
 
             // update the timeline's physical size
             self.current_physical_size_gauge
-                .add(new_delta_path.metadata()?.len() as i64);
+                .add(new_delta_path.metadata()?.len());
 
             new_layer_paths.insert(new_delta_path);
             layers.insert_historic(Arc::new(l));
@@ -1623,8 +1623,7 @@ impl LayeredTimeline {
         drop(all_keys_iter);
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
-                self.current_physical_size_gauge
-                    .sub(path.metadata()?.len() as i64);
+                self.current_physical_size_gauge.sub(path.metadata()?.len());
                 layer_paths_do_delete.insert(path);
             }
             l.delete()?;
@@ -1878,8 +1877,7 @@ impl LayeredTimeline {
         let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
-                self.current_physical_size_gauge
-                    .sub(path.metadata()?.len() as i64);
+                self.current_physical_size_gauge.sub(path.metadata()?.len());
                 layer_paths_to_delete.insert(path);
             }
             doomed_layer.delete()?;
