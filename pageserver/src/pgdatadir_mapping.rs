@@ -76,6 +76,7 @@ pub trait DatadirTimeline: Timeline {
     {
         DatadirModification {
             tline: self,
+            last_flush_lsn: Lsn(0),
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
@@ -456,6 +457,13 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     /// read the state, but note that any pending updates are *not* reflected
     /// in the state in 'tline' yet.
     pub tline: &'a T,
+
+    /// The last LSN written to disk by 'commit' and 'flush' methods.
+    // This variable is needed to `get` data after committing/flushing
+    // the modification's pending updates to disk to save memory.
+    // One example of this situation is when we import a large relation.
+    // See https://github.com/neondatabase/neon/pull/2044.
+    pub last_flush_lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
@@ -864,6 +872,8 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         });
         result?;
 
+        self.last_flush_lsn = lsn;
+
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * pg_constants::BLCKSZ as isize);
             self.pending_nblocks = 0;
@@ -892,6 +902,8 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
 
         writer.finish_write(lsn);
 
+        self.last_flush_lsn = lsn;
+
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * pg_constants::BLCKSZ as isize);
         }
@@ -919,8 +931,8 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
                 bail!("unexpected pending WAL record");
             }
         } else {
-            let last_lsn = self.tline.get_last_record_lsn();
-            self.tline.get(key, last_lsn)
+            let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.last_flush_lsn);
+            self.tline.get(key, lsn)
         }
     }
 
