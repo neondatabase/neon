@@ -363,7 +363,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         if all(not os.path.exists(p) for p in first_segments):
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
+        if elapsed > 200:
             raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
         time.sleep(0.5)
 
