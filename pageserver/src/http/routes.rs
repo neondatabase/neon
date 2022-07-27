@@ -438,8 +438,12 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     let index_accessor = remote_index.read().await;
     let has_in_progress_downloads = index_accessor
         .tenant_entry(&tenant_id)
-        .ok_or_else(|| ApiError::NotFound("Tenant not found in remote index".to_string()))?
-        .has_in_progress_downloads();
+        .map(|t| t.has_in_progress_downloads())
+        .unwrap_or_else(|| {
+            info!("Tenant {tenant_id} not found in remote index");
+            false
+        });
+
     // Retrieves local timelines of the tenant
     let local_timeline_infos = tokio::task::spawn_blocking(move || {
         crate::timelines::get_local_timelines(tenant_id, false, false)
