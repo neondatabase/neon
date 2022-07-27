@@ -20,18 +20,22 @@ def test_isolation(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, caps
     runpath = test_output_dir / 'regress'
     (runpath / 'testtablespace').mkdir(parents=True)
 
+    # Find the pg_isolation_regress binary
+    proc = pg_bin.run(['pg_config', '--libdir'], capture_output=True)
+    libdir = proc.stdout.decode().strip()
+    proc = pg_bin.run(['pg_config', '--bindir'], capture_output=True)
+    bindir = proc.stdout.decode().strip()
+    pg_isolation_regress = os.path.join(libdir,
+                                        'postgresql/pgxs/src/test/isolation/pg_isolation_regress')
+
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = os.path.join(pg_distrib_dir, 'build/src/test/isolation')
     src_path = os.path.join(base_dir, 'vendor/postgres/src/test/isolation')
-    bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'isolation_schedule')
-    pg_isolation_regress = os.path.join(build_path, 'pg_isolation_regress')
 
     pg_isolation_regress_command = [
         pg_isolation_regress,
         '--use-existing',
         '--bindir={}'.format(bindir),
-        '--dlpath={}'.format(build_path),
         '--inputdir={}'.format(src_path),
         '--schedule={}'.format(schedule),
     ]

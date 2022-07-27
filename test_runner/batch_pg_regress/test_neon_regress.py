@@ -20,19 +20,22 @@ def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, c
     runpath = test_output_dir / 'regress'
     (runpath / 'testtablespace').mkdir(parents=True)
 
+    # Find the pg_regress binary and --bindir option to pass to it.
+    proc = pg_bin.run(['pg_config', '--libdir'], capture_output=True)
+    libdir = proc.stdout.decode().strip()
+    proc = pg_bin.run(['pg_config', '--bindir'], capture_output=True)
+    bindir = proc.stdout.decode().strip()
+    pg_regress = os.path.join(libdir, 'postgresql/pgxs/src/test/regress/pg_regress')
+
     # Compute all the file locations that pg_regress will need.
     # This test runs neon specific tests
-    build_path = os.path.join(pg_distrib_dir, 'build/src/test/regress')
     src_path = os.path.join(base_dir, 'test_runner/neon_regress')
-    bindir = os.path.join(pg_distrib_dir, 'bin')
     schedule = os.path.join(src_path, 'parallel_schedule')
-    pg_regress = os.path.join(build_path, 'pg_regress')
 
     pg_regress_command = [
         pg_regress,
         '--use-existing',
         '--bindir={}'.format(bindir),
-        '--dlpath={}'.format(build_path),
         '--schedule={}'.format(schedule),
         '--inputdir={}'.format(src_path),
     ]

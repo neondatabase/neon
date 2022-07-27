@@ -31,6 +31,13 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Checkout
+      if: inputs.needs_postgres_source == 'true'
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+        fetch-depth: 1
+
     - name: Get Neon artifact for restoration
       uses: actions/download-artifact@v3
       with:
@@ -44,12 +51,11 @@ runs:
         tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
         rm -rf ./neon-artifact/
 
-    - name: Checkout
-      if: inputs.needs_postgres_source == 'true'
-      uses: actions/checkout@v3
-      with:
-        submodules: true
-        fetch-depth: 1
+        # Restore the parts of the 'build' directory that were included in the
+        # tarball. This includes the regression test modules in
+        # src/test/regress/*.so.
+        mkdir -p build/
+        cp -a /tmp/neon/pg_build/* build/
 
     - name: Cache poetry deps
       id: cache_poetry
