@@ -508,6 +508,7 @@ pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
     pub state: Option<TenantState>,
+    pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub has_in_progress_downloads: Option<bool>,
 }
 
@@ -526,6 +527,7 @@ pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
             TenantInfo {
                 id: *id,
                 state: Some(tenant.state),
+                current_physical_size: None,
                 has_in_progress_downloads,
             }
         })
