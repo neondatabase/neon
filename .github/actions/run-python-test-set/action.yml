@@ -70,6 +70,7 @@ runs:
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
         PLATFORM: github-actions-selfhosted
+        BUILD_TYPE: ${{ inputs.build_type }}
       shell: bash -ex {0}
       run: |
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
