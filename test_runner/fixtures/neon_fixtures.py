@@ -449,8 +449,11 @@ class RemoteStorageKind(enum.Enum):
 
 def available_remote_storages() -> List[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3]
-    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
+    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
+        log.info("Inabling real s3 storage for tests")
+    else:
+        log.info("Using mock implementations to test remote storage")
     return remote_storages
 
 
