@@ -1,3 +1,4 @@
+from contextlib import closing
 import random
 import time
 import statistics
@@ -6,8 +7,10 @@ import timeit
 import pytest
 from typing import List
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare
+from fixtures.compare_fixtures import NeonCompare, neon_compare
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import wait_for_last_record_lsn
+from fixtures.utils import lsn_from_hex
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
@@ -108,3 +111,37 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
         branch_creation_durations.append(dur)
 
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
+
+
+# Test measures the branch creation time of branching from a timeline with a lot of relations
+# when the root timeline is busy under a workload and not busy.
+def test_branch_creation_many_relations(neon_compare: NeonCompare):
+    env = neon_compare.env
+
+    timeline_id = env.neon_cli.create_branch('root')
+
+    pg = env.postgres.create_start('root')
+    with closing(pg.connect()) as conn:
+        with conn.cursor() as cur:
+            for i in range(10000):
+                cur.execute(f"CREATE TABLE t{i} as SELECT g FROM generate_series(1, 1000) g")
+
+    # Wait for the pageserver to finish processing the latest flush LSN
+    # as we don't want the LSN wait time to be measured during the branch creation
+    flush_lsn = pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+    wait_for_last_record_lsn(env.pageserver.http_client(),
+                             env.initial_tenant,
+                             timeline_id,
+                             lsn_from_hex(flush_lsn))
+
+    with neon_compare.record_duration("create_branch_time_not_busy_root"):
+        env.neon_cli.create_branch('child_not_busy', 'root')
+
+    thread = threading.Thread(target=pg.safe_psql,
+                              args=("INSERT INTO t0 VALUES (generate_series(1, 100000))", ))
+    thread.start()
+
+    with neon_compare.record_duration("create_branch_time_busy_root"):
+        env.neon_cli.create_branch('child_busy', 'root')
+
+    thread.join()
