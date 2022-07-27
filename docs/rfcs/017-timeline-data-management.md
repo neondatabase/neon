@@ -9,7 +9,7 @@ This RFC attempts to describe timeline-related data management as it's done now 
 The main goal is to prepare for future [on-demand layer downloads](https://github.com/neondatabase/neon/issues/2029), yet timeline data is one of the core primitive of pageserver, so a number of other RFCs are affected either.
 Due to that, this document won't have a single implementation, rather requiring a set of code changes to achieve the final state.
 
-RFC considers the repository at the `main` branch, commit `28243d68e60ffc7e69f158522f589f7d2e09186d` on the time of writing.
+RFC considers the repository at the `main` branch, commit [`28243d68e60ffc7e69f158522f589f7d2e09186d`](https://github.com/neondatabase/neon/tree/28243d68e60ffc7e69f158522f589f7d2e09186d) on the time of writing.
 
 ## Motivation
 
@@ -398,6 +398,10 @@ There's still a need to keep inmemory layer buffer synchronized during layer fre
 Flushing the frozen layer requires creating a new layer on disk and further remote storage upload, so `LayerMap` has to get those flushed bytes and queue them later: no need to block in the timeline itself for anything again, rather locking on the layer level, if needed.
 
 ![proposed timeline data access synchronization(2)](./images/017-timeline-data-management/proposed_timeline_data_access_sync_2.svg)
+
+Lock diagrams legend:
+
+![lock diagrams legend](./images/017-timeline-data-management/lock_legend.svg)
 
 After the frozen layers are flushed, something has to ensure that the layer structure is intact, so a repartitioning lock is needed still, and could also guard the layer map structure changes, since both are needed either way.
 This locking belongs to the `LowLevelLayeredTimeline` from the proposed data structure diagram, as the place with all such data being held.
