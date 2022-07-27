@@ -20,6 +20,7 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use super::TaskEvent;
 use crate::{
     http::models::WalReceiverEntry,
+    pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
@@ -177,7 +178,7 @@ pub async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
-                let timeline_to_check = Arc::clone(&timeline.tline);
+                let timeline_to_check = Arc::clone(&timeline);
                 tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
                     .await
                     .with_context(|| {
@@ -225,7 +226,7 @@ pub async fn handle_walreceiver_connection(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);

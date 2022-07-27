@@ -23,8 +23,7 @@ use tar::{Builder, EntryType, Header};
 use tracing::*;
 
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::Timeline;
-use crate::DatadirTimelineImpl;
+use crate::DatadirTimeline;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::*;
 use utils::lsn::Lsn;
@@ -32,12 +31,13 @@ use utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a, W>
+pub struct Basebackup<'a, W, T>
 where
     W: Write,
+    T: DatadirTimeline,
 {
     ar: Builder<AbortableWrite<W>>,
-    timeline: &'a Arc<DatadirTimelineImpl>,
+    timeline: &'a Arc<T>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
@@ -52,17 +52,18 @@ where
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a, W> Basebackup<'a, W>
+impl<'a, W, T> Basebackup<'a, W, T>
 where
     W: Write,
+    T: DatadirTimeline,
 {
     pub fn new(
         write: W,
-        timeline: &'a Arc<DatadirTimelineImpl>,
+        timeline: &'a Arc<T>,
         req_lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
-    ) -> Result<Basebackup<'a, W>> {
+    ) -> Result<Basebackup<'a, W, T>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -79,13 +80,13 @@ where
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", req_lsn);
-            timeline.tline.wait_lsn(req_lsn)?;
+            timeline.wait_lsn(req_lsn)?;
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as
             // zero, though, if no WAL has been generated on this timeline
             // yet.)
-            let end_of_timeline = timeline.tline.get_last_record_rlsn();
+            let end_of_timeline = timeline.get_last_record_rlsn();
             if req_lsn == end_of_timeline.last {
                 (end_of_timeline.prev, req_lsn)
             } else {
@@ -93,7 +94,7 @@ where
             }
         } else {
             // Backup was requested at end of the timeline.
-            let end_of_timeline = timeline.tline.get_last_record_rlsn();
+            let end_of_timeline = timeline.get_last_record_rlsn();
             (end_of_timeline.prev, end_of_timeline.last)
         };
 
@@ -371,7 +372,7 @@ where
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.tline.get_ancestor_lsn() {
+            if self.lsn == self.timeline.get_ancestor_lsn() {
                 write!(zenith_signal, "PREV LSN: none")?;
             } else {
                 write!(zenith_signal, "PREV LSN: invalid")?;
@@ -402,9 +403,10 @@ where
     }
 }
 
-impl<'a, W> Drop for Basebackup<'a, W>
+impl<'a, W, T> Drop for Basebackup<'a, W, T>
 where
     W: Write,
+    T: DatadirTimeline,
 {
     /// If the basebackup was not finished, prevent the Archive::drop() from
     /// writing the end-of-archive marker.

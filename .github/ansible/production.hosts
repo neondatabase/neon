@@ -17,4 +17,4 @@ env_name = prod-1
 console_mgmt_base_url = http://console-release.local
 bucket_name           = zenith-storage-oregon
 bucket_region         = us-west-2
-etcd_endpoints        = etcd-release.local:2379
+etcd_endpoints        = zenith-1-etcd.local:2379
