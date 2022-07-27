@@ -1,5 +1,5 @@
 from contextlib import closing
-import pathlib
+import random
 from uuid import UUID
 import re
 import psycopg2.extras
@@ -296,6 +296,40 @@ def test_timeline_physical_size_metric(neon_simple_env: NeonEnv):
     tl_physical_size_metric = int(matches.group(1))
     timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
+
+
+def test_tenant_physical_size(neon_simple_env: NeonEnv):
+    random.seed(100)
+
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    tenant, timeline = env.neon_cli.create_tenant()
+
+    def get_timeline_physical_size(timeline: UUID):
+        res = client.timeline_detail(tenant, timeline)
+        return res['local']['current_physical_size_non_incremental']
+
+    timeline_total_size = get_timeline_physical_size(timeline)
+    for i in range(10):
+        n_rows = random.randint(100, 1000)
+
+        timeline = env.neon_cli.create_branch(f"test_tenant_physical_size_{i}", tenant_id=tenant)
+        pg = env.postgres.create_start(f"test_tenant_physical_size_{i}", tenant_id=tenant)
+
+        pg.safe_psql_many([
+            "CREATE TABLE foo (t text)",
+            f"INSERT INTO foo SELECT 'long string to consume some space' || g FROM generate_series(1, {n_rows}) g",
+        ])
+
+        env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
+
+        timeline_total_size += get_timeline_physical_size(timeline)
+
+        pg.stop()
+
+    tenant_physical_size = int(client.tenant_status(tenant_id=tenant)['current_physical_size'])
+    assert tenant_physical_size == timeline_total_size
 
 
 def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
