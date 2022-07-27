@@ -126,7 +126,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
 
     let zttid = ZTenantTimelineId {
-        tenant_id: request_data.tenant_id,
+        tenant_id: parse_request_param(&request, "tenant_id")?,
         timeline_id: request_data.timeline_id,
     };
     check_permission(&request, Some(zttid.tenant_id))?;
@@ -214,16 +214,19 @@ pub fn make_router(
             }
         }))
     }
+
+    // NB: on any changes do not forget to update the OpenAPI spec
+    // located nearby (/safekeeper/src/http/openapi_spec.yaml).
     router
         .data(Arc::new(conf))
         .data(auth)
         .get("/v1/status", status_handler)
+        // Will be used in the future instead of implicit timeline creation
+        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .get(
-            "/v1/timeline/:tenant_id/:timeline_id",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_status_handler,
         )
-        // Will be used in the future instead of implicit timeline creation
-        .post("/v1/timeline", timeline_create_handler)
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_force_handler,

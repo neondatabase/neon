@@ -304,10 +304,9 @@ impl SafekeeperNode {
         Ok(self
             .http_request(
                 Method::POST,
-                format!("{}/{}", self.http_base_url, "timeline"),
+                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
             )
             .json(&TimelineCreateRequest {
-                tenant_id,
                 timeline_id,
                 peer_ids,
             })

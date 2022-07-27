@@ -12,10 +12,9 @@ cat <<EOF | tee /tmp/payload
   "version": 1,
   "host": "${HOST}",
   "port": 6500,
+  "http_port": 7676,
   "region_id": {{ console_region_id }},
-  "instance_id": "${INSTANCE_ID}",
-  "http_host": "${HOST}",
-  "http_port": 7676
+  "instance_id": "${INSTANCE_ID}"
 }
 EOF
 
