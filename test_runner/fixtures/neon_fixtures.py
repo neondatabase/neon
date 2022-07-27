@@ -457,8 +457,11 @@ class RemoteStorageKind(enum.Enum):
 
 def available_remote_storages() -> List[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3]
-    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
+    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
+        log.info("Enabling real s3 storage for tests")
+    else:
+        log.info("Using mock implementations to test remote storage")
     return remote_storages
 
 
@@ -609,7 +612,8 @@ class NeonEnvBuilder:
             region_name=mock_region,
             aws_access_key_id=self.mock_s3_server.access_key(),
             aws_secret_access_key=self.mock_s3_server.secret_key(),
-        ).create_bucket(Bucket=bucket_name)
+        )
+        self.remote_storage_client.create_bucket(Bucket=bucket_name)
 
         self.remote_storage = S3Storage(
             bucket_name=bucket_name,
