@@ -230,8 +230,8 @@ async fn subscribe_for_timeline_updates(
     }
 }
 
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 2.0;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 60.0;
+const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
+const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
 
 async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
     if n == 0 {
