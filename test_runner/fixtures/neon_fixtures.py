@@ -691,6 +691,10 @@ class NeonEnv:
         """ Get list of safekeeper endpoints suitable for safekeepers GUC  """
         return ','.join([f'localhost:{wa.port.pg}' for wa in self.safekeepers])
 
+    def timeline_dir(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Path:
+        """Get a timeline directory's path based on the repo directory of the test environment"""
+        return self.repo_dir / "tenants" / tenant_id.hex / "timelines" / timeline_id.hex
+
     @cached_property
     def auth_keys(self) -> AuthKeys:
         pub = (Path(self.repo_dir) / 'auth_public_key.pem').read_bytes()
@@ -863,8 +867,8 @@ class NeonPageserverHttpClient(requests.Session):
 
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
-        )
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}" +
+            "?include-non-incremental-logical-size=1&include-non-incremental-physical-size=1")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)

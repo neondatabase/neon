@@ -49,7 +49,9 @@ pub struct LocalTimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
+    pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
+    pub current_physical_size_non_incremental: Option<u64>,
     pub timeline_state: LocalTimelineState,
 }
 
@@ -57,6 +59,7 @@ impl LocalTimelineInfo {
     pub fn from_loaded_timeline(
         timeline: &TimelineImpl,
         include_non_incremental_logical_size: bool,
+        include_non_incremental_physical_size: bool,
     ) -> anyhow::Result<Self> {
         let last_record_lsn = timeline.get_last_record_lsn();
         let info = LocalTimelineInfo {
@@ -72,9 +75,15 @@ impl LocalTimelineInfo {
             prev_record_lsn: Some(timeline.get_prev_record_lsn()),
             latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Loaded,
+            current_physical_size: Some(timeline.get_physical_size()),
             current_logical_size: Some(timeline.get_current_logical_size()),
             current_logical_size_non_incremental: if include_non_incremental_logical_size {
                 Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
+            } else {
+                None
+            },
+            current_physical_size_non_incremental: if include_non_incremental_physical_size {
+                Some(timeline.get_physical_size_non_incremental()?)
             } else {
                 None
             },
@@ -97,7 +106,9 @@ impl LocalTimelineInfo {
             latest_gc_cutoff_lsn: metadata.latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Unloaded,
             current_logical_size: None,
+            current_physical_size: None,
             current_logical_size_non_incremental: None,
+            current_physical_size_non_incremental: None,
         }
     }
 
@@ -106,11 +117,16 @@ impl LocalTimelineInfo {
         timeline_id: ZTimelineId,
         repo_timeline: &RepositoryTimeline<T>,
         include_non_incremental_logical_size: bool,
+        include_non_incremental_physical_size: bool,
     ) -> anyhow::Result<Self> {
         match repo_timeline {
             RepositoryTimeline::Loaded(_) => {
                 let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
-                Self::from_loaded_timeline(&*timeline, include_non_incremental_logical_size)
+                Self::from_loaded_timeline(
+                    &*timeline,
+                    include_non_incremental_logical_size,
+                    include_non_incremental_physical_size,
+                )
             }
             RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
         }
@@ -320,6 +336,7 @@ fn bootstrap_timeline<R: Repository>(
 pub(crate) fn get_local_timelines(
     tenant_id: ZTenantId,
     include_non_incremental_logical_size: bool,
+    include_non_incremental_physical_size: bool,
 ) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
         .with_context(|| format!("Failed to get repo for tenant {}", tenant_id))?;
@@ -334,6 +351,7 @@ pub(crate) fn get_local_timelines(
                 timeline_id,
                 &repository_timeline,
                 include_non_incremental_logical_size,
+                include_non_incremental_physical_size,
             )?,
         ))
     }
@@ -387,7 +405,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let loaded_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&*loaded_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&*loaded_timeline, false, false)
                 .context("cannot fill timeline info")?
         }
         None => {
@@ -395,7 +413,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let new_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&*new_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&*new_timeline, false, false)
                 .context("cannot fill timeline info")?
         }
     };
