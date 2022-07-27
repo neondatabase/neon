@@ -26,7 +26,7 @@ use crate::{
     repository::{LocalTimelineState, Repository},
     storage_sync::index::RemoteIndex,
     tenant_config::TenantConfOpt,
-    DatadirTimeline, RepositoryImpl,
+    DatadirTimeline, RepositoryImpl, TimelineImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
@@ -54,27 +54,27 @@ pub struct LocalTimelineInfo {
 }
 
 impl LocalTimelineInfo {
-    pub fn from_loaded_timeline<R: Repository>(
-        datadir_tline: &DatadirTimeline<R>,
+    pub fn from_loaded_timeline(
+        timeline: &TimelineImpl,
         include_non_incremental_logical_size: bool,
     ) -> anyhow::Result<Self> {
-        let last_record_lsn = datadir_tline.tline.get_last_record_lsn();
+        let last_record_lsn = timeline.get_last_record_lsn();
         let info = LocalTimelineInfo {
-            ancestor_timeline_id: datadir_tline.tline.get_ancestor_timeline_id(),
+            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
             ancestor_lsn: {
-                match datadir_tline.tline.get_ancestor_lsn() {
+                match timeline.get_ancestor_lsn() {
                     Lsn(0) => None,
                     lsn @ Lsn(_) => Some(lsn),
                 }
             },
-            disk_consistent_lsn: datadir_tline.tline.get_disk_consistent_lsn(),
+            disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
             last_record_lsn,
-            prev_record_lsn: Some(datadir_tline.tline.get_prev_record_lsn()),
-            latest_gc_cutoff_lsn: *datadir_tline.tline.get_latest_gc_cutoff_lsn(),
+            prev_record_lsn: Some(timeline.get_prev_record_lsn()),
+            latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
             timeline_state: LocalTimelineState::Loaded,
-            current_logical_size: Some(datadir_tline.get_current_logical_size()),
+            current_logical_size: Some(timeline.get_current_logical_size()),
             current_logical_size_non_incremental: if include_non_incremental_logical_size {
-                Some(datadir_tline.get_current_logical_size_non_incremental(last_record_lsn)?)
+                Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
             } else {
                 None
             },
@@ -109,9 +109,8 @@ impl LocalTimelineInfo {
     ) -> anyhow::Result<Self> {
         match repo_timeline {
             RepositoryTimeline::Loaded(_) => {
-                let datadir_tline =
-                    tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
-                Self::from_loaded_timeline(&datadir_tline, include_non_incremental_logical_size)
+                let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
+                Self::from_loaded_timeline(&*timeline, include_non_incremental_logical_size)
             }
             RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
         }
@@ -298,19 +297,18 @@ fn bootstrap_timeline<R: Repository>(
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
     let timeline = repo.create_empty_timeline(tli, lsn)?;
-    let mut page_tline: DatadirTimeline<R> = DatadirTimeline::new(timeline, u64::MAX);
-    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &mut page_tline, lsn)?;
+    import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
 
     fail::fail_point!("before-checkpoint-new-timeline", |_| {
         bail!("failpoint before-checkpoint-new-timeline");
     });
 
-    page_tline.tline.checkpoint(CheckpointConfig::Forced)?;
+    timeline.checkpoint(CheckpointConfig::Forced)?;
 
     info!(
         "created root timeline {} timeline.lsn {}",
         tli,
-        page_tline.tline.get_last_record_lsn()
+        timeline.get_last_record_lsn()
     );
 
     // Remove temp dir. We don't need it anymore
@@ -389,7 +387,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let loaded_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&loaded_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&*loaded_timeline, false)
                 .context("cannot fill timeline info")?
         }
         None => {
@@ -397,7 +395,7 @@ pub(crate) fn create_timeline(
             // load the timeline into memory
             let new_timeline =
                 tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&new_timeline, false)
+            LocalTimelineInfo::from_loaded_timeline(&*new_timeline, false)
                 .context("cannot fill timeline info")?
         }
     };

@@ -63,8 +63,7 @@ pub enum CheckpointConfig {
 }
 
 pub type RepositoryImpl = LayeredRepository;
-
-pub type DatadirTimelineImpl = DatadirTimeline<RepositoryImpl>;
+pub type TimelineImpl = <LayeredRepository as repository::Repository>::Timeline;
 
 pub fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint thread. This prevents new connections from

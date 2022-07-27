@@ -14,7 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
-use std::sync::atomic::{self, AtomicBool};
+use std::sync::atomic::{self, AtomicBool, AtomicIsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, SystemTime};
 
@@ -39,6 +39,7 @@ use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::tenant_config::TenantConfOpt;
+use crate::DatadirTimeline;
 
 use postgres_ffi::xlog_utils::to_pg_timestamp;
 use utils::{
@@ -49,7 +50,6 @@ use utils::{
 
 use crate::repository::{GcResult, RepositoryTimeline, Timeline, TimelineWriter};
 use crate::repository::{Key, Value};
-use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -122,7 +122,6 @@ pub enum LayeredTimelineEntry {
     Unloaded {
         id: ZTimelineId,
         metadata: TimelineMetadata,
-        init_logical_size: Option<usize>,
     },
 }
 
@@ -269,10 +268,20 @@ pub struct LayeredTimeline {
     // though lets keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    // Initial logical size of timeline (if known).
-    // Logical size can be copied from ancestor timeline when new branch is create at last LSN
-    pub init_logical_size: Option<usize>,
+    /// When did we last calculate the partitioning?
+    partitioning: Mutex<(KeyPartitioning, Lsn)>,
+
+    /// Configuration: how often should the partitioning be recalculated.
+    repartition_threshold: u64,
+
+    /// Current logical size of the "datadir", at the last LSN.
+    current_logical_size: AtomicIsize,
 }
+
+/// Inherit all the functions from DatadirTimeline, to provide the
+/// functionality to store PostgreSQL relations, SLRUs, etc. in a
+/// LayeredTimeline.
+impl DatadirTimeline for LayeredTimeline {}
 
 ///
 /// Information about how much history needs to be retained, needed by
@@ -472,7 +481,6 @@ impl LayeredTimeline {
         tenant_id: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
-        init_logical_size: Option<usize>,
     ) -> LayeredTimeline {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
@@ -508,7 +516,7 @@ impl LayeredTimeline {
             .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
             .unwrap();
 
-        LayeredTimeline {
+        let mut result = LayeredTimeline {
             conf,
             tenant_conf,
             timeline_id,
@@ -551,8 +559,13 @@ impl LayeredTimeline {
 
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
-            init_logical_size,
-        }
+
+            current_logical_size: AtomicIsize::new(0),
+            partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
+            repartition_threshold: 0,
+        };
+        result.repartition_threshold = result.get_checkpoint_distance() / 10;
+        result
     }
 
     ///
@@ -632,6 +645,58 @@ impl LayeredTimeline {
         );
 
         Ok(())
+    }
+
+    /// (Re-)calculate the logical size of the database at the latest LSN.
+    ///
+    /// This can be a slow operation.
+    pub fn init_logical_size(&self) -> Result<()> {
+        // Try a fast-path first:
+        // Copy logical size from ancestor timeline if there has been no changes on this
+        // branch, and no changes on the ancestor branch since the branch point.
+        if self.get_ancestor_lsn() == self.get_last_record_lsn() && self.ancestor_timeline.is_some()
+        {
+            let ancestor = self.get_ancestor_timeline()?;
+            let ancestor_logical_size = ancestor.get_current_logical_size();
+            // Check LSN after getting logical size to exclude race condition
+            // when ancestor timeline is concurrently updated.
+            //
+            // Logical size 0 means that it was not initialized, so don't believe that.
+            if ancestor_logical_size != 0 && ancestor.get_last_record_lsn() == self.ancestor_lsn {
+                self.current_logical_size
+                    .store(ancestor_logical_size as isize, AtomicOrdering::SeqCst);
+                debug!(
+                    "logical size copied from ancestor: {}",
+                    ancestor_logical_size
+                );
+                return Ok(());
+            }
+        }
+
+        // Have to calculate it the hard way
+        let last_lsn = self.get_last_record_lsn();
+        let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
+        self.current_logical_size
+            .store(logical_size as isize, AtomicOrdering::SeqCst);
+        debug!("calculated logical size the hard way: {}", logical_size);
+        Ok(())
+    }
+
+    /// Retrieve current logical size of the timeline
+    ///
+    /// NOTE: counted incrementally, includes ancestors,
+    pub fn get_current_logical_size(&self) -> usize {
+        let current_logical_size = self.current_logical_size.load(AtomicOrdering::Acquire);
+        match usize::try_from(current_logical_size) {
+            Ok(sz) => sz,
+            Err(_) => {
+                error!(
+                    "current_logical_size is out of range: {}",
+                    current_logical_size
+                );
+                0
+            }
+        }
     }
 
     ///
@@ -1003,18 +1068,16 @@ impl LayeredTimeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let layer_paths_to_upload = if lsn_range.start == self.initdb_lsn
-            && lsn_range.end == Lsn(self.initdb_lsn.0 + 1)
-        {
-            let pgdir = tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)?;
-            let (partitioning, _lsn) =
-                pgdir.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
-            self.create_image_layers(&partitioning, self.initdb_lsn, true)?
-        } else {
-            // normal case, write out a L0 delta layer file.
-            let delta_path = self.create_delta_layer(&frozen_layer)?;
-            HashSet::from([delta_path])
-        };
+        let layer_paths_to_upload =
+            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+                let (partitioning, _lsn) =
+                    self.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
+                self.create_image_layers(&partitioning, self.initdb_lsn, true)?
+            } else {
+                // normal case, write out a L0 delta layer file.
+                let delta_path = self.create_delta_layer(&frozen_layer)?;
+                HashSet::from([delta_path])
+            };
 
         fail_point!("flush-frozen-before-sync");
 
@@ -1186,36 +1249,54 @@ impl LayeredTimeline {
         let target_file_size = self.get_checkpoint_distance();
 
         // Define partitioning schema if needed
-        if let Ok(pgdir) =
-            tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
-        {
-            // 2. Create new image layers for partitions that have been modified
-            // "enough".
-            let (partitioning, lsn) = pgdir.repartition(
-                self.get_last_record_lsn(),
-                self.get_compaction_target_size(),
-            )?;
-            let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
-            if !layer_paths_to_upload.is_empty()
-                && self.upload_layers.load(atomic::Ordering::Relaxed)
-            {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    HashSet::from_iter(layer_paths_to_upload),
-                    None,
-                );
-            }
 
-            // 3. Compact
-            let timer = self.compact_time_histo.start_timer();
-            self.compact_level0(target_file_size)?;
-            timer.stop_and_record();
-        } else {
-            debug!("Could not compact because no partitioning specified yet");
-        }
+        match self.repartition(
+            self.get_last_record_lsn(),
+            self.get_compaction_target_size(),
+        ) {
+            Ok((partitioning, lsn)) => {
+                // 2. Create new image layers for partitions that have been modified
+                // "enough".
+                let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
+                if !layer_paths_to_upload.is_empty()
+                    && self.upload_layers.load(atomic::Ordering::Relaxed)
+                {
+                    storage_sync::schedule_layer_upload(
+                        self.tenant_id,
+                        self.timeline_id,
+                        HashSet::from_iter(layer_paths_to_upload),
+                        None,
+                    );
+                }
+
+                // 3. Compact
+                let timer = self.compact_time_histo.start_timer();
+                self.compact_level0(target_file_size)?;
+                timer.stop_and_record();
+            }
+            Err(err) => {
+                // no partitioning? This is normal, if the timeline was just created
+                // as an empty timeline. Also in unit tests, when we use the timeline
+                // as a simple key-value store, ignoring the datadir layout. Log the
+                // error but continue.
+                error!("could not compact, repartitioning keyspace failed: {err:?}");
+            }
+        };
 
         Ok(())
+    }
+
+    fn repartition(&self, lsn: Lsn, partition_size: u64) -> Result<(KeyPartitioning, Lsn)> {
+        let mut partitioning_guard = self.partitioning.lock().unwrap();
+        if partitioning_guard.1 == Lsn(0)
+            || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
+        {
+            let keyspace = self.collect_keyspace(lsn)?;
+            let partitioning = keyspace.partition(partition_size);
+            *partitioning_guard = (partitioning, lsn);
+            return Ok((partitioning_guard.0.clone(), lsn));
+        }
+        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 
     // Is it time to create a new image layer for the given partition?
@@ -1626,19 +1707,21 @@ impl LayeredTimeline {
 
         // Calculate pitr cutoff point.
         // If we cannot determine a cutoff LSN, be conservative and don't GC anything.
-        let mut pitr_cutoff_lsn: Lsn = *self.get_latest_gc_cutoff_lsn();
+        let mut pitr_cutoff_lsn: Lsn;
 
-        if let Ok(timeline) =
-            tenant_mgr::get_local_timeline_with_load(self.tenant_id, self.timeline_id)
-        {
-            let now = SystemTime::now();
+        if pitr != Duration::ZERO {
+            // conservative, safe default is to remove nothing, when we have no
+            // commit timestamp data available
+            pitr_cutoff_lsn = *self.get_latest_gc_cutoff_lsn();
+
             // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
             // If we don't have enough data to convert to LSN,
             // play safe and don't remove any layers.
+            let now = SystemTime::now();
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match timeline.find_lsn_for_timestamp(pitr_timestamp)? {
+                match self.find_lsn_for_timestamp(pitr_timestamp)? {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
@@ -1653,9 +1736,10 @@ impl LayeredTimeline {
                 }
                 debug!("pitr_cutoff_lsn = {:?}", pitr_cutoff_lsn)
             }
-        } else if cfg!(test) {
-            // We don't have local timeline in mocked cargo tests.
-            // So, just ignore pitr_interval setting in this case.
+        } else {
+            // No time-based retention. (Some unit tests depend on garbage-collection
+            // working even when CLOG data is missing, so that find_lsn_for_timestamp()
+            // above doesn't work.)
             pitr_cutoff_lsn = gc_info.horizon_cutoff;
         }
         gc_info.pitr_cutoff = pitr_cutoff_lsn;
@@ -1961,6 +2045,12 @@ impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
     ///
     fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
+    }
+
+    fn update_current_logical_size(&self, delta: isize) {
+        self.tl
+            .current_logical_size
+            .fetch_add(delta, AtomicOrdering::SeqCst);
     }
 }
 

@@ -13,8 +13,6 @@ use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::Repository;
-use crate::repository::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
 use postgres_ffi::relfile_utils::*;
@@ -30,9 +28,9 @@ use utils::lsn::Lsn;
 /// This is currently only used to import a cluster freshly created by initdb.
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
-pub fn import_timeline_from_postgres_datadir<R: Repository>(
+pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
     path: &Path,
-    tline: &mut DatadirTimeline<R>,
+    tline: &T,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
@@ -90,8 +88,8 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 }
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
-fn import_rel<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+fn import_rel<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
@@ -170,8 +168,8 @@ fn import_rel<R: Repository, Reader: Read>(
 
 /// Import an SLRU segment file
 ///
-fn import_slru<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+fn import_slru<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     slru: SlruKind,
     path: &Path,
     mut reader: Reader,
@@ -226,9 +224,9 @@ fn import_slru<R: Repository, Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal<R: Repository>(
+fn import_wal<T: DatadirTimeline>(
     walpath: &Path,
-    tline: &mut DatadirTimeline<R>,
+    tline: &T,
     startpoint: Lsn,
     endpoint: Lsn,
 ) -> Result<()> {
@@ -297,8 +295,8 @@ fn import_wal<R: Repository>(
     Ok(())
 }
 
-pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
-    tline: &mut DatadirTimeline<R>,
+pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
+    tline: &T,
     reader: Reader,
     base_lsn: Lsn,
 ) -> Result<()> {
@@ -339,8 +337,8 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     Ok(())
 }
 
-pub fn import_wal_from_tar<R: Repository, Reader: Read>(
-    tline: &mut DatadirTimeline<R>,
+pub fn import_wal_from_tar<T: DatadirTimeline, Reader: Read>(
+    tline: &T,
     reader: Reader,
     start_lsn: Lsn,
     end_lsn: Lsn,
@@ -420,8 +418,8 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
     Ok(())
 }
 
-pub fn import_file<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+pub fn import_file<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     file_path: &Path,
     reader: Reader,
     len: usize,
@@ -540,7 +538,7 @@ pub fn import_file<R: Repository, Reader: Read>(
         // zenith.signal is not necessarily the last file, that we handle
         // but it is ok to call `finish_write()`, because final `modification.commit()`
         // will update lsn once more to the final one.
-        let writer = modification.tline.tline.writer();
+        let writer = modification.tline.writer();
         writer.finish_write(prev_lsn);
 
         debug!("imported zenith signal {}", prev_lsn);

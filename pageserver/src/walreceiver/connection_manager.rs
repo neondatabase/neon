@@ -25,7 +25,8 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::DatadirTimelineImpl;
+use crate::repository::{Repository, Timeline};
+use crate::{RepositoryImpl, TimelineImpl};
 use utils::{
     lsn::Lsn,
     pq_proto::ReplicationFeedback,
@@ -39,7 +40,7 @@ pub(super) fn spawn_connection_manager_task(
     id: ZTenantTimelineId,
     broker_loop_prefix: String,
     mut client: Client,
-    local_timeline: Arc<DatadirTimelineImpl>,
+    local_timeline: Arc<TimelineImpl>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
@@ -245,7 +246,7 @@ async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
 struct WalreceiverState {
     id: ZTenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    local_timeline: Arc<DatadirTimelineImpl>,
+    local_timeline: Arc<TimelineImpl>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -283,7 +284,7 @@ struct EtcdSkTimeline {
 impl WalreceiverState {
     fn new(
         id: ZTenantTimelineId,
-        local_timeline: Arc<DatadirTimelineImpl>,
+        local_timeline: Arc<<RepositoryImpl as Repository>::Timeline>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
@@ -1203,13 +1204,10 @@ mod tests {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            local_timeline: Arc::new(DatadirTimelineImpl::new(
-                harness
-                    .load()
-                    .create_empty_timeline(TIMELINE_ID, Lsn(0))
-                    .expect("Failed to create an empty timeline for dummy wal connection manager"),
-                10_000,
-            )),
+            local_timeline: harness
+                .load()
+                .create_empty_timeline(TIMELINE_ID, Lsn(0))
+                .expect("Failed to create an empty timeline for dummy wal connection manager"),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1).unwrap(),

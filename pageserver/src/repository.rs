@@ -185,7 +185,7 @@ impl Value {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
-    type Timeline: Timeline;
+    type Timeline: crate::DatadirTimeline;
 
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
@@ -405,6 +405,8 @@ pub trait TimelineWriter<'a> {
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
     fn finish_write(&self, lsn: Lsn);
+
+    fn update_current_logical_size(&self, delta: isize);
 }
 
 #[cfg(test)]

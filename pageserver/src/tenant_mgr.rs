@@ -3,7 +3,6 @@
 
 use crate::config::PageServerConf;
 use crate::layered_repository::{load_metadata, LayeredRepository};
-use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
@@ -12,7 +11,7 @@ use crate::thread_mgr::ThreadKind;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
-use crate::{DatadirTimelineImpl, RepositoryImpl};
+use crate::{RepositoryImpl, TimelineImpl};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -101,7 +100,7 @@ struct Tenant {
     ///
     /// Local timelines have more metadata that's loaded into memory,
     /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
-    local_timelines: HashMap<ZTimelineId, Arc<DatadirTimelineImpl>>,
+    local_timelines: HashMap<ZTimelineId, Arc<<RepositoryImpl as Repository>::Timeline>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +177,7 @@ pub enum LocalTimelineUpdate {
     },
     Attach {
         id: ZTenantTimelineId,
-        datadir: Arc<DatadirTimelineImpl>,
+        datadir: Arc<<RepositoryImpl as Repository>::Timeline>,
     },
 }
 
@@ -382,7 +381,7 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Rep
 pub fn get_local_timeline_with_load(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<DatadirTimelineImpl>> {
+) -> anyhow::Result<Arc<TimelineImpl>> {
     let mut m = tenants_state::write_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -489,27 +488,18 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
 fn load_local_timeline(
     repo: &RepositoryImpl,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<DatadirTimeline<LayeredRepository>>> {
+) -> anyhow::Result<Arc<TimelineImpl>> {
     let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;
-    let repartition_distance = repo.get_checkpoint_distance() / 10;
-    let init_logical_size = inmem_timeline.init_logical_size;
-    let page_tline = Arc::new(DatadirTimelineImpl::new(
-        inmem_timeline,
-        repartition_distance,
-    ));
-    if let Some(logical_size) = init_logical_size {
-        page_tline.set_logical_size(logical_size);
-    } else {
-        page_tline.init_logical_size()?;
-    }
+    inmem_timeline.init_logical_size()?;
+
     tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
         id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
-        datadir: Arc::clone(&page_tline),
+        datadir: Arc::clone(&inmem_timeline),
     });
 
-    Ok(page_tline)
+    Ok(inmem_timeline)
 }
 
 #[serde_as]
