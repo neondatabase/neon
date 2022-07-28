@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        connstr: [ CAPTEST_30GB_CONNSTR, CAPTEST_RDS_CONNSTR ]
+        connstr: [ CAPTEST_100GB_CONNSTR, CAPTEST_RDS_CONNSTR ]
 
     runs-on: dev
     timeout-minutes: 1440 # 24h
@@ -65,16 +65,8 @@ jobs:
         rm -rf perf-report-captest
         mkdir -p perf-report-captest
 
-        psql $BENCHMARK_CONNSTR -c "SELECT 1; SET statement_timeout TO '10min';"
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "init" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
-
-    - name: Upload pgbench logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        retention-days: 7
-        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
-        path: test_output/**/*pgbench_*.*
 
     - name: Benchmark simple-update
       env:
@@ -88,16 +80,8 @@ jobs:
       run: |
         rm -rf perf-report-captest
         mkdir -p perf-report-captest
-        psql $BENCHMARK_CONNSTR -c "SELECT 1; SET statement_timeout TO '10min';"
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
-
-    - name: Upload pgbench logs
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        retention-days: 7
-        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
-        path: test_output/**/*pgbench_*.*
 
     - name: Benchmark select-only
       env:
@@ -111,7 +95,7 @@ jobs:
       run: |
         rm -rf perf-report-captest
         mkdir -p perf-report-captest
-        psql $BENCHMARK_CONNSTR -c "SELECT 1; SET statement_timeout TO '10min';"
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
 
     - name: Upload pgbench logs
