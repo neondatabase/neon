@@ -493,13 +493,16 @@ async def run_race_conditions(env: NeonEnv, pg: Postgres):
     bg_xmas = asyncio.create_task(xmas_garland(env.safekeepers, data))
 
     n_iterations = 5
-    n_queries = 200
     expected_sum = 0
+    i = 1
 
-    while data.iteration < n_iterations:
-            await asyncio.sleep(0.01)
-            await conn.execute(f"INSERT INTO t values ({i+1}, 'payload')")
-            expected_sum += i + 1
+    while data.iteration <= n_iterations:
+        await asyncio.sleep(0.005)
+        await conn.execute(f"INSERT INTO t values ({i}, 'payload')")
+        expected_sum += i
+        i += 1
+
+    log.info(f'Executed {i-1} queries')
 
     res = await conn.fetchval('SELECT sum(key) FROM t')
     assert res == expected_sum
