@@ -70,7 +70,7 @@ pub trait DatadirTimeline: Timeline {
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    fn begin_modification(&self) -> DatadirModification<Self>
+    fn begin_modification(&self, lsn: Lsn) -> DatadirModification<Self>
     where
         Self: Sized,
     {
@@ -79,7 +79,7 @@ pub trait DatadirTimeline: Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
-            lsn: Lsn(0),
+            lsn,
         }
     }
 
@@ -881,7 +881,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self, lsn: Lsn) -> Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -895,7 +895,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         let mut result: Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, lsn, value);
+                result = writer.put(key, self.lsn, value);
                 false
             } else {
                 true
@@ -916,9 +916,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self, lsn: Lsn) -> Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         let writer = self.tline.writer();
-
+        let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1363,9 +1363,9 @@ pub fn create_test_timeline<R: Repository>(
     timeline_id: utils::zid::ZTimelineId,
 ) -> Result<std::sync::Arc<R::Timeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let mut m = tline.begin_modification();
+    let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
-    m.commit(Lsn(8))?;
+    m.commit()?;
     Ok(tline)
 }
 
