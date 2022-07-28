@@ -29,7 +29,6 @@ postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d
 postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-tokio-stream = "0.1.8"
 anyhow = { version = "1.0", features = ["backtrace"] }
 crc32c = "0.6.0"
 thiserror = "1.0"

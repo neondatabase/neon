@@ -120,6 +120,10 @@ pub fn init_tenant_task_pool() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name("tenant-task-worker")
         .enable_all()
+        .on_thread_start(|| {
+            thread_mgr::register(ThreadKind::TenantTaskWorker, "tenant-task-worker")
+        })
+        .on_thread_stop(thread_mgr::deregister)
         .build()?;
 
     let (gc_send, mut gc_recv) = mpsc::channel::<ZTenantId>(100);

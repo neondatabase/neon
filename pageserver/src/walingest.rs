@@ -34,7 +34,6 @@ use std::collections::HashMap;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::Repository;
 use crate::walrecord::*;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
@@ -44,8 +43,8 @@ use utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
-pub struct WalIngest<'a, R: Repository> {
-    timeline: &'a DatadirTimeline<R>,
+pub struct WalIngest<'a, T: DatadirTimeline> {
+    timeline: &'a T,
 
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
@@ -53,8 +52,8 @@ pub struct WalIngest<'a, R: Repository> {
     relsize_cache: HashMap<RelTag, BlockNumber>,
 }
 
-impl<'a, R: Repository> WalIngest<'a, R> {
-    pub fn new(timeline: &DatadirTimeline<R>, startpoint: Lsn) -> Result<WalIngest<R>> {
+impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
+    pub fn new(timeline: &T, startpoint: Lsn) -> Result<WalIngest<T>> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint)?;
@@ -78,13 +77,13 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ///
     pub fn ingest_record(
         &mut self,
-        timeline: &DatadirTimeline<R>,
         recdata: Bytes,
         lsn: Lsn,
+        modification: &mut DatadirModification<T>,
+        decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
-        let mut modification = timeline.begin_modification(lsn);
+        decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
 
-        let mut decoded = decode_wal_record(recdata).context("failed decoding wal record")?;
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
 
@@ -98,7 +97,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         if decoded.xl_rmid == pg_constants::RM_HEAP_ID
             || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
         {
-            self.ingest_heapam_record(&mut buf, &mut modification, &mut decoded)?;
+            self.ingest_heapam_record(&mut buf, modification, decoded)?;
         }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
@@ -106,19 +105,19 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 == pg_constants::XLOG_SMGR_CREATE
         {
             let create = XlSmgrCreate::decode(&mut buf);
-            self.ingest_xlog_smgr_create(&mut modification, &create)?;
+            self.ingest_xlog_smgr_create(modification, &create)?;
         } else if decoded.xl_rmid == pg_constants::RM_SMGR_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_SMGR_TRUNCATE
         {
             let truncate = XlSmgrTruncate::decode(&mut buf);
-            self.ingest_xlog_smgr_truncate(&mut modification, &truncate)?;
+            self.ingest_xlog_smgr_truncate(modification, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
             if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_CREATE
             {
                 let createdb = XlCreateDatabase::decode(&mut buf);
-                self.ingest_xlog_dbase_create(&mut modification, &createdb)?;
+                self.ingest_xlog_dbase_create(modification, &createdb)?;
             } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                 == pg_constants::XLOG_DBASE_DROP
             {
@@ -137,7 +136,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 self.put_slru_page_image(
-                    &mut modification,
+                    modification,
                     SlruKind::Clog,
                     segno,
                     rpageno,
@@ -146,7 +145,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
             } else {
                 assert!(info == pg_constants::CLOG_TRUNCATE);
                 let xlrec = XlClogTruncate::decode(&mut buf);
-                self.ingest_clog_truncate_record(&mut modification, &xlrec)?;
+                self.ingest_clog_truncate_record(modification, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
             let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
@@ -154,7 +153,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    &mut modification,
+                    modification,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT,
                 )?;
@@ -164,7 +163,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 let parsed_xact =
                     XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
                 self.ingest_xact_record(
-                    &mut modification,
+                    modification,
                     &parsed_xact,
                     info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
                 )?;
@@ -187,7 +186,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 self.put_slru_page_image(
-                    &mut modification,
+                    modification,
                     SlruKind::MultiXactOffsets,
                     segno,
                     rpageno,
@@ -198,7 +197,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                 let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 self.put_slru_page_image(
-                    &mut modification,
+                    modification,
                     SlruKind::MultiXactMembers,
                     segno,
                     rpageno,
@@ -206,14 +205,14 @@ impl<'a, R: Repository> WalIngest<'a, R> {
                 )?;
             } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                 let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(&mut modification, &xlrec)?;
+                self.ingest_multixact_create_record(modification, &xlrec)?;
             } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                 let xlrec = XlMultiXactTruncate::decode(&mut buf);
-                self.ingest_multixact_truncate_record(&mut modification, &xlrec)?;
+                self.ingest_multixact_truncate_record(modification, &xlrec)?;
             }
         } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
             let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(&mut modification, &xlrec, &decoded)?;
+            self.ingest_relmap_page(modification, &xlrec, decoded)?;
         } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_NEXTOID {
@@ -248,7 +247,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
-            self.ingest_decoded_block(&mut modification, lsn, &decoded, blk)?;
+            self.ingest_decoded_block(modification, lsn, decoded, blk)?;
         }
 
         // If checkpoint data was updated, store the new version in the repository
@@ -261,14 +260,14 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit()?;
+        modification.commit(lsn)?;
 
         Ok(())
     }
 
     fn ingest_decoded_block(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         lsn: Lsn,
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
@@ -328,7 +327,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     fn ingest_heapam_record(
         &mut self,
         buf: &mut Bytes,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -472,7 +471,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     /// Subroutine of ingest_record(), to handle an XLOG_DBASE_CREATE record.
     fn ingest_xlog_dbase_create(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rec: &XlCreateDatabase,
     ) -> Result<()> {
         let db_id = rec.db_id;
@@ -539,7 +538,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn ingest_xlog_smgr_create(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rec: &XlSmgrCreate,
     ) -> Result<()> {
         let rel = RelTag {
@@ -557,7 +556,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     /// This is the same logic as in PostgreSQL's smgr_redo() function.
     fn ingest_xlog_smgr_truncate(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rec: &XlSmgrTruncate,
     ) -> Result<()> {
         let spcnode = rec.rnode.spcnode;
@@ -622,7 +621,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
     ///
     fn ingest_xact_record(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
     ) -> Result<()> {
@@ -691,7 +690,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn ingest_clog_truncate_record(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         xlrec: &XlClogTruncate,
     ) -> Result<()> {
         info!(
@@ -749,7 +748,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn ingest_multixact_create_record(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         xlrec: &XlMultiXactCreate,
     ) -> Result<()> {
         // Create WAL record for updating the multixact-offsets page
@@ -828,7 +827,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn ingest_multixact_truncate_record(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         xlrec: &XlMultiXactTruncate,
     ) -> Result<()> {
         self.checkpoint.oldestMulti = xlrec.end_trunc_off;
@@ -862,7 +861,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn ingest_relmap_page(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         xlrec: &XlRelmapUpdate,
         decoded: &DecodedWALRecord,
     ) -> Result<()> {
@@ -878,7 +877,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_rel_creation(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
     ) -> Result<()> {
         self.relsize_cache.insert(rel, 0);
@@ -888,7 +887,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_rel_page_image(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
@@ -900,7 +899,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_rel_wal_record(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
         blknum: BlockNumber,
         rec: ZenithWalRecord,
@@ -912,7 +911,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_rel_truncation(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
         nblocks: BlockNumber,
     ) -> Result<()> {
@@ -923,7 +922,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_rel_drop(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
     ) -> Result<()> {
         modification.put_rel_drop(rel)?;
@@ -948,7 +947,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn handle_rel_extend(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         rel: RelTag,
         blknum: BlockNumber,
     ) -> Result<()> {
@@ -986,7 +985,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn put_slru_page_image(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
@@ -999,7 +998,7 @@ impl<'a, R: Repository> WalIngest<'a, R> {
 
     fn handle_slru_extend(
         &mut self,
-        modification: &mut DatadirModification<R>,
+        modification: &mut DatadirModification<T>,
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
@@ -1052,6 +1051,7 @@ mod tests {
     use super::*;
     use crate::pgdatadir_mapping::create_test_timeline;
     use crate::repository::repo_harness::*;
+    use crate::repository::Timeline;
     use postgres_ffi::pg_constants;
 
     /// Arbitrary relation tag, for testing.
@@ -1062,17 +1062,17 @@ mod tests {
         forknum: 0,
     };
 
-    fn assert_current_logical_size<R: Repository>(_timeline: &DatadirTimeline<R>, _lsn: Lsn) {
+    fn assert_current_logical_size<T: Timeline>(_timeline: &T, _lsn: Lsn) {
         // TODO
     }
 
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    fn init_walingest_test<R: Repository>(tline: &DatadirTimeline<R>) -> Result<WalIngest<R>> {
-        let mut m = tline.begin_modification(Lsn(0x10));
+    fn init_walingest_test<T: DatadirTimeline>(tline: &T) -> Result<WalIngest<T>> {
+        let mut m = tline.begin_modification();
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
-        m.commit()?;
+        m.commit(Lsn(0x10))?;
         let walingest = WalIngest::new(tline, Lsn(0x10))?;
 
         Ok(walingest)
@@ -1082,23 +1082,23 @@ mod tests {
     fn test_relsize() -> Result<()> {
         let repo = RepoHarness::create("test_relsize")?.load();
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
-        let mut walingest = init_walingest_test(&tline)?;
+        let mut walingest = init_walingest_test(&*tline)?;
 
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         walingest.put_rel_creation(&mut m, TESTREL_A)?;
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
-        m.commit()?;
-        let mut m = tline.begin_modification(Lsn(0x30));
+        m.commit(Lsn(0x20))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"))?;
-        m.commit()?;
-        let mut m = tline.begin_modification(Lsn(0x40));
+        m.commit(Lsn(0x30))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"))?;
-        m.commit()?;
-        let mut m = tline.begin_modification(Lsn(0x50));
+        m.commit(Lsn(0x40))?;
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"))?;
-        m.commit()?;
+        m.commit(Lsn(0x50))?;
 
-        assert_current_logical_size(&tline, Lsn(0x50));
+        assert_current_logical_size(&*tline, Lsn(0x50));
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
@@ -1142,10 +1142,10 @@ mod tests {
         );
 
         // Truncate last block
-        let mut m = tline.begin_modification(Lsn(0x60));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 2)?;
-        m.commit()?;
-        assert_current_logical_size(&tline, Lsn(0x60));
+        m.commit(Lsn(0x60))?;
+        assert_current_logical_size(&*tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 2);
@@ -1166,15 +1166,15 @@ mod tests {
         );
 
         // Truncate to zero length
-        let mut m = tline.begin_modification(Lsn(0x68));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 0)?;
-        m.commit()?;
+        m.commit(Lsn(0x68))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x68))?, 0);
 
         // Extend from 0 to 2 blocks, leaving a gap
-        let mut m = tline.begin_modification(Lsn(0x70));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
-        m.commit()?;
+        m.commit(Lsn(0x70))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70))?, 2);
         assert_eq!(
             tline.get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70))?,
@@ -1186,9 +1186,9 @@ mod tests {
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
-        let mut m = tline.begin_modification(Lsn(0x80));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"))?;
-        m.commit()?;
+        m.commit(Lsn(0x80))?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, 1501);
         for blk in 2..1500 {
             assert_eq!(
@@ -1210,20 +1210,20 @@ mod tests {
     fn test_drop_extend() -> Result<()> {
         let repo = RepoHarness::create("test_drop_extend")?.load();
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
-        let mut walingest = init_walingest_test(&tline)?;
+        let mut walingest = init_walingest_test(&*tline)?;
 
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
-        m.commit()?;
+        m.commit(Lsn(0x20))?;
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20))?, 1);
 
         // Drop rel
-        let mut m = tline.begin_modification(Lsn(0x30));
+        let mut m = tline.begin_modification();
         walingest.put_rel_drop(&mut m, TESTREL_A)?;
-        m.commit()?;
+        m.commit(Lsn(0x30))?;
 
         // Check that rel is not visible anymore
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x30))?, false);
@@ -1232,9 +1232,9 @@ mod tests {
         //assert!(tline.get_rel_size(TESTREL_A, Lsn(0x30))?.is_none());
 
         // Re-create it
-        let mut m = tline.begin_modification(Lsn(0x40));
+        let mut m = tline.begin_modification();
         walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"))?;
-        m.commit()?;
+        m.commit(Lsn(0x40))?;
 
         // Check that rel exists and size is correct
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x40))?, true);
@@ -1250,16 +1250,16 @@ mod tests {
     fn test_truncate_extend() -> Result<()> {
         let repo = RepoHarness::create("test_truncate_extend")?.load();
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
-        let mut walingest = init_walingest_test(&tline)?;
+        let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
         let relsize = 20 * 1024 * 1024 / 8192;
-        let mut m = tline.begin_modification(Lsn(0x20));
+        let mut m = tline.begin_modification();
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
         }
-        m.commit()?;
+        m.commit(Lsn(0x20))?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10))?, false);
@@ -1280,9 +1280,9 @@ mod tests {
 
         // Truncate relation so that second segment was dropped
         // - only leave one page
-        let mut m = tline.begin_modification(Lsn(0x60));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, 1)?;
-        m.commit()?;
+        m.commit(Lsn(0x60))?;
 
         // Check reported size and contents after truncation
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x60))?, 1);
@@ -1310,12 +1310,12 @@ mod tests {
         // Extend relation again.
         // Add enough blocks to create second segment
         let lsn = Lsn(0x80);
-        let mut m = tline.begin_modification(lsn);
+        let mut m = tline.begin_modification();
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest.put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data))?;
         }
-        m.commit()?;
+        m.commit(lsn)?;
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x80))?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x80))?, relsize);
@@ -1338,18 +1338,18 @@ mod tests {
     fn test_large_rel() -> Result<()> {
         let repo = RepoHarness::create("test_large_rel")?.load();
         let tline = create_test_timeline(repo, TIMELINE_ID)?;
-        let mut walingest = init_walingest_test(&tline)?;
+        let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
         for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
             lsn += 0x10;
-            let mut m = tline.begin_modification(Lsn(lsn));
+            let mut m = tline.begin_modification();
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest.put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img)?;
-            m.commit()?;
+            m.commit(Lsn(lsn))?;
         }
 
-        assert_current_logical_size(&tline, Lsn(lsn));
+        assert_current_logical_size(&*tline, Lsn(lsn));
 
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
@@ -1358,34 +1358,34 @@ mod tests {
 
         // Truncate one block
         lsn += 0x10;
-        let mut m = tline.begin_modification(Lsn(lsn));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE)?;
-        m.commit()?;
+        m.commit(Lsn(lsn))?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE
         );
-        assert_current_logical_size(&tline, Lsn(lsn));
+        assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
         lsn += 0x10;
-        let mut m = tline.begin_modification(Lsn(lsn));
+        let mut m = tline.begin_modification();
         walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE - 1)?;
-        m.commit()?;
+        m.commit(Lsn(lsn))?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
             pg_constants::RELSEG_SIZE - 1
         );
-        assert_current_logical_size(&tline, Lsn(lsn));
+        assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time
         // This tests the behavior at segment boundaries
         let mut size: i32 = 3000;
         while size >= 0 {
             lsn += 0x10;
-            let mut m = tline.begin_modification(Lsn(lsn));
+            let mut m = tline.begin_modification();
             walingest.put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber)?;
-            m.commit()?;
+            m.commit(Lsn(lsn))?;
             assert_eq!(
                 tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
                 size as BlockNumber
@@ -1393,7 +1393,7 @@ mod tests {
 
             size -= 1;
         }
-        assert_current_logical_size(&tline, Lsn(lsn));
+        assert_current_logical_size(&*tline, Lsn(lsn));
 
         Ok(())
     }

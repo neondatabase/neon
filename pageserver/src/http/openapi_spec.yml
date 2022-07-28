@@ -78,6 +78,11 @@ paths:
         schema:
           type: string
           description: Controls calculation of current_logical_size_non_incremental
+      - name: include-non-incremental-physical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_physical_size_non_incremental
     get:
       description: Get timelines for tenant
       responses:
@@ -136,6 +141,11 @@ paths:
           schema:
             type: string
           description: Controls calculation of current_logical_size_non_incremental
+        - name: include-non-incremental-physical-size
+          in: query
+          schema:
+            type: string
+            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -671,7 +681,11 @@ components:
           format: hex
         current_logical_size:
           type: integer
+        current_physical_size:
+          type: integer
         current_logical_size_non_incremental:
+          type: integer
+        current_physical_size_non_incremental:
           type: integer
 
     WalReceiverEntry:

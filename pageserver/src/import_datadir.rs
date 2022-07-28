@@ -13,9 +13,8 @@ use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::Repository;
-use crate::repository::Timeline;
 use crate::walingest::WalIngest;
+use crate::walrecord::DecodedWALRecord;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
@@ -29,16 +28,16 @@ use utils::lsn::Lsn;
 /// This is currently only used to import a cluster freshly created by initdb.
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
-pub fn import_timeline_from_postgres_datadir<R: Repository>(
+pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
     path: &Path,
-    tline: &mut DatadirTimeline<R>,
+    tline: &T,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification(lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     // Import all but pg_wal
@@ -57,12 +56,12 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
             if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
                 pg_control = Some(control_file);
             }
-            modification.flush()?;
+            modification.flush(lsn)?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit()?;
+    modification.commit(lsn)?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -89,8 +88,8 @@ pub fn import_timeline_from_postgres_datadir<R: Repository>(
 }
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
-fn import_rel<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+fn import_rel<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
@@ -169,8 +168,8 @@ fn import_rel<R: Repository, Reader: Read>(
 
 /// Import an SLRU segment file
 ///
-fn import_slru<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+fn import_slru<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     slru: SlruKind,
     path: &Path,
     mut reader: Reader,
@@ -225,9 +224,9 @@ fn import_slru<R: Repository, Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal<R: Repository>(
+fn import_wal<T: DatadirTimeline>(
     walpath: &Path,
-    tline: &mut DatadirTimeline<R>,
+    tline: &T,
     startpoint: Lsn,
     endpoint: Lsn,
 ) -> Result<()> {
@@ -268,9 +267,11 @@ fn import_wal<R: Repository>(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
+        let mut modification = tline.begin_modification();
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -294,13 +295,13 @@ fn import_wal<R: Repository>(
     Ok(())
 }
 
-pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
-    tline: &mut DatadirTimeline<R>,
+pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
+    tline: &T,
     reader: Reader,
     base_lsn: Lsn,
 ) -> Result<()> {
     info!("importing base at {}", base_lsn);
-    let mut modification = tline.begin_modification(base_lsn);
+    let mut modification = tline.begin_modification();
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
@@ -318,7 +319,7 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush()?;
+                modification.flush(base_lsn)?;
             }
             tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -332,12 +333,12 @@ pub fn import_basebackup_from_tar<R: Repository, Reader: Read>(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit()?;
+    modification.commit(base_lsn)?;
     Ok(())
 }
 
-pub fn import_wal_from_tar<R: Repository, Reader: Read>(
-    tline: &mut DatadirTimeline<R>,
+pub fn import_wal_from_tar<T: DatadirTimeline, Reader: Read>(
+    tline: &T,
     reader: Reader,
     start_lsn: Lsn,
     end_lsn: Lsn,
@@ -384,9 +385,11 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
+        let mut modification = tline.begin_modification();
+        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(tline, recdata, lsn)?;
+                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);
@@ -415,8 +418,8 @@ pub fn import_wal_from_tar<R: Repository, Reader: Read>(
     Ok(())
 }
 
-pub fn import_file<R: Repository, Reader: Read>(
-    modification: &mut DatadirModification<R>,
+pub fn import_file<T: DatadirTimeline, Reader: Read>(
+    modification: &mut DatadirModification<T>,
     file_path: &Path,
     reader: Reader,
     len: usize,
@@ -535,7 +538,7 @@ pub fn import_file<R: Repository, Reader: Read>(
         // zenith.signal is not necessarily the last file, that we handle
         // but it is ok to call `finish_write()`, because final `modification.commit()`
         // will update lsn once more to the final one.
-        let writer = modification.tline.tline.writer();
+        let writer = modification.tline.writer();
         writer.finish_write(prev_lsn);
 
         debug!("imported zenith signal {}", prev_lsn);

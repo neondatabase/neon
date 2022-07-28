@@ -11,7 +11,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+use utils::pq_proto::BeMessage as Be;
 
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
@@ -76,6 +76,12 @@ enum ProxyAuthResponse {
     NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
+impl ClientCredentials {
+    fn is_existing_user(&self) -> bool {
+        self.user.ends_with("@zenith")
+    }
+}
+
 async fn authenticate_proxy_client(
     auth_endpoint: &reqwest::Url,
     creds: &ClientCredentials,
@@ -100,7 +106,7 @@ async fn authenticate_proxy_client(
         }
 
         let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
-        println!("got auth info: #{:?}", auth_info);
+        println!("got auth info: {:?}", auth_info);
 
         use ProxyAuthResponse::*;
         let db_info = match auth_info {
@@ -128,7 +134,9 @@ async fn handle_existing_user(
 
     // Read client's password hash
     let msg = client.read_password_message().await?;
-    let md5_response = parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword)?;
+    let md5_response = parse_password(&msg).ok_or(auth::AuthErrorImpl::MalformedPassword(
+        "the password should be a valid null-terminated utf-8 string",
+    ))?;
 
     let db_info = authenticate_proxy_client(
         auth_endpoint,
@@ -139,21 +147,17 @@ async fn handle_existing_user(
     )
     .await?;
 
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
-
     Ok(compute::NodeInfo {
-        db_info,
-        scram_keys: None,
+        reported_auth_ok: false,
+        config: db_info.into(),
     })
 }
 
 pub async fn handle_user(
     auth_endpoint: &reqwest::Url,
     auth_link_uri: &reqwest::Url,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     creds: &ClientCredentials,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
 ) -> auth::Result<compute::NodeInfo> {
     if creds.is_existing_user() {
         handle_existing_user(auth_endpoint, client, creds).await
@@ -200,5 +204,25 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(auth, ProxyAuthResponse::NotReady { .. }));
+    }
+
+    #[test]
+    fn parse_db_info() -> anyhow::Result<()> {
+        let _: DatabaseInfo = serde_json::from_value(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+        }))?;
+
+        let _: DatabaseInfo = serde_json::from_value(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+        }))?;
+
+        Ok(())
     }
 }

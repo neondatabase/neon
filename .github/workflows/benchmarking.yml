@@ -11,7 +11,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '36 7 * * *' # run once a day, timezone is utc
+    - cron:  '36 4 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
 

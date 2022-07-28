@@ -1,8 +1,34 @@
 import pytest
+import json
+import base64
 
 
 def test_proxy_select_1(static_proxy):
-    static_proxy.safe_psql("select 1;", options="project=generic-project-name")
+    static_proxy.safe_psql('select 1', options='project=generic-project-name')
+
+
+def test_password_hack(static_proxy):
+    user = 'borat'
+    password = 'password'
+    static_proxy.safe_psql(f"create role {user} with login password '{password}'",
+                           options='project=irrelevant')
+
+    def encode(s: str) -> str:
+        return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+
+    magic = encode(json.dumps({
+        'project': 'irrelevant',
+        'password': password,
+    }))
+
+    static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
+
+    magic = encode(json.dumps({
+        'project': 'irrelevant',
+        'password_': encode(password),
+    }))
+
+    static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
 
 
 # Pass extra options to the server.
@@ -11,8 +37,8 @@ def test_proxy_select_1(static_proxy):
 # See https://github.com/neondatabase/neon/issues/1287
 @pytest.mark.xfail
 def test_proxy_options(static_proxy):
-    with static_proxy.connect(options="-cproxytest.option=value") as conn:
+    with static_proxy.connect(options='-cproxytest.option=value') as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW proxytest.option;")
+            cur.execute('SHOW proxytest.option')
             value = cur.fetchall()[0][0]
             assert value == 'value'

@@ -113,10 +113,17 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
+    let include_non_incremental_logical_size =
+        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_physical_size =
+        query_param_present(&request, "include-non-incremental-physical-size");
     let local_timeline_infos = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
-        crate::timelines::get_local_timelines(tenant_id, include_non_incremental_logical_size)
+        crate::timelines::get_local_timelines(
+            tenant_id,
+            include_non_incremental_logical_size,
+            include_non_incremental_physical_size,
+        )
     })
     .await
     .map_err(ApiError::from_err)??;
@@ -145,17 +152,15 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, response_data)
 }
 
-// Gate non incremental logical size calculation behind a flag
-// after pgbench -i -s100 calculation took 28ms so if multiplied by the number of timelines
-// and tenants it can take noticeable amount of time. Also the value currently used only in tests
-fn get_include_non_incremental_logical_size(request: &Request<Body>) -> bool {
+/// Checks if a query param is present in the request's URL
+fn query_param_present(request: &Request<Body>, param: &str) -> bool {
     request
         .uri()
         .query()
         .map(|v| {
             url::form_urlencoded::parse(v.as_bytes())
                 .into_owned()
-                .any(|(param, _)| param == "include-non-incremental-logical-size")
+                .any(|(p, _)| p == param)
         })
         .unwrap_or(false)
 }
@@ -165,7 +170,10 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
-    let include_non_incremental_logical_size = get_include_non_incremental_logical_size(&request);
+    let include_non_incremental_logical_size =
+        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_physical_size =
+        query_param_present(&request, "include-non-incremental-physical-size");
 
     let (local_timeline_info, remote_timeline_info) = async {
         // any error here will render local timeline as None
@@ -181,6 +189,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                             timeline_id,
                             timeline,
                             include_non_incremental_logical_size,
+                            include_non_incremental_physical_size,
                         )
                     })
                     .transpose()?

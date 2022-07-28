@@ -9,20 +9,22 @@ use std::{
 use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
 use fail::fail_point;
+use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
     http::models::WalReceiverEntry,
+    pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
+    walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
@@ -150,19 +152,25 @@ pub async fn handle_walreceiver_connection(
 
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+                {
+                    let mut decoded = DecodedWALRecord::default();
+                    let mut modification = timeline.begin_modification();
+                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
-                    // It is important to deal with the aligned records as lsn in getPage@LSN is
-                    // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hitting a deadlock.
-                    ensure!(lsn.is_aligned());
+                        // It is important to deal with the aligned records as lsn in getPage@LSN is
+                        // aligned and can be several bytes bigger. Without this alignment we are
+                        // at risk of hitting a deadlock.
+                        ensure!(lsn.is_aligned());
 
-                    walingest.ingest_record(&timeline, recdata, lsn)?;
+                        walingest
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                            .context("could not ingest record at {lsn}")?;
 
-                    fail_point!("walreceiver-after-ingest");
+                        fail_point!("walreceiver-after-ingest");
 
-                    last_rec_lsn = lsn;
+                        last_rec_lsn = lsn;
+                    }
                 }
 
                 if !caught_up && endlsn >= end_of_wal {
@@ -170,7 +178,7 @@ pub async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
-                let timeline_to_check = Arc::clone(&timeline.tline);
+                let timeline_to_check = Arc::clone(&timeline);
                 tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
                     .await
                     .with_context(|| {
@@ -218,7 +226,7 @@ pub async fn handle_walreceiver_connection(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);

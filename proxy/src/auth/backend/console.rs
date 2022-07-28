@@ -1,18 +1,17 @@
 //! Cloud API V2.
 
 use crate::{
-    auth::{self, AuthFlow, ClientCredentials, DatabaseInfo},
-    compute,
-    error::UserFacingError,
+    auth::{self, AuthFlow, ClientCredentials},
+    compute::{self, ComputeConnCfg},
+    error::{io_error, UserFacingError},
     scram,
     stream::PqStream,
     url::ApiUrl,
 };
 use serde::{Deserialize, Serialize};
-use std::{future::Future, io};
+use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
 
 pub type Result<T> = std::result::Result<T, ConsoleAuthError>;
 
@@ -84,8 +83,8 @@ pub(super) struct Api<'a> {
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self { endpoint, creds })
+    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
+        Self { endpoint, creds }
     }
 
     /// Authenticate the existing user or throw an error.
@@ -100,7 +99,7 @@ impl<'a> Api<'a> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
-            .append_pair("project", self.creds.project_name.as_ref()?)
+            .append_pair("project", self.creds.project().expect("impossible"))
             .append_pair("role", &self.creds.user);
 
         // TODO: use a proper logger
@@ -120,11 +119,11 @@ impl<'a> Api<'a> {
     }
 
     /// Wake up the compute node and return the corresponding connection info.
-    async fn wake_compute(&self) -> Result<DatabaseInfo> {
+    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
-        let project_name = self.creds.project_name.as_ref()?;
-        url.query_pairs_mut().append_pair("project", project_name);
+        url.query_pairs_mut()
+            .append_pair("project", self.creds.project().expect("impossible"));
 
         // TODO: use a proper logger
         println!("cplane request: {url}");
@@ -137,16 +136,20 @@ impl<'a> Api<'a> {
         let response: GetWakeComputeResponse =
             serde_json::from_str(&resp.text().await.map_err(io_error)?)?;
 
-        let (host, port) = parse_host_port(&response.address)
-            .ok_or(ConsoleAuthError::BadComputeAddress(response.address))?;
+        // Unfortunately, ownership won't let us use `Option::ok_or` here.
+        let (host, port) = match parse_host_port(&response.address) {
+            None => return Err(ConsoleAuthError::BadComputeAddress(response.address)),
+            Some(x) => x,
+        };
 
-        Ok(DatabaseInfo {
-            host,
-            port,
-            dbname: self.creds.dbname.to_owned(),
-            user: self.creds.user.to_owned(),
-            password: None,
-        })
+        let mut config = ComputeConnCfg::new();
+        config
+            .host(host)
+            .port(port)
+            .dbname(&self.creds.dbname)
+            .user(&self.creds.user);
+
+        Ok(config)
     }
 }
 
@@ -160,7 +163,7 @@ pub(super) async fn handle_user<'a, Endpoint, GetAuthInfo, WakeCompute>(
 ) -> auth::Result<compute::NodeInfo>
 where
     GetAuthInfo: Future<Output = Result<AuthInfo>>,
-    WakeCompute: Future<Output = Result<DatabaseInfo>>,
+    WakeCompute: Future<Output = Result<ComputeConnCfg>>,
 {
     let auth_info = get_auth_info(endpoint).await?;
 
@@ -179,48 +182,18 @@ where
         }
     };
 
-    client
-        .write_message_noflush(&Be::AuthenticationOk)?
-        .write_message_noflush(&BeParameterStatusMessage::encoding())?;
+    let mut config = wake_compute(endpoint).await?;
+    if let Some(keys) = scram_keys {
+        config.auth_keys(tokio_postgres::config::AuthKeys::ScramSha256(keys));
+    }
 
     Ok(compute::NodeInfo {
-        db_info: wake_compute(endpoint).await?,
-        scram_keys,
+        reported_auth_ok: false,
+        config,
     })
 }
 
-/// Upcast (almost) any error into an opaque [`io::Error`].
-pub(super) fn io_error(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
-}
-
-fn parse_host_port(input: &str) -> Option<(String, u16)> {
+fn parse_host_port(input: &str) -> Option<(&str, u16)> {
     let (host, port) = input.split_once(':')?;
-    Some((host.to_owned(), port.parse().ok()?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn parse_db_info() -> anyhow::Result<()> {
-        let _: DatabaseInfo = serde_json::from_value(json!({
-            "host": "localhost",
-            "port": 5432,
-            "dbname": "postgres",
-            "user": "john_doe",
-            "password": "password",
-        }))?;
-
-        let _: DatabaseInfo = serde_json::from_value(json!({
-            "host": "localhost",
-            "port": 5432,
-            "dbname": "postgres",
-            "user": "john_doe",
-        }))?;
-
-        Ok(())
-    }
+    Some((host, port.parse().ok()?))
 }
