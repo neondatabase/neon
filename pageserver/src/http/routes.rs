@@ -444,23 +444,31 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             false
         });
 
-    // Retrieves local timelines of the tenant
-    let local_timeline_infos = tokio::task::spawn_blocking(move || {
+    let current_physical_size = match tokio::task::spawn_blocking(move || {
         crate::timelines::get_local_timelines(tenant_id, false, false)
     })
     .await
-    .map_err(ApiError::from_err)??;
-
-    let current_physical_size = local_timeline_infos
-        .into_iter()
-        .fold(0, |acc, x| acc + x.1.current_physical_size.unwrap());
+    .map_err(ApiError::from_err)?
+    {
+        Err(err) => {
+            // Getting local timelines can fail when no local repo is on disk (e.g, during tenant relocation task).
+            // In that case, put a warning message into log and operate normally.
+            warn!("Failed to get local timelines for tenant {tenant_id}: {err}");
+            None
+        }
+        Ok(local_timeline_infos) => Some(
+            local_timeline_infos
+                .into_iter()
+                .fold(0, |acc, x| acc + x.1.current_physical_size.unwrap()),
+        ),
+    };
 
     json_response(
         StatusCode::OK,
         TenantInfo {
             id: tenant_id,
             state: tenant_state,
-            current_physical_size: Some(current_physical_size),
+            current_physical_size,
             has_in_progress_downloads: Some(has_in_progress_downloads),
         },
     )
