@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import query_scalar
 
 
 #
@@ -27,7 +28,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
             FROM generate_series(1, 100) g
     ''')
     main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_a = main_cur.fetchone()[0]
+    lsn_a = query_scalar(main_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info('LSN after 100 rows: ' + lsn_a)
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
@@ -36,8 +37,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
             SELECT 'long string to consume some space' || g
             FROM generate_series(1, 200000) g
     ''')
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_b = main_cur.fetchone()[0]
+    lsn_b = query_scalar(main_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info('LSN after 200100 rows: ' + lsn_b)
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
@@ -47,8 +47,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
             FROM generate_series(1, 200000) g
     ''')
 
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_c = main_cur.fetchone()[0]
+    lsn_c = query_scalar(main_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info('LSN after 400100 rows: ' + lsn_c)
 
     # Create first read-only node at the point where only 100 rows were inserted

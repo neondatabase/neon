@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
 from fixtures.neon_fixtures import NeonPageserver, PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol, wait_for_last_record_lsn, wait_for_upload
-from fixtures.utils import get_dir_size, lsn_to_hex, lsn_from_hex
+from fixtures.utils import get_dir_size, lsn_to_hex, lsn_from_hex, query_scalar
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 from uuid import uuid4
@@ -229,8 +229,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
             else:
                 failed_node.start()
                 failed_node = None
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (500500, )
+    assert query_scalar(cur, 'SELECT sum(key) FROM t') == 500500
 
 
 # Test that safekeepers push their info to the broker and learn peer status from it
@@ -286,12 +285,10 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env.neon_cli.create_branch('test_safekeepers_wal_removal')
     pg = env.postgres.create_start('test_safekeepers_wal_removal')
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            # we rely upon autocommit after each statement
-            # as waiting for acceptors happens there
-            cur.execute('CREATE TABLE t(key int primary key, value text)')
-            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+    pg.safe_psql_many([
+        'CREATE TABLE t(key int primary key, value text)',
+        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+    ])
 
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
@@ -469,8 +466,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
                 cur.execute("insert into t select generate_series(1,500000), 'payload'")
                 expected_sum += 500000 * 500001 // 2
 
-                cur.execute("select sum(key) from t")
-                assert cur.fetchone()[0] == expected_sum
+                assert query_scalar(cur, "select sum(key) from t") == expected_sum
 
                 for sk in env.safekeepers:
                     wait_segment_offload(tenant_id, timeline_id, sk, seg_end)
@@ -484,8 +480,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
                 # require WAL to be trimmed, so no more than one segment is left on disk
                 wait_wal_trim(tenant_id, timeline_id, sk, 16 * 1.5)
 
-            cur.execute('SELECT pg_current_wal_flush_lsn()')
-            last_lsn = cur.fetchone()[0]
+            last_lsn = query_scalar(cur, 'SELECT pg_current_wal_flush_lsn()')
 
     pageserver_lsn = env.pageserver.http_client().timeline_detail(
         uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
@@ -532,10 +527,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
     # verify data
     pg.create_start('test_s3_wal_replay')
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("select sum(key) from t")
-            assert cur.fetchone()[0] == expected_sum
+    assert pg.safe_psql("select sum(key) from t")[0][0] == expected_sum
 
 
 class ProposerPostgres(PgProtocol):
@@ -860,12 +852,10 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
                 # as waiting for acceptors happens there
                 cur.execute('CREATE TABLE IF NOT EXISTS t(key int, value text)')
                 cur.execute("INSERT INTO t VALUES (0, 'something')")
-                cur.execute('SELECT SUM(key) FROM t')
-                sum_before = cur.fetchone()[0]
+                sum_before = query_scalar(cur, 'SELECT SUM(key) FROM t')
 
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
-                cur.execute('SELECT SUM(key) FROM t')
-                sum_after = cur.fetchone()[0]
+                sum_after = query_scalar(cur, 'SELECT SUM(key) FROM t')
                 assert sum_after == sum_before + 5000050000
 
     def show_statuses(safekeepers: List[Safekeeper], tenant_id: str, timeline_id: str):
@@ -950,8 +940,7 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
         assert pg.pgdata_dir is not None
 
         log.info('executing INSERT to generate WAL')
-        cur.execute("select pg_current_wal_lsn()")
-        current_lsn = lsn_from_hex(cur.fetchone()[0]) / 1024 / 1024
+        current_lsn = lsn_from_hex(query_scalar(cur, "select pg_current_wal_lsn()")) / 1024 / 1024
         pg_wal_size = get_dir_size(os.path.join(pg.pgdata_dir, 'pg_wal')) / 1024 / 1024
         if enable_logs:
             log.info(f"LSN delta: {current_lsn - last_lsn} MB, current WAL size: {pg_wal_size} MB")

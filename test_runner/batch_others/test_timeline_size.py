@@ -102,17 +102,14 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
             raise RuntimeError(
                 f"timed out waiting for pageserver to reach pg_current_wal_flush_lsn()")
 
-        with closing(pgmain.connect()) as conn:
-            with conn.cursor() as cur:
-
-                cur.execute('''
-                    select  pg_size_pretty(pg_cluster_size()),
-                    pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn) as received_lsn_lag
-                    FROM backpressure_lsns();
-                ''')
-                res = cur.fetchone()
-                log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
-                received_lsn_lag = res[1]
+        res = pgmain.safe_psql('''
+            SELECT
+                pg_size_pretty(pg_cluster_size()),
+                pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
+            FROM backpressure_lsns();
+            ''')[0]
+        log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
+        received_lsn_lag = res[1]
 
         time.sleep(polling_interval)
 

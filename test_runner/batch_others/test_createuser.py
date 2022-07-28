@@ -1,7 +1,6 @@
-from contextlib import closing
-
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.log_helper import log
+from fixtures.utils import query_scalar
 
 
 #
@@ -13,15 +12,13 @@ def test_createuser(neon_simple_env: NeonEnv):
     pg = env.postgres.create_start('test_createuser')
     log.info("postgres is running on 'test_createuser' branch")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            # Cause a 'relmapper' change in the original branch
-            cur.execute('CREATE USER testuser with password %s', ('testpwd', ))
+    with pg.cursor() as cur:
+        # Cause a 'relmapper' change in the original branch
+        cur.execute('CREATE USER testuser with password %s', ('testpwd', ))
 
-            cur.execute('CHECKPOINT')
+        cur.execute('CHECKPOINT')
 
-            cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn = cur.fetchone()[0]
+        lsn = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
 
     # Create a branch
     env.neon_cli.create_branch('test_createuser2', 'test_createuser', ancestor_start_lsn=lsn)

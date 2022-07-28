@@ -30,6 +30,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
         from pg_settings where name = 'shared_buffers'
     ''')
     row = cur.fetchone()
+    assert row is not None
     log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
