@@ -122,6 +122,7 @@ pub trait DatadirTimeline: Timeline {
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
             return Ok(nblocks);
+        }
 
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
