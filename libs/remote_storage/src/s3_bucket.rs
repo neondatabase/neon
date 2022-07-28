@@ -171,17 +171,25 @@ impl S3Bucket {
 
         let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        // session token is used when authorizing through sso
+        // which is typically the case when testing locally on developer machine
+        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
 
         let client = if access_key_id.is_none() && secret_access_key.is_none() {
             debug!("Using IAM-based AWS access");
             S3Client::new_with(request_dispatcher, InstanceMetadataProvider::new(), region)
         } else {
-            debug!("Using credentials-based AWS access");
+            debug!(
+                "Using credentials-based AWS access. Session token is set: {}",
+                session_token.is_some()
+            );
             S3Client::new_with(
                 request_dispatcher,
-                StaticProvider::new_minimal(
+                StaticProvider::new(
                     access_key_id.unwrap_or_default(),
                     secret_access_key.unwrap_or_default(),
+                    session_token,
+                    None,
                 ),
                 region,
             )
@@ -304,32 +312,24 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
+    /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"
     async fn list_prefixes(
         &self,
         prefix: Option<Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
-        let list_prefix = match prefix {
-            Some(prefix) => {
-                let mut prefix_in_bucket = self.prefix_in_bucket.clone().unwrap_or_default();
-                // if there is no trailing / in default prefix and
-                // supplied prefix does not start with "/" insert it
-                if !(prefix_in_bucket.ends_with(S3_PREFIX_SEPARATOR)
-                    || prefix.0.starts_with(S3_PREFIX_SEPARATOR))
-                {
-                    prefix_in_bucket.push(S3_PREFIX_SEPARATOR);
-                }
-
-                prefix_in_bucket.push_str(&prefix.0);
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let list_prefix = prefix
+            .map(|p| p.0)
+            .or_else(|| self.prefix_in_bucket.clone())
+            .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !prefix_in_bucket.ends_with(S3_PREFIX_SEPARATOR) {
-                    prefix_in_bucket.push(S3_PREFIX_SEPARATOR);
+                if !p.ends_with(S3_PREFIX_SEPARATOR) {
+                    p.push(S3_PREFIX_SEPARATOR);
                 }
-                Some(prefix_in_bucket)
-            }
-            None => self.prefix_in_bucket.clone(),
-        };
+                p
+            });
 
         let mut document_keys = Vec::new();
 

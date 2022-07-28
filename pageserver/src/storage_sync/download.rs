@@ -130,6 +130,7 @@ where
             tenant_path.display()
         )
     })?;
+
     let timelines = storage
         .list_prefixes(Some(tenant_storage_path))
         .await
@@ -139,6 +140,13 @@ where
                 tenant_id
             )
         })?;
+
+    if timelines.is_empty() {
+        anyhow::bail!(
+            "no timelines found on the remote storage for tenant {}",
+            tenant_id
+        )
+    }
 
     let mut sync_ids = HashSet::new();
 
@@ -193,6 +201,8 @@ where
             )
         })
         .map_err(DownloadError::BadInput)?;
+
+    warn!("part_storage_path {:?}", part_storage_path);
 
     let mut index_part_download = storage.download(&part_storage_path).await?;
 
