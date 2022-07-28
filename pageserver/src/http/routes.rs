@@ -451,7 +451,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     .map_err(ApiError::from_err)?
     {
         Err(err) => {
-            // Getting local timelines can fail when no local repo is on disk (e.g, during tenant relocation task).
+            // Getting local timelines can fail when no local repo is on disk (e.g, when tenant data is being downloaded).
             // In that case, put a warning message into log and operate normally.
             warn!("Failed to get local timelines for tenant {tenant_id}: {err}");
             None
