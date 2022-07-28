@@ -1,10 +1,8 @@
-import subprocess
 from contextlib import closing
 
 import psycopg2.extras
-import pytest
 from fixtures.log_helper import log
-from fixtures.utils import print_gc_result
+from fixtures.utils import print_gc_result, query_scalar
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
@@ -24,9 +22,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
-
-    main_cur.execute("SHOW neon.timeline_id")
-    timeline = main_cur.fetchone()[0]
+    timeline = query_scalar(main_cur, "SHOW neon.timeline_id")
 
     # Create table
     main_cur.execute('CREATE TABLE foo (t text)')
@@ -41,12 +37,15 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
             # keep some early lsn to test branch creation after GC
             main_cur.execute('SELECT pg_current_wal_insert_lsn(), txid_current()')
             res = main_cur.fetchone()
+            assert res is not None
             lsn_a = res[0]
             xid_a = res[1]
             log.info(f'LSN after 100 rows: {lsn_a} xid {xid_a}')
 
     main_cur.execute('SELECT pg_current_wal_insert_lsn(), txid_current()')
     res = main_cur.fetchone()
+    assert res is not None
+
     debug_lsn = res[0]
     debug_xid = res[1]
     log.info(f'LSN after 10000 rows: {debug_lsn} xid {debug_xid}')
