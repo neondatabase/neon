@@ -11,10 +11,10 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-concurrency:
-  # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
-  cancel-in-progress: true
+# concurrency:
+#   # Allow only one workflow per any non-`main` branch.
+#   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+#   cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
