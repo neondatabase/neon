@@ -203,58 +203,6 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     assert cur.fetchone() == (500500, )
 
 
-# shut down random subset of acceptors, sleep, wake them up, rinse, repeat
-def xmas_garland(acceptors, stop):
-    while not bool(stop.value):
-        victims = []
-        for wa in acceptors:
-            if random.random() >= 0.5:
-                victims.append(wa)
-        for v in victims:
-            v.stop()
-        time.sleep(1)
-        for v in victims:
-            v.start()
-        time.sleep(1)
-
-
-# value which gets unset on exit
-@pytest.fixture
-def stop_value():
-    stop = Value('i', 0)
-    yield stop
-    stop.value = 1
-
-
-# do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(neon_env_builder: NeonEnvBuilder, stop_value):
-
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch('test_safekeepers_race_conditions')
-    pg = env.postgres.create_start('test_safekeepers_race_conditions')
-
-    # we rely upon autocommit after each statement
-    # as waiting for acceptors happens there
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
-    cur.execute('CREATE TABLE t(key int primary key, value text)')
-
-    proc = Process(target=xmas_garland, args=(env.safekeepers, stop_value))
-    proc.start()
-
-    for i in range(1000):
-        cur.execute("INSERT INTO t values (%s, 'payload');", (i + 1, ))
-
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (500500, )
-
-    stop_value.value = 1
-    proc.join()
-
-
 # Test that safekeepers push their info to the broker and learn peer status from it
 def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
