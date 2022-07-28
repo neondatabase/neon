@@ -16,7 +16,7 @@ use bytes::{Buf, Bytes};
 use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -79,6 +79,7 @@ pub trait DatadirTimeline: Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            lsn: Lsn(0),
         }
     }
 
@@ -149,13 +150,8 @@ pub trait DatadirTimeline: Timeline {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         // first try to lookup relation in cache
-        {
-            let relsize_cache = self.relsize_cache.read().unwrap();
-            if let Some((cached_lsn, _nblocks)) = relsize_cache.get(&tag) {
-                if lsn >= *cached_lsn {
-                    return Ok(true);
-                }
-            }
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
+            return Ok(true);
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);

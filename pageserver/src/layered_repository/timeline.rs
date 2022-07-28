@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
