@@ -30,8 +30,6 @@ use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
-use std::collections::HashMap;
-
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::walrecord::*;
@@ -48,8 +46,6 @@ pub struct WalIngest<'a, T: DatadirTimeline> {
 
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
-
-    relsize_cache: HashMap<RelTag, BlockNumber>,
 }
 
 impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
@@ -64,7 +60,6 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             timeline,
             checkpoint,
             checkpoint_modified: false,
-            relsize_cache: HashMap::new(),
         })
     }
 
@@ -880,7 +875,6 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         modification: &mut DatadirModification<T>,
         rel: RelTag,
     ) -> Result<()> {
-        self.relsize_cache.insert(rel, 0);
         modification.put_rel_creation(rel, 0)?;
         Ok(())
     }
@@ -916,7 +910,6 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         nblocks: BlockNumber,
     ) -> Result<()> {
         modification.put_rel_truncation(rel, nblocks)?;
-        self.relsize_cache.insert(rel, nblocks);
         Ok(())
     }
 
@@ -926,23 +919,17 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         rel: RelTag,
     ) -> Result<()> {
         modification.put_rel_drop(rel)?;
-        self.relsize_cache.remove(&rel);
         Ok(())
     }
 
     fn get_relsize(&mut self, rel: RelTag) -> Result<BlockNumber> {
-        if let Some(nblocks) = self.relsize_cache.get(&rel) {
-            Ok(*nblocks)
+        let last_lsn = self.timeline.get_last_record_lsn();
+        let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+            0
         } else {
-            let last_lsn = self.timeline.get_last_record_lsn();
-            let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
-                0
-            } else {
-                self.timeline.get_rel_size(rel, last_lsn)?
-            };
-            self.relsize_cache.insert(rel, nblocks);
-            Ok(nblocks)
-        }
+            self.timeline.get_rel_size(rel, last_lsn)?
+        };
+        Ok(nblocks)
     }
 
     fn handle_rel_extend(
@@ -952,22 +939,16 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         blknum: BlockNumber,
     ) -> Result<()> {
         let new_nblocks = blknum + 1;
-        let old_nblocks = if let Some(nblocks) = self.relsize_cache.get(&rel) {
-            *nblocks
+        // Check if the relation exists. We implicitly create relations on first
+        // record.
+        // TODO: would be nice if to be more explicit about it
+        let last_lsn = self.timeline.get_last_record_lsn();
+        let old_nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+            // create it with 0 size initially, the logic below will extend it
+            modification.put_rel_creation(rel, 0)?;
+            0
         } else {
-            // Check if the relation exists. We implicitly create relations on first
-            // record.
-            // TODO: would be nice if to be more explicit about it
-            let last_lsn = self.timeline.get_last_record_lsn();
-            let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
-                // create it with 0 size initially, the logic below will extend it
-                modification.put_rel_creation(rel, 0)?;
-                0
-            } else {
-                self.timeline.get_rel_size(rel, last_lsn)?
-            };
-            self.relsize_cache.insert(rel, nblocks);
-            nblocks
+            self.timeline.get_rel_size(rel, last_lsn)?
         };
 
         if new_nblocks > old_nblocks {
@@ -978,7 +959,6 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             for gap_blknum in old_nblocks..blknum {
                 modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
             }
-            self.relsize_cache.insert(rel, new_nblocks);
         }
         Ok(())
     }

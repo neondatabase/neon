@@ -120,6 +120,9 @@ pub trait DatadirTimeline: Timeline {
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
+            return Ok(nblocks);
+        }
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
@@ -133,7 +136,11 @@ pub trait DatadirTimeline: Timeline {
 
         let key = rel_size_to_key(tag);
         let mut buf = self.get(key, lsn)?;
-        Ok(buf.get_u32_le())
+        let nblocks = buf.get_u32_le();
+
+        // Update relation size cache
+        self.update_cached_rel_size(tag, lsn, nblocks);
+        Ok(nblocks)
     }
 
     /// Does relation exist?
@@ -445,6 +452,18 @@ pub trait DatadirTimeline: Timeline {
 
         Ok(result.to_keyspace())
     }
+
+    /// Get cached size of relation if it nt updated fter speified LSN
+    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber>;
+
+    /// Update cached relation size if there is no more recent update
+    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+
+    /// Store cached reltion size
+    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+
+    /// Remove cached reltion size
+    fn remove_cached_rel_size(&self, tag: &RelTag);
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
@@ -666,9 +685,12 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
 
         self.pending_nblocks += nblocks as isize;
 
+        // Update relation size cache
+        let last_lsn = self.tline.get_last_record_lsn();
+        self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
+
         // Even if nblocks > 0, we don't insert any actual blocks here. That's up to the
         // caller.
-
         Ok(())
     }
 
@@ -683,6 +705,10 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         // Update the entry with the new size.
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+        // Update relation size cache
+        let last_lsn = self.tline.get_last_record_lsn();
+        self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
 
         // Update logical database size.
         self.pending_nblocks -= old_size as isize - nblocks as isize;
@@ -702,6 +728,10 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         if nblocks > old_size {
             let buf = nblocks.to_le_bytes();
             self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+            // Update relation size cache
+            let last_lsn = self.tline.get_last_record_lsn();
+            self.tline.set_cached_rel_size(rel, last_lsn, nblocks);
 
             self.pending_nblocks += nblocks as isize - old_size as isize;
         }
@@ -727,6 +757,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
         self.pending_nblocks -= old_size as isize;
+
+        // Remove enty from relation size cache
+        self.tline.remove_cached_rel_size(&rel);
 
         // Delete size entry, as well as all blocks
         self.delete(rel_key_range(rel));
