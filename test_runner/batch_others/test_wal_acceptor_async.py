@@ -496,12 +496,8 @@ async def run_race_conditions(env: NeonEnv, pg: Postgres):
     n_queries = 200
     expected_sum = 0
 
-    for i in range(1, n_iterations + 1):
-        # await for the end of the previous iteration
-        while data.iteration < i:
-            await asyncio.sleep(0.1)
-
-        for i in range((i - 1) * n_queries, i * n_queries):
+    while data.iteration < n_iterations:
+            await asyncio.sleep(0.01)
             await conn.execute(f"INSERT INTO t values ({i+1}, 'payload')")
             expected_sum += i + 1
 
