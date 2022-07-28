@@ -1,10 +1,8 @@
-from contextlib import closing
-
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
 from fixtures.neon_fixtures import pg_distrib_dir
 import os
-from fixtures.utils import subprocess_capture
+from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000
 
@@ -21,19 +19,17 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     pgmain = env.postgres.create_start('test_fullbackup')
     log.info("postgres is running on 'test_fullbackup' branch")
 
-    timeline = pgmain.safe_psql("SHOW neon.timeline_id")[0][0]
+    with pgmain.cursor() as cur:
+        timeline = query_scalar(cur, "SHOW neon.timeline_id")
 
-    with closing(pgmain.connect()) as conn:
-        with conn.cursor() as cur:
-            # data loading may take a while, so increase statement timeout
-            cur.execute("SET statement_timeout='300s'")
-            cur.execute(f'''CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
-                        from generate_series(1,{num_rows}) g''')
-            cur.execute("CHECKPOINT")
+        # data loading may take a while, so increase statement timeout
+        cur.execute("SET statement_timeout='300s'")
+        cur.execute(f'''CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
+                    from generate_series(1,{num_rows}) g''')
+        cur.execute("CHECKPOINT")
 
-            cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn = cur.fetchone()[0]
-            log.info(f"start_backup_lsn = {lsn}")
+        lsn = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
+        log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.

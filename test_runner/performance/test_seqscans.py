@@ -34,6 +34,7 @@ def test_seqscans(neon_with_baseline: PgCompare, rows: int, iters: int, workers:
             from pg_settings where name = 'shared_buffers'
             ''')
             row = cur.fetchone()
+            assert row is not None
             shared_buffers = row[0]
             table_size = row[1]
             log.info(f"shared_buffers is {shared_buffers}, table size {table_size}")

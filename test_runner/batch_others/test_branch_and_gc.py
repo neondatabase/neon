@@ -3,7 +3,7 @@ import pytest
 import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import lsn_from_hex
+from fixtures.utils import lsn_from_hex, query_scalar
 
 
 # Test the GC implementation when running with branching.
@@ -76,20 +76,17 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
         "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
     )
     main_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn1 = main_cur.fetchone()[0]
+    lsn1 = query_scalar(main_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f'LSN1: {lsn1}')
 
     main_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
-    main_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn2 = main_cur.fetchone()[0]
+    lsn2 = query_scalar(main_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f'LSN2: {lsn2}')
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.
     env.pageserver.safe_psql(
-        f'''do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}'''
-    )
+        f'do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}')
 
     env.neon_cli.create_branch('test_branch',
                                'test_main',
@@ -100,8 +97,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     branch_cur = pg_branch.connect().cursor()
     branch_cur.execute('INSERT INTO foo SELECT FROM generate_series(1, 100000)')
 
-    branch_cur.execute('SELECT count(*) FROM foo')
-    assert branch_cur.fetchone() == (200000, )
+    assert query_scalar(branch_cur, 'SELECT count(*) FROM foo') == 200000
 
 
 # This test simulates a race condition happening when branch creation and GC are performed concurrently.

@@ -9,6 +9,8 @@ import psycopg2.extras
 import random
 import time
 
+from fixtures.utils import query_scalar
+
 
 # This is a clear-box test that demonstrates the worst case scenario for the
 # "1 segment per layer" implementation of the pageserver. It writes to random
@@ -59,9 +61,7 @@ def test_random_writes(neon_with_baseline: PgCompare):
                     rows_inserted += rows_to_insert
 
             # Get table size (can't be predicted because padding and alignment)
-            cur.execute("SELECT pg_relation_size('Big');")
-            row = cur.fetchone()
-            table_size = row[0]
+            table_size = query_scalar(cur, "SELECT pg_relation_size('Big')")
             env.zenbenchmark.record("table_size", table_size, 'bytes', MetricReport.TEST_PARAM)
 
             # Decide how much to write, based on knowledge of pageserver implementation.
