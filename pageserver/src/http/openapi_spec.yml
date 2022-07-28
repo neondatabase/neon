@@ -587,6 +587,8 @@ components:
           type: string
         state:
           type: string
+        current_physical_size:
+          type: integer
         has_in_progress_downloads:
           type: boolean
     TenantCreateInfo:
