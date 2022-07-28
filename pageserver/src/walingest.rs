@@ -77,6 +77,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         modification: &mut DatadirModification<T>,
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
+		modification.lsn = lsn;
         decode_wal_record(recdata, decoded).context("failed decoding wal record")?;
 
         let mut buf = decoded.record.clone();
