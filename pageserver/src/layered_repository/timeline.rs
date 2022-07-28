@@ -412,8 +412,6 @@ impl Timeline for LayeredTimeline {
 
     /// Look up the value with the given a key
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
-        debug_assert!(lsn <= self.get_last_record_lsn());
-
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
