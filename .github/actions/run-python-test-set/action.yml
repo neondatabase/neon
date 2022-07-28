@@ -27,29 +27,15 @@ inputs:
     description: 'Whether to upload the performance report'
     required: false
     default: 'false'
-  aws-access-key-id:
-    description: 'AWS Access Key ID'
-    required: true
-  aws-secret-access-key:
-    description: 'AWS Secret Access Key'
-    required: true
 
 runs:
   using: "composite"
   steps:
-    - name: Get Neon artifact for restoration
+    - name: Get Neon artifact
       uses: ./.github/actions/download
       with:
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        key: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
-
-    - name: Extract Neon artifact
-      shell: bash -ex {0}
-      run: |
-        mkdir -p /tmp/neon/
-        tar -xf /tmp/neon.tar.zst -C /tmp/neon/
-        rm -rf /tmp/neon.tar.zst
+        name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
+        path: /tmp/neon
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
@@ -137,12 +123,12 @@ runs:
         find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
         du -sh /tmp/test_output/*
 
+    # TODO: Replace with proper test reports
     - name: Upload python test logs
       if: always()
-      uses: ./.github/actions/upload
+      uses: actions/upload-artifact@v3
       with:
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        key: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
-        artifacts: |
-          /tmp/test_output/
+        retention-days: 7
+        if-no-files-found: error
+        name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
+        path: /tmp/test_output/

@@ -1,14 +1,6 @@
 name: 'Merge and upload coverage data'
 description: 'Compresses and uploads the coverage data as an artifact'
 
-inputs:
-  aws-access-key-id:
-    description: 'AWS Access Key ID'
-    required: true
-  aws-secret-access-key:
-    description: 'AWS Secret Access Key'
-    required: true
-
 runs:
   using: "composite"
   steps:
@@ -16,41 +8,8 @@ runs:
       shell: bash -ex {0}
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
-    - name: Stash current coverage data
-      shell: bash -ex {0}
-      run: mv /tmp/coverage /tmp/coverage-current
-
-    - name: Get previous coverage artifact for restoration
-      if: ${{ github.job != 'build-neon' }}
-      uses: ./.github/actions/download
-      with:
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        key: coverage-data-artifact
-
-    - name: Extract coverage artifact
-      if: ${{ github.job != 'build-neon' }}
-      shell: bash -ex {0}
-      run: |
-        mkdir -p /tmp/coverage/
-        tar -xf /tmp/coverage.tar.zst -C /tmp/coverage/
-        rm -rf /tmp/coverage.tar.zst
-
-    - name: Merge current coverage data with previous
-      shell: bash -ex {0}
-      run: |
-        rsync -a /tmp/coverage-current/ /tmp/coverage/
-        rm -rf /tmp/coverage-current
-
-    - name: Prepare coverage artifact
-      shell: bash -ex {0}
-      run: ZSTD_NBTHREADS=0 tar -C /tmp/coverage/ -cf /tmp/coverage.tar.zst --zstd .
-
     - name: Upload coverage data
       uses: ./.github/actions/upload
       with:
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        key: coverage-data-artifact
-        artifacts: |
-          /tmp/coverage.tar.zst
+        name: coverage-data-artifact
+        path: /tmp/coverage

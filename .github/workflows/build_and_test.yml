@@ -150,28 +150,16 @@ jobs:
       - name: Install postgres binaries
         run: cp -a tmp_install /tmp/neon/pg_install
 
-      - name: Prepare neon artifact
-        run: ZSTD_NBTHREADS=0 tar -C /tmp/neon/ -cf /tmp/neon.tar.zst --zstd .
-
-      # - name: Upload neon binaries to s3
-      #   run: aws s3 cp ./neon.tar.zst s3://neon-dev-bucket/$GITHUB_RUN_ID/${{ matrix.build_type }}-neon.tar.zst
-
       - name: Upload neon binaries
         uses: ./.github/actions/upload
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
-          key: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
-          artifacts: |
-            /tmp/neon.tar.zst
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: /tmp/neon
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
 
   pg_regress-tests:
     runs-on: dev
@@ -196,15 +184,10 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_pg_regress
           needs_postgres_source: true
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
 
   other-tests:
     runs-on: dev
@@ -228,15 +211,10 @@ jobs:
           build_type: ${{ matrix.build_type }}
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_others
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
 
   benchmarks:
     runs-on: dev
@@ -262,8 +240,6 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: true
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -297,31 +273,17 @@ jobs:
             target/
           key: v4-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Get Neon artifact for restoration
+      - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
-          key: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
+          path: /tmp/neon
 
-      - name: Extract Neon artifact
-        run: |
-          mkdir -p /tmp/neon/
-          tar -xf /tmp/neon.tar.zst -C /tmp/neon/
-          rm -rf /tmp/neon.tar.zst
-
-      - name: Get coverage artifact for restoration
+      - name: Get coverage artifact
         uses: ./.github/actions/download
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_GITHUB_ACTIONS_CACHE }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_GITHUB_ACTIONS_CACHE }}
-          key: coverage-data-artifact
-
-      - name: Extract coverage artifact
-        run: |
-          mkdir -p /tmp/coverage/
-          tar -xf /tmp/coverage.tar.zst -C /tmp/coverage/
-          rm -rf /tmp/coverage.tar.zst
+          name: coverage-data-artifact
+          path: /tmp/coverage
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge

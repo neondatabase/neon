@@ -1,53 +1,42 @@
-name: "Upload a Build artifact"
-description: "Custom upload action with fallback to `actions/upload-artifact`"
+name: "Upload an artifact"
+description: "Custom upload action"
 inputs:
-  aws-access-key-id:
-    description: "AWS access key id to access your bucket"
-    required: false
-  aws-secret-access-key:
-    description: "AWS secret access key to access your bucket"
-    required: false
-  key:
-    description: "An explicit key for restoring and saving the cache"
+  name:
+    description: "Artifact name"
     required: true
-  artifacts:
-    description: "A list of files, directories and glob patterns to cache and restore"
+  path:
+    description: "A directory or file to upload"
     required: true
-  force-github-artifacts:
-    description: "Force `actions/upload-artifact` usage"
-    default: true
-    required: false
 
 runs:
   using: "composite"
   steps:
-    - name: Choose upload backend
-      id: upload-backend
-      run: |
-        if [[ "${FORCE_GITHUB_ARTIFACTS}" == "true" || -z "${AWS_ACCESS_KEY_ID}" || -z "${AWS_SECRET_ACCESS_KEY}" ]]; then
-          USE_S3=false
-        else
-          USE_S3=true
-        fi
-        echo ::set-output name=use_s3::${USE_S3}
+    - name: Prepare artifact
       shell: bash -ex {0}
       env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
-        FORCE_GITHUB_ARTIFACTS: ${{ inputs.force-github-artifacts }}
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        mkdir -p $(dirname $ARCHIVE)
 
-    - uses: ./.github/actions/action-s3-cache
-      if: ${{ steps.upload-backend.outputs.use_s3 == 'true' }}
-      with:
-        action: put
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        key: ${{ github.run_id }}-${{ inputs.key }}
-        artifacts: ${{ inputs.artifacts }}
+        if [ -f ${ARCHIVE} ]; then
+          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
+          exit 1
+        fi
 
-    - uses: actions/upload-artifact@v3
-      if: ${{ steps.upload-backend.outputs.use_s3 == 'false' }}
-      with:
-        name: ${{ inputs.key }}
-        path: |
-          ${{ inputs.artifacts }}
+        ZSTD_NBTHREADS=0
+        if [ -d  ${SOURCE} ]; then
+          time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
+        elif [ -f ${SOURCE} ]; then
+          time tar -cf ${ARCHIVE} --zstd ${SOURCE}
+        else
+          echo 2>&1 "${SOURCE} neither directory nor file, don't know how to handle it"
+        fi
+
+    - name: Upload artifact
+      shell: bash -ex {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        time aws s3 mv --only-show-errors ${ARCHIVE} s3://neon-dev-bucket/artifacts/${GITHUB_RUN_ID}/$(basename $ARCHIVE)
