@@ -9,9 +9,7 @@ runs:
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
     - name: Upload coverage data
-      uses: actions/upload-artifact@v3
+      uses: ./.github/actions/upload
       with:
-        retention-days: 7
-        if-no-files-found: error
         name: coverage-data-artifact
-        path: /tmp/coverage/
+        path: /tmp/coverage

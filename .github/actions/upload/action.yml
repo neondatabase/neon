@@ -1,0 +1,42 @@
+name: "Upload an artifact"
+description: "Custom upload action"
+inputs:
+  name:
+    description: "Artifact name"
+    required: true
+  path:
+    description: "A directory or file to upload"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare artifact
+      shell: bash -ex {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        mkdir -p $(dirname $ARCHIVE)
+
+        if [ -f ${ARCHIVE} ]; then
+          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
+          exit 1
+        fi
+
+        ZSTD_NBTHREADS=0
+        if [ -d  ${SOURCE} ]; then
+          time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
+        elif [ -f ${SOURCE} ]; then
+          time tar -cf ${ARCHIVE} --zstd ${SOURCE}
+        else
+          echo 2>&1 "${SOURCE} neither directory nor file, don't know how to handle it"
+        fi
+
+    - name: Upload artifact
+      shell: bash -ex {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        time aws s3 mv --only-show-errors ${ARCHIVE} s3://neon-dev-bucket/artifacts/${GITHUB_RUN_ID}/$(basename $ARCHIVE)
