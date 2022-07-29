@@ -5,6 +5,7 @@ from fixtures.neon_fixtures import NeonEnv, PgBin, Postgres
 import time
 import random
 from fixtures.log_helper import log
+from fixtures.utils import lsn_from_hex, lsn_to_hex
 from performance.test_perf_pgbench import get_scales_matrix
 
 
@@ -25,6 +26,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
                                 n_branches: int,
                                 scale: int,
                                 ty: str):
+    random.seed(100)
     env = neon_simple_env
 
     # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
@@ -44,7 +46,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         log.info(f"Start a pgbench workload on pg {connstr}")
 
         pg_bin.run_capture(['pgbench', '-i', f'-s{scale}', connstr])
-        pg_bin.run_capture(['pgbench', '-T15', connstr])
+        # pg_bin.run_capture(['pgbench', '-T15', connstr])
 
     env.neon_cli.create_branch('b0', tenant_id=tenant)
     pgs: List[Postgres] = []
@@ -54,7 +56,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
     threads.append(threading.Thread(target=run_pgbench, args=(pgs[0], ), daemon=True))
     threads[-1].start()
 
-    thread_limit = 4
+    # thread_limit = 4
 
     for i in range(n_branches):
         # random a delay between [0, 5]
@@ -66,10 +68,10 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         # wait for all the threads to finish before spawning a new one.
         # Because tests defined in `batch_others` are run concurrently in CI,
         # we want to avoid the situation that one test exhausts resources for other tests.
-        if len(threads) >= thread_limit:
-            for thread in threads:
-                thread.join()
-            threads = []
+        # if len(threads) >= thread_limit:
+        #     for thread in threads:
+        #         thread.join()
+        #     threads = []
 
         if ty == "cascade":
             env.neon_cli.create_branch('b{}'.format(i + 1), 'b{}'.format(i), tenant_id=tenant)
@@ -87,3 +89,23 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
     for pg in pgs:
         res = pg.safe_psql('SELECT count(*) from pgbench_accounts')
         assert res[0] == (100000 * scale, )
+
+
+# def test_branching_weird_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
+#     random.seed(100)
+#     env = neon_simple_env
+
+#     env.neon_cli.create_branch('b0')
+#     pg = env.postgres.create_start('b0')
+
+#     pg_bin.run_capture(['pgbench', '-i', pg.connstr()])
+
+#     for i in range(1, 10):
+#         time.sleep(1.0)
+#         start_lsn = lsn_from_hex(
+#             pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]) - random.randint(100, 1000)
+#         log.info(f"Branching b{i} from b{i-1} starting at lsn {start_lsn}...")
+
+#         env.neon_cli.create_branch(f'b{i}', f'b{i-1}', ancestor_start_lsn=lsn_to_hex(start_lsn))
+#         pg = env.postgres.create_start(f'b{i}')
+#         pg_bin.run_capture(['pgbench', '-i', pg.connstr()])

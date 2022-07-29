@@ -140,6 +140,7 @@ pub async fn handle_walreceiver_connection(
         }
     } {
         let replication_message = replication_message?;
+        info!("got message: {:?}", replication_message);
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
@@ -192,6 +193,7 @@ pub async fn handle_walreceiver_connection(
             }
 
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                info!("got keep alive message...");
                 let wal_end = keepalive.wal_end();
                 let timestamp = keepalive.timestamp();
                 let reply_requested = keepalive.reply() != 0;
@@ -205,7 +207,10 @@ pub async fn handle_walreceiver_connection(
                 }
             }
 
-            _ => None,
+            _ => {
+                info!("got message: {:?}", replication_message);
+                None
+            }
         };
 
         if let Some(last_lsn) = status_update {
