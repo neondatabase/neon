@@ -1,6 +1,6 @@
 # Neon
 
-Neon is a serverless open source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes PostgreSQL storage layer by redistributing data across a cluster of nodes.
+Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 The project used to be called "Zenith". Many of the commands and code comments
 still refer to "zenith", but we are in the process of renaming things.
@@ -12,32 +12,31 @@ Alternatively, compile and run the project [locally](#running-local-installation
 
 ## Architecture overview
 
-A Neon installation consists of compute nodes and Neon storage engine.
+A Neon installation consists of compute nodes and a Neon storage engine.
 
-Compute nodes are stateless PostgreSQL nodes, backed by Neon storage engine.
+Compute nodes are stateless PostgreSQL nodes backed by the Neon storage engine.
 
-Neon storage engine consists of two major components:
-- Pageserver. Scalable storage backend for compute nodes.
-- WAL service. The service that receives WAL from compute node and ensures that it is stored durably.
+The Neon storage engine consists of two major components:
+- Pageserver. Scalable storage backend for the compute nodes.
+- WAL service. The service receives WAL from the compute node and ensures that it is stored durably.
 
 Pageserver consists of:
 - Repository - Neon storage implementation.
 - WAL receiver - service that receives WAL from WAL service and stores it in the repository.
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
-- WAL redo - service that builds pages from base images and WAL records on Page service request.
-
+- WAL redo - service that builds pages from base images and WAL records on Page service request
 ## Running local installation
 
 
 #### Installing dependencies on Linux
-1. Install build dependencies and other useful packages
+1. Install build dependencies and other applicable packages
 
-* On Ubuntu or Debian this set of packages should be sufficient to build the code:
+* On Ubuntu or Debian, this set of packages should be sufficient to build the code:
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev etcd cmake postgresql-client
 ```
-* On Fedora these packages are needed:
+* On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake etcd postgresql postgresql-contrib
@@ -69,7 +68,7 @@ brew install libpq
 brew link --force libpq
 ```
 
-#### Building on Linux and OSX
+#### Building on Linux
 
 1. Build neon and patched postgres
 ```
@@ -80,19 +79,35 @@ cd neon
 
 # The preferred and default is to make a debug build. This will create a 
 # demonstrably slower build than a release build. If you want to use a release
-# build, utilize "`BUILD_TYPE=release make -j`nproc``" 
+# build, utilize "BUILD_TYPE=release make -j`nproc`" 
 
 make -j`nproc`
 ```
 
-#### dependency installation notes
+#### Building on OSX
+
+1. Build neon and patched postgres
+```
+# Note: The path to the neon sources can not contain a space.
+
+git clone --recursive https://github.com/neondatabase/neon.git
+cd neon
+
+# The preferred and default is to make a debug build. This will create a 
+# demonstrably slower build than a release build. If you want to use a release
+# build, utilize "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`" 
+
+make -j`sysctl -n hw.logicalcpu`
+```
+
+#### Dependency installation notes
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
-Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
+Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires [poetry](https://python-poetry.org/)) in the project directory.
 
 
-#### running neon database
+#### Running neon database
 1. Start pageserver and postgres on top of it (should be called from repo root):
 ```sh
 # Create repository in .neon with proper paths to binaries and data
@@ -123,7 +138,7 @@ Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=pos
  main  127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main         0/16B5BA8  running
 ```
 
-2. Now it is possible to connect to postgres and run some queries:
+2. Now, it is possible to connect to postgres and run some queries:
 ```text
 > psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
@@ -181,8 +196,8 @@ postgres=# select * from t;
 (1 row)
 ```
 
-4. If you want to run tests afterwards (see below), you have to stop all the running the pageserver, safekeeper and postgres instances
-   you have just started. You can stop them all with one command:
+4. If you want to run tests afterward (see below), you must stop all the running of the pageserver, safekeeper, and postgres instances
+   you have just started. You can terminate them all with one command:
 ```sh
 > ./target/debug/neon_local stop
 ```
@@ -205,8 +220,8 @@ To view your `rustdoc` documentation in a browser, try running `cargo doc --no-d
 
 ### Postgres-specific terms
 
-Due to Neon's very close relation with PostgreSQL internals, there are numerous specific terms used.
-Same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
+Due to Neon's very close relation with PostgreSQL internals, numerous specific terms are used.
+The same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
 
 To get more familiar with this aspect, refer to:
 
