@@ -35,6 +35,8 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
             log.info(f'(capturing output to "{base}.stdout" and "{base}.stderr")')
             try:
                 subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+            except subprocess.CalledProcessError:
+                raise RuntimeError(f"command `{' '.join(cmd)}` has failed")
             finally:
                 stdout_f.flush()
                 stderr_f.flush()

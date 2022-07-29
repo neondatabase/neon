@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport, PgBenchRunResult
+from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchRunResult
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.neon_fixtures import profiling_supported
 from fixtures.utils import get_scale_for_db
@@ -20,23 +20,24 @@ def init_pgbench(env: PgCompare, cmdline):
     # calculate timestamps and durations separately
     # timestamp is intended to be used for linking to grafana and logs
     # duration is actually a metric and uses float instead of int for timestamp
-    init_start_timestamp = utc_now_timestamp()
+    start_timestamp = utc_now_timestamp()
     t0 = timeit.default_timer()
     with env.record_pageserver_writes('init.pageserver_writes'):
-        env.pg_bin.run_capture(cmdline)
+        out = env.pg_bin.run_capture(cmdline)
         env.flush()
-    init_duration = timeit.default_timer() - t0
-    init_end_timestamp = utc_now_timestamp()
 
-    env.zenbenchmark.record("init.duration",
-                            init_duration,
-                            unit="s",
-                            report=MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("init.start_timestamp",
-                            init_start_timestamp,
-                            '',
-                            MetricReport.TEST_PARAM)
-    env.zenbenchmark.record("init.end_timestamp", init_end_timestamp, '', MetricReport.TEST_PARAM)
+    duration = timeit.default_timer() - t0
+    end_timestamp = utc_now_timestamp()
+
+    stderr = Path(f"{out}.stderr").read_text()
+
+    res = PgBenchInitResult.parse_from_stderr(
+        stderr=stderr,
+        duration=duration,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+    )
+    env.zenbenchmark.record_pg_bench_init_result("init", res)
 
 
 def run_pgbench(env: PgCompare, prefix: str, cmdline):
