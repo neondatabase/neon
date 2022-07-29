@@ -1,5 +1,6 @@
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.log_helper import log
+from fixtures.utils import query_scalar
 
 
 #
@@ -14,16 +15,14 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     pg = env.postgres.create_start('test_multixact')
 
     log.info("postgres is running on 'test_multixact' branch")
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
+    cur = pg.connect().cursor()
     cur.execute('''
         CREATE TABLE t1(i int primary key);
         INSERT INTO t1 select * from generate_series(1, 100);
     ''')
 
-    cur.execute('SELECT next_multixact_id FROM pg_control_checkpoint()')
-    next_multixact_id_old = cur.fetchone()[0]
+    next_multixact_id_old = query_scalar(cur,
+                                         'SELECT next_multixact_id FROM pg_control_checkpoint()')
 
     # Lock entries using parallel connections in a round-robin fashion.
     nclients = 20
@@ -53,6 +52,7 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     cur.execute(
         'SELECT next_multixact_id, pg_current_wal_insert_lsn() FROM pg_control_checkpoint()')
     res = cur.fetchone()
+    assert res is not None
     next_multixact_id = res[0]
     lsn = res[1]
 
@@ -64,11 +64,8 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     pg_new = env.postgres.create_start('test_multixact_new')
 
     log.info("postgres is running on 'test_multixact_new' branch")
-    pg_new_conn = pg_new.connect()
-    cur_new = pg_new_conn.cursor()
-
-    cur_new.execute('SELECT next_multixact_id FROM pg_control_checkpoint()')
-    next_multixact_id_new = cur_new.fetchone()[0]
+    next_multixact_id_new = pg_new.safe_psql(
+        'SELECT next_multixact_id FROM pg_control_checkpoint()')[0][0]
 
     # Check that we restored pg_controlfile correctly
     assert next_multixact_id_new == next_multixact_id

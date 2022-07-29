@@ -8,6 +8,7 @@
 
 import asyncio
 from contextlib import closing
+from typing import List, Tuple
 from uuid import UUID
 
 import pytest
@@ -59,7 +60,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, storage_type: str):
 
     env = neon_env_builder.init_start()
 
-    tenants_pgs = []
+    tenants_pgs: List[Tuple[UUID, Postgres]] = []
 
     for i in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
@@ -80,14 +81,11 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, storage_type: str):
     # Wait for the remote storage uploads to finish
     pageserver_http = env.pageserver.http_client()
     for tenant, pg in tenants_pgs:
-        with closing(pg.connect()) as conn:
-            with conn.cursor() as cur:
-                cur.execute("show neon.tenant_id")
-                tenant_id = cur.fetchone()[0]
-                cur.execute("show neon.timeline_id")
-                timeline_id = cur.fetchone()[0]
-                cur.execute("SELECT pg_current_wal_flush_lsn()")
-                current_lsn = lsn_from_hex(cur.fetchone()[0])
+        res = pg.safe_psql_many(
+            ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"])
+        tenant_id = res[0][0][0]
+        timeline_id = res[1][0][0]
+        current_lsn = lsn_from_hex(res[2][0][0])
 
         # wait until pageserver receives all the data
         wait_for_last_record_lsn(pageserver_http, UUID(tenant_id), UUID(timeline_id), current_lsn)

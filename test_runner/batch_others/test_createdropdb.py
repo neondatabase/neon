@@ -4,6 +4,7 @@ import pathlib
 from contextlib import closing
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.log_helper import log
+from fixtures.utils import query_scalar
 
 
 #
@@ -16,15 +17,13 @@ def test_createdb(neon_simple_env: NeonEnv):
     pg = env.postgres.create_start('test_createdb')
     log.info("postgres is running on 'test_createdb' branch")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            # Cause a 'relmapper' change in the original branch
-            cur.execute('VACUUM FULL pg_class')
+    with pg.cursor() as cur:
+        # Cause a 'relmapper' change in the original branch
+        cur.execute('VACUUM FULL pg_class')
 
-            cur.execute('CREATE DATABASE foodb')
+        cur.execute('CREATE DATABASE foodb')
 
-            cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn = cur.fetchone()[0]
+        lsn = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
 
     # Create a branch
     env.neon_cli.create_branch('test_createdb2', 'test_createdb', ancestor_start_lsn=lsn)
@@ -32,21 +31,21 @@ def test_createdb(neon_simple_env: NeonEnv):
 
     # Test that you can connect to the new database on both branches
     for db in (pg, pg2):
-        with closing(db.connect(dbname='foodb')) as conn:
-            with conn.cursor() as cur:
-                # Check database size in both branches
-                cur.execute("""
-                    select pg_size_pretty(pg_database_size('foodb')),
-                    pg_size_pretty(
-                    sum(pg_relation_size(oid, 'main'))
-                    +sum(pg_relation_size(oid, 'vm'))
-                    +sum(pg_relation_size(oid, 'fsm'))
-                    ) FROM pg_class where relisshared is false
-                   """)
-                res = cur.fetchone()
-                # check that dbsize equals sum of all relation sizes, excluding shared ones
-                # This is how we define dbsize in neon for now
-                assert res[0] == res[1]
+        with db.cursor(dbname='foodb') as cur:
+            # Check database size in both branches
+            cur.execute("""
+                select pg_size_pretty(pg_database_size('foodb')),
+                pg_size_pretty(
+                sum(pg_relation_size(oid, 'main'))
+                +sum(pg_relation_size(oid, 'vm'))
+                +sum(pg_relation_size(oid, 'fsm'))
+                ) FROM pg_class where relisshared is false
+                """)
+            res = cur.fetchone()
+            assert res is not None
+            # check that dbsize equals sum of all relation sizes, excluding shared ones
+            # This is how we define dbsize in neon for now
+            assert res[0] == res[1]
 
 
 #
@@ -58,24 +57,19 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     pg = env.postgres.create_start('test_dropdb')
     log.info("postgres is running on 'test_dropdb' branch")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute('CREATE DATABASE foodb')
+    with pg.cursor() as cur:
+        cur.execute('CREATE DATABASE foodb')
 
-            cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn_before_drop = cur.fetchone()[0]
+        lsn_before_drop = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
 
-            cur.execute("SELECT oid FROM pg_database WHERE datname='foodb';")
-            dboid = cur.fetchone()[0]
+        dboid = query_scalar(cur, "SELECT oid FROM pg_database WHERE datname='foodb';")
 
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute('DROP DATABASE foodb')
+    with pg.cursor() as cur:
+        cur.execute('DROP DATABASE foodb')
 
-            cur.execute('CHECKPOINT')
+        cur.execute('CHECKPOINT')
 
-            cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn_after_drop = cur.fetchone()[0]
+        lsn_after_drop = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
 
     # Create two branches before and after database drop.
     env.neon_cli.create_branch('test_before_dropdb',

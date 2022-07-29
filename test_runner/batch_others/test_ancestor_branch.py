@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
+from fixtures.utils import query_scalar
 
 
 #
@@ -25,13 +26,11 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     pg_branch0 = env.postgres.create_start('main', tenant_id=tenant)
     branch0_cur = pg_branch0.connect().cursor()
-    branch0_cur.execute("SHOW neon.timeline_id")
-    branch0_timeline = branch0_cur.fetchone()[0]
+    branch0_timeline = query_scalar(branch0_cur, "SHOW neon.timeline_id")
     log.info(f"b0 timeline {branch0_timeline}")
 
     # Create table, and insert 100k rows.
-    branch0_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    branch0_lsn = branch0_cur.fetchone()[0]
+    branch0_lsn = query_scalar(branch0_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f"b0 at lsn {branch0_lsn}")
 
     branch0_cur.execute('CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)')
@@ -40,8 +39,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
             SELECT '00112233445566778899AABBCCDDEEFF' || ':branch0:' || g
             FROM generate_series(1, 100000) g
     ''')
-    branch0_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_100 = branch0_cur.fetchone()[0]
+    lsn_100 = query_scalar(branch0_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f'LSN after 100k rows: {lsn_100}')
 
     # Create branch1.
@@ -50,12 +48,10 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on 'branch1' branch")
 
     branch1_cur = pg_branch1.connect().cursor()
-    branch1_cur.execute("SHOW neon.timeline_id")
-    branch1_timeline = branch1_cur.fetchone()[0]
+    branch1_timeline = query_scalar(branch1_cur, "SHOW neon.timeline_id")
     log.info(f"b1 timeline {branch1_timeline}")
 
-    branch1_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    branch1_lsn = branch1_cur.fetchone()[0]
+    branch1_lsn = query_scalar(branch1_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f"b1 at lsn {branch1_lsn}")
 
     # Insert 100k rows.
@@ -64,8 +60,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
             SELECT '00112233445566778899AABBCCDDEEFF' || ':branch1:' || g
             FROM generate_series(1, 100000) g
     ''')
-    branch1_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_200 = branch1_cur.fetchone()[0]
+    lsn_200 = query_scalar(branch1_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f'LSN after 200k rows: {lsn_200}')
 
     # Create branch2.
@@ -74,12 +69,10 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on 'branch2' branch")
     branch2_cur = pg_branch2.connect().cursor()
 
-    branch2_cur.execute("SHOW neon.timeline_id")
-    branch2_timeline = branch2_cur.fetchone()[0]
+    branch2_timeline = query_scalar(branch2_cur, "SHOW neon.timeline_id")
     log.info(f"b2 timeline {branch2_timeline}")
 
-    branch2_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    branch2_lsn = branch2_cur.fetchone()[0]
+    branch2_lsn = query_scalar(branch2_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f"b2 at lsn {branch2_lsn}")
 
     # Insert 100k rows.
@@ -88,20 +81,16 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
             SELECT '00112233445566778899AABBCCDDEEFF' || ':branch2:' || g
             FROM generate_series(1, 100000) g
     ''')
-    branch2_cur.execute('SELECT pg_current_wal_insert_lsn()')
-    lsn_300 = branch2_cur.fetchone()[0]
+    lsn_300 = query_scalar(branch2_cur, 'SELECT pg_current_wal_insert_lsn()')
     log.info(f'LSN after 300k rows: {lsn_300}')
 
     # Run compaction on branch1.
-    psconn = env.pageserver.connect()
-    log.info(f'compact {tenant.hex} {branch1_timeline} {lsn_200}')
-    psconn.cursor().execute(f'''compact {tenant.hex} {branch1_timeline} {lsn_200}''')
+    compact = f'compact {tenant.hex} {branch1_timeline} {lsn_200}'
+    log.info(compact)
+    env.pageserver.safe_psql(compact)
 
-    branch0_cur.execute('SELECT count(*) FROM foo')
-    assert branch0_cur.fetchone() == (100000, )
+    assert query_scalar(branch0_cur, 'SELECT count(*) FROM foo') == 100000
 
-    branch1_cur.execute('SELECT count(*) FROM foo')
-    assert branch1_cur.fetchone() == (200000, )
+    assert query_scalar(branch1_cur, 'SELECT count(*) FROM foo') == 200000
 
-    branch2_cur.execute('SELECT count(*) FROM foo')
-    assert branch2_cur.fetchone() == (300000, )
+    assert query_scalar(branch2_cur, 'SELECT count(*) FROM foo') == 300000

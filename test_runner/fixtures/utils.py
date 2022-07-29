@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 
 from typing import Any, List, Tuple
+
+from psycopg2.extensions import cursor
 from fixtures.log_helper import log
 
 
@@ -77,6 +79,20 @@ def etcd_path() -> Path:
         raise RuntimeError('etcd not found in PATH')
     else:
         return Path(path_output)
+
+
+def query_scalar(cur: cursor, query: str) -> Any:
+    """
+    It is a convenience wrapper to avoid repetitions
+    of cur.execute(); cur.fetchone()[0]
+
+    And this is mypy friendly, because without None
+    check mypy says that Optional is not indexable.
+    """
+    cur.execute(query)
+    var = cur.fetchone()
+    assert var is not None
+    return var[0]
 
 
 # Traverse directory to get total size.

@@ -1,9 +1,13 @@
+from typing import List, Tuple
+from uuid import UUID
 import pytest
 import concurrent.futures
 from contextlib import closing
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres
 from fixtures.log_helper import log
 import os
+
+from fixtures.utils import query_scalar
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -13,7 +17,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    tenant_timelines = []
+    tenant_timelines: List[Tuple[str, str, Postgres]] = []
 
     for n in range(4):
         tenant_id_uuid, timeline_id_uuid = env.neon_cli.create_tenant()
@@ -21,13 +25,11 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         timeline_id = timeline_id_uuid.hex
 
         pg = env.postgres.create_start(f'main', tenant_id=tenant_id_uuid)
-        with closing(pg.connect()) as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE TABLE t(key int primary key, value text)")
-                cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t(key int primary key, value text)")
+            cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-                cur.execute("SHOW neon.timeline_id")
-                timeline_id = cur.fetchone()[0]
+            timeline_id = query_scalar(cur, "SHOW neon.timeline_id")
         pg.stop()
         tenant_timelines.append((tenant_id, timeline_id, pg))
 
@@ -68,10 +70,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     # Tenant 0 should still work
     pg0.start()
-    with closing(pg0.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM t")
-            assert cur.fetchone()[0] == 100
+    assert pg0.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
     # But all others are broken
     for n in range(1, 4):

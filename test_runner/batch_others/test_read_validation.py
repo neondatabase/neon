@@ -6,6 +6,8 @@ from fixtures.log_helper import log
 from psycopg2.errors import UndefinedTable
 from psycopg2.errors import IoError
 
+from fixtures.utils import query_scalar
+
 pytest_plugins = ("fixtures.neon_fixtures")
 
 extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
@@ -32,9 +34,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
             c.execute("select lsn, lower, upper from page_header(get_raw_page('foo', 'main', 0));")
             first = c.fetchone()
+            assert first is not None
 
-            c.execute("select relfilenode from pg_class where relname = 'foo'")
-            relfilenode = c.fetchone()[0]
+            relfilenode = query_scalar(c, "select relfilenode from pg_class where relname = 'foo'")
 
             c.execute("insert into foo values (2);")
             c.execute("select lsn, lower, upper from page_header(get_raw_page('foo', 'main', 0));")
@@ -44,22 +46,25 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
             log.info("Test table is populated, validating buffer cache")
 
-            c.execute(
+            cache_entries = query_scalar(
+                c,
                 "select count(*) from pg_buffercache where relfilenode =  {}".format(relfilenode))
-            assert c.fetchone()[0] > 0, "No buffers cached for the test relation"
+            assert cache_entries > 0, "No buffers cached for the test relation"
 
             c.execute(
                 "select reltablespace, reldatabase, relfilenode from pg_buffercache where relfilenode = {}"
                 .format(relfilenode))
             reln = c.fetchone()
+            assert reln is not None
 
             log.info("Clear buffer cache to ensure no stale pages are brought into the cache")
 
             c.execute("select clear_buffer_cache()")
 
-            c.execute(
+            cache_entries = query_scalar(
+                c,
                 "select count(*) from pg_buffercache where relfilenode =  {}".format(relfilenode))
-            assert c.fetchone()[0] == 0, "Failed to clear buffer cache"
+            assert cache_entries == 0, "Failed to clear buffer cache"
 
             log.info("Cache is clear, reading stale page version")
 
@@ -69,9 +74,10 @@ def test_read_validation(neon_simple_env: NeonEnv):
             direct_first = c.fetchone()
             assert first == direct_first, "Failed fetch page at historic lsn"
 
-            c.execute(
+            cache_entries = query_scalar(
+                c,
                 "select count(*) from pg_buffercache where relfilenode =  {}".format(relfilenode))
-            assert c.fetchone()[0] == 0, "relation buffers detected after invalidation"
+            assert cache_entries == 0, "relation buffers detected after invalidation"
 
             log.info("Cache is clear, reading latest page version without cache")
 
@@ -81,9 +87,10 @@ def test_read_validation(neon_simple_env: NeonEnv):
             direct_latest = c.fetchone()
             assert second == direct_latest, "Failed fetch page at latest lsn"
 
-            c.execute(
+            cache_entries = query_scalar(
+                c,
                 "select count(*) from pg_buffercache where relfilenode =  {}".format(relfilenode))
-            assert c.fetchone()[0] == 0, "relation buffers detected after invalidation"
+            assert cache_entries == 0, "relation buffers detected after invalidation"
 
             log.info(
                 "Cache is clear, reading stale page version without cache using relation identifiers"
