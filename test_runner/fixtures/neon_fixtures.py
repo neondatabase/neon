@@ -59,7 +59,7 @@ Env = Dict[str, str]
 Fn = TypeVar('Fn', bound=Callable[..., Any])
 
 DEFAULT_OUTPUT_DIR = 'test_output'
-DEFAULT_POSTGRES_DIR = 'tmp_install'
+DEFAULT_POSTGRES_DIR = 'pg_install/v14'
 DEFAULT_BRANCH_NAME = 'main'
 
 BASE_PORT = 15000

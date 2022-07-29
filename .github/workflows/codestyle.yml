@@ -68,7 +68,7 @@ jobs:
         uses: actions/cache@v2
         with:
           path: |
-            tmp_install/
+            pg_install/
           key: ${{ runner.os }}-pg-${{ steps.pg_ver.outputs.pg_rev }}
 
       - name: Set extra env for macOS
@@ -87,10 +87,10 @@ jobs:
         if: failure()
         continue-on-error: true
         run: |
-          echo '' && echo '=== config.log ===' && echo ''
-          cat tmp_install/build/config.log
-          echo '' && echo '=== configure.log ===' && echo ''
-          cat tmp_install/build/configure.log
+          echo '' && echo '=== Postgres v14 config.log ===' && echo ''
+          cat pg_install/build/v14/config.log
+          echo '' && echo '=== Postgres v14 configure.log ===' && echo ''
+          cat pg_install/build/v14/configure.log
 
       - name: Cache cargo deps
         id: cache_cargo

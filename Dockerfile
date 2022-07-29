@@ -10,8 +10,8 @@ COPY Makefile Makefile
 ENV BUILD_TYPE release
 RUN set -e \
     && mold -run make -j $(nproc) -s postgres \
-    && rm -rf tmp_install/build \
-    && tar -C tmp_install -czf /postgres_install.tar.gz .
+    && rm -rf pg_install/build \
+    && tar -C pg_install -czf /postgres_install.tar.gz .
 
 # Build zenith binaries
 FROM neondatabase/rust:1.58 AS build
@@ -25,7 +25,7 @@ ARG CACHEPOT_BUCKET=zenith-rust-cachepot
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_SECRET_ACCESS_KEY
 
-COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
+COPY --from=pg-build /pg/pg_install/include/postgresql/server pg_install/include/postgresql/server
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
@@ -54,7 +54,7 @@ COPY --from=build --chown=zenith:zenith /home/runner/target/release/pageserver /
 COPY --from=build --chown=zenith:zenith /home/runner/target/release/safekeeper /usr/local/bin
 COPY --from=build --chown=zenith:zenith /home/runner/target/release/proxy      /usr/local/bin
 
-COPY --from=pg-build /pg/tmp_install/         /usr/local/
+COPY --from=pg-build /pg/pg_install/         /usr/local/
 COPY --from=pg-build /postgres_install.tar.gz /data/
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh

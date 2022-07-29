@@ -37,7 +37,7 @@ fn main() -> Result<()> {
                     Arg::new("pg-distrib-dir")
                         .long("pg-distrib-dir")
                         .takes_value(true)
-                        .help("Directory with Postgres distribution (bin and lib directories, e.g. tmp_install)")
+                        .help("Directory with Postgres distribution (bin and lib directories, e.g. pg_install/v14)")
                         .default_value("/usr/local")
                 )
         )

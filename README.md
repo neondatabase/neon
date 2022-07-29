@@ -26,6 +26,14 @@ Pageserver consists of:
 - Page service - service that communicates with compute nodes and responds with pages from the repository.
 - WAL redo - service that builds pages from base images and WAL records on Page service request.
 
+## Running tests
+
+```sh
+git clone --recursive https://github.com/neondatabase/neon.git
+make # builds also postgres and installs it to ./pg_install
+./scripts/pytest
+```
+
 ## Running local installation
 
 
@@ -86,7 +94,7 @@ make -j`nproc`
 ```
 
 #### dependency installation notes
-To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `tmp_install/bin` and `tmp_install/lib`, respectively.
+To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
 Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires poetry) in the project directory.
@@ -185,14 +193,6 @@ postgres=# select * from t;
    you have just started. You can stop them all with one command:
 ```sh
 > ./target/debug/neon_local stop
-```
-
-## Running tests
-
-```sh
-git clone --recursive https://github.com/neondatabase/neon.git
-make # builds also postgres and installs it to ./tmp_install
-./scripts/pytest
 ```
 
 ## Documentation
