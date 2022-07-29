@@ -68,8 +68,6 @@ There are the following implementations present:
 * local filesystem — to use in tests mainly
 * AWS S3           - to use in production
 
-Implementation details are covered in the [backup readme](./src/remote_storage/README.md) and corresponding Rust file docs, parameters documentation can be found at [settings docs](../docs/settings.md).
-
 The backup service is disabled by default and can be enabled to interact with a single remote storage.
 
 CLI examples:
