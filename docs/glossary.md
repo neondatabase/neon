@@ -111,7 +111,7 @@ PostgreSQL LSNs and functions to monitor them:
 * `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically.
 [source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
 
-Neon safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
+Neon safekeeper LSNs. See [safekeeper protocol section](safekeeper-protocol.md) for more information.
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.
