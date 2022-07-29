@@ -75,7 +75,7 @@ layer's Segment and range of LSNs.
 There are two kinds of layers, in-memory and on-disk layers. In-memory
 layers are used to ingest incoming WAL, and provide fast access
 to the recent page versions. On-disk layers are stored as files on disk, and
-are immutable. See pageserver/src/layered_repository/README.md for more.
+are immutable. See [pageserver-storage.md](./pageserver-storage.md) for more.
 
 ### Layer file (on-disk layer)
 
@@ -111,7 +111,7 @@ PostgreSQL LSNs and functions to monitor them:
 * `pg_last_wal_replay_lsn ()` - Returns the last write-ahead log location that has been replayed during recovery. If recovery is still in progress this will increase monotonically.
 [source PostgreSQL documentation](https://www.postgresql.org/docs/devel/functions-admin.html):
 
-Neon safekeeper LSNs. For more check [safekeeper/README_PROTO.md](/safekeeper/README_PROTO.md)
+Neon safekeeper LSNs. See [safekeeper protocol section](safekeeper-protocol.md) for more information.
 * `CommitLSN`: position in WAL confirmed by quorum safekeepers.
 * `RestartLSN`: position in WAL confirmed by all safekeepers.
 * `FlushLSN`: part of WAL persisted to the disk by safekeeper.

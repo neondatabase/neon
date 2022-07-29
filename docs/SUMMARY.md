@@ -52,10 +52,8 @@
 - [multitenancy.md](./multitenancy.md) — how multitenancy is organized in the pageserver and Zenith CLI.
 - [settings.md](./settings.md)
 #FIXME: move these under sourcetree.md
-#- [pageserver/README.md](/pageserver/README.md)
 #- [postgres_ffi/README.md](/libs/postgres_ffi/README.md)
 #- [test_runner/README.md](/test_runner/README.md)
-#- [safekeeper/README.md](/safekeeper/README.md)
 
 
 # RFCs

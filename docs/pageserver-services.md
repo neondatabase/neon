@@ -68,8 +68,6 @@ There are the following implementations present:
 * local filesystem — to use in tests mainly
 * AWS S3           - to use in production
 
-Implementation details are covered in the [backup readme](./src/remote_storage/README.md) and corresponding Rust file docs, parameters documentation can be found at [settings docs](../docs/settings.md).
-
 The backup service is disabled by default and can be enabled to interact with a single remote storage.
 
 CLI examples:
@@ -118,7 +116,7 @@ implemented by the LayeredRepository object in
 `layered_repository.rs`. There is only that one implementation of the
 Repository trait, but it's still a useful abstraction that keeps the
 interface for the low-level storage functionality clean. The layered
-storage format is described in layered_repository/README.md.
+storage format is described in [pageserver-storage.md](./pageserver-storage.md).
 
 Each repository consists of multiple Timelines. Timeline is a
 workhorse that accepts page changes from the WAL, and serves
