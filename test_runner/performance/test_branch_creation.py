@@ -113,8 +113,13 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
 
 
-# Test measures the branch creation time of branching from a timeline with a lot of relations
-# when the root timeline is busy under a workload and not busy.
+# Test measures the branch creation time when branching from a timeline with a lot of relations.
+#
+# This test measures the latency of branch creation under two scenarios
+# 1. The ancestor branch is not under any workloads
+# 2. The ancestor branch is under a workload (busy)
+#
+# To simulate the workload, the test runs a concurrent insertion on the ancestor branch right before branching.
 def test_branch_creation_many_relations(neon_compare: NeonCompare):
     env = neon_compare.env
 
@@ -126,8 +131,8 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
             for i in range(10000):
                 cur.execute(f"CREATE TABLE t{i} as SELECT g FROM generate_series(1, 1000) g")
 
-    # Wait for the pageserver to finish processing the latest flush LSN
-    # as we don't want the LSN wait time to be measured during the branch creation
+    # Wait for the pageserver to finish processing all the pending WALs,
+    # as we don't want the LSN wait time to be included during the branch creation
     flush_lsn = pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
     wait_for_last_record_lsn(env.pageserver.http_client(),
                              env.initial_tenant,
@@ -137,6 +142,7 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
     with neon_compare.record_duration("create_branch_time_not_busy_root"):
         env.neon_cli.create_branch('child_not_busy', 'root')
 
+    # run a concurrent insertion to make the ancestor "busy" during the branch creation
     thread = threading.Thread(target=pg.safe_psql,
                               args=("INSERT INTO t0 VALUES (generate_series(1, 100000))", ))
     thread.start()
