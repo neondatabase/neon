@@ -12,9 +12,9 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
-use pageserver::tenant_mgr::TenantInfo;
-use pageserver::timelines::TimelineInfo;
+use pageserver::http::models::{
+    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
+};
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
