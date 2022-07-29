@@ -290,6 +290,17 @@ pub struct LayeredTimeline {
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: AtomicIsize,
+
+    /// Information about the last processed message by the WAL receiver,
+    /// or None if WAL receiver has not received anything for this timeline
+    /// yet.
+    pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
+}
+
+pub struct WalReceiverInfo {
+    pub wal_source_connstr: String,
+    pub last_received_msg_lsn: Lsn,
+    pub last_received_msg_ts: u128,
 }
 
 /// Inherit all the functions from DatadirTimeline, to provide the
@@ -605,6 +616,8 @@ impl LayeredTimeline {
             current_logical_size: AtomicIsize::new(0),
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
+
+            last_received_wal: Mutex::new(None),
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result

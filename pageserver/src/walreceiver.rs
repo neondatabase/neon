@@ -26,7 +26,6 @@ mod walreceiver_connection;
 use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use std::cell::Cell;
 use std::collections::{hash_map, HashMap, HashSet};
 use std::future::Future;
@@ -36,14 +35,13 @@ use std::thread_local;
 use std::time::Duration;
 use tokio::{
     select,
-    sync::{mpsc, watch, RwLock},
+    sync::{mpsc, watch},
     task::JoinHandle,
 };
 use tracing::*;
 use url::Url;
 
 use crate::config::PageServerConf;
-use crate::http::models::WalReceiverEntry;
 use crate::tenant_mgr::{self, LocalTimelineUpdate, TenantState};
 use crate::thread_mgr::{self, ThreadKind};
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
@@ -53,23 +51,6 @@ thread_local! {
     //
     // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
     pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
-}
-
-/// WAL receiver state for sharing with the outside world.
-/// Only entries for timelines currently available in pageserver are stored.
-static WAL_RECEIVER_ENTRIES: Lazy<RwLock<HashMap<ZTenantTimelineId, WalReceiverEntry>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-/// Gets the public WAL streaming entry for a certain timeline.
-pub async fn get_wal_receiver_entry(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> Option<WalReceiverEntry> {
-    WAL_RECEIVER_ENTRIES
-        .read()
-        .await
-        .get(&ZTenantTimelineId::new(tenant_id, timeline_id))
-        .cloned()
 }
 
 /// Sets up the main WAL receiver thread that manages the rest of the subtasks inside of it, per timeline.
@@ -281,13 +262,10 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                         }
                         None => warn!("Timeline {id} does not have a tenant entry in wal receiver main thread"),
                     };
-                    {
-                        WAL_RECEIVER_ENTRIES.write().await.remove(&id);
-                        if let Err(e) = join_confirmation_sender.send(()) {
-                            warn!("cannot send wal_receiver shutdown confirmation {e}")
-                        } else {
-                            info!("confirm walreceiver shutdown for {id}");
-                        }
+                    if let Err(e) = join_confirmation_sender.send(()) {
+                        warn!("cannot send wal_receiver shutdown confirmation {e}")
+                    } else {
+                        info!("confirm walreceiver shutdown for {id}");
                     }
                 }
                 // Timeline got attached, retrieve all necessary information to start its broker loop and maintain this loop endlessly.
@@ -321,17 +299,6 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                                 return;
                             }
                         };
-
-                    {
-                        WAL_RECEIVER_ENTRIES.write().await.insert(
-                            id,
-                            WalReceiverEntry {
-                                wal_source_connstr: None,
-                                last_received_msg_lsn: None,
-                                last_received_msg_ts: None,
-                            },
-                        );
-                    }
 
                     vacant_connection_manager_entry.insert(
                         connection_manager::spawn_connection_manager_task(

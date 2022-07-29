@@ -101,18 +101,6 @@ impl TenantConfigRequest {
     }
 }
 
-/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
-/// We keep one WAL receiver active per timeline.
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WalReceiverEntry {
-    pub wal_source_connstr: Option<String>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub last_received_msg_lsn: Option<Lsn>,
-    /// the timestamp (in microseconds) of the last received message
-    pub last_received_msg_ts: Option<u128>,
-}
-
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
@@ -143,6 +131,12 @@ pub struct LocalTimelineInfo {
     pub current_logical_size_non_incremental: Option<usize>,
     pub current_physical_size_non_incremental: Option<u64>,
     pub timeline_state: LocalTimelineState,
+
+    pub wal_source_connstr: Option<String>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub last_received_msg_lsn: Option<Lsn>,
+    /// the timestamp (in microseconds) of the last received message
+    pub last_received_msg_ts: Option<u128>,
 }
 
 #[serde_as]

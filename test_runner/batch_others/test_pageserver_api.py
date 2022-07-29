@@ -47,7 +47,8 @@ def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
     for timeline in timelines:
         timeline_id_str = str(timeline['timeline_id'])
         timeline_details = client.timeline_detail(tenant_id=tenant_id,
-                                                  timeline_id=UUID(timeline_id_str))
+                                                  timeline_id=UUID(timeline_id_str),
+                                                  include_non_incremental_logical_size=True)
 
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str
@@ -63,13 +64,19 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    empty_response = client.wal_receiver_get(tenant_id, timeline_id)
+    timeline_details = client.timeline_detail(tenant_id=tenant_id,
+                                              timeline_id=timeline_id,
+                                              include_non_incremental_logical_size=True)
 
-    assert empty_response.get('wal_source_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
-    assert empty_response.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
-    assert empty_response.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert timeline_details.get('wal_source_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert timeline_details.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert timeline_details.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
 
 
+# Test the WAL-receiver related fields in the response to `timeline_details` API call
+#
+# These fields used to be returned by a separate API call, but they're part of
+# `timeline_details` now.
 def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
     client = env.pageserver.http_client()
@@ -78,18 +85,17 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
     def expect_updated_msg_lsn(prev_msg_lsn: Optional[int]) -> int:
-        res = client.wal_receiver_get(tenant_id, timeline_id)
+        timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
-        # a successful `wal_receiver_get` response must contain the below fields
-        assert list(res.keys()) == [
-            "wal_source_connstr",
-            "last_received_msg_lsn",
-            "last_received_msg_ts",
-        ]
+        # a successful `timeline_details` response must contain the below fields
+        local_timeline_details = timeline_details['local']
+        assert "wal_source_connstr" in local_timeline_details.keys()
+        assert "last_received_msg_lsn" in local_timeline_details.keys()
+        assert "last_received_msg_ts" in local_timeline_details.keys()
 
-        assert res["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
+        assert local_timeline_details["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
 
-        last_msg_lsn = lsn_from_hex(res["last_received_msg_lsn"])
+        last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
         assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, \
             f"the last received message's LSN {last_msg_lsn} hasn't been updated \
             compared to the previous message's LSN {prev_msg_lsn}"
@@ -98,7 +104,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 
     # Wait to make sure that we get a latest WAL receiver data.
     # We need to wait here because it's possible that we don't have access to
-    # the latest WAL during the time the `wal_receiver_get` API is called.
+    # the latest WAL yet, when the `timeline_detail` API is first called.
     # See: https://github.com/neondatabase/neon/issues/1768.
     lsn = wait_until(number_of_iterations=5, interval=1, func=lambda: expect_updated_msg_lsn(None))
 

@@ -865,10 +865,24 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
+    def timeline_detail(self,
+                        tenant_id: uuid.UUID,
+                        timeline_id: uuid.UUID,
+                        include_non_incremental_logical_size: bool = False,
+                        include_non_incremental_physical_size: bool = False) -> Dict[Any, Any]:
+
+        include_non_incremental_logical_size_str = "0"
+        if include_non_incremental_logical_size:
+            include_non_incremental_logical_size_str = "1"
+
+        include_non_incremental_physical_size_str = "0"
+        if include_non_incremental_physical_size:
+            include_non_incremental_physical_size_str = "1"
+
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}" +
-            "?include-non-incremental-logical-size=1&include-non-incremental-physical-size=1")
+            "?include-non-incremental-logical-size={include_non_incremental_logical_size_str}" +
+            "&include-non-incremental-physical-size={include_non_incremental_physical_size_str}")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -880,15 +894,6 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
-        return res_json
-
-    def wal_receiver_get(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/wal_receiver"
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
         return res_json
 
     def get_metrics(self) -> str:

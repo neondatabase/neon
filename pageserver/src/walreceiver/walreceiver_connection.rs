@@ -19,7 +19,7 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    http::models::WalReceiverEntry,
+    layered_repository::WalReceiverInfo,
     pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
@@ -232,21 +232,16 @@ pub async fn handle_walreceiver_connection(
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
-            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
-            {
-                super::WAL_RECEIVER_ENTRIES.write().await.insert(
-                    id,
-                    WalReceiverEntry {
-                        wal_source_connstr: Some(wal_source_connstr.to_owned()),
-                        last_received_msg_lsn: Some(last_lsn),
-                        last_received_msg_ts: Some(
-                            ts.duration_since(SystemTime::UNIX_EPOCH)
-                                .expect("Received message time should be before UNIX EPOCH!")
-                                .as_micros(),
-                        ),
-                    },
-                );
-            }
+            // Update the status about what we just received. This is shown in the mgmt API.
+            let last_received_wal = WalReceiverInfo {
+                wal_source_connstr: wal_source_connstr.to_owned(),
+                last_received_msg_lsn: last_lsn,
+                last_received_msg_ts: ts
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("Received message time should be before UNIX EPOCH!")
+                    .as_micros(),
+            };
+            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
