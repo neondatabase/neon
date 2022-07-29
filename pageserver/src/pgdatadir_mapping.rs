@@ -56,13 +56,16 @@ pub trait DatadirTimeline: Timeline {
     /// This provides a transaction-like interface to perform a bunch
     /// of modifications atomically.
     ///
-    /// To ingest a WAL record, call begin_modification() to get a
+    /// To ingest a WAL record, call begin_modification(lsn) to get a
     /// DatadirModification object. Use the functions in the object to
     /// modify the repository state, updating all the pages and metadata
-    /// that the WAL record affects. When you're done, call commit(lsn) to
-    /// commit the changes. All the changes will be stamped with the specified LSN.
+    /// that the WAL record affects. When you're done, call commit() to
+    /// commit the changes.
     ///
-    /// Calling commit(lsn) will flush all the changes and reset the state,
+    /// Lsn stored in modification is advanced by `ingest_record` and
+    /// is used by `commit()` to update `last_record_lsn`.
+    ///
+    /// Calling commit() will flush all the changes and reset the state,
     /// so the `DatadirModification` struct can be reused to perform the next modification.
     ///
     /// Note that any pending modifications you make through the
