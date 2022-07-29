@@ -66,6 +66,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
     ///
     /// Decode a PostgreSQL WAL record and store it in the repository, in the given timeline.
     ///
+    /// This function updates `lsn` field of `DatadirModification`
     ///
     /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
     /// relations/pages that the record affects.
@@ -404,7 +405,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             // replaying it would fail to find the previous image of the page, because
             // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
             // record if it doesn't.
-            let vm_size = self.get_relsize(vm_rel)?;
+            let vm_size = self.get_relsize(vm_rel, modification.lsn)?;
             if let Some(blknum) = new_vm_blk {
                 if blknum >= vm_size {
                     new_vm_blk = None;
@@ -923,12 +924,11 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         Ok(())
     }
 
-    fn get_relsize(&mut self, rel: RelTag) -> Result<BlockNumber> {
-        let last_lsn = self.timeline.get_last_record_lsn();
-        let nblocks = if !self.timeline.get_rel_exists(rel, last_lsn)? {
+    fn get_relsize(&mut self, rel: RelTag, lsn: Lsn) -> Result<BlockNumber> {
+        let nblocks = if !self.timeline.get_rel_exists(rel, lsn)? {
             0
         } else {
-            self.timeline.get_rel_size(rel, last_lsn)?
+            self.timeline.get_rel_size(rel, lsn)?
         };
         Ok(nblocks)
     }
