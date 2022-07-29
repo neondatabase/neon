@@ -109,8 +109,8 @@ crt = ["botocore[crt] (>=1.21.0,<2.0a0)"]
 
 [[package]]
 name = "boto3-stubs"
-version = "1.24.38"
-description = "Type annotations for boto3 1.24.38 generated with mypy-boto3-builder 7.10.1"
+version = "1.24.41"
+description = "Type annotations for boto3 1.24.41 generated with mypy-boto3-builder 7.10.2"
 category = "main"
 optional = false
 python-versions = ">=3.7"
@@ -1386,14 +1386,11 @@ test = ["websockets"]
 
 [[package]]
 name = "werkzeug"
-version = "2.2.0"
+version = "2.1.2"
 description = "The comprehensive WSGI web application library."
 category = "main"
 optional = false
 python-versions = ">=3.7"
-
-[package.dependencies]
-MarkupSafe = ">=2.1.1"
 
 [package.extras]
 watchdog = ["watchdog"]
@@ -1437,7 +1434,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "pytest-flake8", "pytest-
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.9"
-content-hash = "17e901dca9680c6ead56661492431cfce65cb20508be419599f0862ff2d1d827"
+content-hash = "5f7be77c7757a27bae28d39f31cd6f3a7a04e9dab53a200a6021a5af8ad02f37"
 
 [metadata.files]
 aiopg = []
