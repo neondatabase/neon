@@ -37,7 +37,7 @@ pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification();
+    let mut modification = tline.begin_modification(lsn);
     modification.init_empty()?;
 
     // Import all but pg_wal
@@ -56,12 +56,12 @@ pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
             if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
                 pg_control = Some(control_file);
             }
-            modification.flush(lsn)?;
+            modification.flush()?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit(lsn)?;
+    modification.commit()?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -267,7 +267,7 @@ fn import_wal<T: DatadirTimeline>(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
-        let mut modification = tline.begin_modification();
+        let mut modification = tline.begin_modification(endpoint);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
@@ -301,7 +301,7 @@ pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
     base_lsn: Lsn,
 ) -> Result<()> {
     info!("importing base at {}", base_lsn);
-    let mut modification = tline.begin_modification();
+    let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
@@ -319,7 +319,7 @@ pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush(base_lsn)?;
+                modification.flush()?;
             }
             tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -333,7 +333,7 @@ pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit(base_lsn)?;
+    modification.commit()?;
     Ok(())
 }
 
@@ -385,7 +385,7 @@ pub fn import_wal_from_tar<T: DatadirTimeline, Reader: Read>(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
-        let mut modification = tline.begin_modification();
+        let mut modification = tline.begin_modification(end_lsn);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
