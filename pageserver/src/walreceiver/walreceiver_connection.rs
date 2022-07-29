@@ -29,18 +29,18 @@ use crate::{
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
-/// Opens a conneciton to the given wal producer and streams the WAL, sending progress messages during streaming.
+/// Open a connection to the given safekeeper and receive WAL, sending back progress
+/// messages as we go.
 pub async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
-    wal_producer_connstr: &str,
+    wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_producer_connstr}");
-    let connect_cfg =
-        format!("{wal_producer_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connstr}");
+    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
 
     let (mut replication_client, connection) = time::timeout(
         connect_timeout,
@@ -237,7 +237,7 @@ pub async fn handle_walreceiver_connection(
                 super::WAL_RECEIVER_ENTRIES.write().await.insert(
                     id,
                     WalReceiverEntry {
-                        wal_producer_connstr: Some(wal_producer_connstr.to_owned()),
+                        wal_source_connstr: Some(wal_source_connstr.to_owned()),
                         last_received_msg_lsn: Some(last_lsn),
                         last_received_msg_ts: Some(
                             ts.duration_since(SystemTime::UNIX_EPOCH)

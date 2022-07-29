@@ -694,11 +694,11 @@ components:
       type: object
       required:
         - thread_id
-        - wal_producer_connstr
+        - wal_source_connstr
       properties:
         thread_id:
           type: integer
-        wal_producer_connstr:
+        wal_source_connstr:
           type: string
         last_received_msg_lsn:
           type: string

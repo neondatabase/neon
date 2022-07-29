@@ -65,7 +65,7 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 
     empty_response = client.wal_receiver_get(tenant_id, timeline_id)
 
-    assert empty_response.get('wal_producer_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+    assert empty_response.get('wal_source_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
     assert empty_response.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
     assert empty_response.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
 
@@ -82,7 +82,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 
         # a successful `wal_receiver_get` response must contain the below fields
         assert list(res.keys()) == [
-            "wal_producer_connstr",
+            "wal_source_connstr",
             "last_received_msg_lsn",
             "last_received_msg_ts",
         ]

@@ -326,7 +326,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                         WAL_RECEIVER_ENTRIES.write().await.insert(
                             id,
                             WalReceiverEntry {
-                                wal_producer_connstr: None,
+                                wal_source_connstr: None,
                                 last_received_msg_lsn: None,
                                 last_received_msg_ts: None,
                             },

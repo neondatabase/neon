@@ -168,7 +168,7 @@ async fn connection_manager_loop_step(
             walreceiver_state
                 .change_connection(
                     new_candidate.safekeeper_id,
-                    new_candidate.wal_producer_connstr,
+                    new_candidate.wal_source_connstr,
                 )
                 .await
         }
@@ -302,7 +302,7 @@ impl WalreceiverState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_producer_connstr: String) {
+    async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
         if let Some(old_connection) = self.wal_connection.take() {
             old_connection.connection_task.shutdown().await
         }
@@ -324,7 +324,7 @@ impl WalreceiverState {
                 .await;
                 super::walreceiver_connection::handle_walreceiver_connection(
                     id,
-                    &new_wal_producer_connstr,
+                    &new_wal_source_connstr,
                     events_sender.as_ref(),
                     cancellation,
                     connect_timeout,
@@ -387,7 +387,7 @@ impl WalreceiverState {
             Some(existing_wal_connection) => {
                 let connected_sk_node = existing_wal_connection.sk_id;
 
-                let (new_sk_id, new_safekeeper_etcd_data, new_wal_producer_connstr) =
+                let (new_sk_id, new_safekeeper_etcd_data, new_wal_source_connstr) =
                     self.select_connection_candidate(Some(connected_sk_node))?;
 
                 let now = Utc::now().naive_utc();
@@ -397,7 +397,7 @@ impl WalreceiverState {
                     if latest_interaciton > self.lagging_wal_timeout {
                         return Some(NewWalConnectionCandidate {
                             safekeeper_id: new_sk_id,
-                            wal_producer_connstr: new_wal_producer_connstr,
+                            wal_source_connstr: new_wal_source_connstr,
                             reason: ReconnectReason::NoWalTimeout {
                                 last_wal_interaction: Some(
                                     existing_wal_connection.latest_connection_update,
@@ -423,7 +423,7 @@ impl WalreceiverState {
                                         return Some(
                                             NewWalConnectionCandidate {
                                                 safekeeper_id: new_sk_id,
-                                                wal_producer_connstr: new_wal_producer_connstr,
+                                                wal_source_connstr: new_wal_source_connstr,
                                                 reason: ReconnectReason::LaggingWal { current_lsn, new_lsn, threshold: self.max_lsn_wal_lag },
                                             });
                                     }
@@ -434,18 +434,18 @@ impl WalreceiverState {
                     None => {
                         return Some(NewWalConnectionCandidate {
                             safekeeper_id: new_sk_id,
-                            wal_producer_connstr: new_wal_producer_connstr,
+                            wal_source_connstr: new_wal_source_connstr,
                             reason: ReconnectReason::NoEtcdDataForExistingConnection,
                         })
                     }
                 }
             }
             None => {
-                let (new_sk_id, _, new_wal_producer_connstr) =
+                let (new_sk_id, _, new_wal_source_connstr) =
                     self.select_connection_candidate(None)?;
                 return Some(NewWalConnectionCandidate {
                     safekeeper_id: new_sk_id,
-                    wal_producer_connstr: new_wal_producer_connstr,
+                    wal_source_connstr: new_wal_source_connstr,
                     reason: ReconnectReason::NoExistingConnection,
                 });
             }
@@ -546,7 +546,7 @@ impl WalreceiverState {
 #[derive(Debug, PartialEq, Eq)]
 struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
-    wal_producer_connstr: String,
+    wal_source_connstr: String,
     reason: ReconnectReason,
 }
 
@@ -803,7 +803,7 @@ mod tests {
             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
         );
         assert!(only_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         let selected_lsn = 100_000;
@@ -868,7 +868,7 @@ mod tests {
             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
         );
         assert!(biggest_wal_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -985,7 +985,7 @@ mod tests {
             "Should select new safekeeper due to missing etcd data, even if there's an existing connection with this safekeeper"
         );
         assert!(only_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1067,7 +1067,7 @@ mod tests {
             "Should select bigger WAL safekeeper if it starts to lag enough"
         );
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains("advanced by Lsn safekeeper"));
 
         Ok(())
@@ -1134,7 +1134,7 @@ mod tests {
             unexpected => panic!("Unexpected reason: {unexpected:?}"),
         }
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1190,7 +1190,7 @@ mod tests {
             unexpected => panic!("Unexpected reason: {unexpected:?}"),
         }
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())

@@ -102,7 +102,7 @@ impl TenantConfigRequest {
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalReceiverEntry {
-    pub wal_producer_connstr: Option<String>,
+    pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
