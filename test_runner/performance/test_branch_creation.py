@@ -7,7 +7,7 @@ import timeit
 import pytest
 from typing import List
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare, neon_compare
+from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import wait_for_last_record_lsn
 from fixtures.utils import lsn_from_hex
