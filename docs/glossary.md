@@ -75,7 +75,7 @@ layer's Segment and range of LSNs.
 There are two kinds of layers, in-memory and on-disk layers. In-memory
 layers are used to ingest incoming WAL, and provide fast access
 to the recent page versions. On-disk layers are stored as files on disk, and
-are immutable. See pageserver/src/layered_repository/README.md for more.
+are immutable. See [pageserver-storage.md](./pageserver-storage.md) for more.
 
 ### Layer file (on-disk layer)
 

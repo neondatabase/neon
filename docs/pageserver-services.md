@@ -118,7 +118,7 @@ implemented by the LayeredRepository object in
 `layered_repository.rs`. There is only that one implementation of the
 Repository trait, but it's still a useful abstraction that keeps the
 interface for the low-level storage functionality clean. The layered
-storage format is described in layered_repository/README.md.
+storage format is described in [pageserver-storage.md](./pageserver-storage.md).
 
 Each repository consists of multiple Timelines. Timeline is a
 workhorse that accepts page changes from the WAL, and serves
