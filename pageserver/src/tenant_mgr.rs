@@ -2,6 +2,7 @@
 //! page server.
 
 use crate::config::PageServerConf;
+use crate::http::models::TenantInfo;
 use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
@@ -14,7 +15,6 @@ use crate::{thread_mgr, timelines, walreceiver};
 use crate::{RepositoryImpl, TimelineImpl};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -502,16 +502,9 @@ fn load_local_timeline(
     Ok(inmem_timeline)
 }
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TenantInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub id: ZTenantId,
-    pub state: Option<TenantState>,
-    pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
-}
-
+///
+/// Get list of tenants, for the mgmt API
+///
 pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
     tenants_state::read_tenants()
         .iter()
