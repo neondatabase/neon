@@ -1,3 +1,4 @@
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -110,7 +111,21 @@ impl RelTag {
 /// These files are divided into segments, which are divided into
 /// pages of the same BLCKSZ as used for relation files.
 ///
-#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Hash,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
+#[repr(u8)]
 pub enum SlruKind {
     Clog,
     MultiXactMembers,
