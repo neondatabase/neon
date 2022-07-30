@@ -34,7 +34,7 @@ use crate::layered_repository::Timeline;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
-use crate::reltag::RelTag;
+use crate::reltag::{RelTag, SlruKind};
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -50,6 +50,7 @@ enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    GetSlruPage(PagestreamGetSlruPageRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -57,6 +58,7 @@ enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
+    GetSlruPage(PagestreamGetSlruPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
 }
@@ -94,6 +96,17 @@ struct PagestreamDbSizeRequest {
 }
 
 #[derive(Debug)]
+struct PagestreamGetSlruPageRequest {
+    latest: bool,
+    lsn: Lsn,
+    kind: SlruKind,
+    segno: u32,
+    blkno: u32,
+    check_exists_only: bool,
+    region: u32,
+}
+
+#[derive(Debug)]
 struct PagestreamExistsResponse {
     exists: bool,
 }
@@ -106,6 +119,12 @@ struct PagestreamNblocksResponse {
 #[derive(Debug)]
 struct PagestreamGetPageResponse {
     page: Bytes,
+}
+
+#[derive(Debug)]
+struct PagestreamGetSlruPageResponse {
+    seg_exists: bool,
+    page: Option<Bytes>,
 }
 
 #[derive(Debug)]
@@ -167,6 +186,17 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.get_u64()),
                 dbnode: body.get_u32(),
             })),
+            4 => Ok(PagestreamFeMessage::GetSlruPage(
+                PagestreamGetSlruPageRequest {
+                    latest: body.get_u8() != 0,
+                    lsn: Lsn::from(body.get_u64()),
+                    kind: SlruKind::try_from(body.get_u8())?,
+                    segno: body.get_u32(),
+                    blkno: body.get_u32(),
+                    check_exists_only: body.get_u8() != 0,
+                    region: body.get_u32(),
+                },
+            )),
             _ => bail!("unknown smgr message tag: {},'{:?}'", msg_tag, body),
         }
     }
@@ -192,8 +222,19 @@ impl PagestreamBeMessage {
                 bytes.put(&resp.page[..]);
             }
 
-            Self::Error(resp) => {
+            Self::GetSlruPage(resp) => {
                 bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(resp.seg_exists as u8);
+                if let Some(page) = &resp.page {
+                    bytes.put_u8(1); // page exists
+                    bytes.put(&page[..]);
+                } else {
+                    bytes.put_u8(0); // page does not exist
+                }
+            }
+
+            Self::Error(resp) => {
+                bytes.put_u8(104); /* tag from pagestore_client.h */
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
@@ -517,6 +558,18 @@ impl PageServerHandler {
                                     // TODO(ctring): make this region-aware
                                     self.handle_db_size_request(&timelines[0], &req)
                                 }),
+                            PagestreamFeMessage::GetSlruPage(req) => SMGR_QUERY_TIME
+                                .with_label_values(&[
+                                    "get_slru_page_at_lsn",
+                                    &tenant_id,
+                                    &timeline_id,
+                                ])
+                                .observe_closure_duration(|| {
+                                    self.handle_get_slru_page_at_lsn_request(
+                                        timelines[req.region as usize].as_ref(),
+                                        &req,
+                                    )
+                                }),
                         };
 
                         let response = response.unwrap_or_else(|e| {
@@ -765,6 +818,46 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    fn handle_get_slru_page_at_lsn_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamGetSlruPageRequest,
+    ) -> Result<PagestreamBeMessage> {
+        let _enter =
+            info_span!("get_slru_page", slru_kind = %req.kind.to_str(), segno = %req.segno,
+                       check_blkno = &req.blkno, req_lsn = %req.lsn, check_exists_only = %req.check_exists_only)
+            .entered();
+
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
+
+        let seg_exists = timeline.get_slru_segment_exists(req.kind, req.segno, lsn)?;
+        let mut page = None;
+
+        /*
+         * During recovery, postgres treats non-existent segment files as truncated files and
+         * returns an empty SLRU page instead of error (see notes in SlruPhysicalWritePage in slru.c).
+         * Hence, we don't return error here when the segment file does not exist.
+         */
+        if seg_exists {
+            let page_res = timeline.get_slru_page_at_lsn(req.kind, req.segno, req.blkno, lsn);
+            if req.check_exists_only {
+                page = page_res.and(Ok(Bytes::default())).ok();
+            } else {
+                page = Some(page_res.map(|mut buf| {
+                    // Neon appends an 8-byte timestamp to the page so need to ensure that the
+                    // page has postgres page size
+                    buf.truncate(BLCKSZ as usize);
+                    buf
+                })?);
+            }
+        }
+
+        Ok(PagestreamBeMessage::GetSlruPage(
+            PagestreamGetSlruPageResponse { seg_exists, page },
+        ))
     }
 
     fn handle_basebackup_request(
