@@ -18,7 +18,8 @@ use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamGetSlruPageRequest, PagestreamGetSlruPageResponse, PagestreamNblocksRequest,
+    PagestreamNblocksResponse,
 };
 use pq_proto::ConnectionError;
 use pq_proto::FeStartupPacket;
@@ -229,6 +230,7 @@ struct PageRequestMetrics {
     get_rel_size: metrics::Histogram,
     get_page_at_lsn: metrics::Histogram,
     get_db_size: metrics::Histogram,
+    get_slru_page: metrics::Histogram,
 }
 
 impl PageRequestMetrics {
@@ -248,11 +250,15 @@ impl PageRequestMetrics {
         let get_db_size =
             SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
 
+        let get_slru_page =
+            SMGR_QUERY_TIME.with_label_values(&["get_slru_page", &tenant_id, &timeline_id]);
+
         Self {
             get_rel_exists,
             get_rel_size,
             get_page_at_lsn,
             get_db_size,
+            get_slru_page,
         }
     }
 }
@@ -376,6 +382,15 @@ impl PageServerHandler {
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
                     self.handle_db_size_request(&timelines[0], &req, &ctx).await
+                }
+                PagestreamFeMessage::GetSlruPage(req) => {
+                    let _timer = metrics.get_slru_page.start_timer();
+                    self.handle_get_slru_page_at_lsn_request(
+                        &timelines[req.region as usize],
+                        &req,
+                        &ctx,
+                    )
+                    .await
                 }
             };
 
@@ -659,6 +674,50 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    #[instrument(skip(self, timeline, req, ctx), fields(slru_kind = %req.kind.to_str(), segno = %req.segno,
+                 check_blkno = %req.blkno, req_lsn = %req.lsn, check_exists_only = %req.check_exists_only))]
+    async fn handle_get_slru_page_at_lsn_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamGetSlruPageRequest,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
+
+        let seg_exists = timeline
+            .get_slru_segment_exists(req.kind, req.segno, lsn, ctx)
+            .await?;
+        let mut page = None;
+
+        /*
+         * During recovery, postgres treats non-existent segment files as truncated files and
+         * returns an empty SLRU page instead of error (see notes in SlruPhysicalWritePage in slru.c).
+         * Hence, we don't return error here when the segment file does not exist.
+         */
+        if seg_exists {
+            let page_res = timeline
+                .get_slru_page_at_lsn(req.kind, req.segno, req.blkno, lsn, ctx)
+                .await;
+            if req.check_exists_only {
+                page = page_res.and(Ok(Bytes::default())).ok();
+            } else {
+                page = Some(page_res.map(|mut buf| {
+                    // Neon appends an 8-byte timestamp to the page so need to ensure that the
+                    // page has postgres page size
+                    buf.truncate(BLCKSZ as usize);
+                    buf
+                })?);
+            }
+        }
+
+        Ok(PagestreamBeMessage::GetSlruPage(
+            PagestreamGetSlruPageResponse { seg_exists, page },
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
