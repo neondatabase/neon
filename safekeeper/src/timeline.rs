@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self};
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use tokio::sync::mpsc::Sender;
 use tracing::*;
@@ -91,6 +92,10 @@ struct SharedState {
     active: bool,
     num_computes: u32,
     last_removed_segno: XLogSegNo,
+    /// This timestamp is used to deactivate timeline when it is not used for
+    /// a long time (10 minutes).
+    /// TODO: we should implement something better to deactivate timeline.
+    last_compute_activity: Instant,
 }
 
 impl SharedState {
@@ -113,6 +118,7 @@ impl SharedState {
             active: false,
             num_computes: 0,
             last_removed_segno: 0,
+            last_compute_activity: Instant::now(),
         })
     }
 
@@ -131,9 +137,23 @@ impl SharedState {
             active: false,
             num_computes: 0,
             last_removed_segno: 0,
+            last_compute_activity: Instant::now(),
         })
     }
-    fn is_active(&self) -> bool {
+
+    fn is_active(&self, ttid: ZTenantTimelineId) -> bool {
+        // TODO: this is a temporary hack to deactivate timelines when they
+        // have no connection from compute more than 10 minutes. Check will be
+        // triggered by etcd broadcast from other peer, which happens every
+        // second.
+        if self.num_computes == 0
+            && Instant::now().duration_since(self.last_compute_activity)
+                > std::time::Duration::from_secs(10 * 60)
+        {
+            info!("timeline {} had no compute activity for 10 minutes, deactivating; remote_consistent_lsn={} commit_lsn={}", ttid.timeline_id, self.sk.inmem.remote_consistent_lsn, self.sk.inmem.commit_lsn);
+            return false;
+        }
+
         self.is_wal_backup_required()
             // FIXME: add tracking of relevant pageservers and check them here individually,
             // otherwise migration won't work (we suspend too early).
@@ -143,7 +163,7 @@ impl SharedState {
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action.
     fn update_status(&mut self, ttid: ZTenantTimelineId) -> bool {
-        let is_active = self.is_active();
+        let is_active = self.is_active(ttid);
         if self.active != is_active {
             info!("timeline {} active={} now", ttid, is_active);
         }
@@ -291,6 +311,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes += 1;
+            shared_state.last_compute_activity = Instant::now();
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if offloading not started yet.
@@ -308,6 +329,7 @@ impl Timeline {
         {
             let mut shared_state = self.mutex.lock().unwrap();
             shared_state.num_computes -= 1;
+            shared_state.last_compute_activity = Instant::now();
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
         // Wake up wal backup launcher, if it is time to stop the offloading.
@@ -408,6 +430,7 @@ impl Timeline {
         let commit_lsn: Lsn;
         {
             let mut shared_state = self.mutex.lock().unwrap();
+            shared_state.last_compute_activity = Instant::now();
             rmsg = shared_state.sk.process_msg(msg)?;
 
             // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
