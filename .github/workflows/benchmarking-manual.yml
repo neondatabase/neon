@@ -1,0 +1,107 @@
+name: Manual Benchmark
+
+on:
+  push:
+    branches: [ bigdb-perf-test-setup ]
+  workflow_dispatch:
+    inputs:
+      db_size:
+        description: "Database target size. Supports Gb/Mb/ pgbench scale"
+        require: false
+        default: "1gb"
+      duration:
+        description: "Duration of pgbench test (doesn't include pgbench init). Supports H/M/s"
+        require: false
+        default: "1h"
+      vacuum:
+        description: "Add vacuum option to commands"
+        type: boolean
+        require: false
+        default: true
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        connstr: [ CAPTEST_100GB_CONNSTR, CAPTEST_RDS_CONNSTR ]
+
+    runs-on: dev
+    timeout-minutes: 1440 # 24h
+
+    container:
+      image: python:3.9-buster
+
+    steps:
+    - name: Checkout Neon repo
+      uses: actions/checkout@v3
+
+    - name: Install Postgres
+      run: |
+        echo "deb http://apt.postgresql.org/pub/repos/apt buster-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+        apt -y update
+        apt install -y postgresql-14
+
+        psql --version
+        pgbench --version
+
+    - name: Install poetry & python deps
+      run: |
+        python3 -m pip install --upgrade poetry
+        ./scripts/pysync
+
+    - name: Benchmark init
+      shell: bash -ex {0}
+      env:
+        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '30m' }}"
+        TEST_PG_BENCH_SCALES_MATRIX: "10gb"
+        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || true }}"
+        PLATFORM: "neon-captest"
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+        POSTGRES_DISTRIB_DIR: /usr
+      run: |
+        rm -rf perf-report-captest
+        mkdir -p perf-report-captest
+
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "init" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
+
+    - name: Benchmark simple-update
+      env:
+        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '30m' }}"
+        TEST_PG_BENCH_SCALES_MATRIX: "10gb"
+        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || true }}"
+        PLATFORM: "neon-captest"
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+        POSTGRES_DISTRIB_DIR: /usr
+      run: |
+        rm -rf perf-report-captest
+        mkdir -p perf-report-captest
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
+
+    - name: Benchmark select-only
+      env:
+        TEST_PG_BENCH_DURATIONS_MATRIX: "${{ inputs.duration || '30m' }}"
+        TEST_PG_BENCH_SCALES_MATRIX: "10gb"
+        TEST_PG_BENCH_VACUUM: "${{ inputs.vacuum || true }}"
+        PLATFORM: "neon-captest"
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        REMOTE_ENV: "1" # indicate to test harness that we do not have zenith binaries locally
+        POSTGRES_DISTRIB_DIR: /usr
+      run: |
+        rm -rf perf-report-captest
+        mkdir -p perf-report-captest
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 86400
+
+    - name: Upload pgbench logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        retention-days: 7
+        name: pgbench-${{ inputs.db_size }}-${{ inputs.duration }}-logs
+        path: test_output/**/*pgbench_*.*

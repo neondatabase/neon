@@ -290,7 +290,7 @@ class PgProtocol:
         # change it by calling "SET statement_timeout" after
         # connecting.
         options = result.get('options', '')
-        result['options'] = f'-cstatement_timeout=120s {options}'
+        result['options'] = f'-cstatement_timeout=600s {options}'
         return result
 
     # autocommit=True here by default because that's what we need most of the time
