@@ -105,18 +105,24 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
 
 @pytest.mark.timeout(600)
-def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
+def test_import_from_pageserver(test_output_dir,
+                                pg_bin,
+                                vanilla_pg,
+                                neon_env_builder: NeonEnvBuilder):
+    built_type = os.environ.get("BUILD_TYPE")
+    if built_type is not None and built_type == "release":
+        log.info("Detected release build type, use a larger number of rows...")
+        num_rows = 30000000
+    else:
+        num_rows = 3000
 
-    num_rows = 3000
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch('test_import_from_pageserver')
+    timeline = env.neon_cli.create_branch('test_import_from_pageserver')
     pgmain = env.postgres.create_start('test_import_from_pageserver')
     log.info("postgres is running on 'test_import_from_pageserver' branch")
-
-    timeline = pgmain.safe_psql("SHOW neon.timeline_id")[0][0]
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
@@ -130,12 +136,16 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
             lsn = cur.fetchone()[0]
             log.info(f"start_backup_lsn = {lsn}")
 
+    logical_size = env.pageserver.http_client().timeline_detail(
+        env.initial_tenant, timeline)['local']['current_logical_size']
+    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
     psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
 
     # Get a fullbackup from pageserver
-    query = f"fullbackup { env.initial_tenant.hex} {timeline} {lsn}"
+    query = f"fullbackup { env.initial_tenant.hex} {timeline.hex} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
@@ -152,7 +162,7 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     env.pageserver.start()
 
     # Import using another tenantid, because we use the same pageserver.
-    # TODO Create another pageserver to maeke test more realistic.
+    # TODO Create another pageserver to make test more realistic.
     tenant = uuid4()
 
     # Import to pageserver
@@ -165,7 +175,7 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
         "--tenant-id",
         tenant.hex,
         "--timeline-id",
-        timeline,
+        timeline.hex,
         "--node-name",
         node_name,
         "--base-lsn",
@@ -175,15 +185,15 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     ])
 
     # Wait for data to land in s3
-    wait_for_last_record_lsn(client, tenant, UUID(timeline), lsn_from_hex(lsn))
-    wait_for_upload(client, tenant, UUID(timeline), lsn_from_hex(lsn))
+    wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(lsn))
+    wait_for_upload(client, tenant, timeline, lsn_from_hex(lsn))
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
     assert pg.safe_psql('select count(*) from tbl') == [(num_rows, )]
 
     # Take another fullbackup
-    query = f"fullbackup { tenant.hex} {timeline} {lsn}"
+    query = f"fullbackup { tenant.hex} {timeline.hex} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     new_tar_output_file = result_basepath + ".stdout"
@@ -195,4 +205,4 @@ def test_import_from_pageserver(test_output_dir, pg_bin, vanilla_pg, neon_env_bu
     # Check that gc works
     psconn = env.pageserver.connect()
     pscur = psconn.cursor()
-    pscur.execute(f"do_gc {tenant.hex} {timeline} 0")
+    pscur.execute(f"do_gc {tenant.hex} {timeline.hex} 0")
