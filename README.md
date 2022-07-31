@@ -204,6 +204,8 @@ postgres=# select * from t;
 
 ## Running tests
 
+Ensure your dependencies are installed as described [here](https://github.com/neondatabase/neon#dependency-installation-notes).
+
 ```sh
 git clone --recursive https://github.com/neondatabase/neon.git
 make # builds also postgres and installs it to ./tmp_install
