@@ -155,8 +155,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
-use lazy_static::lazy_static;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::{
     fs,
@@ -184,8 +183,8 @@ use crate::{
 };
 
 use metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge, HistogramVec,
+    IntCounterVec, IntGauge,
 };
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
@@ -193,32 +192,33 @@ use self::download::download_index_parts;
 pub use self::download::gather_tenant_timelines_index_parts;
 pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
-lazy_static! {
-    static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
+static REMAINING_SYNC_ITEMS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
         "pageserver_remote_storage_remaining_sync_items",
         "Number of storage sync items left in the queue"
     )
-    .expect("failed to register pageserver remote storage remaining sync items int gauge");
-    static ref FATAL_TASK_FAILURES: IntCounter = register_int_counter!(
-        "pageserver_remote_storage_fatal_task_failures_total",
-        "Number of critically failed tasks"
-    )
-    .expect("failed to register pageserver remote storage remaining sync items int gauge");
-    static ref IMAGE_SYNC_TIME: HistogramVec = register_histogram_vec!(
+    .expect("failed to register pageserver remote storage remaining sync items int gauge")
+});
+
+static IMAGE_SYNC_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_remote_storage_image_sync_seconds",
         "Time took to synchronize (download or upload) a whole pageserver image. \
         Grouped by tenant and timeline ids, `operation_kind` (upload|download) and `status` (success|failure)",
         &["tenant_id", "timeline_id", "operation_kind", "status"],
         vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 3.0, 10.0, 20.0]
     )
-    .expect("failed to register pageserver image sync time histogram vec");
-    static ref REMOTE_INDEX_UPLOAD: IntCounterVec = register_int_counter_vec!(
+    .expect("failed to register pageserver image sync time histogram vec")
+});
+
+static REMOTE_INDEX_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_remote_storage_remote_index_uploads_total",
         "Number of remote index uploads",
         &["tenant_id", "timeline_id"],
     )
-    .expect("failed to register pageserver remote index upload vec");
-}
+    .expect("failed to register pageserver remote index upload vec")
+});
 
 static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 

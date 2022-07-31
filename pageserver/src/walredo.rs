@@ -20,8 +20,8 @@
 //!
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
-use lazy_static::lazy_static;
 use nix::poll::*;
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -105,21 +105,27 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
 // for access to the postgres process ('wait') since there is only one for
 // each tenant.
-lazy_static! {
-    static ref WAL_REDO_TIME: Histogram =
-        register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
-            .expect("failed to define a metric");
-    static ref WAL_REDO_WAIT_TIME: Histogram = register_histogram!(
+
+static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
+        .expect("failed to define a metric")
+});
+
+static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_wal_redo_wait_seconds",
         "Time spent waiting for access to the WAL redo process"
     )
-    .expect("failed to define a metric");
-    static ref WAL_REDO_RECORD_COUNTER: IntCounter = register_int_counter!(
+    .expect("failed to define a metric")
+});
+
+static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_replayed_wal_records_total",
         "Number of WAL records replayed in WAL redo process"
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 ///
 /// This is the real implementation that uses a Postgres process to

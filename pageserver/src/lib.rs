@@ -22,7 +22,7 @@ pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use tracing::info;
 
 use crate::thread_mgr::ThreadKind;
@@ -42,14 +42,14 @@ pub const STORAGE_FORMAT_VERSION: u16 = 3;
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
-lazy_static! {
-    static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
+static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_live_connections",
         "Number of live network connections",
         &["pageserver_connection_kind"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 pub const LOG_FILE_NAME: &str = "pageserver.log";
 
