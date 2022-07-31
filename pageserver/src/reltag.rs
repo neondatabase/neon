@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
+use anyhow::{ensure, Result};
 use postgres_ffi::relfile_utils::forknumber_to_name;
+use postgres_ffi::relfile_utils::*;
 use postgres_ffi::{pg_constants, Oid};
 
 ///
@@ -96,6 +98,47 @@ impl RelTag {
         }
 
         name
+    }
+
+    pub fn from_segfile_name(filepath: &str) -> Result<(Self, u32)> {
+        let mut spcnode = 0;
+        let mut dbnode = 0;
+
+        let (relnode, forknum, segno) = if filepath.starts_with("global") {
+            spcnode = pg_constants::GLOBALTABLESPACE_OID;
+            dbnode = 0;
+            let (_, relpath) = filepath.split_at("global/".len());
+            parse_relfilename(relpath)?
+        } else if filepath.starts_with("base") {
+            spcnode = pg_constants::DEFAULTTABLESPACE_OID;
+            let (_, path) = filepath.split_at("base/".len());
+            let params = path.split('/').collect::<Vec<_>>();
+            ensure!(
+                params.len() == 2,
+                "invalid relation path for parse_filepath_to_reltag: {}",
+                filepath
+            );
+
+            dbnode = params[0].parse::<u32>()?;
+            parse_relfilename(params[1])?
+        } else {
+            (0, 0, 0)
+        };
+
+        ensure!(
+            spcnode != 0,
+            "invalid relation path for parse_filepath_to_reltag: {}",
+            filepath
+        );
+
+        let rel_tag = RelTag {
+            spcnode,
+            dbnode,
+            relnode,
+            forknum,
+        };
+
+        Ok((rel_tag, segno))
     }
 }
 
