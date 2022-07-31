@@ -112,6 +112,9 @@ jobs:
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
+
+          ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps
+
           binaries=$(
             ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
