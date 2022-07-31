@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -32,23 +32,24 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
-lazy_static! {
-    static ref STORAGE_IO_TIME: HistogramVec = register_histogram_vec!(
+static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_io_operations_seconds",
         "Time spent in IO operations",
         &["operation", "tenant_id", "timeline_id"],
         STORAGE_IO_TIME_BUCKETS.into()
     )
-    .expect("failed to define a metric");
-}
-lazy_static! {
-    static ref STORAGE_IO_SIZE: IntGaugeVec = register_int_gauge_vec!(
+    .expect("failed to define a metric")
+});
+
+static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
         &["operation", "tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally

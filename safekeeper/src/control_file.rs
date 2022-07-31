@@ -2,7 +2,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -26,15 +26,15 @@ const CONTROL_FILE_NAME: &str = "safekeeper.control";
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 
-lazy_static! {
-    static ref PERSIST_CONTROL_FILE_SECONDS: HistogramVec = register_histogram_vec!(
+static PERSIST_CONTROL_FILE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "safekeeper_persist_control_file_seconds",
         "Seconds to persist and sync control file, grouped by timeline",
         &["tenant_id", "timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
-    .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec");
-}
+    .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
+});
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.

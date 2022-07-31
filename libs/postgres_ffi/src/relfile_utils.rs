@@ -2,7 +2,7 @@
 //! Common utilities for dealing with PostgreSQL relation files.
 //!
 use crate::pg_constants;
-use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
 use regex::Regex;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -54,11 +54,14 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
 /// See functions relpath() and _mdfd_segpath() in PostgreSQL sources.
 ///
 pub fn parse_relfilename(fname: &str) -> Result<(u32, u8, u32), FilePathError> {
-    lazy_static! {
-        static ref RELFILE_RE: Regex =
-            Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap();
-    }
+    static RELFILE_RE: OnceCell<Regex> = OnceCell::new();
+    RELFILE_RE.get_or_init(|| {
+        Regex::new(r"^(?P<relnode>\d+)(_(?P<forkname>[a-z]+))?(\.(?P<segno>\d+))?$").unwrap()
+    });
+
     let caps = RELFILE_RE
+        .get()
+        .unwrap()
         .captures(fname)
         .ok_or(FilePathError::InvalidFileName)?;
 
