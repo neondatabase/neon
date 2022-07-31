@@ -205,8 +205,12 @@ postgres=# select * from t;
 ## Running tests
 
 ```sh
+# install poetry if not available on the system.
+# pip install poetry
+
 git clone --recursive https://github.com/neondatabase/neon.git
 make # builds also postgres and installs it to ./tmp_install
+poetry install # install the test dependencies
 ./scripts/pytest
 ```
 
