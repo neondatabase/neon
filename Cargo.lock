@@ -1879,7 +1879,6 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "itertools",
- "lazy_static",
  "metrics",
  "nix",
  "once_cell",
