@@ -1379,7 +1379,10 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None):
+    def run(self,
+            command: List[str],
+            env: Optional[Env] = None,
+            **kwargs) -> 'subprocess.CompletedProcess[str]':
         """
         Run one of the postgres binaries.
 
@@ -1396,7 +1399,7 @@ class PgBin:
         self._fixpath(command)
         log.info('Running command "{}"'.format(' '.join(command)))
         env = self._build_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
+        return subprocess.run(command, env=env, check=True, **kwargs)
 
     def run_capture(self,
                     command: List[str],
