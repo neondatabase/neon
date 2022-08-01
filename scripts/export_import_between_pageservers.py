@@ -329,8 +329,6 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
 # End of utils
 ##############
 
-PSQL_ENV = {**os.environ, 'LD_LIBRARY_PATH': '/usr/local/lib/'}
-
 
 def pack_base(log_dir, restored_dir, output_tar):
     """Create tar file from basebackup, being careful to produce relative filenames."""
@@ -457,10 +455,11 @@ def import_timeline(args,
     with open(stdout_filename, 'w') as stdout_f:
         with open(stderr_filename2, 'w') as stderr_f:
             print(f"(capturing output to {stdout_filename})")
+            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
             subprocess.run(full_cmd,
                            stdout=stdout_f,
                            stderr=stderr_f,
-                           env=PSQL_ENV,
+                           env=pg_bin._build_env(None),
                            shell=True,
                            check=True)
 
@@ -494,7 +493,12 @@ def export_timeline(args,
     with open(incomplete_filename, 'w') as stdout_f:
         with open(stderr_filename, 'w') as stderr_f:
             print(f"(capturing output to {incomplete_filename})")
-            subprocess.run(cmd, stdout=stdout_f, stderr=stderr_f, env=PSQL_ENV, check=True)
+            pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
+            subprocess.run(cmd,
+                           stdout=stdout_f,
+                           stderr=stderr_f,
+                           env=pg_bin._build_env(None),
+                           check=True)
 
     # Add missing rels
     pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
