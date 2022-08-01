@@ -9,7 +9,7 @@ on:
 
 defaults:
   run:
-    shell: bash -ex {0}
+    shell: bash -euxo pipefail {0}
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
