@@ -38,6 +38,7 @@ use utils::{
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
 const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
+const DEFAULT_REMOTEXACT_PG_ADDR: &str = "127.0.0.1:10000";
 project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "14";
@@ -59,6 +60,9 @@ auth_type = '{pageserver_auth_type}'
 id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
+
+[xactserver]
+listen_pg_addr = '{DEFAULT_REMOTEXACT_PG_ADDR}'
 "#,
         pageserver_auth_type = AuthType::Trust,
     )

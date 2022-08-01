@@ -80,6 +80,9 @@ pub struct LocalEnv {
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+
+    #[serde(default)]
+    pub xactserver: XactServerConf,
 }
 
 /// Broker config for cluster internal communication.
@@ -157,6 +160,12 @@ impl Default for SafekeeperConf {
             auth_enabled: false,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct XactServerConf {
+    pub listen_pg_addr: String,
 }
 
 impl LocalEnv {
