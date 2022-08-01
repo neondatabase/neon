@@ -1,5 +1,5 @@
 #
-# Script to export nodes from one pageserver
+# Script to export tenants from one pageserver
 # and import them into another page server
 #
 
@@ -19,11 +19,9 @@ from psycopg2.extensions import connection as PgConnection
 import asyncpg
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 
-
 ###############################################
 ### client-side utils copied from test fixtures
 ###############################################
-
 
 Env = Dict[str, str]
 
@@ -117,16 +115,11 @@ class PgBin:
                                   check=True,
                                   **kwargs)
 
+
 class PgProtocol:
     """ Reusable connection logic """
     def __init__(self, **kwargs):
         self.default_options = kwargs
-
-    def connstr(self, **kwargs) -> str:
-        """
-        Build a libpq connection string for the Postgres instance.
-        """
-        return str(make_dsn(**self.conn_options(**kwargs)))
 
     def conn_options(self, **kwargs):
         conn_options = self.default_options.copy()
@@ -156,32 +149,6 @@ class PgProtocol:
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
         return conn
-
-    async def connect_async(self, **kwargs) -> asyncpg.Connection:
-        """
-        Connect to the node from async python.
-        Returns asyncpg's connection object.
-        """
-
-        # asyncpg takes slightly different options than psycopg2. Try
-        # to convert the defaults from the psycopg2 format.
-
-        # The psycopg2 option 'dbname' is called 'database' is asyncpg
-        conn_options = self.conn_options(**kwargs)
-        if 'dbname' in conn_options:
-            conn_options['database'] = conn_options.pop('dbname')
-
-        # Convert options='-c<key>=<val>' to server_settings
-        if 'options' in conn_options:
-            options = conn_options.pop('options')
-            for match in re.finditer('-c(\w*)=(\w*)', options):
-                key = match.group(1)
-                val = match.group(2)
-                if 'server_options' in conn_options:
-                    conn_options['server_settings'].update({key: val})
-                else:
-                    conn_options['server_settings'] = {key: val}
-        return await asyncpg.connect(**conn_options)
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Tuple[Any, ...]]:
         """
@@ -240,16 +207,13 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(['pg_ctl', '-w', '-D', str(self.pgdatadir), 'stop'])
 
-    def get_subdir_size(self, subdir) -> int:
-        """Return size of pgdatadir subdirectory in bytes."""
-        return get_dir_size(os.path.join(self.pgdatadir, subdir))
-
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if self.running:
             self.stop()
+
 
 class NeonPageserverApiException(Exception):
     pass
@@ -366,8 +330,6 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
 # End of utils
 ##############
 
-
-
 PSQL_ENV = {**os.environ, 'LD_LIBRARY_PATH': '/usr/local/lib/'}
 
 
@@ -405,9 +367,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar):
             query = "select oid, datname from pg_database"
             oid_dbname_pairs = vanilla_pg.safe_psql(query, user="cloud_admin")
             template0_oid = [
-                oid
-                for (oid, database) in oid_dbname_pairs
-                if database == "template0"
+                oid for (oid, database) in oid_dbname_pairs if database == "template0"
             ][0]
 
             # Get rel paths for each database
@@ -477,16 +437,21 @@ def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
     return last_lsn, prev_lsn
 
 
-def import_timeline(args, psql_path, pageserver_connstr, pageserver_http, tenant_id,
-           timeline_id, last_lsn, prev_lsn, tar_filename):
+def import_timeline(args,
+                    psql_path,
+                    pageserver_connstr,
+                    pageserver_http,
+                    tenant_id,
+                    timeline_id,
+                    last_lsn,
+                    prev_lsn,
+                    tar_filename):
     # Import timelines to new pageserver
     import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
     full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
 
-    stderr_filename2 = path.join(
-        args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
-    stdout_filename = path.join(
-        args.work_dir, f"import_{tenant_id}_{timeline_id}.stdout")
+    stderr_filename2 = path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
+    stdout_filename = path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stdout")
 
     print(f"Running: {full_cmd}")
 
@@ -503,11 +468,20 @@ def import_timeline(args, psql_path, pageserver_connstr, pageserver_http, tenant
             print(f"Done import")
 
     # Wait until pageserver persists the files
-    wait_for_upload(pageserver_http, uuid.UUID(tenant_id), uuid.UUID(timeline_id), lsn_from_hex(last_lsn))
+    wait_for_upload(pageserver_http,
+                    uuid.UUID(tenant_id),
+                    uuid.UUID(timeline_id),
+                    lsn_from_hex(last_lsn))
 
 
-def export_timeline(args, psql_path, pageserver_connstr, tenant_id,
-                    timeline_id, last_lsn, prev_lsn, tar_filename):
+def export_timeline(args,
+                    psql_path,
+                    pageserver_connstr,
+                    tenant_id,
+                    timeline_id,
+                    last_lsn,
+                    prev_lsn,
+                    tar_filename):
     # Choose filenames
     incomplete_filename = tar_filename + ".incomplete"
     stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
@@ -562,8 +536,8 @@ def main(args: argparse.Namespace):
                 continue
 
             # Choose filenames
-            tar_filename = path.join(
-                args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
+            tar_filename = path.join(args.work_dir,
+                                     f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
 
             # Export timeline from old pageserver
             if args.only_import is False:
@@ -598,16 +572,14 @@ def main(args: argparse.Namespace):
 
             # Re-export and compare
             re_export_filename = tar_filename + ".reexport"
-            export_timeline(
-                args,
-                psql_path,
-                new_pageserver_connstr,
-                timeline['tenant_id'],
-                timeline['timeline_id'],
-                last_lsn,
-                prev_lsn,
-                re_export_filename
-            )
+            export_timeline(args,
+                            psql_path,
+                            new_pageserver_connstr,
+                            timeline['tenant_id'],
+                            timeline['timeline_id'],
+                            last_lsn,
+                            prev_lsn,
+                            re_export_filename)
 
             # Check the size is the same
             old_size = os.path.getsize(tar_filename),
