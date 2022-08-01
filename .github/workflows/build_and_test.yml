@@ -218,6 +218,7 @@ jobs:
   benchmarks:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ build-neon ]
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
       matrix:
