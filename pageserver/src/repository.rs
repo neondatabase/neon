@@ -185,7 +185,7 @@ impl Value {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
-    type Timeline: Timeline;
+    type Timeline: crate::DatadirTimeline;
 
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
@@ -275,15 +275,6 @@ pub enum LocalTimelineState {
     Loaded,
     // timeline is on disk locally and ready to be loaded into memory.
     Unloaded,
-}
-
-impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
-    fn from(local_timeline_entry: &'a RepositoryTimeline<T>) -> Self {
-        match local_timeline_entry {
-            RepositoryTimeline::Loaded(_) => LocalTimelineState::Loaded,
-            RepositoryTimeline::Unloaded { .. } => LocalTimelineState::Unloaded,
-        }
-    }
 }
 
 ///
@@ -382,6 +373,11 @@ pub trait Timeline: Send + Sync {
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
     ) -> Result<()>;
+
+    /// Get the physical size of the timeline at the latest LSN
+    fn get_physical_size(&self) -> u64;
+    /// Get the physical size of the timeline at the latest LSN non incrementally
+    fn get_physical_size_non_incremental(&self) -> Result<u64>;
 }
 
 /// Various functions to mutate the timeline.
@@ -405,6 +401,8 @@ pub trait TimelineWriter<'a> {
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
     fn finish_write(&self, lsn: Lsn);
+
+    fn update_current_logical_size(&self, delta: isize);
 }
 
 #[cfg(test)]

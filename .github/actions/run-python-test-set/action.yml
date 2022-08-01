@@ -41,7 +41,7 @@ runs:
       shell: bash -ex {0}
       run: |
         mkdir -p /tmp/neon/
-        tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
+        tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
         rm -rf ./neon-artifact/
 
     - name: Checkout
@@ -99,7 +99,7 @@ runs:
 
         # Run the tests.
         #
-        # The junit.xml file allows CircleCI to display more fine-grained test information
+        # The junit.xml file allows CI tools to display more fine-grained test information
         # in its "Tests" tab in the results page.
         # --verbose prints name of each test (helpful when there are
         # multiple tests in one file)

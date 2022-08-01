@@ -637,6 +637,17 @@ where
         &mut self,
         msg: &VoteRequest,
     ) -> Result<Option<AcceptorProposerMessage>> {
+        // Once voted, we won't accept data from older proposers; flush
+        // everything we've already received so that new proposer starts
+        // streaming at end of our WAL, without overlap. Currently we truncate
+        // WAL at streaming point, so this avoids truncating already committed
+        // WAL.
+        //
+        // TODO: it would be smoother to not truncate committed piece at
+        // handle_elected instead. Currently not a big deal, as proposer is the
+        // only source of WAL; with peer2peer recovery it would be more
+        // important.
+        self.wal_store.flush_wal()?;
         // initialize with refusal
         let mut resp = VoteResponse {
             term: self.state.acceptor_state.term,

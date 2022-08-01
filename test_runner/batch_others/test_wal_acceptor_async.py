@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, Safekeeper
 from fixtures.log_helper import getLogger
 from fixtures.utils import lsn_from_hex, lsn_to_hex
 from typing import List, Optional
+from dataclasses import dataclass
 
 log = getLogger('root.safekeeper_async')
 
@@ -146,9 +147,8 @@ async def run_restarts_under_load(env: NeonEnv,
                                   max_transfer=100,
                                   period_time=4,
                                   iterations=10):
-    # Set timeout for this test at 5 minutes. It should be enough for test to complete
-    # and less than CircleCI's no_output_timeout, taking into account that this timeout
-    # is checked only at the beginning of every iteration.
+    # Set timeout for this test at 5 minutes. It should be enough for test to complete,
+    # taking into account that this timeout is checked only at the beginning of every iteration.
     test_timeout_at = time.monotonic() + 5 * 60
 
     pg_conn = await pg.connect_async()
@@ -302,6 +302,8 @@ def test_compute_restarts(neon_env_builder: NeonEnvBuilder):
 
 
 class BackgroundCompute(object):
+    MAX_QUERY_GAP_SECONDS = 2
+
     def __init__(self, index: int, env: NeonEnv, branch: str):
         self.index = index
         self.env = env
@@ -339,7 +341,7 @@ class BackgroundCompute(object):
 
             # With less sleep, there is a very big chance of not committing
             # anything or only 1 xact during test run.
-            await asyncio.sleep(2 * random.random())
+            await asyncio.sleep(random.uniform(0, self.MAX_QUERY_GAP_SECONDS))
         self.running = False
 
 
@@ -356,20 +358,34 @@ async def run_concurrent_computes(env: NeonEnv,
     background_tasks = [asyncio.create_task(compute.run()) for compute in computes]
 
     await asyncio.sleep(run_seconds)
+    log.info("stopping all tasks but one")
     for compute in computes[1:]:
         compute.stopped = True
+    await asyncio.gather(*background_tasks[1:])
     log.info("stopped all tasks but one")
 
     # work for some time with only one compute -- it should be able to make some xacts
-    await asyncio.sleep(8)
+    TIMEOUT_SECONDS = computes[0].MAX_QUERY_GAP_SECONDS + 3
+    initial_queries_by_0 = len(computes[0].successful_queries)
+    log.info(f'Waiting for another query by computes[0], '
+             f'it already had {initial_queries_by_0}, timeout is {TIMEOUT_SECONDS}s')
+    for _ in range(10 * TIMEOUT_SECONDS):
+        current_queries_by_0 = len(computes[0].successful_queries) - initial_queries_by_0
+        if current_queries_by_0 >= 1:
+            log.info(f'Found {current_queries_by_0} successful queries '
+                     f'by computes[0], completing the test')
+            break
+        await asyncio.sleep(0.1)
+    else:
+        assert False, "Timed out while waiting for another query by computes[0]"
     computes[0].stopped = True
 
-    await asyncio.gather(*background_tasks)
+    await asyncio.gather(background_tasks[0])
 
     result = await exec_compute_query(env, branch, 'SELECT * FROM query_log')
     # we should have inserted something while single compute was running
-    assert len(result) >= 4
-    log.info(f'Executed {len(result)} queries')
+    log.info(f'Executed {len(result)} queries, {current_queries_by_0} of them '
+             f'by computes[0] after we started stopping the others')
     for row in result:
         log.info(f'{row[0]} {row[1]} {row[2]}')
 
@@ -388,3 +404,119 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
 
     env.neon_cli.create_branch('test_concurrent_computes')
     asyncio.run(run_concurrent_computes(env))
+
+
+# Stop safekeeper and check that query cannot be executed while safekeeper is down.
+# Query will insert a single row into a table.
+async def check_unavailability(sk: Safekeeper,
+                               conn: asyncpg.Connection,
+                               key: int,
+                               start_delay_sec: int = 2):
+    # shutdown one of two acceptors, that is, majority
+    sk.stop()
+
+    bg_query = asyncio.create_task(conn.execute(f"INSERT INTO t values ({key}, 'payload')"))
+
+    await asyncio.sleep(start_delay_sec)
+    # ensure that the query has not been executed yet
+    assert not bg_query.done()
+
+    # start safekeeper and await the query
+    sk.start()
+    await bg_query
+    assert bg_query.done()
+
+
+async def run_unavailability(env: NeonEnv, pg: Postgres):
+    conn = await pg.connect_async()
+
+    # check basic work with table
+    await conn.execute('CREATE TABLE t(key int primary key, value text)')
+    await conn.execute("INSERT INTO t values (1, 'payload')")
+
+    # stop safekeeper and check that query cannot be executed while safekeeper is down
+    await check_unavailability(env.safekeepers[0], conn, 2)
+
+    # for the world's balance, do the same with second safekeeper
+    await check_unavailability(env.safekeepers[1], conn, 3)
+
+    # check that we can execute queries after restart
+    await conn.execute("INSERT INTO t values (4, 'payload')")
+
+    result_sum = await conn.fetchval('SELECT sum(key) FROM t')
+    assert result_sum == 10
+
+
+# When majority of acceptors is offline, commits are expected to be frozen
+def test_unavailability(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 2
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch('test_safekeepers_unavailability')
+    pg = env.postgres.create_start('test_safekeepers_unavailability')
+
+    asyncio.run(run_unavailability(env, pg))
+
+
+@dataclass
+class RaceConditionTest:
+    iteration: int
+    is_stopped: bool
+
+
+# shut down random subset of safekeeper, sleep, wake them up, rinse, repeat
+async def xmas_garland(safekeepers: List[Safekeeper], data: RaceConditionTest):
+    while not data.is_stopped:
+        data.iteration += 1
+        victims = []
+        for sk in safekeepers:
+            if random.random() >= 0.5:
+                victims.append(sk)
+        log.info(
+            f'Iteration {data.iteration}: stopping {list(map(lambda sk: sk.id, victims))} safekeepers'
+        )
+        for v in victims:
+            v.stop()
+        await asyncio.sleep(1)
+        for v in victims:
+            v.start()
+        log.info(f'Iteration {data.iteration} finished')
+        await asyncio.sleep(1)
+
+
+async def run_race_conditions(env: NeonEnv, pg: Postgres):
+    conn = await pg.connect_async()
+    await conn.execute('CREATE TABLE t(key int primary key, value text)')
+
+    data = RaceConditionTest(0, False)
+    bg_xmas = asyncio.create_task(xmas_garland(env.safekeepers, data))
+
+    n_iterations = 5
+    expected_sum = 0
+    i = 1
+
+    while data.iteration <= n_iterations:
+        await asyncio.sleep(0.005)
+        await conn.execute(f"INSERT INTO t values ({i}, 'payload')")
+        expected_sum += i
+        i += 1
+
+    log.info(f'Executed {i-1} queries')
+
+    res = await conn.fetchval('SELECT sum(key) FROM t')
+    assert res == expected_sum
+
+    data.is_stopped = True
+    await bg_xmas
+
+
+# do inserts while concurrently getting up/down subsets of acceptors
+def test_race_conditions(neon_env_builder: NeonEnvBuilder):
+
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch('test_safekeepers_race_conditions')
+    pg = env.postgres.create_start('test_safekeepers_race_conditions')
+
+    asyncio.run(run_race_conditions(env, pg))

@@ -176,7 +176,6 @@ use crate::{
     layered_repository::{
         ephemeral_file::is_ephemeral_file,
         metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
-        LayeredRepository,
     },
     storage_sync::{self, index::RemoteIndex},
     tenant_mgr::attach_downloaded_tenants,
@@ -928,7 +927,7 @@ fn storage_sync_loop<P, S>(
                     );
                     let mut sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>> =
                         HashMap::new();
-                    let index_accessor = runtime.block_on(index.write());
+                    let index_accessor = runtime.block_on(index.read());
                     for tenant_id in updated_tenants {
                         let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
                             Some(tenant_entry) => tenant_entry,
@@ -1121,7 +1120,7 @@ where
         .instrument(info_span!("download_timeline_data")),
     );
 
-    if let Some(delete_data) = batch.delete {
+    if let Some(mut delete_data) = batch.delete {
         if upload_result.is_some() {
             match validate_task_retries(delete_data, max_sync_errors)
                 .instrument(info_span!("retries_validation"))
@@ -1154,6 +1153,7 @@ where
                 }
             }
         } else {
+            delete_data.retries += 1;
             sync_queue.push(sync_id, SyncTask::Delete(delete_data));
             warn!("Skipping delete task due to failed upload tasks, reenqueuing");
         }
@@ -1257,7 +1257,13 @@ async fn update_local_metadata(
             timeline_id,
         } = sync_id;
         tokio::task::spawn_blocking(move || {
-            LayeredRepository::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
+            crate::layered_repository::save_metadata(
+                conf,
+                timeline_id,
+                tenant_id,
+                &cloned_metadata,
+                true,
+            )
         })
         .await
         .with_context(|| {
@@ -1557,6 +1563,7 @@ fn schedule_first_sync_tasks(
     local_timeline_init_statuses
 }
 
+/// bool in return value stands for awaits_download
 fn compare_local_and_remote_timeline(
     new_sync_tasks: &mut VecDeque<(ZTenantTimelineId, SyncTask)>,
     sync_id: ZTenantTimelineId,
@@ -1566,14 +1573,6 @@ fn compare_local_and_remote_timeline(
 ) -> (LocalTimelineInitStatus, bool) {
     let remote_files = remote_entry.stored_files();
 
-    // TODO probably here we need more sophisticated logic,
-    //   if more data is available remotely can we just download what's there?
-    //   without trying to upload something. It may be tricky, needs further investigation.
-    //   For now looks strange that we can request upload
-    //   and download for the same timeline simultaneously.
-    //   (upload needs to be only for previously unsynced files, not whole timeline dir).
-    //   If one of the tasks fails they will be reordered in the queue which can lead
-    //   to timeline being stuck in evicted state
     let number_of_layers_to_download = remote_files.difference(&local_files).count();
     let (initial_timeline_status, awaits_download) = if number_of_layers_to_download > 0 {
         new_sync_tasks.push_back((

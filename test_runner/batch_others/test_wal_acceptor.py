@@ -14,11 +14,41 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from multiprocessing import Process, Value
 from pathlib import Path
-from fixtures.neon_fixtures import PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol
+from fixtures.neon_fixtures import NeonPageserver, PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol, wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import get_dir_size, lsn_to_hex, lsn_from_hex
 from fixtures.log_helper import log
 from typing import List, Optional, Any
 from uuid import uuid4
+
+
+def wait_lsn_force_checkpoint(tenant_id: str,
+                              timeline_id: str,
+                              pg: Postgres,
+                              ps: NeonPageserver,
+                              pageserver_conn_options={}):
+    lsn = lsn_from_hex(pg.safe_psql('SELECT pg_current_wal_flush_lsn()')[0][0])
+    log.info(f"pg_current_wal_flush_lsn is {lsn_to_hex(lsn)}, waiting for it on pageserver")
+
+    auth_token = None
+    if 'password' in pageserver_conn_options:
+        auth_token = pageserver_conn_options['password']
+
+    # wait for the pageserver to catch up
+    wait_for_last_record_lsn(ps.http_client(auth_token=auth_token),
+                             uuid.UUID(hex=tenant_id),
+                             uuid.UUID(hex=timeline_id),
+                             lsn)
+
+    # force checkpoint to advance remote_consistent_lsn
+    with closing(ps.connect(**pageserver_conn_options)) as psconn:
+        with psconn.cursor() as pscur:
+            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+
+    # ensure that remote_consistent_lsn is advanced
+    wait_for_upload(ps.http_client(auth_token=auth_token),
+                    uuid.UUID(hex=tenant_id),
+                    uuid.UUID(hex=timeline_id),
+                    lsn)
 
 
 @dataclass
@@ -203,113 +233,6 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     assert cur.fetchone() == (500500, )
 
 
-start_delay_sec = 2
-
-
-def delayed_safekeeper_start(wa):
-    time.sleep(start_delay_sec)
-    wa.start()
-
-
-# When majority of acceptors is offline, commits are expected to be frozen
-def test_unavailability(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.num_safekeepers = 2
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch('test_safekeepers_unavailability')
-    pg = env.postgres.create_start('test_safekeepers_unavailability')
-
-    # we rely upon autocommit after each statement
-    # as waiting for acceptors happens there
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
-    # check basic work with table
-    cur.execute('CREATE TABLE t(key int primary key, value text)')
-    cur.execute("INSERT INTO t values (1, 'payload')")
-
-    # shutdown one of two acceptors, that is, majority
-    env.safekeepers[0].stop()
-
-    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[0], ))
-    proc.start()
-
-    start = time.time()
-    cur.execute("INSERT INTO t values (2, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    proc.join()
-
-    # for the world's balance, do the same with second acceptor
-    env.safekeepers[1].stop()
-
-    proc = Process(target=delayed_safekeeper_start, args=(env.safekeepers[1], ))
-    proc.start()
-
-    start = time.time()
-    cur.execute("INSERT INTO t values (3, 'payload')")
-    # ensure that the query above was hanging while acceptor was down
-    assert (time.time() - start) >= start_delay_sec
-    proc.join()
-
-    cur.execute("INSERT INTO t values (4, 'payload')")
-
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (10, )
-
-
-# shut down random subset of acceptors, sleep, wake them up, rinse, repeat
-def xmas_garland(acceptors, stop):
-    while not bool(stop.value):
-        victims = []
-        for wa in acceptors:
-            if random.random() >= 0.5:
-                victims.append(wa)
-        for v in victims:
-            v.stop()
-        time.sleep(1)
-        for v in victims:
-            v.start()
-        time.sleep(1)
-
-
-# value which gets unset on exit
-@pytest.fixture
-def stop_value():
-    stop = Value('i', 0)
-    yield stop
-    stop.value = 1
-
-
-# do inserts while concurrently getting up/down subsets of acceptors
-def test_race_conditions(neon_env_builder: NeonEnvBuilder, stop_value):
-
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch('test_safekeepers_race_conditions')
-    pg = env.postgres.create_start('test_safekeepers_race_conditions')
-
-    # we rely upon autocommit after each statement
-    # as waiting for acceptors happens there
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
-    cur.execute('CREATE TABLE t(key int primary key, value text)')
-
-    proc = Process(target=xmas_garland, args=(env.safekeepers, stop_value))
-    proc.start()
-
-    for i in range(1000):
-        cur.execute("INSERT INTO t values (%s, 'payload');", (i + 1, ))
-
-    cur.execute('SELECT sum(key) FROM t')
-    assert cur.fetchone() == (500500, )
-
-    stop_value.value = 1
-    proc.join()
-
-
 # Test that safekeepers push their info to the broker and learn peer status from it
 def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
@@ -330,10 +253,10 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     log.info(f"statuses is {stat_before}")
 
     pg.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
-    # force checkpoint to advance remote_consistent_lsn
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor() as pscur:
-            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+
+    # force checkpoint in pageserver to advance remote_consistent_lsn
+    wait_lsn_force_checkpoint(tenant_id, timeline_id, pg, env.pageserver)
+
     # and wait till remote_consistent_lsn propagates to all safekeepers
     started_at = time.time()
     while True:
@@ -377,9 +300,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     pageserver_conn_options = {}
     if auth_enabled:
         pageserver_conn_options['password'] = env.auth_keys.generate_tenant_token(tenant_id)
-    with closing(env.pageserver.connect(**pageserver_conn_options)) as psconn:
-        with psconn.cursor() as pscur:
-            pscur.execute(f"checkpoint {tenant_id} {timeline_id}")
+    wait_lsn_force_checkpoint(tenant_id, timeline_id, pg, env.pageserver, pageserver_conn_options)
 
     # We will wait for first segment removal. Make sure they exist for starter.
     first_segments = [

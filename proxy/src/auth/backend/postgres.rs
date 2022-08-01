@@ -3,10 +3,12 @@
 use crate::{
     auth::{
         self,
-        backend::console::{self, io_error, AuthInfo, Result},
-        ClientCredentials, DatabaseInfo,
+        backend::console::{self, AuthInfo, Result},
+        ClientCredentials,
     },
-    compute, scram,
+    compute::{self, ComputeConnCfg},
+    error::io_error,
+    scram,
     stream::PqStream,
     url::ApiUrl,
 };
@@ -20,8 +22,8 @@ pub(super) struct Api<'a> {
 
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self { endpoint, creds })
+    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
+        Self { endpoint, creds }
     }
 
     /// Authenticate the existing user or throw an error.
@@ -56,7 +58,10 @@ impl<'a> Api<'a> {
 
             // We shouldn't get more than one row anyway.
             [row, ..] => {
-                let entry = row.try_get(0).map_err(io_error)?;
+                let entry = row
+                    .try_get("rolpassword")
+                    .map_err(|e| io_error(format!("failed to read user's password: {e}")))?;
+
                 scram::ServerSecret::parse(entry)
                     .map(AuthInfo::Scram)
                     .or_else(|| {
@@ -75,14 +80,14 @@ impl<'a> Api<'a> {
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    async fn wake_compute(&self) -> Result<DatabaseInfo> {
-        Ok(DatabaseInfo {
-            // TODO: handle that near CLI params parsing
-            host: self.endpoint.host_str().unwrap_or("localhost").to_owned(),
-            port: self.endpoint.port().unwrap_or(5432),
-            dbname: self.creds.dbname.to_owned(),
-            user: self.creds.user.to_owned(),
-            password: None,
-        })
+    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg> {
+        let mut config = ComputeConnCfg::new();
+        config
+            .host(self.endpoint.host_str().unwrap_or("localhost"))
+            .port(self.endpoint.port().unwrap_or(5432))
+            .dbname(&self.creds.dbname)
+            .user(&self.creds.user);
+
+        Ok(config)
     }
 }

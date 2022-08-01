@@ -118,11 +118,15 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_address: SocketAddr = arg_matches.value_of("mgmt").unwrap().parse()?;
     let http_address: SocketAddr = arg_matches.value_of("http").unwrap().parse()?;
 
+    let auth_urls = config::AuthUrls {
+        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
+        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
+    };
+
     let config: &ProxyConfig = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend: arg_matches.value_of("auth-backend").unwrap().parse()?,
-        auth_endpoint: arg_matches.value_of("auth-endpoint").unwrap().parse()?,
-        auth_link_uri: arg_matches.value_of("uri").unwrap().parse()?,
+        auth_urls,
     }));
 
     println!("Version: {GIT_VERSION}");

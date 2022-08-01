@@ -9,36 +9,38 @@ use std::{
 use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
 use fail::fail_point;
+use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    http::models::WalReceiverEntry,
+    layered_repository::WalReceiverInfo,
+    pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
+    walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
-/// Opens a conneciton to the given wal producer and streams the WAL, sending progress messages during streaming.
+/// Open a connection to the given safekeeper and receive WAL, sending back progress
+/// messages as we go.
 pub async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
-    wal_producer_connstr: &str,
+    wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_producer_connstr}");
-    let connect_cfg =
-        format!("{wal_producer_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connstr}");
+    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
 
     let (mut replication_client, connection) = time::timeout(
         connect_timeout,
@@ -150,19 +152,25 @@ pub async fn handle_walreceiver_connection(
 
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+                {
+                    let mut decoded = DecodedWALRecord::default();
+                    let mut modification = timeline.begin_modification();
+                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
-                    // It is important to deal with the aligned records as lsn in getPage@LSN is
-                    // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hitting a deadlock.
-                    ensure!(lsn.is_aligned());
+                        // It is important to deal with the aligned records as lsn in getPage@LSN is
+                        // aligned and can be several bytes bigger. Without this alignment we are
+                        // at risk of hitting a deadlock.
+                        ensure!(lsn.is_aligned());
 
-                    walingest.ingest_record(&timeline, recdata, lsn)?;
+                        walingest
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                            .context("could not ingest record at {lsn}")?;
 
-                    fail_point!("walreceiver-after-ingest");
+                        fail_point!("walreceiver-after-ingest");
 
-                    last_rec_lsn = lsn;
+                        last_rec_lsn = lsn;
+                    }
                 }
 
                 if !caught_up && endlsn >= end_of_wal {
@@ -170,7 +178,7 @@ pub async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
-                let timeline_to_check = Arc::clone(&timeline.tline);
+                let timeline_to_check = Arc::clone(&timeline);
                 tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
                     .await
                     .with_context(|| {
@@ -218,27 +226,22 @@ pub async fn handle_walreceiver_connection(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
-            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
-            {
-                super::WAL_RECEIVER_ENTRIES.write().await.insert(
-                    id,
-                    WalReceiverEntry {
-                        wal_producer_connstr: Some(wal_producer_connstr.to_owned()),
-                        last_received_msg_lsn: Some(last_lsn),
-                        last_received_msg_ts: Some(
-                            ts.duration_since(SystemTime::UNIX_EPOCH)
-                                .expect("Received message time should be before UNIX EPOCH!")
-                                .as_micros(),
-                        ),
-                    },
-                );
-            }
+            // Update the status about what we just received. This is shown in the mgmt API.
+            let last_received_wal = WalReceiverInfo {
+                wal_source_connstr: wal_source_connstr.to_owned(),
+                last_received_msg_lsn: last_lsn,
+                last_received_msg_ts: ts
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("Received message time should be before UNIX EPOCH!")
+                    .as_micros(),
+            };
+            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.

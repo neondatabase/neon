@@ -25,7 +25,8 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::DatadirTimelineImpl;
+use crate::repository::{Repository, Timeline};
+use crate::{RepositoryImpl, TimelineImpl};
 use utils::{
     lsn::Lsn,
     pq_proto::ReplicationFeedback,
@@ -39,7 +40,7 @@ pub(super) fn spawn_connection_manager_task(
     id: ZTenantTimelineId,
     broker_loop_prefix: String,
     mut client: Client,
-    local_timeline: Arc<DatadirTimelineImpl>,
+    local_timeline: Arc<TimelineImpl>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
@@ -167,7 +168,7 @@ async fn connection_manager_loop_step(
             walreceiver_state
                 .change_connection(
                     new_candidate.safekeeper_id,
-                    new_candidate.wal_producer_connstr,
+                    new_candidate.wal_source_connstr,
                 )
                 .await
         }
@@ -229,8 +230,8 @@ async fn subscribe_for_timeline_updates(
     }
 }
 
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 2.0;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 60.0;
+const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
+const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
 
 async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
     if n == 0 {
@@ -245,7 +246,7 @@ async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
 struct WalreceiverState {
     id: ZTenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    local_timeline: Arc<DatadirTimelineImpl>,
+    local_timeline: Arc<TimelineImpl>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -283,7 +284,7 @@ struct EtcdSkTimeline {
 impl WalreceiverState {
     fn new(
         id: ZTenantTimelineId,
-        local_timeline: Arc<DatadirTimelineImpl>,
+        local_timeline: Arc<<RepositoryImpl as Repository>::Timeline>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
@@ -301,7 +302,7 @@ impl WalreceiverState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_producer_connstr: String) {
+    async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
         if let Some(old_connection) = self.wal_connection.take() {
             old_connection.connection_task.shutdown().await
         }
@@ -323,7 +324,7 @@ impl WalreceiverState {
                 .await;
                 super::walreceiver_connection::handle_walreceiver_connection(
                     id,
-                    &new_wal_producer_connstr,
+                    &new_wal_source_connstr,
                     events_sender.as_ref(),
                     cancellation,
                     connect_timeout,
@@ -386,7 +387,7 @@ impl WalreceiverState {
             Some(existing_wal_connection) => {
                 let connected_sk_node = existing_wal_connection.sk_id;
 
-                let (new_sk_id, new_safekeeper_etcd_data, new_wal_producer_connstr) =
+                let (new_sk_id, new_safekeeper_etcd_data, new_wal_source_connstr) =
                     self.select_connection_candidate(Some(connected_sk_node))?;
 
                 let now = Utc::now().naive_utc();
@@ -396,7 +397,7 @@ impl WalreceiverState {
                     if latest_interaciton > self.lagging_wal_timeout {
                         return Some(NewWalConnectionCandidate {
                             safekeeper_id: new_sk_id,
-                            wal_producer_connstr: new_wal_producer_connstr,
+                            wal_source_connstr: new_wal_source_connstr,
                             reason: ReconnectReason::NoWalTimeout {
                                 last_wal_interaction: Some(
                                     existing_wal_connection.latest_connection_update,
@@ -422,7 +423,7 @@ impl WalreceiverState {
                                         return Some(
                                             NewWalConnectionCandidate {
                                                 safekeeper_id: new_sk_id,
-                                                wal_producer_connstr: new_wal_producer_connstr,
+                                                wal_source_connstr: new_wal_source_connstr,
                                                 reason: ReconnectReason::LaggingWal { current_lsn, new_lsn, threshold: self.max_lsn_wal_lag },
                                             });
                                     }
@@ -433,18 +434,18 @@ impl WalreceiverState {
                     None => {
                         return Some(NewWalConnectionCandidate {
                             safekeeper_id: new_sk_id,
-                            wal_producer_connstr: new_wal_producer_connstr,
+                            wal_source_connstr: new_wal_source_connstr,
                             reason: ReconnectReason::NoEtcdDataForExistingConnection,
                         })
                     }
                 }
             }
             None => {
-                let (new_sk_id, _, new_wal_producer_connstr) =
+                let (new_sk_id, _, new_wal_source_connstr) =
                     self.select_connection_candidate(None)?;
                 return Some(NewWalConnectionCandidate {
                     safekeeper_id: new_sk_id,
-                    wal_producer_connstr: new_wal_producer_connstr,
+                    wal_source_connstr: new_wal_source_connstr,
                     reason: ReconnectReason::NoExistingConnection,
                 });
             }
@@ -545,7 +546,7 @@ impl WalreceiverState {
 #[derive(Debug, PartialEq, Eq)]
 struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
-    wal_producer_connstr: String,
+    wal_source_connstr: String,
     reason: ReconnectReason,
 }
 
@@ -802,7 +803,7 @@ mod tests {
             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
         );
         assert!(only_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         let selected_lsn = 100_000;
@@ -867,7 +868,7 @@ mod tests {
             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
         );
         assert!(biggest_wal_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -984,7 +985,7 @@ mod tests {
             "Should select new safekeeper due to missing etcd data, even if there's an existing connection with this safekeeper"
         );
         assert!(only_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1066,7 +1067,7 @@ mod tests {
             "Should select bigger WAL safekeeper if it starts to lag enough"
         );
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains("advanced by Lsn safekeeper"));
 
         Ok(())
@@ -1133,7 +1134,7 @@ mod tests {
             unexpected => panic!("Unexpected reason: {unexpected:?}"),
         }
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1189,7 +1190,7 @@ mod tests {
             unexpected => panic!("Unexpected reason: {unexpected:?}"),
         }
         assert!(over_threshcurrent_candidate
-            .wal_producer_connstr
+            .wal_source_connstr
             .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
         Ok(())
@@ -1203,13 +1204,10 @@ mod tests {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            local_timeline: Arc::new(DatadirTimelineImpl::new(
-                harness
-                    .load()
-                    .create_empty_timeline(TIMELINE_ID, Lsn(0))
-                    .expect("Failed to create an empty timeline for dummy wal connection manager"),
-                10_000,
-            )),
+            local_timeline: harness
+                .load()
+                .create_empty_timeline(TIMELINE_ID, Lsn(0))
+                .expect("Failed to create an empty timeline for dummy wal connection manager"),
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1).unwrap(),
