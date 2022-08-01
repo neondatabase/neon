@@ -38,7 +38,7 @@ runs:
         path: ./neon-artifact/
 
     - name: Extract Neon artifact
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: |
         mkdir -p /tmp/neon/
         tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
@@ -59,7 +59,7 @@ runs:
         key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
     - name: Run pytest
@@ -70,7 +70,7 @@ runs:
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
         PLATFORM: github-actions-selfhosted
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: |
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR
@@ -123,7 +123,7 @@ runs:
         fi
 
     - name: Delete all data but logs
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       if: always()
       run: |
         du -sh /tmp/test_output/*
