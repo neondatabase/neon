@@ -910,6 +910,15 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
         }
+
+        Some(("status", _)) => match PageServerNode::from_env(env).check_status() {
+            Ok(_) => println!("Page server is up and running"),
+            Err(err) => {
+                eprintln!("Page server is not available: {}", err);
+                exit(1);
+            }
+        },
+
         Some((sub_name, _)) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
         None => bail!("no pageserver subcommand provided"),
     }
