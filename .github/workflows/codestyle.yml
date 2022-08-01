@@ -27,7 +27,7 @@ jobs:
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
-    timeout-minutes: 50
+    timeout-minutes: 60
     name: run regression test suite
     runs-on: ${{ matrix.os }}
 
