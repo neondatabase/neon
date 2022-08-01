@@ -218,6 +218,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     needs: [ build-neon ]
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
       matrix:
