@@ -507,7 +507,7 @@ def export_timeline(args,
 
 
 def main(args: argparse.Namespace):
-    psql_path = Path(args.pg_distrib_dir) / "bin" / "psql"
+    psql_path = str(Path(args.pg_distrib_dir) / "bin" / "psql")
 
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host
