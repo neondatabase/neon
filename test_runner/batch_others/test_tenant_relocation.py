@@ -345,6 +345,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         # Migrate either by attaching from s3 or import/export basebackup
         if method == "major":
             cmd = [
+                "poetry",
+                "run",
                 "python",
                 os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",

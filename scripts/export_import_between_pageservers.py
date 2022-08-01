@@ -16,7 +16,6 @@ import time
 import requests
 import uuid
 from psycopg2.extensions import connection as PgConnection
-import asyncpg
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 
 ###############################################
