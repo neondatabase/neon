@@ -1120,7 +1120,7 @@ where
         .instrument(info_span!("download_timeline_data")),
     );
 
-    if let Some(delete_data) = batch.delete {
+    if let Some(mut delete_data) = batch.delete {
         if upload_result.is_some() {
             match validate_task_retries(delete_data, max_sync_errors)
                 .instrument(info_span!("retries_validation"))
@@ -1153,6 +1153,7 @@ where
                 }
             }
         } else {
+            delete_data.retries += 1;
             sync_queue.push(sync_id, SyncTask::Delete(delete_data));
             warn!("Skipping delete task due to failed upload tasks, reenqueuing");
         }

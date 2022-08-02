@@ -277,15 +277,6 @@ pub enum LocalTimelineState {
     Unloaded,
 }
 
-impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
-    fn from(local_timeline_entry: &'a RepositoryTimeline<T>) -> Self {
-        match local_timeline_entry {
-            RepositoryTimeline::Loaded(_) => LocalTimelineState::Loaded,
-            RepositoryTimeline::Unloaded { .. } => LocalTimelineState::Unloaded,
-        }
-    }
-}
-
 ///
 /// Result of performing GC
 ///

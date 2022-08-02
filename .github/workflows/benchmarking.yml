@@ -60,7 +60,7 @@ jobs:
     - name: Setup cluster
       env:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-      shell: bash
+      shell: bash -euxo pipefail {0}
       run: |
         set -e
 

@@ -4,8 +4,6 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use postgres_ffi::ControlFileData;
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::{
     fs,
     path::Path,
@@ -20,137 +18,14 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
+use crate::tenant_mgr;
 use crate::{
-    config::PageServerConf,
-    layered_repository::metadata::TimelineMetadata,
-    repository::{LocalTimelineState, Repository},
-    storage_sync::index::RemoteIndex,
-    tenant_config::TenantConfOpt,
-    DatadirTimeline, RepositoryImpl, TimelineImpl,
+    config::PageServerConf, repository::Repository, storage_sync::index::RemoteIndex,
+    tenant_config::TenantConfOpt, RepositoryImpl, TimelineImpl,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
-use crate::{repository::RepositoryTimeline, tenant_mgr};
 use crate::{repository::Timeline, CheckpointConfig};
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_timeline_id: Option<ZTimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
-    pub last_record_lsn: Lsn,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub prev_record_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
-    pub latest_gc_cutoff_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
-    pub disk_consistent_lsn: Lsn,
-    pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
-    pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
-    pub current_logical_size_non_incremental: Option<usize>,
-    pub current_physical_size_non_incremental: Option<u64>,
-    pub timeline_state: LocalTimelineState,
-}
-
-impl LocalTimelineInfo {
-    pub fn from_loaded_timeline(
-        timeline: &TimelineImpl,
-        include_non_incremental_logical_size: bool,
-        include_non_incremental_physical_size: bool,
-    ) -> anyhow::Result<Self> {
-        let last_record_lsn = timeline.get_last_record_lsn();
-        let info = LocalTimelineInfo {
-            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
-            ancestor_lsn: {
-                match timeline.get_ancestor_lsn() {
-                    Lsn(0) => None,
-                    lsn @ Lsn(_) => Some(lsn),
-                }
-            },
-            disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-            last_record_lsn,
-            prev_record_lsn: Some(timeline.get_prev_record_lsn()),
-            latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-            timeline_state: LocalTimelineState::Loaded,
-            current_physical_size: Some(timeline.get_physical_size()),
-            current_logical_size: Some(timeline.get_current_logical_size()),
-            current_logical_size_non_incremental: if include_non_incremental_logical_size {
-                Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
-            } else {
-                None
-            },
-            current_physical_size_non_incremental: if include_non_incremental_physical_size {
-                Some(timeline.get_physical_size_non_incremental()?)
-            } else {
-                None
-            },
-        };
-        Ok(info)
-    }
-
-    pub fn from_unloaded_timeline(metadata: &TimelineMetadata) -> Self {
-        LocalTimelineInfo {
-            ancestor_timeline_id: metadata.ancestor_timeline(),
-            ancestor_lsn: {
-                match metadata.ancestor_lsn() {
-                    Lsn(0) => None,
-                    lsn @ Lsn(_) => Some(lsn),
-                }
-            },
-            disk_consistent_lsn: metadata.disk_consistent_lsn(),
-            last_record_lsn: metadata.disk_consistent_lsn(),
-            prev_record_lsn: metadata.prev_record_lsn(),
-            latest_gc_cutoff_lsn: metadata.latest_gc_cutoff_lsn(),
-            timeline_state: LocalTimelineState::Unloaded,
-            current_logical_size: None,
-            current_physical_size: None,
-            current_logical_size_non_incremental: None,
-            current_physical_size_non_incremental: None,
-        }
-    }
-
-    pub fn from_repo_timeline<T>(
-        tenant_id: ZTenantId,
-        timeline_id: ZTimelineId,
-        repo_timeline: &RepositoryTimeline<T>,
-        include_non_incremental_logical_size: bool,
-        include_non_incremental_physical_size: bool,
-    ) -> anyhow::Result<Self> {
-        match repo_timeline {
-            RepositoryTimeline::Loaded(_) => {
-                let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)?;
-                Self::from_loaded_timeline(
-                    &*timeline,
-                    include_non_incremental_logical_size,
-                    include_non_incremental_physical_size,
-                )
-            }
-            RepositoryTimeline::Unloaded { metadata } => Ok(Self::from_unloaded_timeline(metadata)),
-        }
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RemoteTimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub remote_consistent_lsn: Lsn,
-    pub awaits_download: bool,
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: ZTenantId,
-    #[serde_as(as = "DisplayFromStr")]
-    pub timeline_id: ZTimelineId,
-    pub local: Option<LocalTimelineInfo>,
-    pub remote: Option<RemoteTimelineInfo>,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
@@ -333,38 +208,22 @@ fn bootstrap_timeline<R: Repository>(
     Ok(())
 }
 
-pub(crate) fn get_local_timelines(
-    tenant_id: ZTenantId,
-    include_non_incremental_logical_size: bool,
-    include_non_incremental_physical_size: bool,
-) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
-    let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-        .with_context(|| format!("Failed to get repo for tenant {}", tenant_id))?;
-    let repo_timelines = repo.list_timelines();
-
-    let mut local_timeline_info = Vec::with_capacity(repo_timelines.len());
-    for (timeline_id, repository_timeline) in repo_timelines {
-        local_timeline_info.push((
-            timeline_id,
-            LocalTimelineInfo::from_repo_timeline(
-                tenant_id,
-                timeline_id,
-                &repository_timeline,
-                include_non_incremental_logical_size,
-                include_non_incremental_physical_size,
-            )?,
-        ))
-    }
-    Ok(local_timeline_info)
-}
-
+///
+/// Create a new timeline.
+///
+/// Returns the new timeline ID and reference to its Timeline object.
+///
+/// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
+/// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
+/// a new unique ID is generated.
+///
 pub(crate) fn create_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<TimelineInfo>> {
+) -> Result<Option<(ZTimelineId, Arc<TimelineImpl>)>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
@@ -373,7 +232,7 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    let new_timeline_info = match ancestor_timeline_id {
+    let _new_timeline = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline_load(ancestor_timeline_id)
@@ -401,26 +260,13 @@ pub(crate) fn create_timeline(
                 }
             }
 
-            repo.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?;
-            // load the timeline into memory
-            let loaded_timeline =
-                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&*loaded_timeline, false, false)
-                .context("cannot fill timeline info")?
+            repo.branch_timeline(ancestor_timeline_id, new_timeline_id, ancestor_start_lsn)?
         }
-        None => {
-            bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
-            // load the timeline into memory
-            let new_timeline =
-                tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-            LocalTimelineInfo::from_loaded_timeline(&*new_timeline, false, false)
-                .context("cannot fill timeline info")?
-        }
+        None => bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?,
     };
-    Ok(Some(TimelineInfo {
-        tenant_id,
-        timeline_id: new_timeline_id,
-        local: Some(new_timeline_info),
-        remote: None,
-    }))
+
+    // load the timeline into memory
+    let loaded_timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
+
+    Ok(Some((new_timeline_id, loaded_timeline)))
 }

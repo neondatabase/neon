@@ -9,6 +9,7 @@ use pageserver::config::defaults::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
     DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
 };
+use pageserver::http::models::TimelineInfo;
 use safekeeper::defaults::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -24,8 +25,6 @@ use utils::{
     project_git_version,
     zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
-
-use pageserver::timelines::TimelineInfo;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
