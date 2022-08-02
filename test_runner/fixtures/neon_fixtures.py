@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+from contextlib import contextmanager
 from enum import Flag, auto
 import textwrap
 from cached_property import cached_property
@@ -306,6 +307,15 @@ class PgProtocol:
         conn.autocommit = autocommit
         return conn
 
+    @contextmanager
+    def cursor(self, autocommit=True, **kwargs):
+        """
+        Shorthand for pg.connect().cursor().
+        The cursor and connection are closed when the context is exited.
+        """
+        with closing(self.connect(autocommit=autocommit, **kwargs)) as conn:
+            yield conn.cursor()
+
     async def connect_async(self, **kwargs) -> asyncpg.Connection:
         """
         Connect to the node from async python.
@@ -354,7 +364,7 @@ class PgProtocol:
                     if cur.description is None:
                         result.append([])  # query didn't return data
                     else:
-                        result.append(cast(List[Any], cur.fetchall()))
+                        result.append(cur.fetchall())
         return result
 
 
@@ -865,10 +875,24 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
+    def timeline_detail(self,
+                        tenant_id: uuid.UUID,
+                        timeline_id: uuid.UUID,
+                        include_non_incremental_logical_size: bool = False,
+                        include_non_incremental_physical_size: bool = False) -> Dict[Any, Any]:
+
+        include_non_incremental_logical_size_str = "0"
+        if include_non_incremental_logical_size:
+            include_non_incremental_logical_size_str = "1"
+
+        include_non_incremental_physical_size_str = "0"
+        if include_non_incremental_physical_size:
+            include_non_incremental_physical_size_str = "1"
+
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}" +
-            "?include-non-incremental-logical-size=1&include-non-incremental-physical-size=1")
+            "?include-non-incremental-logical-size={include_non_incremental_logical_size_str}" +
+            "&include-non-incremental-physical-size={include_non_incremental_physical_size_str}")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -880,15 +904,6 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
-        return res_json
-
-    def wal_receiver_get(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}/wal_receiver"
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
         return res_json
 
     def get_metrics(self) -> str:
@@ -2137,12 +2152,8 @@ def list_files_to_compare(pgdata_dir: pathlib.Path):
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Postgres):
-
     # Get the timeline ID. We need it for the 'basebackup' command
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SHOW neon.timeline_id")
-            timeline = cur.fetchone()[0]
+    timeline = pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
     # stop postgres to ensure that files won't change
     pg.stop()

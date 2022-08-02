@@ -8,7 +8,7 @@ import time
 from uuid import UUID
 from fixtures.neon_fixtures import NeonEnvBuilder, assert_timeline_local, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
-from fixtures.utils import lsn_from_hex, lsn_to_hex
+from fixtures.utils import lsn_from_hex, query_scalar
 import pytest
 
 
@@ -57,14 +57,12 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     checkpoint_numbers = range(1, 3)
 
     for checkpoint_number in checkpoint_numbers:
-        with closing(pg.connect()) as conn:
-            with conn.cursor() as cur:
-                cur.execute(f'''
-                    CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                    INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
-                ''')
-                cur.execute("SELECT pg_current_wal_flush_lsn()")
-                current_lsn = lsn_from_hex(cur.fetchone()[0])
+        with pg.cursor() as cur:
+            cur.execute(f'''
+                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+            ''')
+            current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
         wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
@@ -123,8 +121,8 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     assert not detail['remote']['awaits_download']
 
     pg = env.postgres.create_start('main')
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            for checkpoint_number in checkpoint_numbers:
-                cur.execute(f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};')
-                assert cur.fetchone() == (f'{data_secret}|{checkpoint_number}', )
+    with pg.cursor() as cur:
+        for checkpoint_number in checkpoint_numbers:
+            assert query_scalar(cur,
+                                f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};'
+                                ) == f'{data_secret}|{checkpoint_number}'

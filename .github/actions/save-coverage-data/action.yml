@@ -5,7 +5,7 @@ runs:
   using: "composite"
   steps:
     - name: Merge coverage data
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
     - name: Upload coverage data
