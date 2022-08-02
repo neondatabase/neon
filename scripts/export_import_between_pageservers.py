@@ -1,7 +1,24 @@
 #
-# Script to export tenants from one pageserver
-# and import them into another page server
+# Script to export tenants from one pageserver and import them into another page server.
 #
+# Outline of steps:
+# 1. Get `(last_lsn, prev_lsn)` from old pageserver
+# 2. Get `fullbackup` from old pageserver, which creates a basebackup tar file
+# 3. This tar file might be missing relation files for empty relations, if the pageserver
+#    is old enough (we didn't always store those). So to recreate them, we start a local
+#    vanilla postgres on this basebackup and ask it what relations should exist, then touch
+#    any missing files and re-pack the tar.
+#    TODO This functionality is no longer needed, so we can delete it later if we don't
+#         end up using the same utils for the pg 15 upgrade. Not sure.
+# 4. We import the patched basebackup into a new pageserver
+# 5. We export again via fullbackup, now from the new pageserver and compare the returned
+#    tar file with the one we imported. This confirms that we imported everything that was
+#    exported, but doesn't guarantee correctness (what if we didn't **export** everything
+#    initially?)
+# 6. We wait for the new pageserver's remote_consistent_lsn to catch up
+#
+# For more context on how to use this, see:
+# https://github.com/neondatabase/cloud/wiki/Storage-format-migration
 
 import os
 from os import path
