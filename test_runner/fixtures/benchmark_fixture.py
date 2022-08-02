@@ -1,23 +1,21 @@
+import calendar
 import dataclasses
+import enum
 import json
 import os
-from pathlib import Path
 import re
-import subprocess
 import timeit
-import calendar
-import enum
-from datetime import datetime
 import uuid
+import warnings
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+# Type-related stuff
+from typing import Iterator, Optional
+
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
-import warnings
-
-from contextlib import contextmanager
-
-# Type-related stuff
-from typing import Iterator, Optional
 """
 This file contains fixtures for micro-benchmarks.
 
@@ -77,7 +75,7 @@ class PgBenchRunResult:
 
         # we know significant parts of these values from test input
         # but to be precise take them from output
-        for line in stdout.splitlines():
+        for line in stdout_lines:
             # scaling factor: 5
             if line.startswith("scaling factor:"):
                 scale = int(line.split()[-1])
@@ -128,6 +126,58 @@ class PgBenchRunResult:
             run_duration=run_duration,
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
+        )
+
+
+@dataclasses.dataclass
+class PgBenchInitResult:
+    total: float
+    drop_tables: Optional[float]
+    create_tables: Optional[float]
+    client_side_generate: Optional[float]
+    vacuum: Optional[float]
+    primary_keys: Optional[float]
+    duration: float
+    start_timestamp: int
+    end_timestamp: int
+
+    @classmethod
+    def parse_from_stderr(
+        cls,
+        stderr: str,
+        duration: float,
+        start_timestamp: int,
+        end_timestamp: int,
+    ):
+        # Parses pgbench initialize output for default initialization steps (dtgvp)
+        # Example: done in 5.66 s (drop tables 0.05 s, create tables 0.31 s, client-side generate 2.01 s, vacuum 0.53 s, primary keys 0.38 s).
+
+        last_line = stderr.splitlines()[-1]
+
+        regex = re.compile(r"done in (\d+\.\d+) s "
+                           r"\("
+                           r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
+                           r"(?:create tables (\d+\.\d+) s)?(?:, )?"
+                           r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
+                           r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
+                           r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
+                           r"\)\.")
+
+        if (m := regex.match(last_line)) is not None:
+            total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [float(v) for v in m.groups() if v is not None]
+        else:
+            raise RuntimeError(f"can't parse pgbench initialize results from `{last_line}`")
+
+        return cls(
+            total=total,
+            drop_tables=drop_tables,
+            create_tables=create_tables,
+            client_side_generate=client_side_generate,
+            vacuum=vacuum,
+            primary_keys=primary_keys,
+            duration=duration,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
         )
 
 
@@ -231,6 +281,32 @@ class NeonBenchmarker:
                     pg_bench_result.run_end_timestamp,
                     '',
                     MetricReport.TEST_PARAM)
+
+    def record_pg_bench_init_result(self, prefix: str, result: PgBenchInitResult):
+        test_params = [
+            "start_timestamp",
+            "end_timestamp",
+        ]
+        for test_param in test_params:
+            self.record(f"{prefix}.{test_param}",
+                        getattr(result, test_param),
+                        '',
+                        MetricReport.TEST_PARAM)
+
+        metrics = [
+            "duration",
+            "drop_tables",
+            "create_tables",
+            "client_side_generate",
+            "vacuum",
+            "primary_keys",
+        ]
+        for metric in metrics:
+            if (value := getattr(result, metric)) is not None:
+                self.record(f"{prefix}.{metric}",
+                            value,
+                            unit="s",
+                            report=MetricReport.LOWER_IS_BETTER)
 
     def get_io_writes(self, pageserver) -> int:
         """
