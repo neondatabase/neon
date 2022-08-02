@@ -23,7 +23,7 @@ env:
 jobs:
   build-neon:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2782329362
     strategy:
       fail-fast: false
       matrix:
@@ -93,8 +93,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
       - name: Cache postgres build
         id: cache_pg
@@ -171,7 +171,7 @@ jobs:
 
   pg_regress-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2782329362
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -199,7 +199,7 @@ jobs:
 
   other-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2782329362
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -230,7 +230,7 @@ jobs:
 
   benchmarks:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2782329362
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
@@ -261,7 +261,7 @@ jobs:
 
   coverage-report:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:2782329362
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -284,7 +284,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git/
             target/
-          key: v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+          key: v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
