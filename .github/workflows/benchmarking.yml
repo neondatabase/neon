@@ -1,4 +1,4 @@
-name: benchmarking
+name: Benchmarking
 
 on:
   # uncomment to run on push for debugging your PR
@@ -14,6 +14,10 @@ on:
     - cron:  '36 4 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
 
 jobs:
   bench:
@@ -60,7 +64,6 @@ jobs:
     - name: Setup cluster
       env:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-      shell: bash -euxo pipefail {0}
       run: |
         set -e
 
@@ -104,6 +107,94 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       run: |
         REPORT_FROM=$(realpath perf-report-staging) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  bench-captest:
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_SCALES_MATRIX: "10gb"
+      REMOTE_ENV: "1"
+      POSTGRES_DISTRIB_DIR: /usr
+
+    strategy:
+      fail-fast: false
+      matrix:
+        connstr: [ BENCHMARK_CAPTEST_CONNSTR, BENCHMARK_RDS_CONNSTR ]
+
+    runs-on: dev
+    timeout-minutes: 360 # 6h
+
+    container:
+      image: python:3.9-buster
+
+    steps:
+    - name: Checkout Neon repo
+      uses: actions/checkout@v3
+
+    - name: Install Deps
+      run: |
+        # Newer git required for submiting results
+        echo "deb http://deb.debian.org/debian buster-backports main" > /etc/apt/sources.list.d/buster-backports.list
+
+        echo "deb http://apt.postgresql.org/pub/repos/apt buster-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+        apt -y update
+        apt install -y postgresql-14 -t buster-backports git
+
+        psql --version
+        pgbench --version
+        git --version
+
+    - name: Install poetry & python deps
+      run: |
+        python3 -m pip install --upgrade poetry
+        ./scripts/pysync
+
+    - name: Benchmark init
+      env:
+        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+      run: |
+        mkdir -p perf-report-captest
+
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "init" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+
+    - name: Benchmark simple-update
+      env:
+        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+      run: |
+        mkdir -p perf-report-captest
+
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+
+    - name: Benchmark select-only
+      env:
+        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+
+      run: |
+        mkdir -p perf-report-captest
+
+        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+
+    - name: Submit result
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+      run: |
+        REPORT_FROM=$(realpath perf-report-captest) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
