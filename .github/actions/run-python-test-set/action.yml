@@ -31,18 +31,11 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Get Neon artifact for restoration
-      uses: actions/download-artifact@v3
+    - name: Get Neon artifact
+      uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
-        path: ./neon-artifact/
-
-    - name: Extract Neon artifact
-      shell: bash -euxo pipefail {0}
-      run: |
-        mkdir -p /tmp/neon/
-        tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
-        rm -rf ./neon-artifact/
+        path: /tmp/neon
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
@@ -132,9 +125,7 @@ runs:
 
     - name: Upload python test logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: ./.github/actions/upload
       with:
-        retention-days: 7
-        if-no-files-found: error
         name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
         path: /tmp/test_output/

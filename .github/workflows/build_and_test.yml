@@ -3,8 +3,8 @@ name: Test and Deploy
 on:
   push:
     branches:
-    - main
-    - release
+      - main
+      - release
   pull_request:
 
 defaults:
@@ -22,7 +22,8 @@ env:
 
 jobs:
   build-neon:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +32,7 @@ jobs:
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
+      GIT_VERSION: ${{ github.sha }}
 
     steps:
       - name: Checkout
@@ -123,6 +125,7 @@ jobs:
             mkdir -p /tmp/coverage/
 
             mkdir -p /tmp/neon/test_bin/
+
             test_exe_paths=$(
               ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
@@ -145,25 +148,20 @@ jobs:
       - name: Install postgres binaries
         run: cp -a tmp_install /tmp/neon/pg_install
 
-      - name: Prepare neon artifact
-        run: ZSTD_NBTHREADS=0 tar -C /tmp/neon/ -cf ./neon.tar.zst --zstd .
-
-      - name: Upload neon binaries
-        uses: actions/upload-artifact@v3
+      - name: Upload Neon artifact
+        uses: ./.github/actions/upload
         with:
-          retention-days: 7
-          if-no-files-found: error
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
-          path: ./neon.tar.zst
+          path: /tmp/neon
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
-
   pg_regress-tests:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -190,7 +188,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   other-tests:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -216,7 +215,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -245,7 +245,8 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   coverage-report:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -270,23 +271,17 @@ jobs:
             target/
           key: v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Get Neon artifact for restoration
-        uses: actions/download-artifact@v3
+      - name: Get Neon artifact
+        uses: ./.github/actions/download
         with:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
-          path: ./neon-artifact/
+          path: /tmp/neon
 
-      - name: Extract Neon artifact
-        run: |
-          mkdir -p /tmp/neon/
-          tar -xf ./neon-artifact/neon.tar.zst -C /tmp/neon/
-          rm -rf ./neon-artifact/
-
-      - name: Restore coverage data
-        uses: actions/download-artifact@v3
+      - name: Get coverage artifact
+        uses: ./.github/actions/download
         with:
           name: coverage-data-artifact
-          path: /tmp/coverage/
+          path: /tmp/coverage
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
@@ -324,40 +319,40 @@ jobs:
             }"
 
   trigger-e2e-tests:
-   runs-on: [ self-hosted, Linux, k8s-runner ]
-   needs: [ build-neon ]
-   steps:
-     - name: Set PR's status to pending and request a remote CI test
-       run: |
-         COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-         COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+    runs-on: [ self-hosted, Linux, k8s-runner ]
+    needs: [ build-neon ]
+    steps:
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
 
-         REMOTE_REPO="${{ github.repository_owner }}/cloud"
+          REMOTE_REPO="${{ github.repository_owner }}/cloud"
 
-         curl -f -X POST \
-         https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-         -H "Accept: application/vnd.github.v3+json" \
-         --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-         --data \
-           "{
-             \"state\": \"pending\",
-             \"context\": \"neon-cloud-e2e\",
-             \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
-           }"
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"neon-cloud-e2e\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
 
-         curl -f -X POST \
-         https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
-         -H "Accept: application/vnd.github.v3+json" \
-         --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-         --data \
-           "{
-             \"ref\": \"main\",
-             \"inputs\": {
-               \"ci_job_name\": \"neon-cloud-e2e\",
-               \"commit_hash\": \"$COMMIT_SHA\",
-               \"remote_repo\": \"${{ github.repository }}\"
-             }
-           }"
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"neon-cloud-e2e\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\"
+              }
+            }"
 
   docker-image:
     runs-on: [ self-hosted, Linux, k8s-runner ]
