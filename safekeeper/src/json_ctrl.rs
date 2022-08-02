@@ -18,6 +18,7 @@ use crate::safekeeper::{
 };
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
 use crate::timeline::TimelineTools;
+use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::{
@@ -73,7 +74,7 @@ pub fn handle_json_ctrl(
 
     let inserted_wal = append_logical_message(spg, append_request)?;
     let response = AppendResult {
-        state: spg.timeline.get().get_state().1,
+        state: spg.timeline.as_ref().unwrap().get_state()?.1,
         inserted_wal,
     };
     let response_data = serde_json::to_vec(&response)?;
@@ -103,7 +104,11 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
         wal_seg_size: WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
     });
 
-    let response = spg.timeline.get().process_msg(&greeting_request)?;
+    let response = spg
+        .timeline
+        .as_ref()
+        .unwrap()
+        .process_msg(&greeting_request)?;
     match response {
         Some(AcceptorProposerMessage::Greeting(_)) => Ok(()),
         _ => anyhow::bail!("not GreetingResponse"),
@@ -112,7 +117,14 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
 
 fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: Lsn) -> Result<()> {
     // add new term to existing history
-    let history = spg.timeline.get().get_state().1.acceptor_state.term_history;
+    let history = spg
+        .timeline
+        .as_ref()
+        .unwrap()
+        .get_state()?
+        .1
+        .acceptor_state
+        .term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
     let mut history_entries = history.0;
     history_entries.push(TermSwitchEntry { term, lsn });
@@ -125,7 +137,10 @@ fn send_proposer_elected(spg: &mut SafekeeperPostgresHandler, term: Term, lsn: L
         timeline_start_lsn: lsn,
     });
 
-    spg.timeline.get().process_msg(&proposer_elected_request)?;
+    spg.timeline
+        .as_ref()
+        .unwrap()
+        .process_msg(&proposer_elected_request)?;
     Ok(())
 }
 
@@ -143,7 +158,7 @@ fn append_logical_message(
     msg: &AppendLogicalMessage,
 ) -> Result<InsertedWAL> {
     let wal_data = xlog_utils::encode_logical_message(&msg.lm_prefix, &msg.lm_message);
-    let sk_state = spg.timeline.get().get_state().1;
+    let sk_state = spg.timeline.as_ref().unwrap().get_state()?.1;
 
     let begin_lsn = msg.begin_lsn;
     let end_lsn = begin_lsn + wal_data.len() as u64;
@@ -167,7 +182,11 @@ fn append_logical_message(
         wal_data: Bytes::from(wal_data),
     });
 
-    let response = spg.timeline.get().process_msg(&append_request)?;
+    let response = spg
+        .timeline
+        .as_ref()
+        .unwrap()
+        .process_msg(&append_request)?;
 
     let append_response = match response {
         Some(AcceptorProposerMessage::AppendResponse(resp)) => resp,

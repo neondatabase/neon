@@ -23,6 +23,9 @@ pub mod wal_backup;
 pub mod wal_service;
 pub mod wal_storage;
 
+mod timelines_global_map;
+pub use timelines_global_map::GlobalTimelines;
+
 pub mod defaults {
     use const_format::formatcp;
     use std::time::Duration;

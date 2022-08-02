@@ -12,7 +12,8 @@ use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
-    timeline::{GlobalTimelines, ReplicaState},
+    timeline::ReplicaState,
+    GlobalTimelines,
 };
 
 pub struct FullTimelineInfo {
@@ -235,9 +236,15 @@ impl Collector for TimelineCollector {
         self.disk_usage.reset();
         self.acceptor_term.reset();
 
-        let timelines = GlobalTimelines::active_timelines_metrics();
+        let timelines = GlobalTimelines::get_all();
 
-        for tli in timelines {
+        for arc_tli in timelines {
+            let tli = arc_tli.info_for_metrics();
+            if tli.is_none() {
+                continue;
+            }
+            let tli = tli.unwrap();
+
             let tenant_id = tli.zttid.tenant_id.to_string();
             let timeline_id = tli.zttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];

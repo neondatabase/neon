@@ -10,6 +10,7 @@ use etcd_broker::LeaseKeeper;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -17,7 +18,8 @@ use tokio::{runtime, time::sleep};
 use tracing::*;
 use url::Url;
 
-use crate::{timeline::GlobalTimelines, SafeKeeperConf};
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 use etcd_broker::{
     subscription_key::{OperationKind, SkOperationKind, SubscriptionKey},
     Client, PutOptions,
@@ -210,11 +212,15 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         // is under plain mutex. That's ok, all this code is not performance
         // sensitive and there is no risk of deadlock as we don't await while
         // lock is held.
-        let active_tlis = GlobalTimelines::get_active_timelines();
+        let mut active_tlis = GlobalTimelines::get_all();
+        active_tlis.retain(|tli| tli.is_active());
+
+        let active_tlis_set: HashSet<ZTenantTimelineId> =
+            active_tlis.iter().map(|tli| tli.zttid).collect();
 
         // // Get and maintain (if not yet) per timeline lease to automatically delete obsolete data.
-        for zttid in active_tlis.iter() {
-            if let Entry::Vacant(v) = leases.entry(*zttid) {
+        for tli in &active_tlis {
+            if let Entry::Vacant(v) = leases.entry(tli.zttid) {
                 let lease = client.lease_grant(LEASE_TTL_SEC, None).await?;
                 let (keeper, ka_stream) = client.lease_keep_alive(lease.id()).await?;
                 v.insert(Lease {
@@ -224,21 +230,26 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 });
             }
         }
-        leases.retain(|zttid, _| active_tlis.contains(zttid));
+        leases.retain(|zttid, _| active_tlis_set.contains(zttid));
 
         // Push data concurrently to not suffer from latency, with many timelines it can be slow.
         let handles = active_tlis
             .iter()
-            .filter_map(|zttid| GlobalTimelines::get_loaded(*zttid))
-            .map(|tli| {
-                let sk_info = tli.get_public_info(&conf);
+            .filter_map(|tli| {
+                let sk_info = tli.get_public_info(&conf).ok()?;
                 let key = timeline_safekeeper_path(
                     conf.broker_etcd_prefix.clone(),
                     tli.zttid,
                     conf.my_id,
                 );
                 let lease = leases.remove(&tli.zttid).unwrap();
-                tokio::spawn(push_sk_info(tli.zttid, client.clone(), key, sk_info, lease))
+                Some(tokio::spawn(push_sk_info(
+                    tli.zttid,
+                    client.clone(),
+                    key,
+                    sk_info,
+                    lease,
+                )))
             })
             .collect::<Vec<_>>();
         for h in handles {
@@ -279,10 +290,10 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
         match subscription.value_updates.recv().await {
             Some(new_info) => {
                 // note: there are blocking operations below, but it's considered fine for now
-                if let Ok(tli) = GlobalTimelines::get(&conf, new_info.key.id, false) {
-                    tli.record_safekeeper_info(&new_info.value, new_info.key.node_id)
-                        .await?
-                }
+                let tli = GlobalTimelines::get(new_info.key.id);
+                let _ = tli
+                    .record_safekeeper_info(&new_info.value, new_info.key.node_id)
+                    .await;
             }
             None => {
                 // XXX it means we lost connection with etcd, error is consumed inside sub object

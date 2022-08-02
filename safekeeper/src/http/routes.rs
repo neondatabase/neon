@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
 use once_cell::sync::Lazy;
@@ -9,7 +10,9 @@ use std::sync::Arc;
 
 use crate::safekeeper::Term;
 use crate::safekeeper::TermHistory;
-use crate::timeline::{GlobalTimelines, TimelineDeleteForceResult};
+use crate::timeline;
+use crate::timeline::TimelineDeleteForceResult;
+use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
@@ -96,9 +99,9 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(zttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
-    let (inmem, state) = tli.get_state();
-    let flush_lsn = tli.get_end_of_wal();
+    let tli = GlobalTimelines::get(zttid);
+    let (inmem, state) = tli.get_state()?;
+    let flush_lsn = tli.get_flush_lsn()?;
 
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
@@ -130,10 +133,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         timeline_id: request_data.timeline_id,
     };
     check_permission(&request, Some(zttid.tenant_id))?;
-    GlobalTimelines::create(get_conf(&request), zttid, request_data.peer_ids)
-        .map_err(ApiError::from_err)?;
 
-    json_response(StatusCode::CREATED, ())
+    Err(ApiError::from_err(anyhow!("not implemented")))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -154,7 +155,7 @@ async fn timeline_delete_force_handler(
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
-        GlobalTimelines::delete_force(get_conf(&request), &zttid)
+        timeline::delete_force(get_conf(&request), &zttid)
             .await
             .map_err(ApiError::from_err)?,
     )
@@ -170,7 +171,7 @@ async fn tenant_delete_force_handler(
     ensure_no_body(&mut request).await?;
     json_response(
         StatusCode::OK,
-        GlobalTimelines::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
+        timeline::delete_force_all_for_tenant(get_conf(&request), &tenant_id)
             .await
             .map_err(ApiError::from_err)?
             .iter()
@@ -188,7 +189,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     check_permission(&request, Some(zttid.tenant_id))?;
     let safekeeper_info: SkTimelineInfo = json_request(&mut request).await?;
 
-    let tli = GlobalTimelines::get(get_conf(&request), zttid, false).map_err(ApiError::from_err)?;
+    let tli = GlobalTimelines::get(zttid);
     tli.record_safekeeper_info(&safekeeper_info, NodeId(1))
         .await?;
 

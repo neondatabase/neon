@@ -1,21 +1,23 @@
-//! This module contains timeline id -> safekeeper state map with file-backed
-//! persistence and support for interaction between sending and receiving wal.
+//! This module implements Timeline lifecycle management and has all neccessary code
+//! to glue together SafeKeeper and all other background services.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
 
-use once_cell::sync::Lazy;
-use postgres_ffi::XLogSegNo;
+use postgres_ffi::v14::xlog_utils::XLogSegNo;
 
 use serde::Serialize;
 use tokio::sync::watch;
 
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
-use std::fs::{self};
+use std::collections::HashMap;
+use std::fs;
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use std::io;
+use std::path::PathBuf;
+use std::time::Instant;
 
 use tokio::sync::mpsc::Sender;
 use tracing::*;
@@ -26,12 +28,12 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTenantTimelineId},
 };
 
-use crate::control_file;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
-    SafekeeperMemState,
+    SafekeeperMemState, ServerInfo,
 };
 use crate::send_wal::HotStandbyFeedback;
+use crate::{control_file, GlobalTimelines};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage;
@@ -95,17 +97,19 @@ struct SharedState {
 }
 
 impl SharedState {
-    /// Initialize timeline state, creating control file
+    /// Initialize timeline state, create a control file on disk.
     fn create(
         conf: &SafeKeeperConf,
         zttid: &ZTenantTimelineId,
-        peer_ids: Vec<NodeId>,
+        state: SafeKeeperState,
     ) -> Result<Self> {
-        let state = SafeKeeperState::new(zttid, peer_ids);
-        let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
+        if state.server.wal_seg_size == 0 {
+            bail!(TimelineError::UninitializedWalSegSize(*zttid));
+        }
 
-        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
-        let sk = SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?;
+        let control_store = control_file::FileStorage::create_new(zttid, conf, state)?;
+        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf, &control_store)?;
+        let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
 
         Ok(Self {
             sk,
@@ -117,16 +121,25 @@ impl SharedState {
         })
     }
 
-    /// Restore SharedState from control file.
-    /// If file doesn't exist, bails out.
+    /// Restore SharedState from control file. If file doesn't exist, bails out.
     fn restore(conf: &SafeKeeperConf, zttid: &ZTenantTimelineId) -> Result<Self> {
-        let control_store = control_file::FileStorage::restore_new(zttid, conf)?;
-        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf);
+        let control_store = control_file::FileStorage::restore_new(zttid, conf).map_err(|e| {
+            if let Some(e) = e.downcast_ref::<io::Error>() {
+                if e.kind() == io::ErrorKind::NotFound {
+                    return anyhow!(TimelineError::NotFound(*zttid));
+                }
+            }
+            e
+        })?;
 
-        info!("timeline {} restored", zttid.timeline_id);
+        if control_store.server.wal_seg_size == 0 {
+            bail!(TimelineError::UninitializedWalSegSize(*zttid));
+        }
+
+        let wal_store = wal_storage::PhysicalStorage::new(zttid, conf, &control_store)?;
 
         Ok(Self {
-            sk: SafeKeeper::new(zttid.timeline_id, control_store, wal_store, conf.my_id)?,
+            sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
             replicas: Vec::new(),
             wal_backup_active: false,
             active: false,
@@ -134,6 +147,8 @@ impl SharedState {
             last_removed_segno: 0,
         })
     }
+
+
     fn is_active(&self) -> bool {
         self.is_wal_backup_required()
             // FIXME: add tracking of relevant pageservers and check them here individually,
@@ -254,7 +269,47 @@ impl SharedState {
     }
 }
 
-/// Database instance (tenant)
+enum TimelineState {
+    /// Timeline on-disk state is unknown. We either haven't tried to restore
+    /// timeline state from disk or got an error.
+    Uninitialized(UninitializedState),
+    /// Timeline exists on disk and loaded in memory.
+    Loaded(Box<SharedState>),
+    /// Timeline was deleted and cannot be used anymore.
+    Deleted,
+}
+
+impl TimelineState {
+    fn inner_mut(&mut self) -> &mut SharedState {
+        match self {
+            TimelineState::Loaded(state) => state,
+            _ => panic!("timeline state is not initialized"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UninitializedState {
+    /// Safekeeper config.
+    conf: Box<SafeKeeperConf>,
+    /// Error that occurred on last attempt to restore timeline state from disk.
+    restore_error: Option<String>,
+    /// Timestamp of the last restore attempt.
+    last_restore_attempt: Option<Instant>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineError {
+    #[error("Timeline {0} was deleted and cannot be used anymore")]
+    Deleted(ZTenantTimelineId),
+    #[error("Timeline {0} is not initialized, wal_seg_size is zero")]
+    UninitializedWalSegSize(ZTenantTimelineId),
+    #[error("Timeline {0} was not found on disk")]
+    NotFound(ZTenantTimelineId),
+}
+
+/// Timeline struct manages lifecycle (creation, deletion, restore) of a safekeeper timeline.
+/// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
     pub zttid: ZTenantTimelineId,
     /// Sending here asks for wal backup launcher attention (start/stop
@@ -264,33 +319,170 @@ pub struct Timeline {
     commit_lsn_watch_tx: watch::Sender<Lsn>,
     /// For breeding receivers.
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
-    mutex: Mutex<SharedState>,
+    mutex: Mutex<TimelineState>,
 }
 
 impl Timeline {
-    fn new(
+    /// Create a new uninitialized timeline. Timeline will be tried to restore from disk
+    /// automatically on most function calls.
+    pub fn new(
+        conf: SafeKeeperConf,
         zttid: ZTenantTimelineId,
         wal_backup_launcher_tx: Sender<ZTenantTimelineId>,
-        shared_state: SharedState,
     ) -> Timeline {
-        let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
-            watch::channel(shared_state.sk.inmem.commit_lsn);
+        let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
         Timeline {
             zttid,
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
-            mutex: Mutex::new(shared_state),
+            mutex: Mutex::new(TimelineState::Uninitialized(UninitializedState {
+                conf: Box::new(conf),
+                restore_error: None,
+                last_restore_attempt: None,
+            })),
         }
+    }
+
+    /// Try to restore timeline state from disk.
+    fn load_from_disk(
+        zttid: &ZTenantTimelineId,
+        uninit: &mut UninitializedState,
+    ) -> Result<SharedState> {
+        info!("Restoring timeline {} from disk", zttid);
+
+        let res = SharedState::restore(&uninit.conf, zttid);
+        if let Err(e) = &res {
+            uninit.restore_error = Some(format!("{}", e));
+            uninit.last_restore_attempt = Some(Instant::now());
+            error!("Failed to restore timeline {} from disk: {}", zttid, e);
+        }
+        res
+    }
+
+    /// Try to create a new timeline on disk.
+    fn create_on_disk(
+        zttid: &ZTenantTimelineId,
+        uninit: &mut UninitializedState,
+        state: SafeKeeperState,
+    ) -> Result<SharedState> {
+        let conf = &uninit.conf;
+        info!("Creating timeline {} on disk", zttid);
+
+        // TODO: check directory existence
+        let dir = conf.timeline_dir(zttid);
+        fs::create_dir_all(dir)?;
+
+        SharedState::create(conf, zttid, state).context("failed to create shared state")
+    }
+
+    /// Initialize timeline with shared_state.
+    fn set_shared_state(
+        &self,
+        state: SharedState,
+        state_lock: &mut MutexGuard<TimelineState>,
+    ) -> Result<()> {
+        assert!(matches!(&**state_lock, TimelineState::Uninitialized(_)));
+        self.commit_lsn_watch_tx.send(state.sk.inmem.commit_lsn)?;
+        **state_lock = TimelineState::Loaded(Box::new(state));
+        Ok(())
+    }
+
+    /// Require timeline state to be loaded. If it's not loaded, try to restore it from disk.
+    fn require_loaded(&self) -> Result<MappedMutexGuard<SharedState>> {
+        let mut state = self.mutex.lock();
+        match &mut *state {
+            TimelineState::Loaded(_) => {}
+            TimelineState::Uninitialized(uninit) => {
+                if let Some(err) = &uninit.restore_error {
+                    // We have an error from last restore attempt, next attempt will not help
+                    // unless something was changed on disk manually. If we will try to restore
+                    // every time, we will have a lot of spam in the logs.
+                    bail!(err.clone())
+                }
+                // TODO: we can allow restoring once a minute, to automatically recover from
+                // restore failure when something was changed on disk.
+
+                let shared_state = Self::load_from_disk(&self.zttid, uninit)?;
+                self.set_shared_state(shared_state, &mut state)?;
+            }
+            TimelineState::Deleted => bail!(TimelineError::Deleted(self.zttid)),
+        }
+
+        Ok(MutexGuard::map(state, TimelineState::inner_mut))
+    }
+
+    /// Try to load timeline state from disk. If timeline control file is not found,
+    /// create and initialize a state for the new timeline.
+    pub fn init_create_or_load(&self, server_info: ServerInfo) -> Result<()> {
+        let mut state_lock = self.mutex.lock();
+        match &mut *state_lock {
+            TimelineState::Uninitialized(uninit) => {
+                let shared_state = Self::load_from_disk(&self.zttid, uninit);
+                match shared_state {
+                    Ok(shared_state) => {
+                        // restored successfully
+                        self.set_shared_state(shared_state, &mut state_lock)?;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        if let Some(e) = e.downcast_ref::<TimelineError>() {
+                            if matches!(e, TimelineError::NotFound(_)) {
+                                // timeline does not exist on disk, create new one
+                                let state = SafeKeeperState::new(&self.zttid, server_info, vec![]);
+                                let shared_state =
+                                    Self::create_on_disk(&self.zttid, uninit, state)?;
+                                self.set_shared_state(shared_state, &mut state_lock)?;
+                                return Ok(());
+                            }
+                        }
+                        Err(e)
+                    }
+                }
+            }
+            TimelineState::Loaded(_) => Ok(()),
+            TimelineState::Deleted => bail!(TimelineError::Deleted(self.zttid)),
+        }
+    }
+
+    /// Deactivates and marks timeline as deleted. Returns whether the timeline was
+    /// already active. The timeline can no longer be used after this call, almost
+    /// all functions will return `TimelineError::Deleted`.
+    ///
+    /// We assume all threads will stop by themselves eventually (possibly with errors,
+    /// but no panics). There should be no compute threads (as we're deleting the timeline),
+    /// actually. Some WAL may be left unsent, but we're deleting the timeline anyway.
+    async fn delete(&self) -> bool {
+        let was_active = {
+            let mut state_lock = self.mutex.lock();
+            let was_active = match &*state_lock {
+                TimelineState::Loaded(state) => state.active,
+                TimelineState::Uninitialized(_) => false,
+
+                // already deleted
+                TimelineState::Deleted => return false,
+            };
+
+            *state_lock = TimelineState::Deleted;
+            was_active
+        };
+
+        // XXX: we can have a cancellation channel to notify all tasks that they should stop
+
+        let res = self.wal_backup_launcher_tx.send(self.zttid).await;
+        if let Err(e) = res {
+            error!("Failed to send stop signal to wal_backup_launcher: {}", e);
+        }
+
+        was_active
     }
 
     /// Register compute connection, starting timeline-related activity if it is
     /// not running yet.
-    /// Can fail only if channel to a static thread got closed, which is not normal at all.
     pub fn on_compute_connect(&self) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         {
-            let mut shared_state = self.mutex.lock().unwrap();
+            let mut shared_state = self.require_loaded()?;
             shared_state.num_computes += 1;
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
@@ -303,11 +495,10 @@ impl Timeline {
 
     /// De-register compute connection, shutting down timeline activity if
     /// pageserver doesn't need catchup.
-    /// Can fail only if channel to a static thread got closed, which is not normal at all.
     pub fn on_compute_disconnect(&self) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         {
-            let mut shared_state = self.mutex.lock().unwrap();
+            let mut shared_state = self.require_loaded()?;
             shared_state.num_computes -= 1;
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
         }
@@ -318,10 +509,10 @@ impl Timeline {
         Ok(())
     }
 
-    /// Whether we still need this walsender running?
+    /// Returns true if walsender should stop sending WAL to pageserver.
     /// TODO: check this pageserver is actually interested in this timeline.
-    pub fn stop_walsender(&self, replica_id: usize) -> Result<bool> {
-        let mut shared_state = self.mutex.lock().unwrap();
+    pub fn should_walsender_stop(&self, replica_id: usize) -> Result<bool> {
+        let mut shared_state = self.require_loaded()?;
         if shared_state.num_computes == 0 {
             let replica_state = shared_state.replicas[replica_id].unwrap();
             let stop = shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
@@ -338,64 +529,54 @@ impl Timeline {
     /// Returns whether s3 offloading is required and sets current status as
     /// matching it.
     pub fn wal_backup_attend(&self) -> bool {
-        let mut shared_state = self.mutex.lock().unwrap();
+        let shared_state = self.require_loaded();
+        if shared_state.is_err() {
+            return false;
+        }
+        let mut shared_state = shared_state.unwrap();
         shared_state.wal_backup_attend()
     }
 
-    // Can this safekeeper offload to s3? Recently joined safekeepers might not
-    // have necessary WAL.
+    /// Can this safekeeper offload to s3? Recently joined safekeepers might not
+    /// have necessary WAL.
     pub fn can_wal_backup(&self) -> bool {
-        self.mutex.lock().unwrap().can_wal_backup()
+        self.require_loaded()
+            .map(|state| state.can_wal_backup())
+            .unwrap_or(false)
     }
 
-    /// Deactivates the timeline, assuming it is being deleted.
-    /// Returns whether the timeline was already active.
-    ///
-    /// We assume all threads will stop by themselves eventually (possibly with errors, but no panics).
-    /// There should be no compute threads (as we're deleting the timeline), actually. Some WAL may be left unsent, but
-    /// we're deleting the timeline anyway.
-    pub async fn deactivate_for_delete(&self) -> Result<bool> {
-        let was_active: bool;
-        {
-            let shared_state = self.mutex.lock().unwrap();
-            was_active = shared_state.active;
-        }
-        self.wal_backup_launcher_tx.send(self.zttid).await?;
-        Ok(was_active)
-    }
-
-    fn is_active(&self) -> bool {
-        let shared_state = self.mutex.lock().unwrap();
-        shared_state.active
-    }
-
-    /// Returns full timeline info, required for the metrics.
-    /// If the timeline is not active, returns None instead.
+    /// Returns full timeline info, required for the metrics. If the timeline is
+    /// not active, returns None instead.
     pub fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
-        let shared_state = self.mutex.lock().unwrap();
-        if !shared_state.active {
-            return None;
-        }
-
-        Some(FullTimelineInfo {
-            zttid: self.zttid,
-            replicas: shared_state
-                .replicas
-                .iter()
-                .filter_map(|r| r.as_ref())
-                .copied()
-                .collect(),
-            wal_backup_active: shared_state.wal_backup_active,
-            timeline_is_active: shared_state.active,
-            num_computes: shared_state.num_computes,
-            last_removed_segno: shared_state.last_removed_segno,
-            epoch_start_lsn: shared_state.sk.epoch_start_lsn,
-            mem_state: shared_state.sk.inmem.clone(),
-            persisted_state: shared_state.sk.state.clone(),
-            flush_lsn: shared_state.sk.wal_store.flush_lsn(),
-        })
+        self.require_loaded()
+            .map(|state| {
+                if state.active {
+                    Some(FullTimelineInfo {
+                        zttid: self.zttid,
+                        replicas: state
+                            .replicas
+                            .iter()
+                            .filter_map(|r| r.as_ref())
+                            .copied()
+                            .collect(),
+                        wal_backup_active: state.wal_backup_active,
+                        timeline_is_active: state.active,
+                        num_computes: state.num_computes,
+                        last_removed_segno: state.last_removed_segno,
+                        epoch_start_lsn: state.sk.epoch_start_lsn,
+                        mem_state: state.sk.inmem.clone(),
+                        persisted_state: state.sk.state.clone(),
+                        flush_lsn: state.sk.wal_store.flush_lsn(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(None)
     }
 
+    /// Returns commit_lsn watch channel. Channel should be obtained only after
+    /// the timeline is loaded. Otherwise, the channel will have invalid LSN value.
     pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
         self.commit_lsn_watch_rx.clone()
     }
@@ -408,7 +589,7 @@ impl Timeline {
         let mut rmsg: Option<AcceptorProposerMessage>;
         let commit_lsn: Lsn;
         {
-            let mut shared_state = self.mutex.lock().unwrap();
+            let mut shared_state = self.require_loaded()?;
             rmsg = shared_state.sk.process_msg(msg)?;
 
             // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
@@ -426,29 +607,42 @@ impl Timeline {
         Ok(rmsg)
     }
 
-    pub fn get_wal_seg_size(&self) -> usize {
-        self.mutex.lock().unwrap().get_wal_seg_size()
+    /// Returns wal_seg_size or None if timeline is not loaded.
+    pub fn get_wal_seg_size(&self) -> Result<usize> {
+        self.require_loaded().map(|state| state.get_wal_seg_size())
     }
 
-    pub fn get_state(&self) -> (SafekeeperMemState, SafeKeeperState) {
-        let shared_state = self.mutex.lock().unwrap();
-        (shared_state.sk.inmem.clone(), shared_state.sk.state.clone())
+    /// Returns true only if the timeline is loaded and active.
+    pub fn is_active(&self) -> bool {
+        self.require_loaded()
+            .map(|state| state.active)
+            .unwrap_or(false)
     }
 
-    pub fn get_wal_backup_lsn(&self) -> Lsn {
-        self.mutex.lock().unwrap().sk.inmem.backup_lsn
+    /// Returns state of the timeline or None if timeline is not loaded.
+    pub fn get_state(&self) -> Result<(SafekeeperMemState, SafeKeeperState)> {
+        self.require_loaded()
+            .map(|state| (state.sk.inmem.clone(), state.sk.state.clone()))
     }
 
-    pub fn set_wal_backup_lsn(&self, backup_lsn: Lsn) {
-        self.mutex.lock().unwrap().sk.inmem.backup_lsn = backup_lsn;
+    /// Returns backup_lsn or None if timeline is not loaded.
+    pub fn get_wal_backup_lsn(&self) -> Result<Lsn> {
+        self.require_loaded().map(|state| state.sk.inmem.backup_lsn)
+    }
+
+    /// Sets backup_lsn to the given value.
+    pub fn set_wal_backup_lsn(&self, backup_lsn: Lsn) -> Result<()> {
+        let mut shared_state = self.require_loaded()?;
+        shared_state.sk.inmem.backup_lsn = backup_lsn;
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
+        Ok(())
     }
 
-    /// Prepare public safekeeper info for reporting.
-    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> SkTimelineInfo {
-        let shared_state = self.mutex.lock().unwrap();
-        SkTimelineInfo {
+    /// Return public safekeeper info for broadcasting to broker and other peers.
+    pub fn get_public_info(&self, conf: &SafeKeeperConf) -> Result<SkTimelineInfo> {
+        let shared_state = self.require_loaded()?;
+        Ok(SkTimelineInfo {
             last_log_term: Some(shared_state.sk.get_epoch()),
             flush_lsn: Some(shared_state.sk.wal_store.flush_lsn()),
             // note: this value is not flushed to control file yet and can be lost
@@ -461,7 +655,7 @@ impl Timeline {
             peer_horizon_lsn: Some(shared_state.sk.inmem.peer_horizon_lsn),
             safekeeper_connstr: Some(conf.listen_pg_addr.clone()),
             backup_lsn: Some(shared_state.sk.inmem.backup_lsn),
-        }
+        })
     }
 
     /// Update timeline state with peer safekeeper data.
@@ -473,12 +667,7 @@ impl Timeline {
         let is_wal_backup_action_pending: bool;
         let commit_lsn: Lsn;
         {
-            let mut shared_state = self.mutex.lock().unwrap();
-            // WAL seg size not initialized yet (no message from compute ever
-            // received), can't do much without it.
-            if shared_state.get_wal_seg_size() == 0 {
-                return Ok(());
-            }
+            let mut shared_state = self.require_loaded()?;
             shared_state.sk.record_safekeeper_info(sk_info)?;
             is_wal_backup_action_pending = shared_state.update_status(self.zttid);
             commit_lsn = shared_state.sk.inmem.commit_lsn;
@@ -491,36 +680,40 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn add_replica(&self, state: ReplicaState) -> usize {
-        let mut shared_state = self.mutex.lock().unwrap();
-        shared_state.add_replica(state)
+    /// Add send_wal replica to the in-memory vector of replicas.
+    pub fn add_replica(&self, state: ReplicaState) -> Result<usize> {
+        let mut shared_state = self.require_loaded()?;
+        Ok(shared_state.add_replica(state))
     }
 
-    pub fn update_replica_state(&self, id: usize, state: ReplicaState) {
-        let mut shared_state = self.mutex.lock().unwrap();
+    /// Update replication replica state.
+    pub fn update_replica_state(&self, id: usize, state: ReplicaState) -> Result<()> {
+        let mut shared_state = self.require_loaded()?;
         shared_state.replicas[id] = Some(state);
+        Ok(())
     }
 
-    pub fn remove_replica(&self, id: usize) {
-        let mut shared_state = self.mutex.lock().unwrap();
+    /// Remove send_wal replica from the in-memory vector of replicas.
+    pub fn remove_replica(&self, id: usize) -> Result<()> {
+        let mut shared_state = self.require_loaded()?;
         assert!(shared_state.replicas[id].is_some());
         shared_state.replicas[id] = None;
+        Ok(())
     }
 
-    pub fn get_end_of_wal(&self) -> Lsn {
-        let shared_state = self.mutex.lock().unwrap();
-        shared_state.sk.wal_store.flush_lsn()
+    /// Returns flush_lsn.
+    pub fn get_flush_lsn(&self) -> Result<Lsn> {
+        let shared_state = self.require_loaded()?;
+        Ok(shared_state.sk.wal_store.flush_lsn())
     }
 
+    /// Delete WAL segments from disk that are no longer needed. This is determined
+    /// based on pageserver's remote_consistent_lsn and local backup_lsn/peer_lsn.
     pub fn remove_old_wal(&self, wal_backup_enabled: bool) -> Result<()> {
         let horizon_segno: XLogSegNo;
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
-            let shared_state = self.mutex.lock().unwrap();
-            // WAL seg size not initialized yet, no WAL exists.
-            if shared_state.get_wal_seg_size() == 0 {
-                return Ok(());
-            }
+            let shared_state = self.require_loaded()?;
             horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
@@ -528,44 +721,16 @@ impl Timeline {
             }
             // release the lock before removing
         }
-        let _enter =
-            info_span!("", tenant = %self.zttid.tenant_id, timeline = %self.zttid.timeline_id)
-                .entered();
+
+        // delete old WAL files
         remover(horizon_segno - 1)?;
-        self.mutex.lock().unwrap().last_removed_segno = horizon_segno;
+
+        // update last_removed_segno
+        let mut shared_state = self.require_loaded()?;
+        shared_state.last_removed_segno = horizon_segno;
         Ok(())
     }
 }
-
-// Utilities needed by various Connection-like objects
-pub trait TimelineTools {
-    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()>;
-
-    fn get(&self) -> &Arc<Timeline>;
-}
-
-impl TimelineTools for Option<Arc<Timeline>> {
-    fn set(&mut self, conf: &SafeKeeperConf, zttid: ZTenantTimelineId, create: bool) -> Result<()> {
-        *self = Some(GlobalTimelines::get(conf, zttid, create)?);
-        Ok(())
-    }
-
-    fn get(&self) -> &Arc<Timeline> {
-        self.as_ref().unwrap()
-    }
-}
-
-struct GlobalTimelinesState {
-    timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
-    wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
-}
-
-static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
-    Mutex::new(GlobalTimelinesState {
-        timelines: HashMap::new(),
-        wal_backup_launcher_tx: None,
-    })
-});
 
 #[derive(Clone, Copy, Serialize)]
 pub struct TimelineDeleteForceResult {
@@ -573,199 +738,88 @@ pub struct TimelineDeleteForceResult {
     pub was_active: bool,
 }
 
-/// A zero-sized struct used to manage access to the global timelines map.
-pub struct GlobalTimelines;
-
-impl GlobalTimelines {
-    pub fn init(wal_backup_launcher_tx: Sender<ZTenantTimelineId>) {
-        let mut state = TIMELINES_STATE.lock().unwrap();
-        assert!(state.wal_backup_launcher_tx.is_none());
-        state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
+/// Deletes directory and it's contents. Returns false if directory does not exist.
+fn delete_dir(path: PathBuf) -> Result<bool> {
+    match std::fs::remove_dir_all(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
     }
+}
 
-    fn create_internal(
-        mut state: MutexGuard<GlobalTimelinesState>,
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        peer_ids: Vec<NodeId>,
-    ) -> Result<Arc<Timeline>> {
-        match state.timelines.get(&zttid) {
-            Some(_) => bail!("timeline {} already exists", zttid),
-            None => {
-                // TODO: check directory existence
-                let dir = conf.timeline_dir(&zttid);
-                fs::create_dir_all(dir)?;
+/// Deactivates and sets TimelineState to Deleted, see `Timeline::delete()`, then deletes the
+/// corresponding data directory. We assume all timeline threads will eventually check that
+/// timeline is Deleted and terminate without panics.
+///
+/// Timeline cannot be recreated because we keep all deleted timelines in memory. It can be
+/// accidentally created again if safekeeper will restart and compute will connect to it, but this
+/// is very unlikely.
+pub async fn delete_force(
+    conf: &SafeKeeperConf,
+    zttid: &ZTenantTimelineId,
+) -> Result<TimelineDeleteForceResult> {
+    info!("deleting timeline {}", zttid);
+    let timeline = GlobalTimelines::get(*zttid);
 
-                let shared_state = SharedState::create(conf, &zttid, peer_ids)
-                    .context("failed to create shared state")?;
+    let was_active = timeline.delete().await;
+    Ok(TimelineDeleteForceResult {
+        dir_existed: delete_dir(conf.timeline_dir(zttid))?,
+        was_active,
+    })
+}
 
-                let new_tli = Arc::new(Timeline::new(
-                    zttid,
-                    state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
-                    shared_state,
-                ));
-                state.timelines.insert(zttid, Arc::clone(&new_tli));
-                Ok(new_tli)
+/// Deactivates and deletes all timelines for the tenant. Returns map of all timelines which
+/// the tenant had, `true` if a timeline was active. There may be a race if new timelines are
+/// created simultaneously. In that case the function will return error and the caller should
+/// try to delete tenant again later.
+pub async fn delete_force_all_for_tenant(
+    conf: &SafeKeeperConf,
+    tenant_id: &ZTenantId,
+) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
+    info!("deleting all timelines for tenant {}", tenant_id);
+    let to_delete = GlobalTimelines::get_all_for_tenant(*tenant_id);
+
+    let mut err = None;
+
+    let mut deleted = HashMap::new();
+    for tli in &to_delete {
+        let was_active = tli.delete().await;
+        let res = delete_dir(conf.timeline_dir(&tli.zttid));
+
+        match res {
+            Ok(dir_existed) => {
+                deleted.insert(
+                    tli.zttid,
+                    TimelineDeleteForceResult {
+                        dir_existed,
+                        was_active,
+                    },
+                );
+            }
+            Err(e) => {
+                error!("failed to delete timeline {}: {}", tli.zttid, e);
+                // Save error to return later.
+                err = Some(e);
             }
         }
     }
 
-    pub fn create(
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        peer_ids: Vec<NodeId>,
-    ) -> Result<Arc<Timeline>> {
-        let state = TIMELINES_STATE.lock().unwrap();
-        GlobalTimelines::create_internal(state, conf, zttid, peer_ids)
+    // There may be inactive timelines, so delete the whole tenant dir as well.
+    delete_dir(conf.tenant_dir(tenant_id))?;
+
+    let tlis_after_delete = GlobalTimelines::get_all_for_tenant(*tenant_id);
+    if tlis_after_delete.len() != to_delete.len() {
+        // Some timelines were created while we were deleting them, returning error
+        // to the caller, so it can retry later.
+        bail!(
+            "failed to delete all timelines for tenant {}: some timelines were created while we were deleting them",
+            tenant_id
+        );
     }
 
-    /// Get a timeline with control file loaded from the global TIMELINES_STATE.timelines map.
-    /// If control file doesn't exist and create=false, bails out.
-    pub fn get(
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        create: bool,
-    ) -> Result<Arc<Timeline>> {
-        let _enter = info_span!("", timeline = %zttid.timeline_id).entered();
-
-        let mut state = TIMELINES_STATE.lock().unwrap();
-
-        match state.timelines.get(&zttid) {
-            Some(result) => Ok(Arc::clone(result)),
-            None => {
-                let shared_state = SharedState::restore(conf, &zttid);
-
-                let shared_state = match shared_state {
-                    Ok(shared_state) => shared_state,
-                    Err(error) => {
-                        // TODO: always create timeline explicitly
-                        if error
-                            .root_cause()
-                            .to_string()
-                            .contains("No such file or directory")
-                            && create
-                        {
-                            return GlobalTimelines::create_internal(state, conf, zttid, vec![]);
-                        } else {
-                            return Err(error);
-                        }
-                    }
-                };
-
-                let new_tli = Arc::new(Timeline::new(
-                    zttid,
-                    state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
-                    shared_state,
-                ));
-                state.timelines.insert(zttid, Arc::clone(&new_tli));
-                Ok(new_tli)
-            }
-        }
-    }
-
-    /// Get loaded timeline, if it exists.
-    pub fn get_loaded(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
-        let state = TIMELINES_STATE.lock().unwrap();
-        state.timelines.get(&zttid).map(Arc::clone)
-    }
-
-    /// Get ZTenantTimelineIDs of all active timelines.
-    pub fn get_active_timelines() -> HashSet<ZTenantTimelineId> {
-        let state = TIMELINES_STATE.lock().unwrap();
-        state
-            .timelines
-            .iter()
-            .filter(|&(_, tli)| tli.is_active())
-            .map(|(zttid, _)| *zttid)
-            .collect()
-    }
-
-    /// Return FullTimelineInfo for all active timelines.
-    pub fn active_timelines_metrics() -> Vec<FullTimelineInfo> {
-        let state = TIMELINES_STATE.lock().unwrap();
-        state
-            .timelines
-            .iter()
-            .filter_map(|(_, tli)| tli.info_for_metrics())
-            .collect()
-    }
-
-    fn delete_force_internal(
-        conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
-        was_active: bool,
-    ) -> Result<TimelineDeleteForceResult> {
-        match std::fs::remove_dir_all(conf.timeline_dir(zttid)) {
-            Ok(_) => Ok(TimelineDeleteForceResult {
-                dir_existed: true,
-                was_active,
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TimelineDeleteForceResult {
-                dir_existed: false,
-                was_active,
-            }),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Deactivates and deletes the timeline, see `Timeline::deactivate_for_delete()`, the deletes
-    /// the corresponding data directory.
-    /// We assume all timeline threads do not care about `GlobalTimelines` not containing the timeline
-    /// anymore, and they will eventually terminate without panics.
-    ///
-    /// There are multiple ways the timeline may be accidentally "re-created" (so we end up with two
-    /// `Timeline` objects in memory):
-    /// a) a compute node connects after this method is called, or
-    /// b) an HTTP GET request about the timeline is made and it's able to restore the current state, or
-    /// c) an HTTP POST request for timeline creation is made after the timeline is already deleted.
-    /// TODO: ensure all of the above never happens.
-    pub async fn delete_force(
-        conf: &SafeKeeperConf,
-        zttid: &ZTenantTimelineId,
-    ) -> Result<TimelineDeleteForceResult> {
-        info!("deleting timeline {}", zttid);
-        let timeline = TIMELINES_STATE.lock().unwrap().timelines.remove(zttid);
-        let mut was_active = false;
-        if let Some(tli) = timeline {
-            was_active = tli.deactivate_for_delete().await?;
-        }
-        GlobalTimelines::delete_force_internal(conf, zttid, was_active)
-    }
-
-    /// Deactivates and deletes all timelines for the tenant, see `delete()`.
-    /// Returns map of all timelines which the tenant had, `true` if a timeline was active.
-    /// There may be a race if new timelines are created simultaneously.
-    pub async fn delete_force_all_for_tenant(
-        conf: &SafeKeeperConf,
-        tenant_id: &ZTenantId,
-    ) -> Result<HashMap<ZTenantTimelineId, TimelineDeleteForceResult>> {
-        info!("deleting all timelines for tenant {}", tenant_id);
-        let mut to_delete = HashMap::new();
-        {
-            // Keep mutex in this scope.
-            let timelines = &mut TIMELINES_STATE.lock().unwrap().timelines;
-            for (&zttid, tli) in timelines.iter() {
-                if zttid.tenant_id == *tenant_id {
-                    to_delete.insert(zttid, tli.clone());
-                }
-            }
-            // TODO: test that the correct subset of timelines is removed. It's complicated because they are implicitly created currently.
-            timelines.retain(|zttid, _| !to_delete.contains_key(zttid));
-        }
-        let mut deleted = HashMap::new();
-        for (zttid, timeline) in to_delete {
-            let was_active = timeline.deactivate_for_delete().await?;
-            deleted.insert(
-                zttid,
-                GlobalTimelines::delete_force_internal(conf, &zttid, was_active)?,
-            );
-        }
-        // There may be inactive timelines, so delete the whole tenant dir as well.
-        match std::fs::remove_dir_all(conf.tenant_dir(tenant_id)) {
-            Ok(_) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            e => e?,
-        };
+    if let Some(e) = err {
+        Err(e)
+    } else {
         Ok(deleted)
     }
 }

@@ -9,8 +9,6 @@ use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-use tracing::*;
-
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
 use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
@@ -122,13 +120,7 @@ impl FileStorage {
     }
 
     /// Read in the control file.
-    /// If create=false and file doesn't exist, bails out.
     pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
-        info!(
-            "loading control file {}",
-            control_file_path.as_ref().display(),
-        );
-
         let mut control_file = OpenOptions::new()
             .read(true)
             .write(true)

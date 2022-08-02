@@ -26,8 +26,8 @@ use tracing::*;
 use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::broker::{Election, ElectionLeader};
-use crate::timeline::{GlobalTimelines, Timeline};
-use crate::{broker, SafeKeeperConf};
+use crate::timeline::Timeline;
+use crate::{broker, GlobalTimelines, SafeKeeperConf};
 
 use once_cell::sync::OnceCell;
 
@@ -54,7 +54,7 @@ pub fn wal_backup_launcher_thread_main(
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
 fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
+    Some(GlobalTimelines::get(zttid)).filter(|tli| tli.wal_backup_attend())
 }
 
 struct WalBackupTaskHandle {
@@ -191,7 +191,8 @@ struct WalBackupTask {
     election: Election,
 }
 
-/// Offload single timeline.
+/// Offload single timeline. Called only after we checked that backup
+/// is required (wal_backup_attend) and possible (can_wal_backup).
 async fn backup_task_main(
     zttid: ZTenantTimelineId,
     timeline_dir: PathBuf,
@@ -199,18 +200,17 @@ async fn backup_task_main(
     election: Election,
 ) {
     info!("started");
-    let timeline: Arc<Timeline> = if let Some(tli) = GlobalTimelines::get_loaded(zttid) {
-        tli
-    } else {
-        /* Timeline could get deleted while task was starting, just exit then. */
-        info!("no timeline, exiting");
+    let tli = GlobalTimelines::get(zttid);
+    let res = tli.get_wal_seg_size();
+    if let Err(e) = res {
+        info!("backup error for timeline {}: {}", zttid, e);
         return;
-    };
+    }
 
     let mut wb = WalBackupTask {
-        wal_seg_size: timeline.get_wal_seg_size(),
-        commit_lsn_watch_rx: timeline.get_commit_lsn_watch_rx(),
-        timeline,
+        wal_seg_size: res.unwrap(),
+        commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
+        timeline: tli,
         timeline_dir,
         leader: None,
         election,
@@ -253,7 +253,7 @@ impl WalBackupTask {
                 if retry_attempt == 0 {
                     // wait for new WAL to arrive
                     if let Err(e) = self.commit_lsn_watch_rx.changed().await {
-                        // should never happen, as we hold Arc to timeline.
+                        // can happen if timeline is deleted
                         error!("commit_lsn watch shut down: {:?}", e);
                         return;
                     }
@@ -279,7 +279,12 @@ impl WalBackupTask {
                     continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
                 }
                 // Perhaps peers advanced the position, check shmem value.
-                backup_lsn = self.timeline.get_wal_backup_lsn();
+                let res = self.timeline.get_wal_backup_lsn();
+                if let Err(e) = res {
+                    error!("backup error: {}", e);
+                    return;
+                }
+                backup_lsn = res.unwrap();
                 if backup_lsn.segment_number(self.wal_seg_size)
                     >= commit_lsn.segment_number(self.wal_seg_size)
                 {
@@ -322,7 +327,11 @@ impl WalBackupTask {
                 {
                     Ok(backup_lsn_result) => {
                         backup_lsn = backup_lsn_result;
-                        self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
+                        if let Err(e) = res {
+                            error!("backup error: {}", e);
+                            return;
+                        }
                         retry_attempt = 0;
                     }
                     Err(e) => {

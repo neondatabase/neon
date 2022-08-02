@@ -5,8 +5,8 @@ use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 use crate::receive_wal::ReceiveWalConn;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
 use crate::send_wal::ReplicationConn;
-use crate::timeline::{Timeline, TimelineTools};
-use crate::SafeKeeperConf;
+use crate::timeline::Timeline;
+use crate::{GlobalTimelines, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 
 use postgres_ffi::PG_TLI;
@@ -98,17 +98,12 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             query_string, self.ztimelineid
         );
 
-        let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
-            || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
-
         let tenantid = self.ztenantid.context("tenantid is required")?;
         let timelineid = self.ztimelineid.context("timelineid is required")?;
         if self.timeline.is_none() {
-            self.timeline.set(
-                &self.conf,
-                ZTenantTimelineId::new(tenantid, timelineid),
-                create,
-            )?;
+            self.timeline = Some(GlobalTimelines::get(ZTenantTimelineId::new(
+                tenantid, timelineid,
+            )));
         }
 
         match cmd {
@@ -144,7 +139,8 @@ impl SafekeeperPostgresHandler {
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
         self.timeline
-            .get()
+            .as_ref()
+            .unwrap()
             .process_msg(msg)
             .context("failed to process ProposerAcceptorMessage")
     }
@@ -153,23 +149,18 @@ impl SafekeeperPostgresHandler {
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
+        let tli = self.timeline.as_ref().unwrap();
+
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
-            self.timeline.get().get_end_of_wal()
+            tli.get_flush_lsn()?
         } else {
             // other clients shouldn't get any uncommitted WAL
-            self.timeline.get().get_state().0.commit_lsn
+            tli.get_state()?.0.commit_lsn
         }
         .to_string();
 
-        let sysid = self
-            .timeline
-            .get()
-            .get_state()
-            .1
-            .server
-            .system_id
-            .to_string();
+        let sysid = tli.get_state()?.1.server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

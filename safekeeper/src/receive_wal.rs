@@ -20,7 +20,6 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::timeline::TimelineTools;
 use utils::{
     postgres_backend::PostgresBackend,
     pq_proto::{BeMessage, FeMessage},
@@ -112,9 +111,9 @@ impl<'pg> ReceiveWalConn<'pg> {
                 // Register the connection and defer unregister. Do that only
                 // after processing first message, as it sets wal_seg_size,
                 // wanted by many.
-                spg.timeline.get().on_compute_connect()?;
+                spg.timeline.as_ref().unwrap().on_compute_connect()?;
                 _guard = Some(ComputeConnectionGuard {
-                    timeline: Arc::clone(spg.timeline.get()),
+                    timeline: Arc::clone(spg.timeline.as_ref().unwrap()),
                 });
                 first_time_through = false;
             }
@@ -190,6 +189,8 @@ struct ComputeConnectionGuard {
 
 impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        self.timeline.on_compute_disconnect().unwrap();
+        if let Err(e) = self.timeline.on_compute_disconnect() {
+            error!("failed to unregister compute connection: {}", e);
+        }
     }
 }
