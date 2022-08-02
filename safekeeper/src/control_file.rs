@@ -9,8 +9,6 @@ use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-use tracing::*;
-
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
 use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECONDS_BUCKETS};
@@ -55,12 +53,13 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    pub fn restore_new(zttid: &TenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
-        let timeline_dir = conf.timeline_dir(zttid);
-        let tenant_id = zttid.tenant_id.to_string();
-        let timeline_id = zttid.timeline_id.to_string();
+    /// Initialize storage by loading state from disk.
+    pub fn restore_new(ttid: &TenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
+        let timeline_dir = conf.timeline_dir(ttid);
+        let tenant_id = ttid.tenant_id.to_string();
+        let timeline_id = ttid.timeline_id.to_string();
 
-        let state = Self::load_control_file_conf(conf, zttid)?;
+        let state = Self::load_control_file_conf(conf, ttid)?;
 
         Ok(FileStorage {
             timeline_dir,
@@ -71,28 +70,28 @@ impl FileStorage {
         })
     }
 
+    /// Create file storage for a new timeline, but don't persist it yet.
     pub fn create_new(
-        zttid: &TenantTimelineId,
+        ttid: &TenantTimelineId,
         conf: &SafeKeeperConf,
         state: SafeKeeperState,
     ) -> Result<FileStorage> {
-        let timeline_dir = conf.timeline_dir(zttid);
-        let tenant_id = zttid.tenant_id.to_string();
-        let timeline_id = zttid.timeline_id.to_string();
+        let timeline_dir = conf.timeline_dir(ttid);
+        let tenant_id = ttid.tenant_id.to_string();
+        let timeline_id = ttid.timeline_id.to_string();
 
-        let mut store = FileStorage {
+        let store = FileStorage {
             timeline_dir,
             conf: conf.clone(),
             persist_control_file_seconds: PERSIST_CONTROL_FILE_SECONDS
                 .with_label_values(&[&tenant_id, &timeline_id]),
-            state: state.clone(),
+            state,
         };
 
-        store.persist(&state)?;
         Ok(store)
     }
 
-    // Check the magic/version in the on-disk data and deserialize it, if possible.
+    /// Check the magic/version in the on-disk data and deserialize it, if possible.
     fn deser_sk_state(buf: &mut &[u8]) -> Result<SafeKeeperState> {
         // Read the version independent part
         let magic = buf.read_u32::<LittleEndian>()?;
@@ -112,23 +111,17 @@ impl FileStorage {
         upgrade_control_file(buf, version)
     }
 
-    // Load control file for given zttid at path specified by conf.
+    /// Load control file for given ttid at path specified by conf.
     pub fn load_control_file_conf(
         conf: &SafeKeeperConf,
-        zttid: &TenantTimelineId,
+        ttid: &TenantTimelineId,
     ) -> Result<SafeKeeperState> {
-        let path = conf.timeline_dir(zttid).join(CONTROL_FILE_NAME);
+        let path = conf.timeline_dir(ttid).join(CONTROL_FILE_NAME);
         Self::load_control_file(path)
     }
 
     /// Read in the control file.
-    /// If create=false and file doesn't exist, bails out.
     pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
-        info!(
-            "loading control file {}",
-            control_file_path.as_ref().display(),
-        );
-
         let mut control_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -179,8 +172,8 @@ impl Deref for FileStorage {
 }
 
 impl Storage for FileStorage {
-    // persists state durably to underlying storage
-    // for description see https://lwn.net/Articles/457667/
+    /// persists state durably to underlying storage
+    /// for description see https://lwn.net/Articles/457667/
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
         let _timer = &self.persist_control_file_seconds.start_timer();
 
@@ -264,57 +257,57 @@ mod test {
 
     fn load_from_control_file(
         conf: &SafeKeeperConf,
-        zttid: &TenantTimelineId,
+        ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(&conf.timeline_dir(ttid)).expect("failed to create timeline dir");
         Ok((
-            FileStorage::restore_new(zttid, conf)?,
-            FileStorage::load_control_file_conf(conf, zttid)?,
+            FileStorage::restore_new(ttid, conf)?,
+            FileStorage::load_control_file_conf(conf, ttid)?,
         ))
     }
 
     fn create(
         conf: &SafeKeeperConf,
-        zttid: &TenantTimelineId,
+        ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(&conf.timeline_dir(zttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(&conf.timeline_dir(ttid)).expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
-        let storage = FileStorage::create_new(zttid, conf, state.clone())?;
+        let storage = FileStorage::create_new(ttid, conf, state.clone())?;
         Ok((storage, state))
     }
 
     #[test]
     fn test_read_write_safekeeper_state() {
         let conf = stub_conf();
-        let zttid = TenantTimelineId::generate();
+        let ttid = TenantTimelineId::generate();
         {
-            let (mut storage, mut state) = create(&conf, &zttid).expect("failed to create state");
+            let (mut storage, mut state) = create(&conf, &ttid).expect("failed to create state");
             // change something
             state.commit_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
 
-        let (_, state) = load_from_control_file(&conf, &zttid).expect("failed to read state");
+        let (_, state) = load_from_control_file(&conf, &ttid).expect("failed to read state");
         assert_eq!(state.commit_lsn, Lsn(42));
     }
 
     #[test]
     fn test_safekeeper_state_checksum_mismatch() {
         let conf = stub_conf();
-        let zttid = TenantTimelineId::generate();
+        let ttid = TenantTimelineId::generate();
         {
-            let (mut storage, mut state) = create(&conf, &zttid).expect("failed to read state");
+            let (mut storage, mut state) = create(&conf, &ttid).expect("failed to read state");
 
             // change something
             state.commit_lsn = Lsn(42);
             storage.persist(&state).expect("failed to persist state");
         }
-        let control_path = conf.timeline_dir(&zttid).join(CONTROL_FILE_NAME);
+        let control_path = conf.timeline_dir(&ttid).join(CONTROL_FILE_NAME);
         let mut data = fs::read(&control_path).unwrap();
         data[0] += 1; // change the first byte of the file to fail checksum validation
         fs::write(&control_path, &data).expect("failed to write control file");
 
-        match load_from_control_file(&conf, &zttid) {
+        match load_from_control_file(&conf, &ttid) {
             Err(err) => assert!(err
                 .to_string()
                 .contains("safekeeper control file checksum mismatch")),
