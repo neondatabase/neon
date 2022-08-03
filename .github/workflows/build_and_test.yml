@@ -7,9 +7,9 @@ on:
       - release
   pull_request:
 
-defaults:
-  run:
-    shell: bash -euxo pipefail {0}
+#defaults:
+  #run:
+    #shell: bash -euxo pipefail {0}
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
