@@ -94,7 +94,7 @@ jobs:
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
             v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-   
 
       - name: Cache postgres build
         id: cache_pg
@@ -407,7 +407,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
   build-compute-node-image:
-    name: 'kaniko-compute-tools'
+    name: 'kaniko-compute-node'
     if: github.event_name != 'workflow_dispatch'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
