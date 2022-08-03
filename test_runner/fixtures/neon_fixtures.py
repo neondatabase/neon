@@ -221,7 +221,7 @@ def can_bind(host: str, port: int) -> bool:
         # moment. If that changes, we should use start using SO_REUSEADDR here
         # too, to allow reusing ports more quickly.
         # See https://github.com/neondatabase/neon/issues/801
-        #sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         try:
             sock.bind((host, port))
@@ -230,6 +230,8 @@ def can_bind(host: str, port: int) -> bool:
         except socket.error:
             log.info(f"Port {port} is in use, skipping")
             return False
+        finally:
+            sock.close()
 
 
 class PortDistributor:
@@ -1860,8 +1862,8 @@ class Safekeeper:
         started_at = time.time()
         while True:
             try:
-                http_cli = self.http_client()
-                http_cli.check_status()
+                with self.http_client() as http_cli:
+                    http_cli.check_status()
             except Exception as e:
                 elapsed = time.time() - started_at
                 if elapsed > 3:
@@ -2012,9 +2014,9 @@ class Etcd:
         return f'http://127.0.0.1:{self.port}'
 
     def check_status(self):
-        s = requests.Session()
-        s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
-        s.get(f"{self.client_url()}/health").raise_for_status()
+        with requests.Session() as s:
+            s.mount('http://', requests.adapters.HTTPAdapter(max_retries=1))  # do not retry
+            s.get(f"{self.client_url()}/health").raise_for_status()
 
     def try_start(self):
         if self.handle is not None:
