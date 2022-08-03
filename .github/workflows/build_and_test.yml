@@ -384,11 +384,11 @@ jobs:
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-        shell: /busybox/sh
+        shell: sh
 
       - name: Kaniko build console
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID
-        shell: /busybox/sh
+        shell: sh
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
@@ -404,11 +404,11 @@ jobs:
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-        shell: /busybox/sh
+        shell: sh
 
       - name: Kaniko build console
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
-        shell: /busybox/sh
+        shell: sh
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
@@ -424,12 +424,12 @@ jobs:
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-        shell: /busybox/sh
+        shell: sh
 
       - name: Kaniko build console
         working-directory: ./vendor/postgres/
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
-        shell: /busybox/sh
+        shell: sh
 
   docker-image:
     runs-on: [ self-hosted, Linux, k8s-runner ]
