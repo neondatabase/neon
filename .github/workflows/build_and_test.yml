@@ -395,7 +395,6 @@ jobs:
       - name: Check output
         id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
-        uses: actions/github-script@v3
         run: echo "::set-output name=key::true"
 
   build-neon-image:
