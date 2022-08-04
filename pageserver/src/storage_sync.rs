@@ -193,7 +193,6 @@ use self::download::download_index_parts;
 pub use self::download::gather_tenant_timelines_index_parts;
 pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
-// TODO Add pageserver instance label
 lazy_static! {
     static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
         "pageserver_remote_storage_remaining_sync_items",

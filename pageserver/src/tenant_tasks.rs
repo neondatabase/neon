@@ -19,7 +19,6 @@ use tokio::sync::watch;
 use tracing::*;
 use utils::zid::ZTenantId;
 
-// TODO Add pageserver instance label
 static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_tenant_task_events",
