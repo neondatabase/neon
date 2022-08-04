@@ -13,7 +13,7 @@ from uuid import UUID
 
 import pytest
 
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres, RemoteStorageKind, available_remote_storages, wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import lsn_from_hex
 
 
@@ -38,7 +38,7 @@ async def tenant_workload(env: NeonEnv, pg: Postgres):
 
 async def all_tenants_workload(env: NeonEnv, tenants_pgs):
     workers = []
-    for tenant, pg in tenants_pgs:
+    for _, pg in tenants_pgs:
         worker = tenant_workload(env, pg)
         workers.append(asyncio.create_task(worker))
 
@@ -46,23 +46,18 @@ async def all_tenants_workload(env: NeonEnv, tenants_pgs):
     await asyncio.gather(*workers)
 
 
-@pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_tenants_many(neon_env_builder: NeonEnvBuilder, storage_type: str):
-
-    if storage_type == 'local_fs':
-        neon_env_builder.enable_local_fs_remote_storage()
-    elif storage_type == 'mock_s3':
-        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
-    else:
-        raise RuntimeError(f'Unknown storage type: {storage_type}')
-
-    neon_env_builder.enable_local_fs_remote_storage()
+@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storatge_kind,
+        test_name='test_tenants_many',
+    )
 
     env = neon_env_builder.init_start()
 
     tenants_pgs: List[Tuple[UUID, Postgres]] = []
 
-    for i in range(1, 5):
+    for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
         tenant, _ = env.neon_cli.create_tenant(
             conf={

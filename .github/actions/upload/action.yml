@@ -1,0 +1,51 @@
+name: "Upload an artifact"
+description: "Custom upload action"
+inputs:
+  name:
+    description: "Artifact name"
+    required: true
+  path:
+    description: "A directory or file to upload"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare artifact
+      shell: bash -euxo pipefail {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        mkdir -p $(dirname $ARCHIVE)
+
+        if [ -f ${ARCHIVE} ]; then
+          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
+          exit 1
+        fi
+
+        ZSTD_NBTHREADS=0
+        if [ -d  ${SOURCE} ]; then
+          time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
+        elif [ -f ${SOURCE} ]; then
+          time tar -cf ${ARCHIVE} --zstd ${SOURCE}
+        else
+          echo 2>&1 "${SOURCE} neither directory nor file, don't know how to handle it"
+        fi
+
+    - name: Upload artifact
+      shell: bash -euxo pipefail {0}
+      env:
+        SOURCE: ${{ inputs.path }}
+        ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+      run: |
+        BUCKET=neon-github-public-dev
+        PREFIX=artifacts/${GITHUB_RUN_ID}
+        FILENAME=$(basename $ARCHIVE)
+
+        FILESIZE=$(du -sh ${ARCHIVE} | cut -f1)
+
+        time aws s3 mv --only-show-errors ${ARCHIVE} s3://${BUCKET}/${PREFIX}/${GITHUB_RUN_ATTEMPT}/${FILENAME}
+
+        # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
+        echo "[${FILENAME}](https://${BUCKET}.s3.amazonaws.com/${PREFIX}/${GITHUB_RUN_ATTEMPT}/${FILENAME}) ${FILESIZE}" >> ${GITHUB_STEP_SUMMARY}

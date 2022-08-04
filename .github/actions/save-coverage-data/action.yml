@@ -8,10 +8,15 @@ runs:
       shell: bash -euxo pipefail {0}
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
-    - name: Upload coverage data
-      uses: actions/upload-artifact@v3
+    - name: Download previous coverage data into the same directory
+      uses: ./.github/actions/download
       with:
-        retention-days: 7
-        if-no-files-found: error
         name: coverage-data-artifact
-        path: /tmp/coverage/
+        path: /tmp/coverage
+        skip-if-does-not-exist: true # skip if there's no previous coverage to download
+
+    - name: Upload coverage data
+      uses: ./.github/actions/upload
+      with:
+        name: coverage-data-artifact
+        path: /tmp/coverage
