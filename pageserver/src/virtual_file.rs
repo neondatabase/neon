@@ -41,7 +41,6 @@ lazy_static! {
     )
     .expect("failed to define a metric");
 }
-
 lazy_static! {
     static ref STORAGE_IO_SIZE: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",

@@ -105,7 +105,6 @@ impl crate::walredo::WalRedoManager for DummyRedoManager {
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
 // for access to the postgres process ('wait') since there is only one for
 // each tenant.
-//
 lazy_static! {
     static ref WAL_REDO_TIME: Histogram =
         register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
