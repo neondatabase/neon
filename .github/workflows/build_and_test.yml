@@ -394,11 +394,10 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build console
-        with:
-          build-args: |
-            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID
+        env:
+          AWS_ACCESS_KEY_ID: "${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
+          AWS_SECRET_ACCESS_KEY: "${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
