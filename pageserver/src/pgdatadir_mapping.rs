@@ -462,16 +462,16 @@ pub trait DatadirTimeline: Timeline {
         Ok(result.to_keyspace())
     }
 
-    /// Get cached size of relation if it nt updated fter speified LSN
+    /// Get cached size of relation if it not updated after specified LSN
     fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber>;
 
     /// Update cached relation size if there is no more recent update
     fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
 
-    /// Store cached reltion size
+    /// Store cached relation size
     fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
 
-    /// Remove cached reltion size
+    /// Remove cached relation size
     fn remove_cached_rel_size(&self, tag: &RelTag);
 }
 
