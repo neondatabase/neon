@@ -53,7 +53,7 @@ pub fn wal_backup_launcher_thread_main(
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
 fn is_wal_backup_required(zttid: ZTenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup_attend())
+    GlobalTimelines::get_loaded(zttid).filter(|t| t.wal_backup-_attend())
 }
 
 struct WalBackupTaskHandle {

@@ -25,8 +25,6 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
-use super::models::TimelineCreateRequest;
-
 #[derive(Debug, Serialize)]
 struct SafekeeperStatus {
     id: NodeId,
@@ -122,20 +120,6 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::OK, status)
 }
 
-async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let request_data: TimelineCreateRequest = json_request(&mut request).await?;
-
-    let zttid = ZTenantTimelineId {
-        tenant_id: parse_request_param(&request, "tenant_id")?,
-        timeline_id: request_data.timeline_id,
-    };
-    check_permission(&request, Some(zttid.tenant_id))?;
-    GlobalTimelines::create(get_conf(&request), zttid, request_data.peer_ids)
-        .map_err(ApiError::from_err)?;
-
-    json_response(StatusCode::CREATED, ())
-}
-
 /// Deactivates the timeline and removes its data directory.
 ///
 /// It does not try to stop any processing of the timeline; there is no such code at the time of writing.
@@ -221,8 +205,7 @@ pub fn make_router(
         .data(Arc::new(conf))
         .data(auth)
         .get("/v1/status", status_handler)
-        // Will be used in the future instead of implicit timeline creation
-        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
+        // TODO: update OpenAPI spec
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_status_handler,

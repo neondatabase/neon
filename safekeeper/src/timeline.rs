@@ -557,6 +557,7 @@ impl TimelineTools for Option<Arc<Timeline>> {
 struct GlobalTimelinesState {
     timelines: HashMap<ZTenantTimelineId, Arc<Timeline>>,
     wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
+    conf: Option<SafeKeeperConf>,
 }
 
 lazy_static! {
@@ -576,15 +577,16 @@ pub struct TimelineDeleteForceResult {
 pub struct GlobalTimelines;
 
 impl GlobalTimelines {
-    pub fn init(wal_backup_launcher_tx: Sender<ZTenantTimelineId>) {
+    pub fn init(wal_backup_launcher_tx: Sender<ZTenantTimelineId>, conf: &SafeKeeperConf) {
         let mut state = TIMELINES_STATE.lock().unwrap();
         assert!(state.wal_backup_launcher_tx.is_none());
+        assert!(state.conf.is_none());
         state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
+        state.conf = Some(conf.clone());
     }
 
     fn create_internal(
         mut state: MutexGuard<GlobalTimelinesState>,
-        conf: &SafeKeeperConf,
         zttid: ZTenantTimelineId,
         peer_ids: Vec<NodeId>,
     ) -> Result<Arc<Timeline>> {
@@ -609,15 +611,6 @@ impl GlobalTimelines {
         }
     }
 
-    pub fn create(
-        conf: &SafeKeeperConf,
-        zttid: ZTenantTimelineId,
-        peer_ids: Vec<NodeId>,
-    ) -> Result<Arc<Timeline>> {
-        let state = TIMELINES_STATE.lock().unwrap();
-        GlobalTimelines::create_internal(state, conf, zttid, peer_ids)
-    }
-
     /// Get a timeline with control file loaded from the global TIMELINES_STATE.timelines map.
     /// If control file doesn't exist and create=false, bails out.
     pub fn get(
@@ -625,7 +618,7 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
-        let _enter = info_span!("", timeline = %zttid.tenant_id).entered();
+        let _enter = info_span!("", tenant = %zttid.tenant_id).entered();
 
         let mut state = TIMELINES_STATE.lock().unwrap();
 
