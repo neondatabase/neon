@@ -55,6 +55,7 @@ use utils::{
 use crate::layered_repository::writeback_ephemeral_file;
 use crate::repository::Key;
 
+// TODO move ownership into a new PageserverState struct
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
 

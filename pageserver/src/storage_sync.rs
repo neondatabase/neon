@@ -193,6 +193,7 @@ use self::download::download_index_parts;
 pub use self::download::gather_tenant_timelines_index_parts;
 pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
         "pageserver_remote_storage_remaining_sync_items",
@@ -220,6 +221,7 @@ lazy_static! {
     .expect("failed to register pageserver remote index upload vec");
 }
 
+// TODO move ownership into a new PageserverState struct
 static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 
 /// A timeline status to share with pageserver's sync counterpart,

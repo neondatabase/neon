@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref NUM_ONDISK_LAYERS: IntGauge =
         register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")

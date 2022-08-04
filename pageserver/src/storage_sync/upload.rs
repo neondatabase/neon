@@ -20,6 +20,7 @@ use crate::{
 };
 use metrics::{register_int_counter_vec, IntCounterVec};
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref NO_LAYERS_UPLOAD: IntCounterVec = register_int_counter_vec!(
         "pageserver_remote_storage_no_layers_uploads_total",

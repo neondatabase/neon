@@ -25,6 +25,7 @@ use utils::lsn::Lsn;
 
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
+// TODO move ownership into a new PageserverState struct
 mod tenants_state {
     use anyhow::ensure;
     use std::{

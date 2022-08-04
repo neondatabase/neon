@@ -434,6 +434,7 @@ const TIME_BUCKETS: &[f64] = &[
     0.1,  // 1/10 s
 ];
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_smgr_query_seconds",

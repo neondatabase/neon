@@ -51,6 +51,7 @@ use utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::shutdown_pageserver;
 
+// TODO move ownership into a new PageserverState struct
 lazy_static! {
     /// Each thread that we track is associated with a "thread ID". It's just
     /// an increasing number that we assign, not related to any system thread

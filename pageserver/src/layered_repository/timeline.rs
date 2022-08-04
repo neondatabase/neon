@@ -59,6 +59,7 @@ use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
 // Metrics collected on operations on the storage repository.
+// TODO Add pageserver instance label
 lazy_static! {
     pub static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_storage_operations_seconds",
@@ -69,6 +70,7 @@ lazy_static! {
 }
 
 // Metrics collected on operations on the storage repository.
+// TODO Add pageserver instance label
 lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
@@ -78,6 +80,7 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref MATERIALIZED_PAGE_CACHE_HIT: IntCounterVec = register_int_counter_vec!(
         "pageserver_materialized_cache_hits_total",
@@ -93,6 +96,7 @@ lazy_static! {
     .expect("failed to define a metric");
 }
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_last_record_lsn",
@@ -105,6 +109,7 @@ lazy_static! {
 // Metrics for determining timeline's physical size.
 // A layered timeline's physical is defined as the total size of
 // (delta/image) layer files on disk.
+// TODO Add pageserver instance label
 lazy_static! {
     static ref CURRENT_PHYSICAL_SIZE: UIntGaugeVec = register_uint_gauge_vec!(
         "pageserver_current_physical_size",
@@ -116,6 +121,7 @@ lazy_static! {
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
+// TODO Add pageserver instance label
 lazy_static! {
     static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
         "pageserver_created_persistent_files_total",

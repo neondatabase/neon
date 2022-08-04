@@ -32,6 +32,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref STORAGE_IO_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_io_operations_seconds",
@@ -41,6 +42,8 @@ lazy_static! {
     )
     .expect("failed to define a metric");
 }
+
+// TODO Add pageserver instance label
 lazy_static! {
     static ref STORAGE_IO_SIZE: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",

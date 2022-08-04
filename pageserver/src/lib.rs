@@ -42,6 +42,7 @@ pub const STORAGE_FORMAT_VERSION: u16 = 3;
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
+// TODO Add pageserver instance label
 lazy_static! {
     static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "pageserver_live_connections",

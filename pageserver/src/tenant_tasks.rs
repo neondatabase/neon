@@ -19,6 +19,7 @@ use tokio::sync::watch;
 use tracing::*;
 use utils::zid::ZTenantId;
 
+// TODO Add pageserver instance label
 static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_tenant_task_events",
@@ -87,6 +88,7 @@ async fn compaction_loop(tenantid: ZTenantId, mut cancel: watch::Receiver<()>) {
     );
 }
 
+// TODO move ownership into a new PageserverState struct
 static START_GC_LOOP: OnceCell<mpsc::Sender<ZTenantId>> = OnceCell::new();
 static START_COMPACTION_LOOP: OnceCell<mpsc::Sender<ZTenantId>> = OnceCell::new();
 
