@@ -393,17 +393,16 @@ jobs:
             ./vendor/postgres/Dockerfile
 
       - name: Check output
-        id: soft-fail
+        id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
         uses: actions/github-script@v3
-        with:
-          script: |
-            core.setFailed('Empty message')
+        run: echo "::set-output name=key::true"
 
   build-neon-image:
     name: 'kaniko-neon'
     if: |
-      github.event_name != 'workflow_dispatch'
+      github.event_name != 'workflow_dispatch' &&
+      steps.skip.outputs.key == 'true'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -425,7 +424,8 @@ jobs:
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
     if: |
-      github.event_name != 'workflow_dispatch'
+      github.event_name != 'workflow_dispatch' &&
+      steps.skip.outputs.key == 'true'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -444,7 +444,8 @@ jobs:
   build-compute-node-image:
     name: 'kaniko-compute-node'
     if: |
-      github.event_name != 'workflow_dispatch'
+      github.event_name != 'workflow_dispatch' &&
+      steps.skip.outputs.key == 'true'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
