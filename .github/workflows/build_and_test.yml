@@ -440,7 +440,7 @@ jobs:
   promote-neon-image:
     name: 'promote-neon'
     runs-on: dev
-    needs: [ build-neon-image ]
+    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
 
@@ -452,7 +452,7 @@ jobs:
   promote-compute-tools-image:
     name: 'promote-compute-tools'
     runs-on: dev
-    needs: [ build-compute-tools-image ]
+    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
 
@@ -464,7 +464,7 @@ jobs:
   promote-compute-node-image:
     name: 'promote-compute-node'
     runs-on: dev
-    needs: [ build-compute-node-image ]
+    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
 
