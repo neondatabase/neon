@@ -437,6 +437,42 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
         shell: sh
 
+  promote-neon-image:
+    name: 'promote-neon'
+    runs-on: dev
+    needs: [ build-neon-image ]
+    if: github.event_name != 'workflow_dispatch'
+    container: amazon/aws-cli
+
+    steps:
+      - name: Promote image
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag latest --image-manifest "$MANIFEST"
+
+  promote-compute-tools-image:
+    name: 'promote-compute-tools'
+    runs-on: dev
+    needs: [ build-compute-tools-image ]
+    if: github.event_name != 'workflow_dispatch'
+    container: amazon/aws-cli
+
+    steps:
+      - name: Promote image
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name compute-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-tools --image-tag latest --image-manifest "$MANIFEST"
+
+  promote-compute-node-image:
+    name: 'promote-compute-node'
+    runs-on: dev
+    needs: [ build-compute-node-image ]
+    if: github.event_name != 'workflow_dispatch'
+    container: amazon/aws-cli
+
+    steps:
+      - name: Promote image
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag latest --image-manifest "$MANIFEST"
+
   docker-image:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     needs: [ pg_regress-tests, other-tests ]
