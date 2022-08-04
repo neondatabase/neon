@@ -378,7 +378,7 @@ jobs:
   dockerfile-check:
     name: 'dockerfile check'
     runs-on: dev
-    container: node:18-bullseye-slim
+    container: node:18-bullseye
     steps:
       - name: Checkout
         uses: actions/checkout@v3
