@@ -376,8 +376,12 @@ jobs:
             }"
 
   dockerfile-check:
+    name: 'dockerfile check'
+    runs-on: dev
+    container: node:18-bullseye
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
 
       - name: Get specific changed files
         id: dockerfile-check
