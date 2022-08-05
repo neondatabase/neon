@@ -146,7 +146,7 @@ def test_pgbench_simple_update_workload(pg_compare: PgCompare, scale: int, durat
     record_thread.join()
 
 
-def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
+def start_pgbench_intensive_initialization(env: PgCompare, scale: int, done_event: threading.Event):
     with env.record_duration("run_duration"):
         # Needs to increase the statement timeout (default: 120s) because the
         # initialization step can be slow with a large scale.
@@ -158,6 +158,8 @@ def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
             env.pg.connstr(options='-cstatement_timeout=360s')
         ])
 
+    done_event.set()
+
 
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize("scale", get_scales_matrix(1000))
@@ -166,15 +168,17 @@ def test_pgbench_intensive_init_workload(pg_compare: PgCompare, scale: int):
     with env.pg.connect().cursor() as cur:
         cur.execute("CREATE TABLE foo as select generate_series(1,100000)")
 
+    workload_done_event = threading.Event()
+
     workload_thread = threading.Thread(target=start_pgbench_intensive_initialization,
-                                       args=(env, scale))
+                                       args=(env, scale, workload_done_event))
     workload_thread.start()
 
     record_thread = threading.Thread(target=record_lsn_write_lag,
-                                     args=(env, lambda: workload_thread.is_alive()))
+                                     args=(env, lambda: not workload_done_event.is_set()))
     record_thread.start()
 
-    record_read_latency(env, lambda: workload_thread.is_alive(), "SELECT count(*) from foo")
+    record_read_latency(env, lambda: not workload_done_event.is_set(), "SELECT count(*) from foo")
     workload_thread.join()
     record_thread.join()
 
