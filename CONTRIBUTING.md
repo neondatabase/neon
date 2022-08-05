@@ -11,18 +11,13 @@ than it was before.
 
 ## Submitting changes
 
-1. Make a PR for every change.
-
-   Even seemingly trivial patches can break things in surprising ways.
-Use of common sense is OK. If you're only fixing a typo in a comment,
-it's probably fine to just push it. But if in doubt, open a PR.
-
-2. Get at least one +1 on your PR before you push.
+1. Get at least one +1 on your PR before you push.
 
    For simple patches, it will only take a minute for someone to review
-it.
+it. PR force-push breaks unadressed review comments, so it is better to
+just commit follow ups and squash later during the merge.
 
-3. Always keep the CI green.
+2. Always keep the CI green.
 
    Do not push, if the CI failed on your PR. Even if you think it's not
 your patch's fault. Help to fix the root cause if something else has
