@@ -10,13 +10,13 @@ use std::io::{Read, Result, Write};
 /// # use std::io::{Result, Read};
 /// # use metrics::{register_int_counter, IntCounter};
 /// # use metrics::CountedReader;
+/// # use once_cell::sync::Lazy;
 /// #
-/// # lazy_static::lazy_static! {
-/// #     static ref INT_COUNTER: IntCounter = register_int_counter!(
+/// # static INT_COUNTER: Lazy<IntCounter> = Lazy::new( || { register_int_counter!(
 /// #         "int_counter",
 /// #         "let's count something!"
-/// #     ).unwrap();
-/// # }
+/// #     ).unwrap()
+/// # });
 /// #
 /// fn do_some_reads(stream: impl Read, count: usize) -> Result<Vec<u8>> {
 ///     let mut reader = CountedReader::new(stream, |cnt| {
@@ -85,13 +85,13 @@ impl<T: Read> Read for CountedReader<'_, T> {
 /// # use std::io::{Result, Write};
 /// # use metrics::{register_int_counter, IntCounter};
 /// # use metrics::CountedWriter;
+/// # use once_cell::sync::Lazy;
 /// #
-/// # lazy_static::lazy_static! {
-/// #     static ref INT_COUNTER: IntCounter = register_int_counter!(
+/// # static INT_COUNTER: Lazy<IntCounter> = Lazy::new( || { register_int_counter!(
 /// #         "int_counter",
 /// #         "let's count something!"
-/// #     ).unwrap();
-/// # }
+/// #     ).unwrap()
+/// # });
 /// #
 /// fn do_some_writes(stream: impl Write, payload: &[u8]) -> Result<()> {
 ///     let mut writer = CountedWriter::new(stream, |cnt| {

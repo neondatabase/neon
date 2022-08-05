@@ -7,7 +7,7 @@ use std::{
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
 use utils::postgres_backend::{AuthType, Handler, PostgresBackend};
 
@@ -19,16 +19,15 @@ fn make_tcp_pair() -> (TcpStream, TcpStream) {
     (server_stream, client_stream)
 }
 
-lazy_static! {
-    static ref KEY: rustls::PrivateKey = {
-        let mut cursor = Cursor::new(include_bytes!("key.pem"));
-        rustls::PrivateKey(rustls_pemfile::rsa_private_keys(&mut cursor).unwrap()[0].clone())
-    };
-    static ref CERT: rustls::Certificate = {
-        let mut cursor = Cursor::new(include_bytes!("cert.pem"));
-        rustls::Certificate(rustls_pemfile::certs(&mut cursor).unwrap()[0].clone())
-    };
-}
+static KEY: Lazy<rustls::PrivateKey> = Lazy::new(|| {
+    let mut cursor = Cursor::new(include_bytes!("key.pem"));
+    rustls::PrivateKey(rustls_pemfile::rsa_private_keys(&mut cursor).unwrap()[0].clone())
+});
+
+static CERT: Lazy<rustls::Certificate> = Lazy::new(|| {
+    let mut cursor = Cursor::new(include_bytes!("cert.pem"));
+    rustls::Certificate(rustls_pemfile::certs(&mut cursor).unwrap()[0].clone())
+});
 
 #[test]
 fn ssl() {

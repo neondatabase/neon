@@ -5,7 +5,7 @@
 use crate::page_cache;
 use crate::page_cache::{ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::AtomicU64;
@@ -117,9 +117,7 @@ where
     }
 }
 
-lazy_static! {
-    static ref NEXT_ID: AtomicU64 = AtomicU64::new(1);
-}
+static NEXT_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
 
 /// An adapter for reading a (virtual) file using the page cache.
 ///

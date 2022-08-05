@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
@@ -61,75 +61,81 @@ use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
 // Metrics collected on operations on the storage repository.
-lazy_static! {
-    pub static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
+pub static STORAGE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_storage_operations_seconds",
         "Time spent on storage operations",
         &["operation", "tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics collected on operations on the storage repository.
-lazy_static! {
-    static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
+static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
-lazy_static! {
-    static ref MATERIALIZED_PAGE_CACHE_HIT: IntCounterVec = register_int_counter_vec!(
+static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_materialized_cache_hits_total",
         "Number of cache hits from materialized page cache",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-    static ref WAIT_LSN_TIME: HistogramVec = register_histogram_vec!(
+    .expect("failed to define a metric")
+});
+
+static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
-lazy_static! {
-    static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
+static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics for determining timeline's physical size.
 // A layered timeline's physical is defined as the total size of
 // (delta/image) layer files on disk.
-lazy_static! {
-    static ref CURRENT_PHYSICAL_SIZE: UIntGaugeVec = register_uint_gauge_vec!(
+static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_current_physical_size",
         "Current physical size grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
-lazy_static! {
-    static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
+static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
     )
-    .expect("failed to define a metric");
-    static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
+    .expect("failed to define a metric")
+});
+
+static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 #[derive(Clone)]
 pub enum LayeredTimelineEntry {

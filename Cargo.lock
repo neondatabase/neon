@@ -495,8 +495,8 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "lazy_static",
  "nix",
+ "once_cell",
  "pageserver",
  "postgres",
  "regex",
@@ -1591,8 +1591,8 @@ dependencies = [
 name = "metrics"
 version = "0.1.0"
 dependencies = [
- "lazy_static",
  "libc",
+ "once_cell",
  "prometheus",
  "workspace_hack",
 ]
@@ -1870,7 +1870,6 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "itertools",
- "lazy_static",
  "metrics",
  "nix",
  "once_cell",
@@ -2116,9 +2115,9 @@ dependencies = [
  "crc32c",
  "env_logger",
  "hex",
- "lazy_static",
  "log",
  "memoffset",
+ "once_cell",
  "postgres",
  "rand",
  "regex",
@@ -2278,9 +2277,9 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "hyper",
- "lazy_static",
  "md5",
  "metrics",
+ "once_cell",
  "parking_lot 0.12.1",
  "pin-project-lite",
  "rand",
@@ -2754,7 +2753,6 @@ dependencies = [
  "hex",
  "humantime",
  "hyper",
- "lazy_static",
  "metrics",
  "once_cell",
  "postgres",
@@ -3671,9 +3669,9 @@ dependencies = [
  "hex-literal",
  "hyper",
  "jsonwebtoken",
- "lazy_static",
  "metrics",
  "nix",
+ "once_cell",
  "pin-project-lite",
  "postgres",
  "postgres-protocol",

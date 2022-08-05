@@ -4,8 +4,8 @@ use crate::zid::ZTenantId;
 use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
-use lazy_static::lazy_static;
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
+use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
@@ -16,13 +16,13 @@ use std::net::TcpListener;
 
 use super::error::ApiError;
 
-lazy_static! {
-    static ref SERVE_METRICS_COUNT: IntCounter = register_int_counter!(
+static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "libmetrics_metric_handler_requests_total",
         "Number of metric requests made"
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
     info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
