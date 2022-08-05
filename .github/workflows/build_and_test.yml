@@ -392,16 +392,16 @@ jobs:
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
 
-      - name: Check output
-        id: skip
-        if: steps.dockerfile-check.outputs.any_changed == 'false'
-        run: echo "::set-output name=key::true"
+#      - name: Check output
+#        id: skip
+#        if: steps.dockerfile-check.outputs.any_changed == 'false'
+#        run: echo "::set-output name=key::true"
 
   build-neon-image:
     name: 'kaniko-neon'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key == 'true'
+      steps.dockerfile-check.outputs.any_changed == 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -424,7 +424,7 @@ jobs:
     name: 'kaniko-compute-tools'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key == 'true'
+      steps.dockerfile-check.outputs.any_changed == 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -444,7 +444,7 @@ jobs:
     name: 'kaniko-compute-node'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key == 'true'
+      steps.dockerfile-check.outputs.any_changed == 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
