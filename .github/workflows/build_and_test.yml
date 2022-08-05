@@ -400,9 +400,17 @@ jobs:
         env:
           key: ${{ steps.skip.outputs.key }}
 
+  dockerfile-double-check:
+    name: 'dockerfile double check'
+    runs-on: dev
+    container: node:18-bullseye
+    steps:
+      - name: Check env
+        run: echo "${{ env.key }}"
+
   build-neon-image:
     name: 'kaniko-neon'
-    if: steps.skip.outputs.key != 'false'
+    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -423,7 +431,7 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
-    if: steps.skip.outputs.key != 'false'
+    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -441,7 +449,7 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
-    if: steps.skip.outputs.key != 'false'
+    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
