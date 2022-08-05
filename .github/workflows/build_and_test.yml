@@ -405,7 +405,7 @@ jobs:
     container: node:18-bullseye
     steps:
       - name: Check env
-        run: echo "${{ $GITHUB_ENV }}"
+        run: echo $GITHUB_ENV
 
   build-neon-image:
     name: 'kaniko-neon'
