@@ -395,19 +395,19 @@ jobs:
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
 
-      - name: Check output
-        id: skip
-        if: steps.dockerfile-check.outputs.any_changed == 'false'
-        run: echo ${{ dockerfile-check.outputs.any_changed }}
-
-  dockerfile-double-check:
-    name: 'dockerfile double check'
-    runs-on: dev
-    needs: [ dockerfile-check ]
-    container: node:18-bullseye
-    steps:
-      - name: Check output
-        run: echo "${{ dockerfile-check.outputs.key }}"
+#      - name: Check output
+#        id: skip
+#        if: steps.dockerfile-check.outputs.any_changed == 'false'
+#        run: echo ${{ dockerfile-check.outputs.any_changed }}
+#
+#  dockerfile-double-check:
+#    name: 'dockerfile double check'
+#    runs-on: dev
+#    needs: [ dockerfile-check ]
+#    container: node:18-bullseye
+#    steps:
+#      - name: Check output
+#        run: echo "${{ dockerfile-check.outputs.key }}"
 
 #  build-neon-image:
 #    name: 'kaniko-neon'
