@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -38,7 +38,9 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 use crate::DatadirTimeline;
 
@@ -295,6 +297,9 @@ pub struct LayeredTimeline {
     /// or None if WAL receiver has not received anything for this timeline
     /// yet.
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
+
+    /// Relation size cache
+    rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
 }
 
 pub struct WalReceiverInfo {
@@ -306,7 +311,42 @@ pub struct WalReceiverInfo {
 /// Inherit all the functions from DatadirTimeline, to provide the
 /// functionality to store PostgreSQL relations, SLRUs, etc. in a
 /// LayeredTimeline.
-impl DatadirTimeline for LayeredTimeline {}
+impl DatadirTimeline for LayeredTimeline {
+    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+        let rel_size_cache = self.rel_size_cache.read().unwrap();
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+            if lsn >= *cached_lsn {
+                return Some(*nblocks);
+            }
+        }
+        None
+    }
+
+    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        match rel_size_cache.entry(tag) {
+            Entry::Occupied(mut entry) => {
+                let cached_lsn = entry.get_mut();
+                if lsn >= cached_lsn.0 {
+                    *cached_lsn = (lsn, nblocks);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert((lsn, nblocks));
+            }
+        }
+    }
+
+    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.insert(tag, (lsn, nblocks));
+    }
+
+    fn remove_cached_rel_size(&self, tag: &RelTag) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.remove(tag);
+    }
+}
 
 ///
 /// Information about how much history needs to be retained, needed by
@@ -377,8 +417,6 @@ impl Timeline for LayeredTimeline {
 
     /// Look up the value with the given a key
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
-        debug_assert!(lsn <= self.get_last_record_lsn());
-
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -618,6 +656,7 @@ impl LayeredTimeline {
             repartition_threshold: 0,
 
             last_received_wal: Mutex::new(None),
+            rel_size_cache: RwLock::new(HashMap::new()),
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result

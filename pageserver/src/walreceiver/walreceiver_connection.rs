@@ -154,7 +154,7 @@ pub async fn handle_walreceiver_connection(
 
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification();
+                    let mut modification = timeline.begin_modification(endlsn);
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
