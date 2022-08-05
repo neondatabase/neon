@@ -386,14 +386,14 @@ jobs:
 
       - name: Get specific changed files
         id: dockerfile-check
+        outputs:
+          key: ${{ steps.dockerfile-check.outputs.any_changed }}
         uses: tj-actions/changed-files@v24.1
         with:
           files: |
             Dockerfile
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
-        outputs:
-          key: ${{ steps.dockerfile-check.outputs.any_changed }}
 
       #- name: Check output
         #id: skip
