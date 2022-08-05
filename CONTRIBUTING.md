@@ -14,10 +14,13 @@ than it was before.
 1. Get at least one +1 on your PR before you push.
 
    For simple patches, it will only take a minute for someone to review
-it. PR force-push breaks unadressed review comments, so it is better to
-just commit follow ups and squash later during the merge.
+it.
 
-2. Always keep the CI green.
+2. Don't force push small changes after making the PR ready for review.
+Doing so will force readers to re-read your entire PR, which will delay
+the review process.
+
+3. Always keep the CI green.
 
    Do not push, if the CI failed on your PR. Even if you think it's not
 your patch's fault. Help to fix the root cause if something else has
