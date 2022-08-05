@@ -58,12 +58,30 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
+/// Prometheus histogram buckets (in seconds) that capture the majority of
+/// latencies in the microsecond range but also extend far enough up to capture
+/// all latencies.
+fn get_buckets_for_critical_operations() -> Vec<f64> {
+    let mut buckets = vec![];
+    for exp in -12..=4 {
+        buckets.push((10 as f64).powf(exp as f64 / 2.0))
+    }
+    buckets
+}
+
+#[test]
+fn feature() {
+    let foo = get_buckets_for_critical_operations();
+    dbg!(foo);
+}
+
 // Metrics collected on operations on the storage repository.
 lazy_static! {
     pub static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_storage_operations_seconds",
         "Time spent on storage operations",
-        &["operation", "tenant_id", "timeline_id"]
+        &["operation", "tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric");
 }
@@ -73,7 +91,8 @@ lazy_static! {
     static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric");
 }
@@ -88,7 +107,8 @@ lazy_static! {
     static ref WAIT_LSN_TIME: HistogramVec = register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric");
 }
