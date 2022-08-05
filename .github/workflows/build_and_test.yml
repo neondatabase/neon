@@ -396,9 +396,7 @@ jobs:
       - name: Check output
         id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
-        run: echo "::set-output name=key::false"
-        env:
-          key: ${{ steps.skip.outputs.key }}
+        run: echo "key=false" >> $GITHUB_ENV
 
   dockerfile-double-check:
     name: 'dockerfile double check'
@@ -407,7 +405,7 @@ jobs:
     container: node:18-bullseye
     steps:
       - name: Check env
-        run: echo "${{ env.key }}"
+        run: echo key = $key
 
   build-neon-image:
     name: 'kaniko-neon'
