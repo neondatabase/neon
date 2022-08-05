@@ -392,11 +392,13 @@ jobs:
             Dockerfile
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
+        outputs:
+          key: ${{ steps.dockerfile-check.outputs.any_changed }}
 
-      - name: Check output
-        id: skip
-        if: steps.dockerfile-check.outputs.any_changed == 'false'
-        run: echo "key=false" >> $GITHUB_ENV
+      #- name: Check output
+        #id: skip
+        #if: steps.dockerfile-check.outputs.any_changed == 'false'
+        #run: echo "key=false" >> $GITHUB_ENV
 
   dockerfile-double-check:
     name: 'dockerfile double check'
@@ -404,8 +406,8 @@ jobs:
     needs: [ dockerfile-check ]
     container: node:18-bullseye
     steps:
-      - name: Check env
-        run: echo $GITHUB_ENV
+      - name: Check output
+        run: echo "${{ dockerfile-check.outputs.key }}"
 
   build-neon-image:
     name: 'kaniko-neon'
