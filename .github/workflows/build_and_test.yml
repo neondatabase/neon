@@ -395,11 +395,6 @@ jobs:
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
 
-#      - name: Check output
-#        id: skip
-#        if: steps.dockerfile-check.outputs.any_changed == 'false'
-#        run: echo ${{ dockerfile-check.outputs.any_changed }}
-#
   dockerfile-double-check:
     name: 'dockerfile double check'
     runs-on: dev
@@ -411,8 +406,9 @@ jobs:
 
   build-neon-image:
     name: 'kaniko-neon'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
-    needs: [ dockerfile-double-check ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -432,7 +428,7 @@ jobs:
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
     runs-on: dev
-    needs: [ dockerfile-double-check ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -449,7 +445,7 @@ jobs:
   build-compute-node-image:
     name: 'kaniko-compute-node'
     runs-on: dev
-    needs: [ dockerfile-double-check ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
