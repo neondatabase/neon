@@ -401,7 +401,7 @@ jobs:
     name: 'kaniko-neon'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      if: steps.skip.outputs.key != 'false'
+      steps.skip.outputs.key != 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -424,7 +424,7 @@ jobs:
     name: 'kaniko-compute-tools'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      if: steps.skip.outputs.key != 'false'
+      steps.skip.outputs.key != 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
@@ -444,7 +444,7 @@ jobs:
     name: 'kaniko-compute-node'
     if: |
       github.event_name != 'workflow_dispatch' &&
-      if: steps.skip.outputs.key != 'false'
+      steps.skip.outputs.key != 'false'
     runs-on: dev
     needs: [ pg_regress-tests, other-tests ]
     container: gcr.io/kaniko-project/executor:debug
