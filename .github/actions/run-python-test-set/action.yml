@@ -85,7 +85,7 @@ runs:
         PLATFORM: github-actions-selfhosted
         AWS_ACCESS_KEY_ID: ${{ inputs.real_s3_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
-      shell: bash -euxo pipefail {0} {0}
+      shell: bash -euxo pipefail {0}
       run: |
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR

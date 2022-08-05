@@ -35,6 +35,16 @@ jobs:
       GIT_VERSION: ${{ github.sha }}
 
     steps:
+      - name: Fix git ownerwhip
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
       - name: Checkout
         uses: actions/checkout@v3
         with:
