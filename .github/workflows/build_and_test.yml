@@ -400,19 +400,19 @@ jobs:
 #        if: steps.dockerfile-check.outputs.any_changed == 'false'
 #        run: echo ${{ dockerfile-check.outputs.any_changed }}
 #
-#  dockerfile-double-check:
-#    name: 'dockerfile double check'
-#    runs-on: dev
-#    needs: [ dockerfile-check ]
-#    container: node:18-bullseye
-#    steps:
-#      - name: Check output
-#        run: echo "${{ dockerfile-check.outputs.key }}"
+  dockerfile-double-check:
+    name: 'dockerfile double check'
+    runs-on: dev
+    needs: [ dockerfile-check ]
+    container: node:18-bullseye
+    steps:
+      - name: Check output
+        run: echo "${{ needs.dockerfile-check.outputs.value }}"
 
   build-neon-image:
     name: 'kaniko-neon'
     runs-on: dev
-    needs: [ dockerfile-check ]
+    needs: [ dockerfile-double-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -432,7 +432,7 @@ jobs:
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
     runs-on: dev
-    needs: [ dockerfile-check ]
+    needs: [ dockerfile-double-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -449,7 +449,7 @@ jobs:
   build-compute-node-image:
     name: 'kaniko-compute-node'
     runs-on: dev
-    needs: [ dockerfile-check ]
+    needs: [ dockerfile-double-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
