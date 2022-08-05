@@ -398,7 +398,7 @@ jobs:
       - name: Check output
         id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
-        run: echo ${{ steps.dockerfile-check.outputs.any_changed }}
+        run: echo ${{ dockerfile-check.outputs.any_changed }}
 
   dockerfile-double-check:
     name: 'dockerfile double check'
