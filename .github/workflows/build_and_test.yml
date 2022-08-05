@@ -377,6 +377,7 @@ jobs:
 
   dockerfile-check:
     name: 'dockerfile check'
+    if: github.event_name != 'workflow_dispatch'
     runs-on: dev
     container: node:18-bullseye
     steps:
@@ -399,11 +400,9 @@ jobs:
 
   build-neon-image:
     name: 'kaniko-neon'
-    if: |
-      github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key != 'false'
+    if: steps.skip.outputs.key != 'false'
     runs-on: dev
-    needs: [ pg_regress-tests, other-tests ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -422,11 +421,9 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
-    if: |
-      github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key != 'false'
+    if: steps.skip.outputs.key != 'false'
     runs-on: dev
-    needs: [ pg_regress-tests, other-tests ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
@@ -442,11 +439,9 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
-    if: |
-      github.event_name != 'workflow_dispatch' &&
-      steps.skip.outputs.key != 'false'
+    if: steps.skip.outputs.key != 'false'
     runs-on: dev
-    needs: [ pg_regress-tests, other-tests ]
+    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
