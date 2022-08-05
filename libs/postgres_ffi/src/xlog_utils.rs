@@ -16,7 +16,7 @@ use crate::XLogRecord;
 use crate::XLOG_PAGE_MAGIC;
 
 use crate::pg_constants::WAL_SEGMENT_SIZE;
-use anyhow::{bail, ensure};
+use anyhow::{anyhow, bail, ensure};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -159,7 +159,7 @@ fn find_end_of_wal_segment(
     let mut buf = [0u8; XLOG_BLCKSZ];
     let file_name = XLogFileName(tli, segno, wal_seg_size);
     let mut last_valid_rec_pos: usize = start_offset; // assume at given start_offset begins new record
-    let mut file = File::open(data_dir.join(file_name.clone() + ".partial")).unwrap();
+    let mut file = File::open(data_dir.join(file_name.clone() + ".partial"))?;
     file.seek(SeekFrom::Start(offs as u64))?;
     // xl_crc is the last field in XLogRecord, will not be read into rec_hdr
     const_assert!(XLOG_RECORD_CRC_OFFS + 4 == XLOG_SIZE_OF_XLOG_RECORD);
@@ -396,10 +396,13 @@ pub fn find_end_of_wal(
     let mut high_tli: TimeLineID = 0;
     let mut high_ispartial = false;
 
-    for entry in fs::read_dir(data_dir).unwrap().flatten() {
+    for entry in fs::read_dir(data_dir)?.flatten() {
         let ispartial: bool;
         let entry_name = entry.file_name();
-        let fname = entry_name.to_str().unwrap();
+        let fname = entry_name
+            .to_str()
+            .ok_or_else(|| anyhow!("Invalid file name"))?;
+
         /*
          * Check if the filename looks like an xlog file, or a .partial file.
          */
@@ -411,7 +414,7 @@ pub fn find_end_of_wal(
             continue;
         }
         let (segno, tli) = XLogFromFileName(fname, wal_seg_size);
-        if !ispartial && entry.metadata().unwrap().len() != wal_seg_size as u64 {
+        if !ispartial && entry.metadata()?.len() != wal_seg_size as u64 {
             continue;
         }
         if segno > high_segno

@@ -12,9 +12,8 @@ import uuid
 
 from contextlib import closing
 from dataclasses import dataclass, field
-from multiprocessing import Process, Value
 from pathlib import Path
-from fixtures.neon_fixtures import NeonPageserver, PgBin, Etcd, Postgres, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, neon_binpath, PgProtocol, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonPageserver, PgBin, Etcd, Postgres, RemoteStorageKind, RemoteStorageUsers, Safekeeper, NeonEnv, NeonEnvBuilder, PortDistributor, SafekeeperPort, available_remote_storages, neon_binpath, PgProtocol, wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import get_dir_size, lsn_to_hex, lsn_from_hex, query_scalar
 from fixtures.log_helper import log
 from typing import List, Optional, Any
@@ -377,15 +376,15 @@ def wait_wal_trim(tenant_id, timeline_id, sk, target_size):
         time.sleep(0.5)
 
 
-@pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
-def test_wal_backup(neon_env_builder: NeonEnvBuilder, storage_type: str):
+@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
-    if storage_type == 'local_fs':
-        neon_env_builder.enable_local_fs_remote_storage()
-    elif storage_type == 'mock_s3':
-        neon_env_builder.enable_s3_mock_remote_storage('test_safekeepers_wal_backup')
-    else:
-        raise RuntimeError(f'Unknown storage type: {storage_type}')
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storatge_kind,
+        test_name='test_safekeepers_wal_backup',
+    )
+
     neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
 
     env = neon_env_builder.init_start()
@@ -425,15 +424,15 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, storage_type: str):
     wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], '0/5000000')
 
 
-@pytest.mark.parametrize('storage_type', ['mock_s3', 'local_fs'])
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, storage_type: str):
+@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
-    if storage_type == 'local_fs':
-        neon_env_builder.enable_local_fs_remote_storage()
-    elif storage_type == 'mock_s3':
-        neon_env_builder.enable_s3_mock_remote_storage('test_s3_wal_replay')
-    else:
-        raise RuntimeError(f'Unknown storage type: {storage_type}')
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storatge_kind,
+        test_name='test_s3_wal_replay',
+    )
+
     neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
 
     env = neon_env_builder.init_start()

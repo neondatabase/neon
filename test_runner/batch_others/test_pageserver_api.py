@@ -60,17 +60,38 @@ def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
 
 def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    client = env.pageserver.http_client()
+    with env.pageserver.http_client() as client:
+        tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+        timeline_details = client.timeline_detail(tenant_id=tenant_id,
+                                                  timeline_id=timeline_id,
+                                                  include_non_incremental_logical_size=True)
 
-    timeline_details = client.timeline_detail(tenant_id=tenant_id,
-                                              timeline_id=timeline_id,
-                                              include_non_incremental_logical_size=True)
+        assert timeline_details.get('wal_source_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+        assert timeline_details.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+        assert timeline_details.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
 
-    assert timeline_details.get('wal_source_connstr') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
-    assert timeline_details.get('last_received_msg_lsn') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
-    assert timeline_details.get('last_received_msg_ts') is None, 'Should not be able to connect to WAL streaming without PG compute node running'
+
+def expect_updated_msg_lsn(client: NeonPageserverHttpClient,
+                           tenant_id: UUID,
+                           timeline_id: UUID,
+                           prev_msg_lsn: Optional[int]) -> int:
+    timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
+
+    # a successful `timeline_details` response must contain the below fields
+    local_timeline_details = timeline_details['local']
+    assert "wal_source_connstr" in local_timeline_details.keys()
+    assert "last_received_msg_lsn" in local_timeline_details.keys()
+    assert "last_received_msg_ts" in local_timeline_details.keys()
+
+    assert local_timeline_details["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
+
+    last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
+    assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, \
+        f"the last received message's LSN {last_msg_lsn} hasn't been updated \
+        compared to the previous message's LSN {prev_msg_lsn}"
+
+    return last_msg_lsn
 
 
 # Test the WAL-receiver related fields in the response to `timeline_details` API call
@@ -79,44 +100,29 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 # `timeline_details` now.
 def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    client = env.pageserver.http_client()
+    with env.pageserver.http_client() as client:
+        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
-    pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
+        # Wait to make sure that we get a latest WAL receiver data.
+        # We need to wait here because it's possible that we don't have access to
+        # the latest WAL yet, when the `timeline_detail` API is first called.
+        # See: https://github.com/neondatabase/neon/issues/1768.
+        lsn = wait_until(number_of_iterations=5,
+                         interval=1,
+                         func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None))
 
-    def expect_updated_msg_lsn(prev_msg_lsn: Optional[int]) -> int:
-        timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
-
-        # a successful `timeline_details` response must contain the below fields
-        local_timeline_details = timeline_details['local']
-        assert "wal_source_connstr" in local_timeline_details.keys()
-        assert "last_received_msg_lsn" in local_timeline_details.keys()
-        assert "last_received_msg_ts" in local_timeline_details.keys()
-
-        assert local_timeline_details["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
-
-        last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
-        assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, \
-            f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-            compared to the previous message's LSN {prev_msg_lsn}"
-
-        return last_msg_lsn
-
-    # Wait to make sure that we get a latest WAL receiver data.
-    # We need to wait here because it's possible that we don't have access to
-    # the latest WAL yet, when the `timeline_detail` API is first called.
-    # See: https://github.com/neondatabase/neon/issues/1768.
-    lsn = wait_until(number_of_iterations=5, interval=1, func=lambda: expect_updated_msg_lsn(None))
-
-    # Make a DB modification then expect getting a new WAL receiver's data.
-    pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
-    wait_until(number_of_iterations=5, interval=1, func=lambda: expect_updated_msg_lsn(lsn))
+        # Make a DB modification then expect getting a new WAL receiver's data.
+        pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+        wait_until(number_of_iterations=5,
+                   interval=1,
+                   func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn))
 
 
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    client = env.pageserver.http_client()
-    check_client(client, env.initial_tenant)
+    with env.pageserver.http_client() as client:
+        check_client(client, env.initial_tenant)
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
@@ -125,5 +131,5 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
 
     management_token = env.auth_keys.generate_management_token()
 
-    client = env.pageserver.http_client(auth_token=management_token)
-    check_client(client, env.initial_tenant)
+    with env.pageserver.http_client(auth_token=management_token) as client:
+        check_client(client, env.initial_tenant)
