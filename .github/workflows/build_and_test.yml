@@ -403,6 +403,7 @@ jobs:
   dockerfile-double-check:
     name: 'dockerfile double check'
     runs-on: dev
+    needs: [ dockerfile-check ]
     container: node:18-bullseye
     steps:
       - name: Check env
