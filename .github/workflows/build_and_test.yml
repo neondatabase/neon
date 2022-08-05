@@ -410,7 +410,6 @@ jobs:
 
   build-neon-image:
     name: 'kaniko-neon'
-    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -431,7 +430,6 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
-    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -449,7 +447,6 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
-    if: env.key != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
