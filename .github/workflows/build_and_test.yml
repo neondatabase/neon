@@ -380,6 +380,8 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     runs-on: dev
     container: node:18-bullseye
+    outputs:
+      value: ${{ steps.dockerfile-check.outputs.any_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -397,8 +399,6 @@ jobs:
         id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
         run: echo ${{ steps.dockerfile-check.outputs.any_changed }}
-        outputs:
-          value: ${{ steps.dockerfile-check.outputs.any_changed }}
 
   dockerfile-double-check:
     name: 'dockerfile double check'
