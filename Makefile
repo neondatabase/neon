@@ -89,6 +89,8 @@ postgres: postgres-configure \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 install
 	+@echo "Compiling contrib/neon"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon install
+	+@echo "Compiling contrib/neon/libpqwalproposer"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon/libpqwalproposer install
 	+@echo "Compiling contrib/neon_test_utils"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon_test_utils install
 	+@echo "Compiling pg_buffercache"
