@@ -59,15 +59,18 @@ use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
 /// Prometheus histogram buckets (in seconds) that capture the majority of
-/// latencies in the microsecond range but also extend far enough up to capture
-/// all latencies.
+/// latencies in the microsecond range but also extend far enough up to distinguish
+/// "bad" from "really bad".
 fn get_buckets_for_critical_operations() -> Vec<f64> {
-    // Generate exponential buckets from 1 microsecond to ~5 minutes, sqrt(10) apart.
-    // Hopefully no critical operation will last 5 minutes. But without explicitly
-    // adding this bucket we'll never know.
+    let buckets_per_digit = 5;
+    let min_exponent = -6;
+    let max_exponent = 2;
+
     let mut buckets = vec![];
-    for exp in -12..=4 {
-        buckets.push(10_f64.powf(exp as f64 / 2.0))
+    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
+    // because it's more numerically stable and doesn't result in numbers like 9.999999
+    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
+        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
     }
     buckets
 }
