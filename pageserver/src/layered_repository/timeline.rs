@@ -67,7 +67,7 @@ fn get_buckets_for_critical_operations() -> Vec<f64> {
     // adding this bucket we'll never know.
     let mut buckets = vec![];
     for exp in -12..=4 {
-        buckets.push((10 as f64).powf(exp as f64 / 2.0))
+        buckets.push(10_f64.powf(exp as f64 / 2.0))
     }
     buckets
 }
