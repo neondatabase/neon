@@ -386,8 +386,6 @@ jobs:
 
       - name: Get specific changed files
         id: dockerfile-check
-        outputs:
-          key: ${{ steps.dockerfile-check.outputs.any_changed }}
         uses: tj-actions/changed-files@v24.1
         with:
           files: |
@@ -395,10 +393,12 @@ jobs:
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
 
-      #- name: Check output
-        #id: skip
-        #if: steps.dockerfile-check.outputs.any_changed == 'false'
-        #run: echo "key=false" >> $GITHUB_ENV
+      - name: Check output
+        id: skip
+        if: steps.dockerfile-check.outputs.any_changed == 'false'
+        run: echo ${{ steps.dockerfile-check.outputs.any_changed }}
+        outputs:
+          value: ${{ steps.dockerfile-check.outputs.any_changed }}
 
   dockerfile-double-check:
     name: 'dockerfile double check'
