@@ -350,7 +350,7 @@ def wait_segment_offload(tenant_id, timeline_id, live_sk, seg_end):
         if lsn_from_hex(tli_status.backup_lsn) >= lsn_from_hex(seg_end):
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
+        if elapsed > 30:
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for segment ending at {seg_end} get offloaded")
         time.sleep(0.5)
