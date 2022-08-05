@@ -405,7 +405,7 @@ jobs:
     container: node:18-bullseye
     steps:
       - name: Check env
-        run: echo key = $key
+        run: echo "${{ env.key }}"
 
   build-neon-image:
     name: 'kaniko-neon'
