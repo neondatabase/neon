@@ -379,7 +379,7 @@ jobs:
     name: 'dockerfile check'
     if: github.event_name != 'workflow_dispatch'
     runs-on: dev
-    container: node:18-bullseye
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     outputs:
       value: ${{ steps.dockerfile-check.outputs.any_changed }}
     steps:
@@ -394,15 +394,6 @@ jobs:
             Dockerfile
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
-
-  dockerfile-double-check:
-    name: 'dockerfile double check'
-    runs-on: dev
-    needs: [ dockerfile-check ]
-    container: node:18-bullseye
-    steps:
-      - name: Check output
-        run: echo "${{ needs.dockerfile-check.outputs.value }}"
 
   build-neon-image:
     name: 'kaniko-neon'
@@ -427,6 +418,7 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -444,6 +436,7 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
