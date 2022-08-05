@@ -62,7 +62,9 @@ use crate::{page_cache, storage_sync};
 /// latencies in the microsecond range but also extend far enough up to capture
 /// all latencies.
 fn get_buckets_for_critical_operations() -> Vec<f64> {
-    // Generate exponential buckets from 1 microsecond to ~5 minutes, sqrt(10) apart
+    // Generate exponential buckets from 1 microsecond to ~5 minutes, sqrt(10) apart.
+    // Hopefully no critical operation will last 5 minutes. But without explicitly
+    // adding this bucket we'll never know.
     let mut buckets = vec![];
     for exp in -12..=4 {
         buckets.push((10 as f64).powf(exp as f64 / 2.0))
