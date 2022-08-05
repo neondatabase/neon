@@ -397,6 +397,8 @@ jobs:
         id: skip
         if: steps.dockerfile-check.outputs.any_changed == 'false'
         run: echo "::set-output name=key::false"
+        env:
+          key: ${{ steps.skip.outputs.key }}
 
   build-neon-image:
     name: 'kaniko-neon'
