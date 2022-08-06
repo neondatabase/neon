@@ -513,13 +513,21 @@ jobs:
       options: --privileged --user root
 
     steps:
-      - name: Configure ECR login
-        run: |
-          mkdir /root/.docker
-          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
-          echo "{\"credsStore\":\"ecr-login\"}" > /home/nonroot/.docker/config.json
-          service docker start
-          export AWS_REGION=eu-central-1
+#      - name: Configure ECR login
+#        run: |
+#          mkdir /root/.docker
+#          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
+#          echo "{\"credsStore\":\"ecr-login\"}" > /home/nonroot/.docker/config.json
+#          service docker start
+
+      - name: Start docker
+        run: service docker start
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::369495373322:role/github-runner
+          aws-region: eu-central-1
 
       - name: Login to Amazon ECR
         id: login-ecr
