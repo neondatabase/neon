@@ -519,7 +519,7 @@ jobs:
           echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
           echo "{\"credsStore\":\"ecr-login\"}" > /home/nonroot/.docker/config.json
           service docker start
-          export AWS_DEFAULT_REGION=eu-central-1
+          export AWS_REGION=eu-central-1
 
       - name: Login to Amazon ECR
         id: login-ecr
