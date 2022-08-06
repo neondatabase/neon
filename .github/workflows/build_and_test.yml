@@ -528,7 +528,7 @@ jobs:
           EOF
 
       - name: Copy over
-        run: echo "FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest | /kaniko/executor --context . --dockerfile /dev/stdin --destination roryneon/neon:latest
+        run: echo "FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest" | /kaniko/executor --context . --dockerfile /dev/stdin --destination roryneon/neon:latest
 
 #  docker-image:
 #    runs-on: [ self-hosted, Linux, k8s-runner ]
