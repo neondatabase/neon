@@ -517,7 +517,7 @@ jobs:
           cat <<EOF > /kaniko/.docker/config.json
           {
             "auths": {
-              "https://index.docker.io/v1/": {
+              "https://index.docker.io/v2/": {
                 "auth": "${{ secrets.DOCKERHUB_B64 }}",
               }
             },
