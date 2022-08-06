@@ -517,6 +517,7 @@ jobs:
         run: | 
           mkdir /root/.docker
           echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
+          apt update && apt install amazon-ecr-credential-helper 
           service docker start
 
       - name: Pull image
