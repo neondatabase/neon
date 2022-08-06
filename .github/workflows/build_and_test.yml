@@ -516,8 +516,8 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-        env:
-          - AWS_DEFAULT_REGION: eu-central-1
+        with:
+          AWS_DEFAULT_REGION: eu-central-1
 
       - name: Start docker
         run: service docker start
