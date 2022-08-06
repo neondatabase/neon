@@ -511,6 +511,7 @@ jobs:
     container: gcr.io/kaniko-project/executor:debug
     environment: dev
 
+    steps:
       - name: Configure ECR login
         run: |
           cat <<EOF > /kaniko/.docker/config.json
