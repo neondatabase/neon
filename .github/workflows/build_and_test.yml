@@ -701,7 +701,7 @@ jobs:
     # picks the compute version based on the storage version. If it notices a fresh
     # storage it may bump the compute version. And if compute image failed to build
     # it may break things badly.
-    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
+    needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -747,7 +747,7 @@ jobs:
     runs-on: [ self-hosted, Linux, k8s-runner ]
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it
     # to run all deploy jobs consistently.
-    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
+    needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
