@@ -91,6 +91,19 @@ fn local_timeline_info_from_loaded_timeline(
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<LocalTimelineInfo> {
     let last_record_lsn = timeline.get_last_record_lsn();
+    let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
+        let guard = timeline.last_received_wal.lock().unwrap();
+        if let Some(info) = guard.as_ref() {
+            (
+                Some(info.wal_source_connstr.clone()),
+                Some(info.last_received_msg_lsn),
+                Some(info.last_received_msg_ts),
+            )
+        } else {
+            (None, None, None)
+        }
+    };
+
     let info = LocalTimelineInfo {
         ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
         ancestor_lsn: {
@@ -116,6 +129,9 @@ fn local_timeline_info_from_loaded_timeline(
         } else {
             None
         },
+        wal_source_connstr,
+        last_received_msg_lsn,
+        last_received_msg_ts,
     };
     Ok(info)
 }
@@ -138,6 +154,9 @@ fn local_timeline_info_from_unloaded_timeline(metadata: &TimelineMetadata) -> Lo
         current_physical_size: None,
         current_logical_size_non_incremental: None,
         current_physical_size_non_incremental: None,
+        wal_source_connstr: None,
+        last_received_msg_lsn: None,
+        last_received_msg_ts: None,
     }
 }
 
@@ -346,23 +365,6 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     };
 
     json_response(StatusCode::OK, timeline_info)
-}
-
-async fn wal_receiver_get_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
-    let wal_receiver_entry = crate::walreceiver::get_wal_receiver_entry(tenant_id, timeline_id)
-        .instrument(info_span!("wal_receiver_get", tenant = %tenant_id, timeline = %timeline_id))
-        .await
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "WAL receiver data not found for tenant {tenant_id} and timeline {timeline_id}"
-            ))
-        })?;
-
-    json_response(StatusCode::OK, &wal_receiver_entry)
 }
 
 // TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
@@ -750,10 +752,6 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
             timeline_delete_handler,
-        )
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/wal_receiver",
-            wal_receiver_get_handler,
         )
         .any(handler_404))
 }

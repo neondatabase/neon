@@ -50,7 +50,6 @@ def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: pathlib.Path, pg_
 
         # checkpoint one more time to ensure that the lsn we get is the latest one
         pg.safe_psql('CHECKPOINT')
-        pg.safe_psql('select pg_current_wal_insert_lsn()')[0][0]
 
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, pg)

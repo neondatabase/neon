@@ -67,6 +67,9 @@ pub use crate::layered_repository::ephemeral_file::writeback as writeback_epheme
 // re-export for use in storage_sync.rs
 pub use crate::layered_repository::timeline::save_metadata;
 
+// re-export for use in walreceiver
+pub use crate::layered_repository::timeline::WalReceiverInfo;
+
 /// Parts of the `.neon/tenants/<tenantid>/timelines/<timelineid>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 

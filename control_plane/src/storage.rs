@@ -318,7 +318,7 @@ impl PageServerNode {
         // Shutting down may take a long time,
         // if pageserver checkpoints a lot of data
         let mut tcp_stopped = false;
-        for _ in 0..100 {
+        for i in 0..600 {
             if !tcp_stopped {
                 if let Err(err) = TcpStream::connect(&address) {
                     tcp_stopped = true;
@@ -344,9 +344,11 @@ impl PageServerNode {
                     }
                 }
             }
-            print!(".");
-            io::stdout().flush().unwrap();
-            thread::sleep(Duration::from_secs(1));
+            if i % 10 == 0 {
+                print!(".");
+                io::stdout().flush().unwrap();
+            }
+            thread::sleep(Duration::from_millis(100));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
