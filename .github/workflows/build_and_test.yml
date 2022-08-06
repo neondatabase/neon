@@ -510,16 +510,15 @@ jobs:
     runs-on: dev
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:latest
-      options: --privileged --user root
+      options: --privileged
 
     steps:
-      - name: Configure ECR login
-        run: | 
-          mkdir /root/.docker
-          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
-          apt update && apt install amazon-ecr-credential-helper -y
-          service docker start
-          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Start docker
+        run: service docker start
 
       - name: Pull image
         run: docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
