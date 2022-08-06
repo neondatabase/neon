@@ -518,10 +518,13 @@ jobs:
           mkdir /root/.docker
           echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
           service docker start
+          whoami
+          pwd
           export AWS_DEFAULT_REGION=eu-central-1
+          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
 
-      - name: Pull image
-        run: docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
+      #- name: Pull image
+        #run: docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
 
       - name: Login to DockerHub
         uses: docker/login-action@v1
