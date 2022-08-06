@@ -515,8 +515,8 @@ jobs:
     steps:
       - name: Configure ECR login
         run: | 
-          mkdir -p ~/.docker
-          echo "{\"credsStore\":\"ecr-login\"}" > ~/.docker/config.json
+          mkdir /root/.docker
+          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
           service docker start
 
       - name: Pull image
