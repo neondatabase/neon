@@ -518,7 +518,7 @@ jobs:
           {
             "auths": {
               "https://index.docker.io/v1/": {
-                "auth": "${{ secrets.DOCKERHUB_B64 }}",
+                "auth": ${{ secrets.DOCKERHUB_B64 }},
               }
             },
             "credHelpers": {
