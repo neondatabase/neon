@@ -509,18 +509,16 @@ jobs:
     #needs: [ promote-neon-image, promote-compute-tools-image, promote-compute-node-image ]
     runs-on: dev
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:latest
-      options: --privileged
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:2809177405
+      options: --privileged --user root
 
     steps:
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-        with:
-          AWS_DEFAULT_REGION: eu-central-1
-
-      - name: Start docker
-        run: service docker start
+      - name: Configure ECR login
+        run: |
+          mkdir /root/.docker
+          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
+          service docker start
+          export AWS_DEFAULT_REGION=eu-central-1
 
       - name: Pull image
         run: docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
