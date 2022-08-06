@@ -526,6 +526,7 @@ jobs:
             }
           }
           EOF
+          echo /kaniko/.docker/config.json
 
       - name: Copy over
         run: echo "FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest" | /kaniko/executor --context . --dockerfile /dev/stdin --destination roryneon/neon:latest
