@@ -548,20 +548,20 @@ jobs:
         run: |
           mkdir /root/.docker
           echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
-        shell: /bin/sh
+        shell: sh
           
       - name: Pull image from ECR
         run: |
           cat /root/.docker/config.json
           crane ls 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache
-        shell: /bin/sh
+        shell: sh
 
       - name: Configure docker login
         run: |
           echo "" > /root/.docker/config.json
           crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
-        shell: /bin/sh
+        shell: sh
 
       - name: Push image to docker hub
         run: crane push cache roryneon/neon:$GITHUB_RUN_ID
