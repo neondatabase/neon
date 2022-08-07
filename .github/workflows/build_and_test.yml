@@ -575,7 +575,7 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@main
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
 
-       - name: Configure ECR login
+      - name: Configure ECR login
         run: |
           mkdir /github/home/.docker/
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
