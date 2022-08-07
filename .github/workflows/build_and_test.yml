@@ -538,10 +538,11 @@ jobs:
     environment: dev
 
     steps:
-      - name: Install go apps
-        run: |
-          go install github.com/google/go-containerregistry/cmd/crane@main
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@main
+
+      - name: Install ecr helper
+        run: go install go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
 
       - name: Configure ECR login
         run: |
