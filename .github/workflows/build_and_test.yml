@@ -542,7 +542,7 @@ jobs:
         run: go install github.com/google/go-containerregistry/cmd/crane@main
 
       - name: Install ecr helper
-        run: go install go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+        run: go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
 
       - name: Configure ECR login
         run: |
