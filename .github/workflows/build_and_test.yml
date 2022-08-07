@@ -553,8 +553,7 @@ jobs:
       - name: Pull image from ECR
         run: |
           cat /root/.docker/config.json
-          crane ls 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache
+          crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache
         shell: sh
 
       - name: Configure docker login
