@@ -540,16 +540,32 @@ jobs:
     steps:
       - name: Single step
         run: |
+          apt update
+          apt install curl unzip -y
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          ./aws/install
           go install github.com/google/go-containerregistry/cmd/crane@main
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
-          mkdir /root/.docker
-          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
-          cat /root/.docker/config.json
+          aws ecr get-login-password --region eu-central-1 | crane auth login --username AWS --password-stdin 369495373322.dkr.ecr.eu-central-1.amazonaws.com
           crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache || true
           echo "" > /root/.docker/config.json
           crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
           crane push cache roryneon/neon:$GITHUB_RUN_ID
         shell: sh
+
+#    steps:
+#      - name: Single step
+#        run: |
+#          go install github.com/google/go-containerregistry/cmd/crane@main
+#          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+#          mkdir /root/.docker
+#          echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
+#          cat /root/.docker/config.json
+#          crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache || true
+#          echo "" > /root/.docker/config.json
+#          crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
+#          crane push cache roryneon/neon:$GITHUB_RUN_ID
+#        shell: sh
 
 #    steps:
 #      - name: Install crane
