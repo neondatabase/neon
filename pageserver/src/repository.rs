@@ -316,7 +316,7 @@ pub trait Timeline: Send + Sync {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()>;
+    fn wait_lsn(&self, lsn: Lsn, ctx: &str) -> Result<()>;
 
     /// Lock and get timeline's GC cuttof
     fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;

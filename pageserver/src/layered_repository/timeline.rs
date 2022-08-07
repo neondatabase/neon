@@ -418,7 +418,7 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+    fn wait_lsn(&self, lsn: Lsn, ctx: &str) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
         ensure!(
@@ -431,8 +431,8 @@ impl Timeline for LayeredTimeline {
                 .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
                 .with_context(|| {
                     format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={} context={}",
+                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn(), ctx
                     )
                 }))?;
 

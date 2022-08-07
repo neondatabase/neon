@@ -663,7 +663,11 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn)?;
+                let ctx = format!(
+                    "requested lsn: {} is ahead of last_record_lsn: {}",
+                    lsn, last_record_lsn
+                );
+                timeline.wait_lsn(lsn, &ctx)?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -673,7 +677,8 @@ impl PageServerHandler {
             if lsn == Lsn(0) {
                 bail!("invalid LSN(0) in request");
             }
-            timeline.wait_lsn(lsn)?;
+            let ctx = format!("requesting lsn: {}. Latest page wasn't requested.", lsn);
+            timeline.wait_lsn(lsn, &ctx)?;
         }
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,

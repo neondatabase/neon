@@ -80,7 +80,12 @@ where
         let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", req_lsn);
-            timeline.wait_lsn(req_lsn)?;
+
+            let ctx = format!(
+                "Backup was already requested at lsn {}. Waiting for it to arrive.",
+                req_lsn
+            );
+            timeline.wait_lsn(req_lsn, &ctx)?;
 
             // If the requested point is the end of the timeline, we can
             // provide prev_lsn. (get_last_record_rlsn() might return it as
