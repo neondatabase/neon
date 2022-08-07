@@ -546,6 +546,7 @@ jobs:
           echo "{\"credsStore\":\"ecr-login\"}" > /root/.docker/config.json
           cat /root/.docker/config.json
           crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache || true
+          crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache || true
           echo "" > /root/.docker/config.json
           crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
           crane push cache roryneon/neon:$GITHUB_RUN_ID
