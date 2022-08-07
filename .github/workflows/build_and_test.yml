@@ -556,11 +556,13 @@ jobs:
     steps:
       - name: Single step
         run: |
+          pwd
+          whoami
           go install github.com/google/go-containerregistry/cmd/crane@main
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
-          mkdir /root/.docker
+          mkdir /github/home/.docker/
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-          cat /root/.docker/config.json
+          cat /github/home/.docker/config.json
           crane pull -v 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache:test cache || true
           echo "" > /github/home/.docker/config.json
           crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
