@@ -467,7 +467,6 @@ jobs:
       - name: Promote image to latest
         run:
           MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag latest --image-manifest "$MANIFEST"
-
 #      - name: Add release tag
 #        run:
 #          MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag release --image-manifest "$MANIFEST"
@@ -499,7 +498,7 @@ jobs:
   push-docker-hub:
     name: 'push-docker-hub'
     runs-on: dev
-    #needs: [ dockerfile-check ]
+    needs: [ promote-neon-image, promote-compute-tools, promote-compute-node ]
     container: golang:bullseye
     environment: dev
 
@@ -554,151 +553,6 @@ jobs:
           crane tag roryneon/neon:${{steps.build-tag.outputs.tag}} latest
           crane tag roryneon/compute-tools:${{steps.build-tag.outputs.tag}} latest
           crane tag roryneon/compute-node:${{steps.build-tag.outputs.tag}} latest
-
-#  docker-image:
-#    runs-on: [ self-hosted, Linux, k8s-runner ]
-#    needs: [ pg_regress-tests, other-tests ]
-#    if: |
-#      (github.ref_name == 'main' || github.ref_name == 'release') &&
-#      github.event_name != 'workflow_dispatch'
-#    outputs:
-#      build-tag: ${{steps.build-tag.outputs.tag}}
-#    steps:
-#      - name: Checkout
-#        uses: actions/checkout@v3
-#        with:
-#          submodules: true
-#          fetch-depth: 0
-#
-#      - name: Login to DockerHub
-#        uses: docker/login-action@v1
-#        with:
-#          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-#          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-#
-#      - name: Set up Docker Buildx
-#        uses: docker/setup-buildx-action@v1
-#        with:
-#          driver: docker
-#
-#      - name: Get build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-#            exit 1
-#          fi
-#        id: build-tag
-#
-#      - name: Get legacy build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::latest"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-#            exit 1
-#          fi
-#        id: legacy-build-tag
-#
-#      - name: Build neon Docker image
-#        uses: docker/build-push-action@v2
-#        with:
-#          context: .
-#          build-args: |
-#            GIT_VERSION="${{github.sha}}"
-#            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-#            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-#          pull: true
-#          push: true
-#          tags: neondatabase/neon:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/neon:${{steps.build-tag.outputs.tag}}
-
-#  docker-image-compute:
-#    runs-on: [ self-hosted, Linux, k8s-runner ]
-#    needs: [ pg_regress-tests, other-tests ]
-#    if: |
-#      (github.ref_name == 'main' || github.ref_name == 'release') &&
-#      github.event_name != 'workflow_dispatch'
-#    outputs:
-#      build-tag: ${{steps.build-tag.outputs.tag}}
-#    steps:
-#      - name: Checkout
-#        uses: actions/checkout@v3
-#        with:
-#          submodules: true
-#          fetch-depth: 0
-#
-#      - name: Login to DockerHub
-#        uses: docker/login-action@v1
-#        with:
-#          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-#          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-#
-#      - name: Set up Docker Buildx
-#        uses: docker/setup-buildx-action@v1
-#        with:
-#          driver: docker
-#
-#      - name: Get build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-#            exit 1
-#          fi
-#        id: build-tag
-#
-#      - name: Get legacy build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::latest"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-#            exit 1
-#          fi
-#        id: legacy-build-tag
-#
-#      - name: Build compute-tools Docker image
-#        uses: docker/build-push-action@v2
-#        with:
-#          context: .
-#          build-args: |
-#            GIT_VERSION="${{github.sha}}"
-#            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-#            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-#          push: false
-#          file: Dockerfile.compute-tools
-#          tags: neondatabase/compute-tools:local
-#
-#      - name: Push compute-tools Docker image
-#        uses: docker/build-push-action@v2
-#        with:
-#          context: .
-#          build-args: |
-#            GIT_VERSION="${{github.sha}}"
-#            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-#            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-#          push: true
-#          file: Dockerfile.compute-tools
-#          tags: neondatabase/compute-tools:${{steps.legacy-build-tag.outputs.tag}}
-#
-#      - name: Build compute-node Docker image
-#        uses: docker/build-push-action@v2
-#        with:
-#          context: ./vendor/postgres/
-#          build-args:
-#            COMPUTE_TOOLS_TAG=local
-#          push: true
-#          tags: neondatabase/compute-node:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]

@@ -25,7 +25,6 @@ runs:
         fi
 
         ZSTD_NBTHREADS=0
-        ZSTD_CLEVEL=1
         if [ -d  ${SOURCE} ]; then
           time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
         elif [ -f ${SOURCE} ]; then
