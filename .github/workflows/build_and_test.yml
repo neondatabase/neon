@@ -527,13 +527,13 @@ jobs:
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
       - name: Pull neon image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID neon
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest neon
 
       - name: Pull compute tools image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID compute-tools
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest compute-tools
 
       - name: Pull compute node image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID compute-node
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest compute-node
 
       - name: Configure docker login
         run: |
