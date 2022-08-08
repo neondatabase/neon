@@ -509,7 +509,7 @@ jobs:
 #    steps:
 #      - name: Promote image to latest
 #        run:
-#          MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag latest --image-manifest "$MANIFEST"
+##          MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
     name: 'push-docker-hub'
