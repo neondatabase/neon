@@ -541,8 +541,6 @@ components:
           type: string
         current_physical_size:
           type: integer
-        has_in_progress_downloads:
-          type: boolean
     TenantCreateInfo:
       type: object
       properties:
@@ -588,49 +586,28 @@ components:
         - timeline_id
         - tenant_id
       properties:
-        timeline_id:
-          type: string
-          format: hex
         tenant_id:
           type: string
           format: hex
-        local:
-          $ref: "#/components/schemas/LocalTimelineInfo"
-        remote:
-          $ref: "#/components/schemas/RemoteTimelineInfo"
-    RemoteTimelineInfo:
-      type: object
-      required:
-        - awaits_download
-        - remote_consistent_lsn
-      properties:
-        awaits_download:
-          type: boolean
-        remote_consistent_lsn:
+        timeline_id:
           type: string
           format: hex
-    LocalTimelineInfo:
-      type: object
-      required:
-        - last_record_lsn
-        - disk_consistent_lsn
-        - timeline_state
-      properties:
-        last_record_lsn:
-          type: string
-          format: hex
-        disk_consistent_lsn:
-          type: string
-          format: hex
-        timeline_state:
-          type: string
         ancestor_timeline_id:
           type: string
           format: hex
         ancestor_lsn:
           type: string
           format: hex
+        last_record_lsn:
+          type: string
+          format: hex
         prev_record_lsn:
+          type: string
+          format: hex
+        latest_gc_cutoff_lsn:
+          type: string
+          format: hex
+        disk_consistent_lsn:
           type: string
           format: hex
         current_logical_size:
@@ -641,6 +618,9 @@ components:
           type: integer
         current_physical_size_non_incremental:
           type: integer
+        remote_consistent_lsn:
+          type: string
+          format: hex
         wal_source_connstr:
           type: string
         last_received_msg_lsn:

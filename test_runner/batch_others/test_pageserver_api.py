@@ -53,10 +53,6 @@ def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
         assert timeline_details['tenant_id'] == tenant_id.hex
         assert timeline_details['timeline_id'] == timeline_id_str
 
-        local_timeline_details = timeline_details.get('local')
-        assert local_timeline_details is not None
-        assert local_timeline_details['timeline_state'] == 'Loaded'
-
 
 def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -79,14 +75,13 @@ def expect_updated_msg_lsn(client: NeonPageserverHttpClient,
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
     # a successful `timeline_details` response must contain the below fields
-    local_timeline_details = timeline_details['local']
-    assert "wal_source_connstr" in local_timeline_details.keys()
-    assert "last_received_msg_lsn" in local_timeline_details.keys()
-    assert "last_received_msg_ts" in local_timeline_details.keys()
+    assert "wal_source_connstr" in timeline_details.keys()
+    assert "last_received_msg_lsn" in timeline_details.keys()
+    assert "last_received_msg_ts" in timeline_details.keys()
 
-    assert local_timeline_details["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
+    assert timeline_details["last_received_msg_lsn"] is not None, "the last received message's LSN is empty"
 
-    last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
+    last_msg_lsn = lsn_from_hex(timeline_details["last_received_msg_lsn"])
     assert prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn, \
         f"the last received message's LSN {last_msg_lsn} hasn't been updated \
         compared to the previous message's LSN {prev_msg_lsn}"

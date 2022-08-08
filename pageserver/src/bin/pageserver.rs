@@ -263,7 +263,8 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // start profiler (if enabled)
     let profiler_guard = profiling::init_profiler(conf);
 
-    pageserver::tenant_tasks::init_tenant_task_pool()?;
+    pageserver::walreceiver::init_etcd_client(conf)?;
+    pageserver::storage_sync::init_storage_sync(conf)?;
 
     // initialize authentication for incoming connections
     let auth = match &conf.auth_type {
@@ -276,7 +277,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    let remote_index = tenant_mgr::init_tenant_mgr(conf)?;
+    tenant_mgr::init_tenant_mgr(conf)?;
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
@@ -288,7 +289,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         "http_endpoint_thread",
         true,
         move || {
-            let router = http::make_router(conf, auth_cloned, remote_index)?;
+            let router = http::make_router(conf, auth_cloned)?;
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;

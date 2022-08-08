@@ -1362,7 +1362,7 @@ fn is_slru_block_key(key: Key) -> bool {
 
 #[cfg(test)]
 pub fn create_test_timeline<R: Repository>(
-    repo: R,
+    repo: &mut R,
     timeline_id: utils::zid::ZTimelineId,
 ) -> Result<std::sync::Arc<R::Timeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
@@ -1374,19 +1374,9 @@ pub fn create_test_timeline<R: Repository>(
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
-mod tests {
+pub mod tests {
     //use super::repo_harness::*;
     //use super::*;
-
-    /*
-        fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {
-            let incremental = timeline.get_current_logical_size();
-            let non_incremental = timeline
-                .get_current_logical_size_non_incremental(lsn)
-                .unwrap();
-            assert_eq!(incremental, non_incremental);
-        }
-    */
 
     /*
     ///

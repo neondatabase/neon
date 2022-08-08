@@ -25,8 +25,9 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::repository::{Repository, Timeline};
-use crate::{RepositoryImpl, TimelineImpl};
+use crate::repository::Timeline;
+use crate::walreceiver::get_etcd_client;
+use crate::TimelineImpl;
 use utils::{
     lsn::Lsn,
     pq_proto::ReplicationFeedback,
@@ -36,21 +37,25 @@ use utils::{
 use super::{TaskEvent, TaskHandle};
 
 /// Spawns the loop to take care of the timeline's WAL streaming connection.
-pub(super) fn spawn_connection_manager_task(
-    id: ZTenantTimelineId,
+pub fn spawn_connection_manager_task(
     broker_loop_prefix: String,
-    mut client: Client,
-    local_timeline: Arc<TimelineImpl>,
+    timeline: Arc<TimelineImpl>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
 ) -> TaskHandle<()> {
+    let mut etcd_client = get_etcd_client().clone();
+
+    let id = ZTenantTimelineId {
+        tenant_id: timeline.tenant_id,
+        timeline_id: timeline.timeline_id,
+    };
+
     TaskHandle::spawn(move |_, mut cancellation| {
         async move {
             info!("WAL receiver broker started, connecting to etcd");
             let mut walreceiver_state = WalreceiverState::new(
-                id,
-                local_timeline,
+                timeline,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
@@ -68,7 +73,7 @@ pub(super) fn spawn_connection_manager_task(
 
                     _ = connection_manager_loop_step(
                         &broker_loop_prefix,
-                        &mut client,
+                        &mut etcd_client,
                         &mut walreceiver_state,
                     ) => {},
                 }
@@ -86,7 +91,10 @@ async fn connection_manager_loop_step(
     etcd_client: &mut Client,
     walreceiver_state: &mut WalreceiverState,
 ) {
-    let id = walreceiver_state.id;
+    let id = ZTenantTimelineId {
+        tenant_id: walreceiver_state.timeline.tenant_id,
+        timeline_id: walreceiver_state.timeline.timeline_id,
+    };
 
     // XXX: We never explicitly cancel etcd task, instead establishing one and never letting it go,
     // running the entire loop step as much as possible to an end.
@@ -245,8 +253,9 @@ async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.
 struct WalreceiverState {
     id: ZTenantTimelineId,
+
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    local_timeline: Arc<TimelineImpl>,
+    timeline: Arc<TimelineImpl>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -283,15 +292,18 @@ struct EtcdSkTimeline {
 
 impl WalreceiverState {
     fn new(
-        id: ZTenantTimelineId,
-        local_timeline: Arc<<RepositoryImpl as Repository>::Timeline>,
+        timeline: Arc<TimelineImpl>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
     ) -> Self {
+        let id = ZTenantTimelineId {
+            tenant_id: timeline.tenant_id,
+            timeline_id: timeline.timeline_id,
+        };
         Self {
             id,
-            local_timeline,
+            timeline,
             wal_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -314,6 +326,8 @@ impl WalreceiverState {
             .get(&new_sk_id)
             .copied()
             .unwrap_or(0);
+
+        let timeline = Arc::clone(&self.timeline);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 exponential_backoff(
@@ -323,7 +337,7 @@ impl WalreceiverState {
                 )
                 .await;
                 super::walreceiver_connection::handle_walreceiver_connection(
-                    id,
+                    timeline,
                     &new_wal_source_connstr,
                     events_sender.as_ref(),
                     cancellation,
@@ -503,7 +517,7 @@ impl WalreceiverState {
         self.wal_stream_candidates
             .iter()
             .filter(|(_, etcd_info)| {
-                etcd_info.timeline.commit_lsn > Some(self.local_timeline.get_last_record_lsn())
+                etcd_info.timeline.commit_lsn > Some(self.timeline.get_last_record_lsn())
             })
             .filter_map(|(sk_id, etcd_info)| {
                 let info = &etcd_info.timeline;
@@ -590,10 +604,8 @@ fn wal_stream_connection_string(
 mod tests {
     use std::time::SystemTime;
 
-    use crate::repository::{
-        repo_harness::{RepoHarness, TIMELINE_ID},
-        Repository,
-    };
+    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::repository::Repository;
 
     use super::*;
 
@@ -1204,7 +1216,7 @@ mod tests {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            local_timeline: harness
+            timeline: harness
                 .load()
                 .create_empty_timeline(TIMELINE_ID, Lsn(0))
                 .expect("Failed to create an empty timeline for dummy wal connection manager"),

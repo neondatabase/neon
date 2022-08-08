@@ -14,7 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
-use std::sync::atomic::{self, AtomicBool, AtomicIsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicIsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, SystemTime};
 
@@ -38,11 +38,10 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::pgdatadir_mapping::BlockNumber;
-use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::pgdatadir_mapping::{BlockNumber, DatadirTimeline, LsnForTimestamp};
 use crate::reltag::RelTag;
+use crate::storage_sync::{index::IndexPart, RemoteTimelineClient};
 use crate::tenant_config::TenantConfOpt;
-use crate::DatadirTimeline;
 
 use postgres_ffi::xlog_utils::to_pg_timestamp;
 use utils::{
@@ -51,14 +50,16 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::repository::{GcResult, RepositoryTimeline, Timeline, TimelineWriter};
+use crate::page_cache;
+use crate::repository::{GcResult, Timeline, TimelineWriter};
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
+use crate::walreceiver::spawn_connection_manager_task;
+use crate::walreceiver::TaskHandle;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
-use crate::{page_cache, storage_sync};
 
 /// Prometheus histogram buckets (in seconds) that capture the majority of
 /// latencies in the microsecond range but also extend far enough up to distinguish
@@ -157,85 +158,29 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-#[derive(Clone)]
-pub enum LayeredTimelineEntry {
-    Loaded(Arc<LayeredTimeline>),
-    Unloaded {
-        id: ZTimelineId,
-        metadata: TimelineMetadata,
-    },
-}
-
-impl LayeredTimelineEntry {
-    fn timeline_id(&self) -> ZTimelineId {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline.timeline_id,
-            LayeredTimelineEntry::Unloaded { id, .. } => *id,
-        }
-    }
-
-    pub fn ancestor_timeline_id(&self) -> Option<ZTimelineId> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => {
-                timeline.ancestor_timeline.as_ref().map(|t| t.timeline_id())
-            }
-            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_timeline(),
-        }
-    }
-
-    pub fn ancestor_lsn(&self) -> Lsn {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline.ancestor_lsn,
-            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_lsn(),
-        }
-    }
-
-    fn ensure_loaded(&self) -> anyhow::Result<&Arc<LayeredTimeline>> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => Ok(timeline),
-            LayeredTimelineEntry::Unloaded { .. } => {
-                anyhow::bail!("timeline is unloaded")
-            }
-        }
-    }
-
-    pub fn layer_removal_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline
-                .layer_removal_cs
-                .try_lock()
-                .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
-                .map(Some),
-
-            LayeredTimelineEntry::Unloaded { .. } => Ok(None),
-        }
-    }
-}
-
-impl From<LayeredTimelineEntry> for RepositoryTimeline<LayeredTimeline> {
-    fn from(entry: LayeredTimelineEntry) -> Self {
-        match entry {
-            LayeredTimelineEntry::Loaded(timeline) => RepositoryTimeline::Loaded(timeline as _),
-            LayeredTimelineEntry::Unloaded { metadata, .. } => {
-                RepositoryTimeline::Unloaded { metadata }
-            }
-        }
-    }
-}
-
 pub struct LayeredTimeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    tenant_id: ZTenantId,
+    pub tenant_id: ZTenantId,
     pub timeline_id: ZTimelineId,
 
     pub layers: RwLock<LayerMap>,
 
     last_freeze_at: AtomicLsn,
 
-    // WAL redo manager
+    /// WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
+
+    /// Remote storage client.
+    ///
+    /// If Some, use it to upload all newly created layers to the remote storage,
+    /// and keep remote metadata file in sync. In the future, also use it to download
+    /// layer files on-demand.
+    remote_client: Option<Arc<RemoteTimelineClient>>,
+
+    /// WAL receiver task
+    walreceiver: RwLock<Option<TaskHandle<()>>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -263,7 +208,7 @@ pub struct LayeredTimeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<LayeredTimelineEntry>,
+    ancestor_timeline: Option<Arc<LayeredTimeline>>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -275,9 +220,6 @@ pub struct LayeredTimeline {
     last_record_gauge: IntGauge,
     wait_lsn_time_histo: Histogram,
     current_physical_size_gauge: UIntGauge,
-
-    /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
-    upload_layers: AtomicBool,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
@@ -412,7 +354,7 @@ impl Timeline for LayeredTimeline {
     fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
         self.ancestor_timeline
             .as_ref()
-            .map(LayeredTimelineEntry::timeline_id)
+            .map(|ancestor| ancestor.timeline_id)
     }
 
     /// Wait until WAL has been received up to the given LSN.
@@ -520,6 +462,14 @@ impl Timeline for LayeredTimeline {
         self.disk_consistent_lsn.load()
     }
 
+    fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.last_uploaded_consistent_lsn()
+        } else {
+            None
+        }
+    }
+
     fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
         Box::new(LayeredTimelineWriter {
             tl: self,
@@ -581,20 +531,24 @@ impl LayeredTimeline {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
-    /// Open a Timeline handle.
+    /// Construct a LayeredTimeline object to represent a timeline.
     ///
-    /// Loads the metadata for the timeline into memory, but not the layer map.
+    /// Before the timeline can actually be used, the caller is responsible for:
+    /// - downloading the data to local disk, if necessary (that is, on tenant-attach)
+    /// - calling load_layer_map()
+    /// - launching WAL receiver, by calling launch_wal_receiver()
+    ///
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
-        metadata: TimelineMetadata,
-        ancestor: Option<LayeredTimelineEntry>,
+        metadata: &TimelineMetadata,
+        ancestor: Option<Arc<LayeredTimeline>>,
         timeline_id: ZTimelineId,
         tenant_id: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        upload_layers: bool,
-    ) -> LayeredTimeline {
+        remote_client: Option<RemoteTimelineClient>,
+    ) -> Arc<LayeredTimeline> {
         let reconstruct_time_histo = RECONSTRUCT_TIME
             .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
             .unwrap();
@@ -640,6 +594,8 @@ impl LayeredTimeline {
             layers: RwLock::new(LayerMap::default()),
 
             walredo_mgr,
+            remote_client: remote_client.map(|c| Arc::new(c)),
+            walreceiver: RwLock::new(None),
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
@@ -662,8 +618,6 @@ impl LayeredTimeline {
             wait_lsn_time_histo,
             current_physical_size_gauge,
 
-            upload_layers: AtomicBool::new(upload_layers),
-
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
             layer_removal_cs: Mutex::new(()),
@@ -685,7 +639,38 @@ impl LayeredTimeline {
             rel_size_cache: RwLock::new(HashMap::new()),
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
-        result
+
+        let timeline = Arc::new(result);
+
+        timeline
+    }
+
+    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+        info!(
+            "launching WAL receiver for timeline {} of tenant {}",
+            self.timeline_id, self.tenant_id
+        );
+        let tenant_conf_guard = self.tenant_conf.read().unwrap();
+        let lagging_wal_timeout = tenant_conf_guard
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
+        let walreceiver_connect_timeout = tenant_conf_guard
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
+        let max_lsn_wal_lag = tenant_conf_guard
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
+        drop(tenant_conf_guard);
+        let walreceiver = spawn_connection_manager_task(
+            self.conf.broker_etcd_prefix.clone(),
+            Arc::clone(&self),
+            walreceiver_connect_timeout,
+            lagging_wal_timeout,
+            max_lsn_wal_lag,
+        );
+        *self.walreceiver.write().unwrap() = Some(walreceiver);
+
+        Ok(())
     }
 
     ///
@@ -968,6 +953,59 @@ impl LayeredTimeline {
         }
     }
 
+    ///
+    /// Download everything that's present remotely, into the local disk
+    ///
+    /// This is used during tenant attach. We assume that the local directory is
+    /// empty. If it's not, we will merrily overwrite.
+    ///
+    /// Note: This doesn't populate the layer map yet. Merely downloads the files.
+    ///
+    pub async fn initial_download(&self, index_part: &IndexPart) -> Result<()> {
+        let remote_metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)
+            .with_context(|| {
+                format!(
+                    "Failed to parse metadata file from remote storage for tenant {}",
+                    self.tenant_id
+                )
+            })?;
+
+        let remote_client = self
+            .remote_client
+            .as_ref()
+            .ok_or(anyhow!("cannot download without remote storage"))?;
+
+        remote_client.init_queue(
+            &index_part.timeline_layers,
+            remote_metadata.disk_consistent_lsn(),
+        );
+
+        // Download the layer files
+        // TODO: do this in parallel
+        for path in index_part.timeline_layers.iter() {
+            remote_client.download_layer_file(path).await?;
+        }
+
+        // Save the metadata file to local disk.
+        // Do this last, so that if we crash in-between, we won't think that the
+        // local state is valid.
+        save_metadata(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            &remote_metadata,
+            true,
+        )?;
+
+        info!(
+            "initial download of timeline {} complete ({} files)",
+            self.timeline_id,
+            index_part.timeline_layers.len()
+        );
+
+        Ok(())
+    }
+
     fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
 
@@ -980,24 +1018,13 @@ impl LayeredTimeline {
     }
 
     fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
-        let ancestor = self
-            .ancestor_timeline
-            .as_ref()
-            .with_context(|| {
-                format!(
-                    "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                    self.timeline_id,
-                    self.get_ancestor_timeline_id(),
-                )
-            })?
-            .ensure_loaded()
-            .with_context(|| {
-                format!(
-                    "Ancestor timeline is not loaded. Timeline id: {} Ancestor id {:?}",
-                    self.timeline_id,
-                    self.get_ancestor_timeline_id(),
-                )
-            })?;
+        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
+            format!(
+                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
+                self.timeline_id,
+                self.get_ancestor_timeline_id(),
+            )
+        })?;
         Ok(Arc::clone(ancestor))
     }
 
@@ -1260,10 +1287,7 @@ impl LayeredTimeline {
                 None
             };
 
-            let ancestor_timelineid = self
-                .ancestor_timeline
-                .as_ref()
-                .map(LayeredTimelineEntry::timeline_id);
+            let ancestor_timelineid = self.get_ancestor_timeline_id();
 
             let metadata = TimelineMetadata::new(
                 disk_consistent_lsn,
@@ -1287,13 +1311,11 @@ impl LayeredTimeline {
                 false,
             )?;
 
-            if self.upload_layers.load(atomic::Ordering::Relaxed) {
-                storage_sync::schedule_layer_upload(
-                    self.tenant_id,
-                    self.timeline_id,
-                    layer_paths_to_upload,
-                    Some(metadata),
-                );
+            if let Some(remote_client) = &self.remote_client {
+                for path in layer_paths_to_upload {
+                    remote_client.schedule_layer_file_upload(&path)?;
+                }
+                remote_client.schedule_index_upload(&metadata)?;
             }
 
             // Also update the in-memory copy
@@ -1387,15 +1409,10 @@ impl LayeredTimeline {
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
                 let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
-                if !layer_paths_to_upload.is_empty()
-                    && self.upload_layers.load(atomic::Ordering::Relaxed)
-                {
-                    storage_sync::schedule_layer_upload(
-                        self.tenant_id,
-                        self.timeline_id,
-                        HashSet::from_iter(layer_paths_to_upload),
-                        None,
-                    );
+                if let Some(remote_client) = &self.remote_client {
+                    for path in layer_paths_to_upload {
+                        remote_client.schedule_layer_file_upload(&path)?;
+                    }
                 }
 
                 // 3. Compact
@@ -1778,30 +1795,24 @@ impl LayeredTimeline {
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
-        drop(all_keys_iter);
-        for l in deltas_to_compact {
+        let mut layer_paths_to_delete = HashSet::with_capacity(deltas_to_compact.len());
+        for l in deltas_to_compact.iter() {
             if let Some(path) = l.local_path() {
                 self.current_physical_size_gauge.sub(path.metadata()?.len());
-                layer_paths_do_delete.insert(path);
+                layer_paths_to_delete.insert(path);
             }
             l.delete()?;
-            layers.remove_historic(l);
+            layers.remove_historic(Arc::clone(l));
         }
         drop(layers);
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
-            storage_sync::schedule_layer_upload(
-                self.tenant_id,
-                self.timeline_id,
-                new_layer_paths,
-                None,
-            );
-            storage_sync::schedule_layer_delete(
-                self.tenant_id,
-                self.timeline_id,
-                layer_paths_do_delete,
-            );
+        if let Some(remote_client) = &self.remote_client {
+            for path in new_layer_paths {
+                remote_client.schedule_layer_file_upload(&path)?;
+            }
+            for path in layer_paths_to_delete {
+                remote_client.schedule_layer_file_deletion(&path)?;
+            }
         }
 
         Ok(())
@@ -2047,12 +2058,10 @@ impl LayeredTimeline {
             result.layers_removed += 1;
         }
 
-        if self.upload_layers.load(atomic::Ordering::Relaxed) {
-            storage_sync::schedule_layer_delete(
-                self.tenant_id,
-                self.timeline_id,
-                layer_paths_to_delete,
-            );
+        if let Some(remote_client) = &self.remote_client {
+            for path in layer_paths_to_delete {
+                remote_client.schedule_layer_file_deletion(&path)?;
+            }
         }
 
         result.elapsed = now.elapsed()?;
@@ -2214,6 +2223,26 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     bail!("couldn't find an unused backup number for {:?}", path)
 }
 
+pub fn load_metadata(
+    conf: &'static PageServerConf,
+    timeline_id: ZTimelineId,
+    tenant_id: ZTenantId,
+) -> anyhow::Result<TimelineMetadata> {
+    let metadata_path = metadata_path(conf, timeline_id, tenant_id);
+    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
+        format!(
+            "Failed to read metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })?;
+    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+        format!(
+            "Failed to parse metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })
+}
+
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
@@ -2248,4 +2277,13 @@ pub fn save_metadata(
     }
 
     Ok(())
+}
+
+/// Delete the metadata file.
+pub fn delete_metadata(
+    _conf: &'static PageServerConf,
+    _timelineid: ZTimelineId,
+    _tenantid: ZTenantId,
+) -> Result<()> {
+    todo!()
 }

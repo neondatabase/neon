@@ -105,14 +105,9 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         for timeline_detail in timeline_details:
             timeline_id: str = timeline_detail["timeline_id"]
 
-            local_timeline_detail = timeline_detail.get('local')
-            if local_timeline_detail is None:
-                log.debug(f"Timeline {timeline_id} is not present locally, skipping")
-                continue
-
             m = TimelineMetrics(
                 timeline_id=timeline_id,
-                last_record_lsn=lsn_from_hex(local_timeline_detail['last_record_lsn']),
+                last_record_lsn=lsn_from_hex(timeline_detail['last_record_lsn']),
             )
             for sk_m in sk_metrics:
                 m.flush_lsns.append(sk_m.flush_lsn_inexact[(tenant_id.hex, timeline_id)])
@@ -335,7 +330,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         if all(not os.path.exists(p) for p in first_segments):
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
+        if elapsed > 120:
             raise RuntimeError(f"timed out waiting {elapsed:.0f}s for first segment get removed")
         time.sleep(0.5)
 
@@ -482,7 +477,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: R
             last_lsn = query_scalar(cur, 'SELECT pg_current_wal_flush_lsn()')
 
     pageserver_lsn = env.pageserver.http_client().timeline_detail(
-        uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
+        uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["last_record_lsn"]
     lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
     log.info(
         f'Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb'
@@ -509,7 +504,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: R
             raise RuntimeError(f'Timed out waiting for WAL redo')
 
         pageserver_lsn = env.pageserver.http_client().timeline_detail(
-            uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["local"]["last_record_lsn"]
+            uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["last_record_lsn"]
         lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
 
         if time.time() > last_debug_print + 10 or lag <= 0:

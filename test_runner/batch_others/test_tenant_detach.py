@@ -23,7 +23,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     # first check for non existing tenant
     tenant_id = uuid4()
     with pytest.raises(expected_exception=NeonPageserverApiException,
-                       match=f'Tenant not found for id {tenant_id.hex}'):
+                       match=f'Tenant {tenant_id.hex} not found'):
         pageserver_http.tenant_detach(tenant_id)
 
     # create new nenant

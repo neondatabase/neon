@@ -8,8 +8,7 @@ use utils::{
 };
 
 // These enums are used in the API response fields.
-use crate::repository::LocalTimelineState;
-use crate::tenant_mgr::TenantState;
+use crate::layered_repository::TenantState;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -106,14 +105,21 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
-    pub state: Option<TenantState>,
+    pub state: TenantState,
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
 }
 
+///
+/// This represents the output of the "timeline_detail" API call.
+///
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalTimelineInfo {
+pub struct TimelineInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: ZTenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_id: ZTimelineId,
+
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<ZTimelineId>,
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -130,30 +136,13 @@ pub struct LocalTimelineInfo {
     pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<usize>,
     pub current_physical_size_non_incremental: Option<u64>,
-    pub timeline_state: LocalTimelineState,
+
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
 
     pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RemoteTimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub remote_consistent_lsn: Lsn,
-    pub awaits_download: bool,
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: ZTenantId,
-    #[serde_as(as = "DisplayFromStr")]
-    pub timeline_id: ZTimelineId,
-    pub local: Option<LocalTimelineInfo>,
-    pub remote: Option<RemoteTimelineInfo>,
 }

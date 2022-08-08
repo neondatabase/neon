@@ -18,7 +18,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # for non existing tenant:
     invalid_tenant_id = uuid4()
     with pytest.raises(NeonPageserverApiException,
-                       match=f"Tenant {invalid_tenant_id.hex} not found in local tenant state"):
+                       match=f"Tenant {invalid_tenant_id.hex} not found"):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
     # construct pair of branches to validate that pageserver prohibits
@@ -30,7 +30,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     ps_http = env.pageserver.http_client()
     with pytest.raises(NeonPageserverApiException,
-                       match="Cannot detach timeline which has child timelines"):
+                       match="Cannot delete timeline which has child timelines"):
 
         timeline_path = env.repo_dir / "tenants" / env.initial_tenant.hex / "timelines" / parent_timeline_id.hex
         assert timeline_path.exists()
@@ -51,7 +51,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # check 404
     with pytest.raises(NeonPageserverApiException,
-                       match="is not found neither locally nor remotely"):
+                       match=f"Timeline {leaf_timeline_id.hex} not found"):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
         # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?

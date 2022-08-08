@@ -19,20 +19,16 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    layered_repository::WalReceiverInfo,
-    pgdatadir_mapping::DatadirTimeline,
-    repository::{Repository, Timeline},
-    tenant_mgr,
-    walingest::WalIngest,
-    walrecord::DecodedWALRecord,
+    layered_repository::WalReceiverInfo, pgdatadir_mapping::DatadirTimeline, repository::Timeline,
+    walingest::WalIngest, walrecord::DecodedWALRecord, TimelineImpl,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
+use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    id: ZTenantTimelineId,
+    timeline: Arc<TimelineImpl>,
     wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
     mut cancellation: watch::Receiver<()>,
@@ -48,7 +44,7 @@ pub async fn handle_walreceiver_connection(
     )
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver conection")?;
+    .context("Failed to open walreceiver connection")?;
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     let mut connection_cancellation = cancellation.clone();
@@ -86,22 +82,8 @@ pub async fn handle_walreceiver_connection(
     info!("{identify:?}");
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
-    let ZTenantTimelineId {
-        tenant_id,
-        timeline_id,
-    } = id;
 
-    let (repo, timeline) = tokio::task::spawn_blocking(move || {
-        let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-            .with_context(|| format!("no repository found for tenant {tenant_id}"))?;
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)
-            .with_context(|| {
-                format!("local timeline {timeline_id} not found for tenant {tenant_id}")
-            })?;
-        Ok::<_, anyhow::Error>((repo, timeline))
-    })
-    .await
-    .with_context(|| format!("Failed to spawn blocking task to get repository and timeline for tenant {tenant_id} timeline {timeline_id}"))??;
+    let timeline_id = timeline.timeline_id;
 
     //
     // Start streaming the WAL, from where we left off previously.
@@ -178,15 +160,9 @@ pub async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
-                let timeline_to_check = Arc::clone(&timeline);
-                tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
-                    .await
-                    .with_context(|| {
-                        format!("Spawned checkpoint check task panicked for timeline {id}")
-                    })?
-                    .with_context(|| {
-                        format!("Failed to check checkpoint distance for timeline {id}")
-                    })?;
+                timeline.check_checkpoint_distance().with_context(|| {
+                    format!("Failed to check checkpoint distance for timeline {timeline_id}")
+                })?;
 
                 Some(endlsn)
             }
@@ -209,19 +185,8 @@ pub async fn handle_walreceiver_connection(
         };
 
         if let Some(last_lsn) = status_update {
-            let remote_index = repo.get_remote_index();
-            let timeline_remote_consistent_lsn = remote_index
-                .read()
-                .await
-                // here we either do not have this timeline in remote index
-                // or there were no checkpoints for it yet
-                .timeline_entry(&ZTenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                })
-                .map(|remote_timeline| remote_timeline.metadata.disk_consistent_lsn())
-                // no checkpoint was uploaded
-                .unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn =
+                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);

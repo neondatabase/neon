@@ -1030,8 +1030,8 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layered_repository::repo_harness::*;
     use crate::pgdatadir_mapping::create_test_timeline;
-    use crate::repository::repo_harness::*;
     use crate::repository::Timeline;
     use postgres_ffi::pg_constants;
 
@@ -1061,8 +1061,8 @@ mod tests {
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = RepoHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut repo = RepoHarness::create("test_relsize")?.load();
+        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1189,8 +1189,8 @@ mod tests {
     // and then created it again within the same layer.
     #[test]
     fn test_drop_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut repo = RepoHarness::create("test_drop_extend")?.load();
+        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1229,8 +1229,8 @@ mod tests {
     // and then extended it again within the same layer.
     #[test]
     fn test_truncate_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut repo = RepoHarness::create("test_truncate_extend")?.load();
+        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1317,8 +1317,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let mut repo = RepoHarness::create("test_large_rel")?.load();
+        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;

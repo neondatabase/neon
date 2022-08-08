@@ -1081,7 +1081,7 @@ CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[
                                           re.MULTILINE)
 CREATE_TIMELINE_ID_EXTRACTOR = re.compile(r"^Created timeline '(?P<timeline_id>[^']+)'",
                                           re.MULTILINE)
-TIMELINE_DATA_EXTRACTOR = re.compile(r"\s(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]",
+TIMELINE_DATA_EXTRACTOR = re.compile(r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]",
                                      re.MULTILINE)
 
 
@@ -2403,34 +2403,18 @@ def wait_until(number_of_iterations: int, interval: float, func):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def assert_timeline_local(pageserver_http_client: NeonPageserverHttpClient,
-                          tenant: uuid.UUID,
-                          timeline: uuid.UUID):
-    timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
-    assert timeline_detail.get('local', {}).get("disk_consistent_lsn"), timeline_detail
-    return timeline_detail
-
-
-def assert_no_in_progress_downloads_for_tenant(
-    pageserver_http_client: NeonPageserverHttpClient,
-    tenant: uuid.UUID,
-):
-    tenant_status = pageserver_http_client.tenant_status(tenant)
-    assert tenant_status['has_in_progress_downloads'] is False, tenant_status
-
-
 def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
                           tenant: uuid.UUID,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail['remote'] is None:
+    if detail['remote_consistent_lsn'] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:
-        lsn_str = detail['remote']['remote_consistent_lsn']
+        lsn_str = detail['remote_consistent_lsn']
         assert isinstance(lsn_str, str)
         return lsn_from_hex(lsn_str)
 
@@ -2443,6 +2427,7 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
     for i in range(10):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
+            log.info("wait finished")
             return
         log.info("waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
             lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
@@ -2456,7 +2441,7 @@ def last_record_lsn(pageserver_http_client: NeonPageserverHttpClient,
                     timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    lsn_str = detail['local']['last_record_lsn']
+    lsn_str = detail['last_record_lsn']
     assert isinstance(lsn_str, str)
     return lsn_from_hex(lsn_str)
 

@@ -105,6 +105,9 @@ pub enum ThreadKind {
     // Thread for synchronizing pageserver layer files with the remote storage.
     // Shared by all tenants.
     StorageSync,
+
+    // Thread that handles the initial downloading of all tenants
+    InitialLoad,
 }
 
 #[derive(Default)]
@@ -288,7 +291,7 @@ pub fn associate_with(tenant_id: Option<ZTenantId>, timeline_id: Option<ZTimelin
 ///
 /// Or to shut down all threads for given timeline:
 ///
-///   shutdown_threads(None, Some(timelineid), None)
+///   shutdown_threads(None, Some(tenantid), Some(timelineid))
 ///
 pub fn shutdown_threads(
     kind: Option<ThreadKind>,
