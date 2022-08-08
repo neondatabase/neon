@@ -707,7 +707,7 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<RelativePath>, b: &Vec<&str>) {
+    fn assert_file_list(a: &HashSet<RelativePath>, b: &[&str]) {
         let xx = PathBuf::from("");
         let mut avec: Vec<String> = a
             .iter()
@@ -716,12 +716,12 @@ mod tests {
         avec.sort();
 
         let mut bvec = b.to_owned();
-        bvec.sort();
+        bvec.sort_unstable();
 
         assert_eq!(avec, bvec);
     }
 
-    fn assert_remote_files(expected: &Vec<&str>, remote_path: &Path) {
+    fn assert_remote_files(expected: &[&str], remote_path: &Path) {
         let mut expected: Vec<String> = expected.iter().map(|x| String::from(*x)).collect();
         expected.sort();
 
@@ -787,7 +787,7 @@ mod tests {
             GenericRemoteStorage::new(harness.conf.workdir.clone(), &storage_config)?;
         let client = Arc::new(RemoteTimelineClient {
             conf: harness.conf,
-            runtime: runtime,
+            runtime,
             tenant_id: harness.tenant_id,
             timeline_id: TIMELINE_ID,
             storage_impl,
