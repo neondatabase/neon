@@ -397,7 +397,7 @@ jobs:
 
   build-neon-image:
     name: 'kaniko-neon'
-    if: needs.dockerfile-check.outputs.value != 'true'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -418,7 +418,7 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
-    if: needs.dockerfile-check.outputs.value != 'true'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -436,7 +436,7 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
-    if: needs.dockerfile-check.outputs.value != 'true'
+    if: needs.dockerfile-check.outputs.value != 'false'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -474,42 +474,6 @@ jobs:
 #      - name: Add release tag
 #        run:
 #          MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name ${{ matrix.name }} --image-tag release --image-manifest "$MANIFEST"
-
-#  promote-neon-image:
-#    name: 'promote-neon'
-#    runs-on: dev
-#    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
-#    if: github.event_name != 'workflow_dispatch'
-#    container: amazon/aws-cli
-#
-#    steps:
-#      - name: Promote image to latest
-#        run:
-#          MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag latest --image-manifest "$MANIFEST"
-#
-#  promote-compute-tools-image:
-#    name: 'promote-compute-tools'
-#    runs-on: dev
-#    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
-#    if: github.event_name != 'workflow_dispatch'
-#    container: amazon/aws-cli
-#
-#    steps:
-#      - name: Promote image to latest
-#        run:
-#          MANIFEST=$(aws ecr batch-get-image --repository-name compute-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-tools --image-tag latest --image-manifest "$MANIFEST"
-#
-#  promote-compute-node-image:
-#    name: 'promote-compute-node'
-#    runs-on: dev
-#    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
-#    if: github.event_name != 'workflow_dispatch'
-#    container: amazon/aws-cli
-#
-#    steps:
-#      - name: Promote image to latest
-#        run:
-##          MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
     name: 'push-docker-hub'
