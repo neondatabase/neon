@@ -24,6 +24,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::task::JoinHandle;
+
 use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
@@ -271,7 +273,7 @@ impl Repository for LayeredRepository {
         let remote_client = if self.upload_layers {
             let remote_client =
                 create_remote_timeline_client(self.conf, self.tenant_id, timeline_id)?;
-            remote_client.init_queue(&HashSet::new(), Lsn(0));
+            remote_client.init_queue(&std::collections::HashSet::new(), Lsn(0));
             Some(remote_client)
         } else {
             None
@@ -674,10 +676,6 @@ impl LayeredRepository {
 
             let remote_client =
                 create_remote_timeline_client(self.conf, self.tenant_id, timeline_id)?;
-            remote_client.init_queue(
-                &index_part.timeline_layers,
-                remote_metadata.disk_consistent_lsn(),
-            );
 
             let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
                 let timelines = self.timelines.lock().unwrap();
@@ -698,13 +696,13 @@ impl LayeredRepository {
                 Some(remote_client),
             );
 
-            // Download everything from remote storage to local disk
-            timeline.initial_download(index_part).await?;
-
             // Initialize the layer map, based on all the files we now have on local disk.
             timeline
                 .load_layer_map(remote_metadata.disk_consistent_lsn())
                 .context("failed to load layermap")?;
+
+            // Download everything from remote storage to local disk
+            timeline.reconcile_with_remote(Some(index_part)).await?;
 
             info!("calculating initial size of {}", timeline.timeline_id);
             timeline.init_logical_size()?;
@@ -748,7 +746,7 @@ impl LayeredRepository {
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: ZTenantId,
-    ) -> Result<(Arc<LayeredRepository>, tokio::task::JoinHandle<()>)> {
+    ) -> Result<(Arc<LayeredRepository>, JoinHandle<()>)> {
         // FIXME: also go into Broken state if this fails
         let tenant_conf = Self::load_tenant_config(conf, tenant_id)?;
 
@@ -766,7 +764,7 @@ impl LayeredRepository {
         // Do all the hard work in a background task
         let repo_clone = Arc::clone(&repo);
         let handle = tokio::spawn(async move {
-            match repo_clone.load_tenant() {
+            match repo_clone.load_tenant().await {
                 Ok(()) => {}
                 Err(err) => {
                     repo_clone.update_state(TenantState::Broken);
@@ -784,7 +782,7 @@ impl LayeredRepository {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    fn load_tenant(self: &Arc<LayeredRepository>) -> Result<()> {
+    async fn load_tenant(self: &Arc<LayeredRepository>) -> Result<()> {
         info!("loading tenant task {}", self.tenant_id);
 
         // Load in-memory state to reflect the local files on disk
@@ -826,7 +824,7 @@ impl LayeredRepository {
 
         let mut loaded_timelines: Vec<Arc<LayeredTimeline>> = Vec::new();
         for &timeline_id in sorted_timelines.iter() {
-            let timeline = self.load_timeline(timeline_id)?;
+            let timeline = self.load_timeline(timeline_id).await?;
 
             let mut timelines = self.timelines.lock().unwrap();
             timelines.insert(timeline_id, Arc::clone(&timeline));
@@ -861,12 +859,10 @@ impl LayeredRepository {
         Ok(())
     }
 
-    /// Subroutine of `load_tenant`, to load an individual timeline
-    ///
-    /// NB: The parent is assumed to be already loaded!
-    fn load_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
-        let _enter =
-            info_span!("loading timeline state from disk", timeline = %timeline_id).entered();
+    fn load_local_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+        // FIXME
+        //let _enter =
+        //    info_span!("loading timeline state from disk", timeline = %timeline_id).entered();
         let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -880,12 +876,11 @@ impl LayeredRepository {
         };
 
         let remote_client = if self.upload_layers {
-            let remote_client =
-                create_remote_timeline_client(self.conf, self.tenant_id, timeline_id)?;
-
-            // FIXME: download the remote index file and initialize queue based on it.
-            remote_client.init_queue(&HashSet::new(), Lsn(0));
-            Some(remote_client)
+            Some(create_remote_timeline_client(
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            )?)
         } else {
             None
         };
@@ -909,6 +904,21 @@ impl LayeredRepository {
         timeline
             .load_layer_map(disk_consistent_lsn)
             .context("failed to load layermap")?;
+        Ok(timeline)
+    }
+
+    /// Subroutine of `load_tenant`, to load an individual timeline
+    ///
+    /// NB: The parent is assumed to be already loaded!
+    async fn load_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+        let timeline = self.load_local_timeline(timeline_id)?;
+
+        if self.upload_layers {
+            // Reconcile local state with remote storage, downloading anything that's
+            // missing locally, and scheduling uploads for anything that's missing
+            // in remote storage.
+            timeline.reconcile_with_remote(None).await?;
+        }
 
         timeline.init_logical_size()?;
 
@@ -920,7 +930,9 @@ impl LayeredRepository {
     /// This removes all in-memory data for the tenant, as well as all local files.
     /// The tenant still remains in remote storage, and can be re-attached later,
     /// or to a different pageserver.
-    pub fn detach(self: &Arc<LayeredRepository>) -> Result<()> {
+    ///
+    /// Returns a JoinHandle that you can use to wait for the detach operation to finish.
+    pub fn spawn_detach(self: &Arc<LayeredRepository>) -> Result<JoinHandle<Result<()>>> {
         let old_state = self.state.send_replace(TenantState::Stopping);
         if old_state == TenantState::Stopping {
             bail!("already stopping");
@@ -928,9 +940,9 @@ impl LayeredRepository {
 
         // Do all the hard work in the background
         let repo_clone = Arc::clone(self);
-        tokio::spawn(async move { repo_clone.detach_tenant().await });
-
-        Ok(())
+        Ok(tokio::spawn(
+            async move { repo_clone.detach_tenant().await },
+        ))
     }
 
     async fn detach_tenant(&self) -> Result<()> {
@@ -938,9 +950,16 @@ impl LayeredRepository {
         // a timeout?
 
         // shutdown the tenant and timeline threads: gc, compaction, page service threads)
+        // FIXME: should we keep the layer flushing active until we have shut down WAL
+        // receivers
+        // FIXME: does thread_mgr::shutdown_threads also shut down the WAL receiver?
         thread_mgr::shutdown_threads(None, Some(self.tenant_id), None);
 
-        // FIXME: does thread_mgr::shutdown_threads also shut down the WAL receiver?
+        let timelines: Vec<Arc<LayeredTimeline>> =
+            self.timelines.lock().unwrap().values().cloned().collect();
+        for timeline in timelines.iter() {
+            timeline.shutdown().await?;
+        }
 
         // Now there is nothing actively accessing the tenant or its timelines, we can
         // delete local files.
@@ -954,13 +973,25 @@ impl LayeredRepository {
             timeline::delete_metadata(self.conf, timeline_id, self.tenant_id)?;
         }
 
-        // TODO: delete all other local files for the tenant
+        // If removal fails there will be no way to successfully retry detach,
+        // because tenant no longer exists in in memory map. And it needs to be removed from it
+        // before we remove files because it contains references to repository
+        // which references ephemeral files which are deleted on drop. So if we keep these references
+        // code will attempt to remove files which no longer exist. This can be fixed by having shutdown
+        // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
+        let local_tenant_directory = self.conf.tenant_path(&self.tenant_id);
+        std::fs::remove_dir_all(&local_tenant_directory).with_context(|| {
+            format!(
+                "Failed to remove local tenant directory '{}'",
+                local_tenant_directory.display()
+            )
+        })?;
 
-        todo!();
+        Ok(())
     }
 
     /// Called on pageserver shutdown
-    pub fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<()> {
         let old_state = self.state.send_replace(TenantState::Stopping);
         if old_state == TenantState::Stopping {
             bail!("already stopping");
@@ -970,38 +1001,11 @@ impl LayeredRepository {
 
         // FIXME: does thread_mgr::shutdown_threads also shut down the WAL receiver?
 
-        /*
-        // FIXME should we protect somehow from starting new threads/walreceivers when tenant is in stopping state?
-        // send stop signal to wal receiver and collect join handles while holding the lock
-        let walreceiver_join_handles = {
-            let tenants = write_tenants();
-            let tenant = tenants.get(&tenant_id).context("tenant not found")?;
-            let mut walreceiver_join_handles = Vec::with_capacity(tenant.local_timelines.len());
-            for timeline_id in self.timelines.keys() {
-                let (sender, receiver) = std::sync::mpsc::channel::<()>();
-                tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
-                    id: ZTenantTimelineId::new(tenant_id, *timeline_id),
-                    join_confirmation_sender: sender,
-                });
-                walreceiver_join_handles.push((*timeline_id, receiver));
-            }
-            // drop the tenants lock
-            walreceiver_join_handles
-        };
-         */
-
-        // wait for wal receivers to stop without holding the lock, because walreceiver
-        // will attempt to change tenant state which is protected by the same global tenants lock.
-        // TODO do we need a timeout here? how to handle it?
-        // recv_timeout is broken: https://github.com/rust-lang/rust/issues/94518#issuecomment-1057440631
-        // need to use crossbeam-channel
-        /*
-               for (timeline_id, join_handle) in walreceiver_join_handles {
-                   info!("waiting for wal receiver to shutdown timeline_id {timeline_id}");
-                   join_handle.recv().context("failed to join walreceiver")?;
-                   info!("wal receiver shutdown confirmed timeline_id {timeline_id}");
-               }
-        */
+        let timelines: Vec<Arc<LayeredTimeline>> =
+            self.timelines.lock().unwrap().values().cloned().collect();
+        for timeline in timelines.iter() {
+            timeline.shutdown().await?;
+        }
 
         Ok(())
     }
@@ -1548,7 +1552,8 @@ pub mod repo_harness {
                     .parse()
                     .unwrap();
 
-                let timeline = repo.load_timeline(timeline_id)?;
+                let timeline = repo.load_local_timeline(timeline_id)?;
+                timeline.init_logical_size()?;
 
                 // Insert it to the hash map
                 repo.timelines.lock().unwrap().insert(timeline_id, timeline);

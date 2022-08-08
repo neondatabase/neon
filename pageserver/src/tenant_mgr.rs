@@ -207,28 +207,23 @@ pub fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<RepositoryI
     })
 }
 
-pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> anyhow::Result<()> {
+pub fn detach_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
     let repo = get_tenant(tenant_id)?;
+    let task = repo.spawn_detach()?;
+
     // FIXME: Should we go ahead and remove the tenant anyway, if detaching fails? It's a bit
     // annoying if a tenant gets wedged so that you can't even detach it. OTOH, it's scary
     // to delete files if we're not sure what's wrong.
-    repo.shutdown()?;
-    write_tenants().remove(&tenant_id);
-
-    // If removal fails there will be no way to successfully retry detach,
-    // because tenant no longer exists in in memory map. And it needs to be removed from it
-    // before we remove files because it contains references to repository
-    // which references ephemeral files which are deleted on drop. So if we keep these references
-    // code will attempt to remove files which no longer exist. This can be fixed by having shutdown
-    // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
-    let local_tenant_directory = conf.tenant_path(&tenant_id);
-    std::fs::remove_dir_all(&local_tenant_directory).with_context(|| {
-        format!(
-            "Failed to remove local tenant directory '{}'",
-            local_tenant_directory.display()
-        )
-    })?;
-
+    tokio::spawn(async move {
+        match task.await {
+            Ok(_) => {
+                write_tenants().remove(&tenant_id);
+            }
+            Err(err) => {
+                error!("detaching tenant {} failed: {:?}", tenant_id, err);
+            }
+        };
+    });
     Ok(())
 }
 
@@ -246,7 +241,7 @@ pub fn list_tenants() -> Vec<(ZTenantId, TenantState)> {
 /// Execute Attach mgmt API command.
 ///
 /// Downloading all the tenant data is performed in the background,
-/// this merely spawn the background task and returns quickly.
+/// this awn the background task and returns quickly.
 ///
 pub fn attach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Result<()> {
     match write_tenants().entry(tenant_id) {

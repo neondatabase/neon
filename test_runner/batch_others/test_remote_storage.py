@@ -47,6 +47,12 @@ def test_remote_storage_backup_and_restore(
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
+
+    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
+    # Create a tenant after bootstrapping and use that instead 
+    tenant, _ = env.neon_cli.create_tenant()
+    env.initial_tenant = tenant
+
     pg = env.postgres.create_start('main')
 
     client = env.pageserver.http_client()
@@ -101,6 +107,8 @@ def test_remote_storage_backup_and_restore(
     with pytest.raises(Exception, match="attach is already in progress"):
         client.tenant_attach(UUID(tenant_id))
 
+
+
     # FIXME: cannot call timeline_detail while it's still being downloaded
     #detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     #log.info("Timeline detail with active failpoint: %s", detail)
@@ -108,20 +116,27 @@ def test_remote_storage_backup_and_restore(
 
     # trigger temporary download files removal
     env.pageserver.stop()
+    dir_to_clear = Path(env.repo_dir) / 'tenants'
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
     env.pageserver.start()
 
     client.tenant_attach(UUID(tenant_id))
 
-    log.info("waiting for tenant redownload")
+    def ll():
+        tenant_state = client.tenant_status(UUID(tenant_id))['state']
+        log.info(f"STATUS: {tenant_state}")
+        if tenant_state != 'Active':
+            raise Exception(f'state is {tenant_state}')
+
+    log.info("waiting for tenant attach to finish")
     wait_until(number_of_iterations=20,
                interval=1,
-               func=lambda: client.timeline_local(UUID(tenant_id), UUID(timeline_id)))
-    # FIXME: timeline_local is gone
+               func=ll)
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail after attach completed: %s", detail)
     assert lsn_from_hex(detail['last_record_lsn']) >= current_lsn, 'current db Lsn should should not be less than the one stored on remote storage'
-    assert not detail['remote']['awaits_download']
 
     pg = env.postgres.create_start('main')
     with pg.cursor() as cur:

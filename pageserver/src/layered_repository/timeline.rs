@@ -40,7 +40,7 @@ use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::pgdatadir_mapping::{BlockNumber, DatadirTimeline, LsnForTimestamp};
 use crate::reltag::RelTag;
-use crate::storage_sync::{index::IndexPart, RemoteTimelineClient};
+use crate::storage_sync::{index::IndexPart, index::RelativePath, RemoteTimelineClient};
 use crate::tenant_config::TenantConfOpt;
 
 use postgres_ffi::xlog_utils::to_pg_timestamp;
@@ -177,7 +177,7 @@ pub struct LayeredTimeline {
     /// If Some, use it to upload all newly created layers to the remote storage,
     /// and keep remote metadata file in sync. In the future, also use it to download
     /// layer files on-demand.
-    remote_client: Option<Arc<RemoteTimelineClient>>,
+    pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     /// WAL receiver task
     walreceiver: RwLock<Option<TaskHandle<()>>>,
@@ -957,9 +957,26 @@ impl LayeredTimeline {
     /// This is used during tenant attach. We assume that the local directory is
     /// empty. If it's not, we will merrily overwrite.
     ///
-    /// Note: This doesn't populate the layer map yet. Merely downloads the files.
+    /// The caller can provide IndexPart if it has it already. If it's None,
+    /// this function will download it.
     ///
-    pub async fn initial_download(&self, index_part: &IndexPart) -> Result<()> {
+    pub async fn reconcile_with_remote(&self, index_part: Option<&IndexPart>) -> Result<()> {
+        let remote_client = self
+            .remote_client
+            .as_ref()
+            .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
+
+        let _index_part;
+
+        // If the caller supplied an IndexPart, use it. Otherwise download it from
+        // remote storage.
+        let index_part = if let Some(index_part) = index_part {
+            index_part
+        } else {
+            _index_part = remote_client.download_index_file().await?;
+            &_index_part
+        };
+
         let remote_metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)
             .with_context(|| {
                 format!(
@@ -968,25 +985,104 @@ impl LayeredTimeline {
                 )
             })?;
 
-        let remote_client = self
-            .remote_client
-            .as_ref()
-            .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
+        let remote_consistent_lsn = remote_metadata.disk_consistent_lsn();
+
+        let mut downloaded_physical_size = 0;
+
+        // Build a map of local layers for quick lookups
+        let mut local_filenames: HashSet<PathBuf> = HashSet::new();
+        for layer in self.layers.read().unwrap().iter_historic_layers() {
+            local_filenames.insert(layer.filename());
+        }
+
+        let mut remote_filenames: HashSet<PathBuf> = HashSet::new();
+        for fname in index_part.timeline_layers.iter() {
+            remote_filenames.insert(fname.to_local_path(&PathBuf::from("")));
+        }
+
+        // Are we missing some files that are present in remote storage?
+        // Download them, and add to the layer map
+        //
+        // TODO: do this in parallel
+        for path in remote_filenames.difference(&local_filenames) {
+            let fname = path.to_str().unwrap();
+            info!(
+                "remote layer file {} does not exist locally, downloading",
+                fname
+            );
+
+            if let Some(imgfilename) = ImageFileName::parse_str(fname) {
+                if imgfilename.lsn > remote_consistent_lsn {
+                    warn!(
+                        "found future image layer {} on timeline {} remote_consistent_lsn is {}",
+                        imgfilename, self.timeline_id, remote_consistent_lsn
+                    );
+                    continue;
+                }
+
+                remote_client
+                    .download_layer_file(&RelativePath::from_local_path(&PathBuf::from(""), path)?)
+                    .await?;
+
+                let layer =
+                    ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
+
+                downloaded_physical_size += layer.path().metadata()?.len();
+                self.layers
+                    .write()
+                    .unwrap()
+                    .insert_historic(Arc::new(layer));
+            } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
+                // Create a DeltaLayer struct for each delta file.
+                // The end-LSN is exclusive, while disk_consistent_lsn is
+                // inclusive. For example, if disk_consistent_lsn is 100, it is
+                // OK for a delta layer to have end LSN 101, but if the end LSN
+                // is 102, then it might not have been fully flushed to disk
+                // before crash.
+                if deltafilename.lsn_range.end > remote_consistent_lsn + 1 {
+                    warn!(
+                        "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
+                        deltafilename, self.timeline_id, remote_consistent_lsn
+                    );
+                    continue;
+                }
+
+                remote_client
+                    .download_layer_file(&RelativePath::from_local_path(&PathBuf::from(""), path)?)
+                    .await?;
+
+                let layer =
+                    DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
+
+                downloaded_physical_size += layer.path().metadata()?.len();
+                self.layers
+                    .write()
+                    .unwrap()
+                    .insert_historic(Arc::new(layer));
+            } else {
+                bail!("unexpected layer filename in remote storage: {}", fname);
+            }
+        }
+
+        self.current_physical_size_gauge
+            .add(downloaded_physical_size);
 
         remote_client.init_queue(
             &index_part.timeline_layers,
             remote_metadata.disk_consistent_lsn(),
         );
 
-        // Download the layer files
-        // TODO: do this in parallel
-        for path in index_part.timeline_layers.iter() {
-            remote_client.download_layer_file(path).await?;
+        // Are there local files that don't exist remotely? Schedule uploads for them
+        //
+        // FIXME: should we also schedule an index file upload immediately?
+        for fname in local_filenames.difference(&remote_filenames) {
+            remote_client.schedule_layer_file_upload(fname)?;
         }
 
         // Save the metadata file to local disk.
         // Do this last, so that if we crash in-between, we won't think that the
         // local state is valid.
+
         save_metadata(
             self.conf,
             self.timeline_id,
@@ -1000,6 +1096,26 @@ impl LayeredTimeline {
             self.timeline_id,
             index_part.timeline_layers.len()
         );
+
+        Ok(())
+    }
+
+    ///
+    /// Shut down the timeline gracefully
+    ///
+    pub async fn shutdown(&self) -> Result<()> {
+        // TODO: stop new getpage requests. Or was that done by caller already?
+
+        // Shut down WAL receiver
+        let walreceiver: Option<TaskHandle<()>> = self.walreceiver.write().unwrap().take();
+        if let Some(walreceiver_task) = walreceiver {
+            walreceiver_task.shutdown().await;
+        }
+
+        // Wait for all upload tasks to finish.
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.wait_completion().await?;
+        }
 
         Ok(())
     }
@@ -1266,59 +1382,57 @@ impl LayeredTimeline {
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
         let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+        assert!(disk_consistent_lsn >= old_disk_consistent_lsn);
 
-            // We can only save a valid 'prev_record_lsn' value on disk if we
-            // flushed *all* in-memory changes to disk. We only track
-            // 'prev_record_lsn' in memory for the latest processed record, so we
-            // don't remember what the correct value that corresponds to some old
-            // LSN is. But if we flush everything, then the value corresponding
-            // current 'last_record_lsn' is correct and we can store it on disk.
-            let RecordLsn {
-                last: last_record_lsn,
-                prev: prev_record_lsn,
-            } = self.last_record_lsn.load();
-            let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
-                Some(prev_record_lsn)
-            } else {
-                None
-            };
+        // We can only save a valid 'prev_record_lsn' value on disk if we
+        // flushed *all* in-memory changes to disk. We only track
+        // 'prev_record_lsn' in memory for the latest processed record, so we
+        // don't remember what the correct value that corresponds to some old
+        // LSN is. But if we flush everything, then the value corresponding
+        // current 'last_record_lsn' is correct and we can store it on disk.
+        let RecordLsn {
+            last: last_record_lsn,
+            prev: prev_record_lsn,
+        } = self.last_record_lsn.load();
+        let ondisk_prev_record_lsn = if disk_consistent_lsn == last_record_lsn {
+            Some(prev_record_lsn)
+        } else {
+            None
+        };
 
-            let ancestor_timelineid = self.get_ancestor_timeline_id();
+        let ancestor_timelineid = self.get_ancestor_timeline_id();
 
-            let metadata = TimelineMetadata::new(
-                disk_consistent_lsn,
-                ondisk_prev_record_lsn,
-                ancestor_timelineid,
-                self.ancestor_lsn,
-                *self.latest_gc_cutoff_lsn.read().unwrap(),
-                self.initdb_lsn,
-            );
+        let metadata = TimelineMetadata::new(
+            disk_consistent_lsn,
+            ondisk_prev_record_lsn,
+            ancestor_timelineid,
+            self.ancestor_lsn,
+            *self.latest_gc_cutoff_lsn.read().unwrap(),
+            self.initdb_lsn,
+        );
 
-            fail_point!("checkpoint-before-saving-metadata", |x| bail!(
-                "{}",
-                x.unwrap()
-            ));
+        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+            "{}",
+            x.unwrap()
+        ));
 
-            save_metadata(
-                self.conf,
-                self.timeline_id,
-                self.tenant_id,
-                &metadata,
-                false,
-            )?;
+        save_metadata(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            &metadata,
+            false,
+        )?;
 
-            if let Some(remote_client) = &self.remote_client {
-                for path in layer_paths_to_upload {
-                    remote_client.schedule_layer_file_upload(&path)?;
-                }
-                remote_client.schedule_index_upload(&metadata)?;
+        if let Some(remote_client) = &self.remote_client {
+            for path in layer_paths_to_upload {
+                remote_client.schedule_layer_file_upload(&path)?;
             }
-
-            // Also update the in-memory copy
-            self.disk_consistent_lsn.store(disk_consistent_lsn);
+            remote_client.schedule_index_upload(&metadata)?;
         }
+
+        // Also update the in-memory copy
+        self.disk_consistent_lsn.store(disk_consistent_lsn);
 
         Ok(())
     }

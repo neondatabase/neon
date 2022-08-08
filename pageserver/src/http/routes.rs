@@ -277,11 +277,9 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let conf = get_config(&request);
-
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
-        if let Err(err) = tenant_mgr::detach_tenant(conf, tenant_id) {
+        if let Err(err) = tenant_mgr::detach_tenant(tenant_id) {
             // FIXME: distinguish between "Tenant is already present locally" and other errors
             error!("could not detach tenant: {:?}", err);
             return Err(err);

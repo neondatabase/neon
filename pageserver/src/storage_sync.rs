@@ -414,13 +414,14 @@ impl RemoteTimelineClient {
             &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
             path,
         )?;
-        println!("relative_path: {:?}", relative_path);
 
         upload_queue.latest_files.insert(relative_path);
 
         upload_queue
             .queued_operations
             .push_back(UploadOp::UploadLayer(PathBuf::from(path)));
+
+        info!("scheduled layer file upload {}", path.display());
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -442,6 +443,8 @@ impl RemoteTimelineClient {
         upload_queue
             .queued_operations
             .push_back(UploadOp::Delete(PathBuf::from(path)));
+
+        info!("scheduled layer file deletion {}", path.display());
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -510,6 +513,8 @@ impl RemoteTimelineClient {
 
             // We can launch this task. Remove it from the queue first.
             let next_op = upload_queue.queued_operations.pop_front().unwrap();
+
+            info!("starting op: {:?}", next_op);
 
             // Update the counters
             match next_op {
@@ -833,7 +838,7 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let index_part = runtime.block_on(client.download_index_file())?;
-        assert_file_list(&index_part.timeline_layers, &vec!["foo", "bar"]);
+        assert_file_list(&index_part.timeline_layers, &["foo", "bar"]);
         let downloaded_metadata = TimelineMetadata::from_bytes(&index_part.metadata_bytes)?;
         assert_eq!(downloaded_metadata, metadata);
 
@@ -848,12 +853,12 @@ mod tests {
             assert!(upload_queue.num_inprogress_layer_uploads == 1);
             assert!(upload_queue.num_inprogress_deletions == 0);
         }
-        assert_remote_files(&vec!["foo", "bar", "index_part.json"], &remote_timeline_dir);
+        assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
 
         // Finish them
         runtime.block_on(client.wait_completion())?;
 
-        assert_remote_files(&vec!["bar", "baz", "index_part.json"], &remote_timeline_dir);
+        assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
 
         Ok(())
     }
