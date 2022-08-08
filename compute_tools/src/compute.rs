@@ -192,8 +192,8 @@ impl ComputeNode {
             anyhow::bail!(
                 "postgres --sync-safekeepers exited with non-zero status: {}. stdout: {}, stderr: {}",
                 sync_output.status,
-                sync_output.stdout.to_str_lossy(),
-                sync_output.stderr.to_str_lossy(),
+                sync_output.stdout.to_str().expect("postgres --sync-safekeepers exited, and stdout is not utf-8"),
+                sync_output.stderr.to_str().expect("postgres --sync-safekeepers exited, and stderr is not utf-8"),
             );
         }
 
