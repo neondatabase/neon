@@ -137,7 +137,7 @@ impl SharedState {
         self.is_wal_backup_required()
             // FIXME: add tracking of relevant pageservers and check them here individually,
             // otherwise migration won't work (we suspend too early).
-            || self.sk.inmem.remote_consistent_lsn <= self.sk.inmem.commit_lsn
+            || self.sk.inmem.remote_consistent_lsn < self.sk.inmem.commit_lsn
     }
 
     /// Mark timeline active/inactive and return whether s3 offloading requires

@@ -178,16 +178,6 @@ pub async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
-                let timeline_to_check = Arc::clone(&timeline);
-                tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
-                    .await
-                    .with_context(|| {
-                        format!("Spawned checkpoint check task panicked for timeline {id}")
-                    })?
-                    .with_context(|| {
-                        format!("Failed to check checkpoint distance for timeline {id}")
-                    })?;
-
                 Some(endlsn)
             }
 
@@ -207,6 +197,12 @@ pub async fn handle_walreceiver_connection(
 
             _ => None,
         };
+
+        let timeline_to_check = Arc::clone(&timeline);
+        tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
+            .await
+            .with_context(|| format!("Spawned checkpoint check task panicked for timeline {id}"))?
+            .with_context(|| format!("Failed to check checkpoint distance for timeline {id}"))?;
 
         if let Some(last_lsn) = status_update {
             let remote_index = repo.get_remote_index();
