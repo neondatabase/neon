@@ -40,9 +40,6 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         for t in timelines:
             client.timeline_delete(tenant, t)
 
-    def assert_idle(tenant):
-        assert get_state(tenant) == "Idle"
-
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     timeline = env.neon_cli.create_timeline(name, tenant_id=tenant)
@@ -52,14 +49,12 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     # Stop compute
     pg.stop()
 
-    # Detach all tenants and wait for them to go idle
-    # TODO they should be already idle since there are no active computes
+    # Delete all timelines on all tenants
     for tenant_info in client.tenant_list():
         tenant_id = UUID(tenant_info["id"])
         delete_all_timelines(tenant_id)
-        wait_until(10, 0.2, lambda: assert_idle(tenant_id))
 
-    # Assert that all tasks finish quickly after tenants go idle
+    # Assert that all tasks finish quickly afterwards
     def assert_tasks_finish():
         tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
         tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
