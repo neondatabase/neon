@@ -519,7 +519,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
     match tenant_match.subcommand() {
         Some(("list", _)) => {
             for t in pageserver.tenant_list()? {
-                println!("{} {}", t.id, t.state.to_string());
+                println!("{} {}", t.id, t.state);
             }
         }
         Some(("create", create_match)) => {
@@ -727,7 +727,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&node.timeline_id)
-                            .and_then(|l| Some(l.last_record_lsn.to_string()))
+                            .map(|l| l.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
                     }
                     Some(lsn) => {

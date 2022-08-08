@@ -181,7 +181,7 @@ pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<RepositoryImpl>> {
         .get(&tenant_id)
         .with_context(|| format!("Tenant {tenant_id} not found"))?;
 
-    Ok(Arc::clone(&tenant))
+    Ok(Arc::clone(tenant))
 }
 
 ///

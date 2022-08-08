@@ -92,7 +92,7 @@ where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
-    let storage_path = storage.remote_object_id(&source_path).with_context(|| {
+    let storage_path = storage.remote_object_id(source_path).with_context(|| {
         format!(
             "Failed to get the layer storage path for local path '{}'",
             source_path.display()

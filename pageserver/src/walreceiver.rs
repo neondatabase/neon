@@ -65,7 +65,7 @@ pub fn get_walreceiver_runtime() -> Handle {
     //
     if cfg!(test) {
         WALRECEIVER_RUNTIME_HANDLE
-            .get_or_init(|| Handle::current().clone())
+            .get_or_init(Handle::current)
             .clone()
     } else {
         WALRECEIVER_RUNTIME_HANDLE

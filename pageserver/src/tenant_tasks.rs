@@ -13,9 +13,9 @@ use tracing::*;
 
 pub fn start_background_loops(repo: &Arc<RepositoryImpl>) {
     let repo_clone = Arc::clone(repo);
-    tokio::spawn(async { crate::tenant_tasks::compaction_loop(repo_clone) });
+    tokio::spawn(async { crate::tenant_tasks::compaction_loop(repo_clone).await });
     let repo_clone = Arc::clone(repo);
-    tokio::spawn(async { crate::tenant_tasks::gc_loop(repo_clone) });
+    tokio::spawn(async { crate::tenant_tasks::gc_loop(repo_clone).await });
 }
 
 ///

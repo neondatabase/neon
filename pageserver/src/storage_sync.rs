@@ -565,7 +565,7 @@ impl RemoteTimelineClient {
         loop {
             let upload_result: anyhow::Result<()> = match task.op {
                 UploadOp::UploadLayer(ref path) => {
-                    upload::upload_timeline_layer(&self.storage_impl, &path).await
+                    upload::upload_timeline_layer(&self.storage_impl, path).await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     upload::upload_index_part(
@@ -573,11 +573,11 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         self.tenant_id,
                         self.timeline_id,
-                        &index_part,
+                        index_part,
                     )
                     .await
                 }
-                UploadOp::Delete(ref path) => delete::delete_layer(&self.storage_impl, &path).await,
+                UploadOp::Delete(ref path) => delete::delete_layer(&self.storage_impl, path).await,
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
@@ -656,7 +656,7 @@ pub fn create_remote_timeline_client(
     let remote_storage_config = conf
         .remote_storage_config
         .as_ref()
-        .ok_or(anyhow::anyhow!("no remote storage configured"))?;
+        .ok_or_else(|| anyhow::anyhow!("no remote storage configured"))?;
 
     let runtime = STORAGE_SYNC_RUNTIME
         .get()

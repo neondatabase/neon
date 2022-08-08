@@ -699,7 +699,7 @@ impl LayeredRepository {
             );
 
             // Download everything from remote storage to local disk
-            timeline.initial_download(&index_part).await?;
+            timeline.initial_download(index_part).await?;
 
             // Initialize the layer map, based on all the files we now have on local disk.
             timeline
@@ -1355,7 +1355,7 @@ impl LayeredRepository {
 /// before the children.
 ///
 fn tree_sort_timelines(
-    timelines: &Vec<(ZTimelineId, Option<ZTimelineId>)>,
+    timelines: &[(ZTimelineId, Option<ZTimelineId>)],
 ) -> Result<Vec<ZTimelineId>> {
     let mut result = Vec::new();
 

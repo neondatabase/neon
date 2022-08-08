@@ -31,7 +31,7 @@ where
     );
 
     let storage_path = storage
-        .remote_object_id(&local_layer_path)
+        .remote_object_id(local_layer_path)
         .with_context(|| {
             format!(
                 "Failed to get the layer storage path for local path '{}'",

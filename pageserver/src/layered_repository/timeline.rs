@@ -594,7 +594,7 @@ impl LayeredTimeline {
             layers: RwLock::new(LayerMap::default()),
 
             walredo_mgr,
-            remote_client: remote_client.map(|c| Arc::new(c)),
+            remote_client: remote_client.map(Arc::new),
             walreceiver: RwLock::new(None),
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
@@ -640,9 +640,7 @@ impl LayeredTimeline {
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
 
-        let timeline = Arc::new(result);
-
-        timeline
+        Arc::new(result)
     }
 
     pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -663,7 +661,7 @@ impl LayeredTimeline {
         drop(tenant_conf_guard);
         let walreceiver = spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
-            Arc::clone(&self),
+            Arc::clone(self),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -973,7 +971,7 @@ impl LayeredTimeline {
         let remote_client = self
             .remote_client
             .as_ref()
-            .ok_or(anyhow!("cannot download without remote storage"))?;
+            .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
 
         remote_client.init_queue(
             &index_part.timeline_layers,
