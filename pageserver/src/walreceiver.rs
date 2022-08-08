@@ -66,7 +66,7 @@ pub fn init_wal_receiver_main_thread(
     );
     let broker_prefix = &conf.broker_etcd_prefix;
     info!(
-        "Starting wal receiver main thread, etdc endpoints: {}",
+        "Starting wal receiver main thread, etcd endpoints: {}",
         etcd_endpoints.iter().map(Url::to_string).join(", ")
     );
 
