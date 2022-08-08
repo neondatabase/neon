@@ -75,13 +75,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
             .strip_suffix(&[0])
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
-        // The so-called "password" should contain a base64-encoded json.
-        // We will use it later to route the client to their project.
-        let bytes = base64::decode(password)
-            .map_err(|_| AuthErrorImpl::MalformedPassword("bad encoding"))?;
-
-        let payload = serde_json::from_slice(&bytes)
-            .map_err(|_| AuthErrorImpl::MalformedPassword("invalid payload"))?;
+        let payload = PasswordHackPayload::parse(password)
+            // TODO: change the error message!
+            .ok_or(AuthErrorImpl::MalformedPassword("invalid payload"))?;
 
         Ok(payload)
     }

@@ -1,6 +1,5 @@
 import pytest
-import json
-import base64
+import psycopg2
 
 
 def test_proxy_select_1(static_proxy):
@@ -13,22 +12,14 @@ def test_password_hack(static_proxy):
     static_proxy.safe_psql(f"create role {user} with login password '{password}'",
                            options='project=irrelevant')
 
-    def encode(s: str) -> str:
-        return base64.b64encode(s.encode('utf-8')).decode('utf-8')
-
-    magic = encode(json.dumps({
-        'project': 'irrelevant',
-        'password': password,
-    }))
-
+    # Note the format of `magic`!
+    magic = f"project=irrelevant;{password}"
     static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
 
-    magic = encode(json.dumps({
-        'project': 'irrelevant',
-        'password_': encode(password),
-    }))
-
-    static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
+    # Must also check that invalid magic won't be accepted.
+    with pytest.raises(psycopg2.errors.OperationalError):
+        magic = "broken"
+        static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
 
 
 # Pass extra options to the server.
