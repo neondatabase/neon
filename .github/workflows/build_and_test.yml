@@ -468,9 +468,9 @@ jobs:
         run:
           MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag latest --image-manifest "$MANIFEST"
 
-      - name: Add release tag
-        run:
-          MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag release --image-manifest "$MANIFEST"
+#      - name: Add release tag
+#        run:
+#          MANIFEST=$(aws ecr batch-get-image --repository-name neon --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name neon --image-tag release --image-manifest "$MANIFEST"
 
   promote-compute-tools-image:
     name: 'promote-compute-tools'
@@ -484,10 +484,6 @@ jobs:
         run:
           MANIFEST=$(aws ecr batch-get-image --repository-name compute-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-tools --image-tag latest --image-manifest "$MANIFEST"
 
-      - name: Add release tag
-        run:
-          MANIFEST=$(aws ecr batch-get-image --repository-name compute-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-tools --image-tag release --image-manifest "$MANIFEST"
-
   promote-compute-node-image:
     name: 'promote-compute-node'
     runs-on: dev
@@ -499,36 +495,6 @@ jobs:
       - name: Promote image to latest
         run:
           MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag latest --image-manifest "$MANIFEST"
-
-      - name: Add release tag
-        run:
-          MANIFEST=$(aws ecr batch-get-image --repository-name compute-node --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-node --image-tag release --image-manifest "$MANIFEST"
-
-#  push-docker-hub:
-#    name: 'push-docker-hub'
-#    runs-on: dev
-#    #needs: [ dockerfile-check ]
-#    container: gcr.io/kaniko-project/executor:debug
-#    environment: dev
-#
-#    steps:
-#      - name: Configure ECR login
-#        run: |
-#          cat <<EOF > /kaniko/.docker/config.json
-#          {
-#            "auths": {
-#              "https://index.docker.io/v1/": {
-#                "auth": "${{ secrets.DOCKERHUB_B64 }}",
-#              }
-#            },
-#            "credHelpers": {
-#              "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-#            }
-#          }
-#          EOF
-#
-#      - name: Copy over
-#        run: echo "FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest" | /kaniko/executor --context . --dockerfile /dev/stdin --destination roryneon/neon:latest
 
   push-docker-hub:
     name: 'push-docker-hub'
@@ -542,22 +508,46 @@ jobs:
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@main
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+          
+      - name: Get build tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "::set-output name=tag::$GITHUB_RUN_ID"
+          fi
+        id: build-tag
 
       - name: Configure ECR login
         run: |
           mkdir /github/home/.docker/
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
-      - name: Pull image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest neon
+      - name: Pull neon image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID neon
+
+      - name: Pull compute tools image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID compute-tools
+
+      - name: Pull compute node image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID compute-node
 
       - name: Configure docker login
         run: |
           echo "" > /github/home/.docker/config.json
           crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
 
-      - name: Push image to Docker Hub
-        run: crane push neon roryneon/neon:$GITHUB_RUN_ID
+      - name: Push neon image to Docker Hub
+        run: crane push neon roryneon/neon:${{steps.build-tag.outputs.tag}}
+
+      - name: Push compute tools image to Docker Hub
+        run: crane push compute-tools roryneon/compute-tools:${{steps.build-tag.outputs.tag}}
+
+      - name: Push compute node image to Docker Hub
+        run: crane push compute-node roryneon/compute-node:${{steps.build-tag.outputs.tag}}
 
 #  docker-image:
 #    runs-on: [ self-hosted, Linux, k8s-runner ]
