@@ -178,6 +178,7 @@ impl ComputeNode {
             .args(&["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
 
@@ -189,8 +190,10 @@ impl ComputeNode {
             .expect("postgres --sync-safekeepers failed");
         if !sync_output.status.success() {
             anyhow::bail!(
-                "postgres --sync-safekeepers exited with non-zero status: {}",
+                "postgres --sync-safekeepers exited with non-zero status: {}. stdout: {}, stderr: {}",
                 sync_output.status,
+                sync_output.stdout.to_str_lossy(),
+                sync_output.stderr.to_str_lossy(),
             );
         }
 
