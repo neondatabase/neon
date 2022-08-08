@@ -31,7 +31,7 @@ jobs:
       GIT_VERSION: ${{ github.sha }}
 
     steps:
-      - name: Fix git ownerwhip
+      - name: Fix git ownership
         run: |
           # Workaround for `fatal: detected dubious ownership in repository at ...`
           #
