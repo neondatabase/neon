@@ -549,6 +549,12 @@ jobs:
       - name: Push compute node image to Docker Hub
         run: crane push compute-node roryneon/compute-node:${{steps.build-tag.outputs.tag}}
 
+      - name: Add latest tag to images
+        run: |
+          crane tag roryneon/neon:${{steps.build-tag.outputs.tag}} latest
+          crane tag roryneon/compute-tools:${{steps.build-tag.outputs.tag}} latest
+          crane tag roryneon/compute-node:${{steps.build-tag.outputs.tag}} latest
+
 #  docker-image:
 #    runs-on: [ self-hosted, Linux, k8s-runner ]
 #    needs: [ pg_regress-tests, other-tests ]
