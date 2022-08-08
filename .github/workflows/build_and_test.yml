@@ -498,7 +498,7 @@ jobs:
   push-docker-hub:
     name: 'push-docker-hub'
     runs-on: dev
-    needs: [ promote-neon-image, promote-compute-tools, promote-compute-node ]
+    needs: [ promote-neon-image, promote-compute-tools-image, promote-compute-node-image ]
     container: golang:bullseye
     environment: dev
 
