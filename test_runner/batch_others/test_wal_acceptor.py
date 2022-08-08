@@ -503,16 +503,20 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: R
         if elapsed > wait_lsn_timeout:
             raise RuntimeError(f'Timed out waiting for WAL redo')
 
-        pageserver_lsn = env.pageserver.http_client().timeline_detail(
-            uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["last_record_lsn"]
-        lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
+        tenant_status = env.pageserver.http_client().tenant_status(uuid.UUID(tenant_id))
+        if tenant_status['state'] == 'Loading':
+            log.debug(f"Tenant {tenant_id} is still loading, retrying")
+        else:
+            pageserver_lsn = env.pageserver.http_client().timeline_detail(
+                uuid.UUID(tenant_id), uuid.UUID((timeline_id)))["last_record_lsn"]
+            lag = lsn_from_hex(last_lsn) - lsn_from_hex(pageserver_lsn)
 
-        if time.time() > last_debug_print + 10 or lag <= 0:
-            last_debug_print = time.time()
-            log.info(f'Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb')
+            if time.time() > last_debug_print + 10 or lag <= 0:
+                last_debug_print = time.time()
+                log.info(f'Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb')
 
-        if lag <= 0:
-            break
+            if lag <= 0:
+                break
 
         time.sleep(1)
 
