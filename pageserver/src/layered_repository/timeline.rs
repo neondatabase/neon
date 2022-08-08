@@ -16,7 +16,7 @@ use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool, AtomicIsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use metrics::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
@@ -233,6 +233,8 @@ pub struct LayeredTimeline {
     pub layers: RwLock<LayerMap>,
 
     last_freeze_at: AtomicLsn,
+    // Atomic would be more appropriate here.
+    last_freeze_ts: RwLock<Instant>,
 
     // WAL redo manager
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
@@ -560,6 +562,13 @@ impl LayeredTimeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
+    fn get_checkpoint_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_timeout
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
+    }
+
     fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -649,6 +658,7 @@ impl LayeredTimeline {
             disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
 
             last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
+            last_freeze_ts: RwLock::new(Instant::now()),
 
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
@@ -1094,8 +1104,11 @@ impl LayeredTimeline {
     }
 
     ///
-    /// Check if more than 'checkpoint_distance' of WAL has been accumulated
-    /// in the in-memory layer, and initiate flushing it if so.
+    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
+    /// the in-memory layer, and initiate flushing it if so.
+    ///
+    /// Also flush after a period of time without new data -- it helps
+    /// safekeepers to regard pageserver as caught up and suspend activity.
     ///
     pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
@@ -1103,21 +1116,27 @@ impl LayeredTimeline {
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_size = open_layer.size()?;
             drop(layers);
-            let distance = last_lsn.widening_sub(self.last_freeze_at.load());
+            let last_freeze_at = self.last_freeze_at.load();
+            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
+            let distance = last_lsn.widening_sub(last_freeze_at);
             // Checkpointing the open layer can be triggered by layer size or LSN range.
             // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
             // we want to stay below that with a big margin.  The LSN distance determines how
             // much WAL the safekeepers need to store.
             if distance >= self.get_checkpoint_distance().into()
                 || open_layer_size > self.get_checkpoint_distance()
+                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
             {
                 info!(
-                    "check_checkpoint_distance {}, layer size {}",
-                    distance, open_layer_size
+                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
+                    distance,
+                    open_layer_size,
+                    last_freeze_ts.elapsed()
                 );
 
                 self.freeze_inmem_layer(true);
                 self.last_freeze_at.store(last_lsn);
+                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
                 // Launch a thread to flush the frozen layer to disk, unless
                 // a thread was already running. (If the thread was running

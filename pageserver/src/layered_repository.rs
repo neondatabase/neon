@@ -433,6 +433,13 @@ impl LayeredRepository {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
+    pub fn get_checkpoint_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_timeout
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
+    }
+
     pub fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
