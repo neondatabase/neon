@@ -188,12 +188,13 @@ impl ComputeNode {
         let sync_output = sync_handle
             .wait_with_output()
             .expect("postgres --sync-safekeepers failed");
+
         if !sync_output.status.success() {
             anyhow::bail!(
                 "postgres --sync-safekeepers exited with non-zero status: {}. stdout: {}, stderr: {}",
                 sync_output.status,
-                sync_output.stdout.to_str().expect("postgres --sync-safekeepers exited, and stdout is not utf-8"),
-                sync_output.stderr.to_str().expect("postgres --sync-safekeepers exited, and stderr is not utf-8"),
+                String::from_utf8(sync_output.stdout).expect("postgres --sync-safekeepers exited, and stdout is not utf-8"),
+                String::from_utf8(sync_output.stderr).expect("postgres --sync-safekeepers exited, and stderr is not utf-8"),
             );
         }
 
