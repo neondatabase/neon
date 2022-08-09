@@ -1,8 +1,10 @@
+import re
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, Postgres, wait_for_upload, wait_for_last_record_lsn
 from fixtures.utils import lsn_from_hex
 from uuid import UUID, uuid4
 import os
+import tarfile
 import shutil
 from pathlib import Path
 import json
@@ -129,17 +131,27 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
 
     # For `test_import_from_pageserver_multisegment`, we want to make sure that the data
     # is large enough to create multi-segment files. Typically, a segment file's size is
-    # at most 1GB. A large number of inserted rows is used to increase the DB size to above 1GB.
-    # See: https://github.com/neondatabase/neon/issues/2097.
+    # at most 1GB. A large number of inserted rows (`30000000`) is used to increase the
+    # DB size to above 1GB. Related: https://github.com/neondatabase/neon/issues/2097.
     num_rows = 30000000
     lsn = _start_workload(num_rows, pg)
 
     logical_size = env.pageserver.http_client().timeline_detail(
         env.initial_tenant, timeline)['local']['current_logical_size']
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
-    assert logical_size > 1024**3
+    assert logical_size > 1024**3  # = 1GB
 
-    _start_import(num_rows, lsn, env, pg_bin, timeline)
+    tar_output_file = _start_import(num_rows, lsn, env, pg_bin, timeline)
+
+    # Check if the backup data contains multiple segment files
+    cnt_seg_files = 0
+    segfile_re = re.compile('[0-9]+\\.[0-9]+')
+    with tarfile.open(tar_output_file, "r") as tar_f:
+        for f in tar_f.getnames():
+            if segfile_re.search(f) is not None:
+                cnt_seg_files += 1
+                log.info(f"Found a segment file: {f} in the backup archive file")
+    assert cnt_seg_files > 0
 
 
 def _start_workload(num_rows: int, pg: Postgres):
@@ -224,3 +236,5 @@ def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline
     psconn = env.pageserver.connect()
     pscur = psconn.cursor()
     pscur.execute(f"do_gc {tenant.hex} {timeline.hex} 0")
+
+    return tar_output_file
