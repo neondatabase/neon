@@ -246,19 +246,7 @@ pub(crate) fn create_timeline(
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
                 *lsn = lsn.align();
-
-                info!(
-                    "start lsn: {}, ancestor lsn: {}",
-                    *lsn,
-                    ancestor_timeline.get_last_record_lsn()
-                );
-
                 ancestor_timeline.wait_lsn(*lsn)?;
-
-                info!(
-                    "Finished waiting... ancesotr lsn :{}",
-                    ancestor_timeline.get_last_record_lsn()
-                );
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                 if ancestor_ancestor_lsn > *lsn {
