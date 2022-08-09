@@ -181,7 +181,6 @@
             }
         ]
     },
-
     "delta_operations": [
         {
             "action": "delete_db",
