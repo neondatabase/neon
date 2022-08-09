@@ -12,7 +12,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use postgres_ffi::xlog_utils::{
     find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName, XLogSegNo, PG_TLI,
 };
@@ -38,31 +38,44 @@ use metrics::{register_histogram_vec, Histogram, HistogramVec, DISK_WRITE_SECOND
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-lazy_static! {
-    // The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
-    // i64 is faster than f64, so update to u64 when available.
-    static ref WRITE_WAL_BYTES: HistogramVec = register_histogram_vec!(
+// The prometheus crate does not support u64 yet, i64 only (see `IntGauge`).
+// i64 is faster than f64, so update to u64 when available.
+static WRITE_WAL_BYTES: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "safekeeper_write_wal_bytes",
         "Bytes written to WAL in a single request, grouped by timeline",
         &["tenant_id", "timeline_id"],
-        vec![1.0, 10.0, 100.0, 1024.0, 8192.0, 128.0 * 1024.0, 1024.0 * 1024.0, 10.0 * 1024.0 * 1024.0]
+        vec![
+            1.0,
+            10.0,
+            100.0,
+            1024.0,
+            8192.0,
+            128.0 * 1024.0,
+            1024.0 * 1024.0,
+            10.0 * 1024.0 * 1024.0
+        ]
     )
-    .expect("Failed to register safekeeper_write_wal_bytes histogram vec");
-    static ref WRITE_WAL_SECONDS: HistogramVec = register_histogram_vec!(
+    .expect("Failed to register safekeeper_write_wal_bytes histogram vec")
+});
+static WRITE_WAL_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "safekeeper_write_wal_seconds",
         "Seconds spent writing and syncing WAL to a disk in a single request, grouped by timeline",
         &["tenant_id", "timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
-    .expect("Failed to register safekeeper_write_wal_seconds histogram vec");
-    static ref FLUSH_WAL_SECONDS: HistogramVec = register_histogram_vec!(
+    .expect("Failed to register safekeeper_write_wal_seconds histogram vec")
+});
+static FLUSH_WAL_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "safekeeper_flush_wal_seconds",
         "Seconds spent syncing WAL to a disk, grouped by timeline",
         &["tenant_id", "timeline_id"],
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
-    .expect("Failed to register safekeeper_flush_wal_seconds histogram vec");
-}
+    .expect("Failed to register safekeeper_flush_wal_seconds histogram vec")
+});
 
 struct WalStorageMetrics {
     write_wal_bytes: Histogram,

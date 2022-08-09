@@ -40,7 +40,7 @@ jobs:
         key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
     - name: Run pytest
@@ -49,7 +49,7 @@ jobs:
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
         TEST_OUTPUT: /tmp/test_output
         POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: |
         # Test framework expects we have psql binary;
         # but since we don't really need it in this test, let's mock it

@@ -56,13 +56,16 @@ pub trait DatadirTimeline: Timeline {
     /// This provides a transaction-like interface to perform a bunch
     /// of modifications atomically.
     ///
-    /// To ingest a WAL record, call begin_modification() to get a
+    /// To ingest a WAL record, call begin_modification(lsn) to get a
     /// DatadirModification object. Use the functions in the object to
     /// modify the repository state, updating all the pages and metadata
-    /// that the WAL record affects. When you're done, call commit(lsn) to
-    /// commit the changes. All the changes will be stamped with the specified LSN.
+    /// that the WAL record affects. When you're done, call commit() to
+    /// commit the changes.
     ///
-    /// Calling commit(lsn) will flush all the changes and reset the state,
+    /// Lsn stored in modification is advanced by `ingest_record` and
+    /// is used by `commit()` to update `last_record_lsn`.
+    ///
+    /// Calling commit() will flush all the changes and reset the state,
     /// so the `DatadirModification` struct can be reused to perform the next modification.
     ///
     /// Note that any pending modifications you make through the
@@ -70,7 +73,7 @@ pub trait DatadirTimeline: Timeline {
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    fn begin_modification(&self) -> DatadirModification<Self>
+    fn begin_modification(&self, lsn: Lsn) -> DatadirModification<Self>
     where
         Self: Sized,
     {
@@ -79,6 +82,7 @@ pub trait DatadirTimeline: Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            lsn,
         }
     }
 
@@ -120,6 +124,10 @@ pub trait DatadirTimeline: Timeline {
     fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
+            return Ok(nblocks);
+        }
+
         if (tag.forknum == pg_constants::FSM_FORKNUM
             || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
             && !self.get_rel_exists(tag, lsn)?
@@ -133,13 +141,21 @@ pub trait DatadirTimeline: Timeline {
 
         let key = rel_size_to_key(tag);
         let mut buf = self.get(key, lsn)?;
-        Ok(buf.get_u32_le())
+        let nblocks = buf.get_u32_le();
+
+        // Update relation size cache
+        self.update_cached_rel_size(tag, lsn, nblocks);
+        Ok(nblocks)
     }
 
     /// Does relation exist?
     fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
+        // first try to lookup relation in cache
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
+            return Ok(true);
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.get(key, lsn)?;
@@ -445,6 +461,18 @@ pub trait DatadirTimeline: Timeline {
 
         Ok(result.to_keyspace())
     }
+
+    /// Get cached size of relation if it not updated after specified LSN
+    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber>;
+
+    /// Update cached relation size if there is no more recent update
+    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+
+    /// Store cached relation size
+    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+
+    /// Remove cached relation size
+    fn remove_cached_rel_size(&self, tag: &RelTag);
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
@@ -456,6 +484,9 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     /// read the state, but note that any pending updates are *not* reflected
     /// in the state in 'tline' yet.
     pub tline: &'a T,
+
+    /// Lsn assigned by begin_modification
+    pub lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
@@ -666,9 +697,11 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
 
         self.pending_nblocks += nblocks as isize;
 
+        // Update relation size cache
+        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
+
         // Even if nblocks > 0, we don't insert any actual blocks here. That's up to the
         // caller.
-
         Ok(())
     }
 
@@ -683,6 +716,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         // Update the entry with the new size.
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+        // Update relation size cache
+        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
         // Update logical database size.
         self.pending_nblocks -= old_size as isize - nblocks as isize;
@@ -702,6 +738,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         if nblocks > old_size {
             let buf = nblocks.to_le_bytes();
             self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
             self.pending_nblocks += nblocks as isize - old_size as isize;
         }
@@ -727,6 +766,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
         self.pending_nblocks -= old_size as isize;
+
+        // Remove enty from relation size cache
+        self.tline.remove_cached_rel_size(&rel);
 
         // Delete size entry, as well as all blocks
         self.delete(rel_key_range(rel));
@@ -842,7 +884,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self, lsn: Lsn) -> Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -856,7 +898,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
         let mut result: Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, lsn, value);
+                result = writer.put(key, self.lsn, value);
                 false
             } else {
                 true
@@ -877,9 +919,9 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self, lsn: Lsn) -> Result<()> {
+    pub fn commit(&mut self) -> Result<()> {
         let writer = self.tline.writer();
-
+        let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1324,9 +1366,9 @@ pub fn create_test_timeline<R: Repository>(
     timeline_id: utils::zid::ZTimelineId,
 ) -> Result<std::sync::Arc<R::Timeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let mut m = tline.begin_modification();
+    let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
-    m.commit(Lsn(8))?;
+    m.commit()?;
     Ok(tline)
 }
 

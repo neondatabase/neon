@@ -45,21 +45,20 @@ use tokio::sync::watch;
 
 use tracing::{debug, error, info, warn};
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
 use utils::zid::{ZTenantId, ZTimelineId};
 
 use crate::shutdown_pageserver;
 
-lazy_static! {
-    /// Each thread that we track is associated with a "thread ID". It's just
-    /// an increasing number that we assign, not related to any system thread
-    /// id.
-    static ref NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
+/// Each thread that we track is associated with a "thread ID". It's just
+/// an increasing number that we assign, not related to any system thread
+/// id.
+static NEXT_THREAD_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
 
-    /// Global registry of threads
-    static ref THREADS: Mutex<HashMap<u64, Arc<PageServerThread>>> = Mutex::new(HashMap::new());
-}
+/// Global registry of threads
+static THREADS: Lazy<Mutex<HashMap<u64, Arc<PageServerThread>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // There is a Tokio watch channel for each thread, which can be used to signal the
 // thread that it needs to shut down. This thread local variable holds the receiving

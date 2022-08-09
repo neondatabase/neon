@@ -27,23 +27,25 @@ use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
     use anyhow::ensure;
+    use once_cell::sync::Lazy;
     use std::{
         collections::HashMap,
         sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
     use tokio::sync::mpsc;
     use tracing::{debug, error};
-
     use utils::zid::ZTenantId;
 
     use crate::tenant_mgr::{LocalTimelineUpdate, Tenant};
 
-    lazy_static::lazy_static! {
-        static ref TENANTS: RwLock<HashMap<ZTenantId, Tenant>> = RwLock::new(HashMap::new());
-        /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
-        /// so that it can enable/disable corresponding processes.
-        static ref TIMELINE_UPDATE_SENDER: RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>> = RwLock::new(None);
-    }
+    static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Tenant>>> =
+        Lazy::new(|| RwLock::new(HashMap::new()));
+
+    /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
+    /// so that it can enable/disable corresponding processes.
+    static TIMELINE_UPDATE_SENDER: Lazy<
+        RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>>,
+    > = Lazy::new(|| RwLock::new(None));
 
     pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Tenant>> {
         TENANTS
