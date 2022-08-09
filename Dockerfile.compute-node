@@ -18,7 +18,7 @@ RUN ./configure && make install
 FROM pg-build AS postgis-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ADD https://github.com/postgis/postgis.git#stable-3.2 postgis
-RUN ./configure && make install
+RUN ls -la && ./configure && make install
 
 # Compile and run the Neon-specific `compute_ctl` binary
 FROM build-deps AS compute-tools-build
