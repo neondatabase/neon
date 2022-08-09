@@ -10,6 +10,7 @@ FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
 RUN git clone -b REL_14_STABLE https://github.com/neondatabase/postgres.git postgres && \
+    cd postgres &&  \
     configure && \
     make install
 
