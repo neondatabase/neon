@@ -5,29 +5,30 @@ RUN apt update &&  \
     apt install -y git automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
     libcurl4-openssl-dev libossp-uuid-dev
 
-FROM debian:bullseye-slim AS build-deps2
-RUN apt update &&  \
-    apt install -y git automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
-    libcurl4-openssl-dev libossp-uuid-dev
-
 FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
+WORKDIR /tmp/pg
 RUN git clone -b REL_14_STABLE https://github.com/neondatabase/postgres.git postgres && \
     cd postgres &&  \
+    ./configure && \
+    make install \
+
+RUN git clone -b stable-3.2 https://github.com/postgis/postgis.git postgis && \
+    cd postgis &&  \
     ./configure && \
     make install
 
 # Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
 # investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
-FROM build-deps2 AS postgis-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-RUN git clone -b stable-3.2 https://github.com/postgis/postgis.git postgis && \
-    cd postgis &&  \
-    ./configure && \
-    make install
+#FROM pg-build AS postgis-build
+#COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+#RUN git clone -b stable-3.2 https://github.com/postgis/postgis.git postgis && \
+#    cd postgis &&  \
+#    ./configure && \
+#    make install
 
 # Compile and run the Neon-specific `compute_ctl` binary
 FROM build-deps AS compute-tools-build
@@ -37,5 +38,5 @@ RUN cargo build
 # Put it all together into the final image
 FROM debian:bullseye-slim
 COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
-COPY --from=postgis-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=pg-build /usr/local/postgis /usr/local/postgis
 COPY --from=compute-tools-build /home/runner/target/release/compute_ctl /usr/local/bin/compute_ctl
