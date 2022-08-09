@@ -79,4 +79,5 @@
 - [014-storage-lsm](rfcs/014-storage-lsm.md)
 - [015-storage-messaging](rfcs/015-storage-messaging.md)
 - [016-connection-routing](rfcs/016-connection-routing.md)
+- [017-pageserver-op-atomicity](rfcs/017-pageserver-op-atomicity.md)
 - [cluster-size-limits](rfcs/cluster-size-limits.md)
