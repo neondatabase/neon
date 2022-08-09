@@ -9,21 +9,20 @@ FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
-RUN git clone -b REL_14_STABLE https://github.com/neondatabase/postgres.git postgres && \
-    cd postgres &&  \
-    ./configure && \
-    make install
+ADD https://github.com/neondatabase/postgres.git#REL_14_STABLE postgres
+RUN cd postgres && ./configure && make install
 
 # Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
 # investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
 FROM pg-build AS postgis-build
-COPY /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ADD https://github.com/postgis/postgis.git#stable-3.2 postgis
+RUN cd postgis && ./configure && make install
 
 # Compile and run the Neon-specific `compute_ctl` binary
 FROM build-deps AS compute-tools-build
-COPY compute_tools compute_tools
+COPY --from=compute-deps compute_tools compute_tools
 RUN cargo build
 
 # Put it all together into the final image
