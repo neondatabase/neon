@@ -119,7 +119,7 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
     _start_import(num_rows, lsn, env, pg_bin, timeline)
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(1800)
 @pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
 def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 1
