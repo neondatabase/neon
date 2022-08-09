@@ -154,7 +154,7 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     assert cnt_seg_files > 0
 
 
-def _start_workload(num_rows: int, pg: Postgres):
+def _start_workload(num_rows: int, pg: Postgres) -> str:
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # data loading may take a while, so increase statement timeout
@@ -164,10 +164,12 @@ def _start_workload(num_rows: int, pg: Postgres):
             cur.execute("CHECKPOINT")
 
             cur.execute('SELECT pg_current_wal_insert_lsn()')
-            return cur.fetchone()[0]
+            res = cur.fetchone()
+            assert res is not None and isinstance(res[0], str)
+            return res[0]
 
 
-def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID):
+def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID) -> str:
     log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
