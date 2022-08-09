@@ -10,7 +10,7 @@ FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
 ADD https://github.com/neondatabase/postgres.git#REL_14_STABLE postgres
-RUN ./configure && make install
+RUN ls -la && ./configure && make install
 
 # Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
