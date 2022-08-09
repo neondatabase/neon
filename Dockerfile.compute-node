@@ -5,6 +5,11 @@ RUN apt update &&  \
     apt install -y git automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
     libcurl4-openssl-dev libossp-uuid-dev
 
+FROM debian:bullseye-slim AS build-deps2
+RUN apt update &&  \
+    apt install -y git automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
+    libcurl4-openssl-dev libossp-uuid-dev
+
 FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 
 # Build Postgres from the neon postgres repository.
@@ -17,7 +22,7 @@ RUN git clone -b REL_14_STABLE https://github.com/neondatabase/postgres.git post
 # Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
 # investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
-FROM build-deps AS postgis-build
+FROM build-deps2 AS postgis-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN git clone -b stable-3.2 https://github.com/postgis/postgis.git postgis && \
     cd postgis &&  \
