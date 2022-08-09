@@ -6,6 +6,7 @@ RUN apt update &&  \
     libcurl4-openssl-dev libossp-uuid-dev
 
 FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
+RUN  whoami
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
