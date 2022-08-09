@@ -91,21 +91,21 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         assert res[0] == (100000 * scale, )
 
 
-# def test_branching_weird_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
-#     random.seed(100)
-#     env = neon_simple_env
+XLOG_BLCKSZ = 8192
 
-#     env.neon_cli.create_branch('b0')
-#     pg = env.postgres.create_start('b0')
 
-#     pg_bin.run_capture(['pgbench', '-i', pg.connstr()])
+def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
+    env = neon_simple_env
 
-#     for i in range(1, 10):
-#         time.sleep(1.0)
-#         start_lsn = lsn_from_hex(
-#             pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]) - random.randint(100, 1000)
-#         log.info(f"Branching b{i} from b{i-1} starting at lsn {start_lsn}...")
+    env.neon_cli.create_branch('b0')
+    pg0 = env.postgres.create_start('b0')
 
-#         env.neon_cli.create_branch(f'b{i}', f'b{i-1}', ancestor_start_lsn=lsn_to_hex(start_lsn))
-#         pg = env.postgres.create_start(f'b{i}')
-#         pg_bin.run_capture(['pgbench', '-i', pg.connstr()])
+    pg_bin.run_capture(['pgbench', '-i', pg0.connstr()])
+
+    curr_lsn = lsn_from_hex(pg0.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    start_lsn = (curr_lsn - XLOG_BLCKSZ) // XLOG_BLCKSZ * XLOG_BLCKSZ
+
+    log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
+    env.neon_cli.create_branch('b1', 'b0', ancestor_start_lsn=lsn_to_hex(start_lsn))
+    pg1 = env.postgres.create_start('b1')
+    pg_bin.run_capture(['pgbench', '-i', pg1.connstr()])
