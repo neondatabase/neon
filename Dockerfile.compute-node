@@ -13,7 +13,7 @@ ADD https://github.com/postgis/postgis.git#stable-3.2 postgis
 
 # Compile and run the Neon-specific `compute_ctl` binary
 FROM build-deps AS compute-tools-build
-COPY compute_tools
+COPY compute_tools compute_tools
 RUN cargo build
 
 # Put it all together into the final image
