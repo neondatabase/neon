@@ -8,7 +8,7 @@ RUN make install
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
 # investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
 FROM pg-build AS postgis-build
-COPY /usr/local/pgsql/
+COPY /usr/local/pgsql/ /usr/local/pgsql/
 ADD https://github.com/postgis/postgis.git#stable-3.2 postgis
 
 # Compile and run the Neon-specific `compute_ctl` binary
