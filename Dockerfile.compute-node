@@ -11,7 +11,7 @@ FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 FROM build-deps AS pg-build
 RUN git clone -b REL_14_STABLE https://github.com/neondatabase/postgres.git postgres && \
     cd postgres &&  \
-    configure && \
+    ./configure && \
     make install
 
 # Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
