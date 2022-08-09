@@ -2,6 +2,7 @@
 //! page server.
 
 use crate::config::PageServerConf;
+use crate::http::models::TenantInfo;
 use crate::layered_repository::{load_metadata, LayeredRepository};
 use crate::repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
@@ -14,7 +15,6 @@ use crate::{thread_mgr, timelines, walreceiver};
 use crate::{RepositoryImpl, TimelineImpl};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -27,23 +27,25 @@ use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
     use anyhow::ensure;
+    use once_cell::sync::Lazy;
     use std::{
         collections::HashMap,
         sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
     use tokio::sync::mpsc;
     use tracing::{debug, error};
-
     use utils::zid::ZTenantId;
 
     use crate::tenant_mgr::{LocalTimelineUpdate, Tenant};
 
-    lazy_static::lazy_static! {
-        static ref TENANTS: RwLock<HashMap<ZTenantId, Tenant>> = RwLock::new(HashMap::new());
-        /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
-        /// so that it can enable/disable corresponding processes.
-        static ref TIMELINE_UPDATE_SENDER: RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>> = RwLock::new(None);
-    }
+    static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Tenant>>> =
+        Lazy::new(|| RwLock::new(HashMap::new()));
+
+    /// Sends updates to the local timelines (creation and deletion) to the WAL receiver,
+    /// so that it can enable/disable corresponding processes.
+    static TIMELINE_UPDATE_SENDER: Lazy<
+        RwLock<Option<mpsc::UnboundedSender<LocalTimelineUpdate>>>,
+    > = Lazy::new(|| RwLock::new(None));
 
     pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Tenant>> {
         TENANTS
@@ -502,15 +504,9 @@ fn load_local_timeline(
     Ok(inmem_timeline)
 }
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TenantInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub id: ZTenantId,
-    pub state: Option<TenantState>,
-    pub has_in_progress_downloads: Option<bool>,
-}
-
+///
+/// Get list of tenants, for the mgmt API
+///
 pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
     tenants_state::read_tenants()
         .iter()
@@ -526,6 +522,7 @@ pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
             TenantInfo {
                 id: *id,
                 state: Some(tenant.state),
+                current_physical_size: None,
                 has_in_progress_downloads,
             }
         })

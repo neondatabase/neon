@@ -4,11 +4,11 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -38,7 +38,9 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
+use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 use crate::DatadirTimeline;
 
@@ -58,76 +60,102 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
+/// Prometheus histogram buckets (in seconds) that capture the majority of
+/// latencies in the microsecond range but also extend far enough up to distinguish
+/// "bad" from "really bad".
+fn get_buckets_for_critical_operations() -> Vec<f64> {
+    let buckets_per_digit = 5;
+    let min_exponent = -6;
+    let max_exponent = 2;
+
+    let mut buckets = vec![];
+    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
+    // because it's more numerically stable and doesn't result in numbers like 9.999999
+    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
+        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
+    }
+    buckets
+}
+
 // Metrics collected on operations on the storage repository.
-lazy_static! {
-    pub static ref STORAGE_TIME: HistogramVec = register_histogram_vec!(
+pub static STORAGE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_storage_operations_seconds",
         "Time spent on storage operations",
-        &["operation", "tenant_id", "timeline_id"]
+        &["operation", "tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics collected on operations on the storage repository.
-lazy_static! {
-    static ref RECONSTRUCT_TIME: HistogramVec = register_histogram_vec!(
+static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
-lazy_static! {
-    static ref MATERIALIZED_PAGE_CACHE_HIT: IntCounterVec = register_int_counter_vec!(
+static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_materialized_cache_hits_total",
         "Number of cache hits from materialized page cache",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-    static ref WAIT_LSN_TIME: HistogramVec = register_histogram_vec!(
+    .expect("failed to define a metric")
+});
+
+static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
-lazy_static! {
-    static ref LAST_RECORD_LSN: IntGaugeVec = register_int_gauge_vec!(
+static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics for determining timeline's physical size.
 // A layered timeline's physical is defined as the total size of
 // (delta/image) layer files on disk.
-lazy_static! {
-    static ref CURRENT_PHYSICAL_SIZE: UIntGaugeVec = register_uint_gauge_vec!(
+static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_current_physical_size",
         "Current physical size grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
-lazy_static! {
-    static ref NUM_PERSISTENT_FILES_CREATED: IntCounter = register_int_counter!(
+static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
     )
-    .expect("failed to define a metric");
-    static ref PERSISTENT_BYTES_WRITTEN: IntCounter = register_int_counter!(
+    .expect("failed to define a metric")
+});
+
+static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 #[derive(Clone)]
 pub enum LayeredTimelineEntry {
@@ -290,12 +318,61 @@ pub struct LayeredTimeline {
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: AtomicIsize,
+
+    /// Information about the last processed message by the WAL receiver,
+    /// or None if WAL receiver has not received anything for this timeline
+    /// yet.
+    pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
+
+    /// Relation size cache
+    rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+}
+
+pub struct WalReceiverInfo {
+    pub wal_source_connstr: String,
+    pub last_received_msg_lsn: Lsn,
+    pub last_received_msg_ts: u128,
 }
 
 /// Inherit all the functions from DatadirTimeline, to provide the
 /// functionality to store PostgreSQL relations, SLRUs, etc. in a
 /// LayeredTimeline.
-impl DatadirTimeline for LayeredTimeline {}
+impl DatadirTimeline for LayeredTimeline {
+    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+        let rel_size_cache = self.rel_size_cache.read().unwrap();
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+            if lsn >= *cached_lsn {
+                return Some(*nblocks);
+            }
+        }
+        None
+    }
+
+    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        match rel_size_cache.entry(tag) {
+            Entry::Occupied(mut entry) => {
+                let cached_lsn = entry.get_mut();
+                if lsn >= cached_lsn.0 {
+                    *cached_lsn = (lsn, nblocks);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert((lsn, nblocks));
+            }
+        }
+    }
+
+    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.insert(tag, (lsn, nblocks));
+    }
+
+    fn remove_cached_rel_size(&self, tag: &RelTag) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.remove(tag);
+    }
+}
 
 ///
 /// Information about how much history needs to be retained, needed by
@@ -366,8 +443,6 @@ impl Timeline for LayeredTimeline {
 
     /// Look up the value with the given a key
     fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
-        debug_assert!(lsn <= self.get_last_record_lsn());
-
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -605,6 +680,9 @@ impl LayeredTimeline {
             current_logical_size: AtomicIsize::new(0),
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
+
+            last_received_wal: Mutex::new(None),
+            rel_size_cache: RwLock::new(HashMap::new()),
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
         result

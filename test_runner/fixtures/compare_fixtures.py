@@ -70,6 +70,7 @@ class PgCompare(ABC):
             for pg_stat in pg_stats:
                 cur.execute(pg_stat.query)
                 row = cur.fetchone()
+                assert row is not None
                 assert len(row) == len(pg_stat.columns)
 
                 for col, val in zip(pg_stat.columns, row):

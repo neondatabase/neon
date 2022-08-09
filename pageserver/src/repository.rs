@@ -277,15 +277,6 @@ pub enum LocalTimelineState {
     Unloaded,
 }
 
-impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
-    fn from(local_timeline_entry: &'a RepositoryTimeline<T>) -> Self {
-        match local_timeline_entry {
-            RepositoryTimeline::Loaded(_) => LocalTimelineState::Loaded,
-            RepositoryTimeline::Unloaded { .. } => LocalTimelineState::Unloaded,
-        }
-    }
-}
-
 ///
 /// Result of performing GC
 ///
@@ -417,7 +408,7 @@ pub trait TimelineWriter<'a> {
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::BytesMut;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
@@ -448,9 +439,7 @@ pub mod repo_harness {
         buf.freeze()
     }
 
-    lazy_static! {
-        static ref LOCK: RwLock<()> = RwLock::new(());
-    }
+    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
 
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
@@ -598,11 +587,10 @@ mod tests {
     //use std::sync::Arc;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
 
-    lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
-    }
+    static TEST_KEY: Lazy<Key> =
+        Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
 
     #[test]
     fn test_basic() -> Result<()> {

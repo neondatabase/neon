@@ -19,7 +19,7 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    http::models::WalReceiverEntry,
+    layered_repository::WalReceiverInfo,
     pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
@@ -29,18 +29,18 @@ use crate::{
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
-/// Opens a conneciton to the given wal producer and streams the WAL, sending progress messages during streaming.
+/// Open a connection to the given safekeeper and receive WAL, sending back progress
+/// messages as we go.
 pub async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
-    wal_producer_connstr: &str,
+    wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_producer_connstr}");
-    let connect_cfg =
-        format!("{wal_producer_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connstr}");
+    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
 
     let (mut replication_client, connection) = time::timeout(
         connect_timeout,
@@ -154,7 +154,7 @@ pub async fn handle_walreceiver_connection(
 
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification();
+                    let mut modification = timeline.begin_modification(endlsn);
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
@@ -232,21 +232,16 @@ pub async fn handle_walreceiver_connection(
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
-            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
-            {
-                super::WAL_RECEIVER_ENTRIES.write().await.insert(
-                    id,
-                    WalReceiverEntry {
-                        wal_producer_connstr: Some(wal_producer_connstr.to_owned()),
-                        last_received_msg_lsn: Some(last_lsn),
-                        last_received_msg_ts: Some(
-                            ts.duration_since(SystemTime::UNIX_EPOCH)
-                                .expect("Received message time should be before UNIX EPOCH!")
-                                .as_micros(),
-                        ),
-                    },
-                );
-            }
+            // Update the status about what we just received. This is shown in the mgmt API.
+            let last_received_wal = WalReceiverInfo {
+                wal_source_connstr: wal_source_connstr.to_owned(),
+                last_received_msg_lsn: last_lsn,
+                last_received_msg_ts: ts
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("Received message time should be before UNIX EPOCH!")
+                    .as_micros(),
+            };
+            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.

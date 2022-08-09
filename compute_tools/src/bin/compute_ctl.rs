@@ -157,7 +157,7 @@ fn main() -> Result<()> {
             exit(code)
         }
         Err(error) => {
-            error!("could not start the compute node: {}", error);
+            error!("could not start the compute node: {:?}", error);
 
             let mut state = compute.state.write().unwrap();
             state.error = Some(format!("{:?}", error));
