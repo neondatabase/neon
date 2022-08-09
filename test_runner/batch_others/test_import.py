@@ -1,8 +1,7 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_upload, wait_for_last_record_lsn
-from fixtures.utils import lsn_from_hex, lsn_to_hex
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, Postgres, wait_for_upload, wait_for_last_record_lsn
+from fixtures.utils import lsn_from_hex
 from uuid import UUID, uuid4
-import tarfile
 import os
 import shutil
 from pathlib import Path
@@ -105,26 +104,46 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
 
 @pytest.mark.timeout(600)
-def test_import_from_pageserver(test_output_dir,
-                                pg_bin,
-                                vanilla_pg,
-                                neon_env_builder: NeonEnvBuilder):
-    built_type = os.environ.get("BUILD_TYPE")
-    if built_type is not None and built_type == "release":
-        log.info("Detected release build type, use a larger number of rows...")
-        num_rows = 30000000
-    else:
-        num_rows = 3000
-
+def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
-    timeline = env.neon_cli.create_branch('test_import_from_pageserver')
-    pgmain = env.postgres.create_start('test_import_from_pageserver')
-    log.info("postgres is running on 'test_import_from_pageserver' branch")
+    timeline = env.neon_cli.create_branch('test_import_from_pageserver_small')
+    pg = env.postgres.create_start('test_import_from_pageserver_small')
 
-    with closing(pgmain.connect()) as conn:
+    num_rows = 3000
+    lsn = _start_workload(num_rows, pg)
+    _start_import(num_rows, lsn, env, pg_bin, timeline)
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
+def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    neon_env_builder.enable_local_fs_remote_storage()
+    env = neon_env_builder.init_start()
+
+    timeline = env.neon_cli.create_branch('test_import_from_pageserver_multisegment')
+    pg = env.postgres.create_start('test_import_from_pageserver_multisegment')
+
+    # For `test_import_from_pageserver_multisegment`, we want to make sure that the data
+    # is large enough to create multi-segment files. Typically, a segment file's size is
+    # at most 1GB. A large number of inserted rows is used to increase the DB size to above 1GB.
+    # See: https://github.com/neondatabase/neon/issues/2097.
+    num_rows = 30000000
+    lsn = _start_workload(num_rows, pg)
+
+    logical_size = env.pageserver.http_client().timeline_detail(
+        env.initial_tenant, timeline)['local']['current_logical_size']
+    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+    assert logical_size > 1024**3
+
+    _start_import(num_rows, lsn, env, pg_bin, timeline)
+
+
+def _start_workload(num_rows: int, pg: Postgres):
+    with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # data loading may take a while, so increase statement timeout
             cur.execute("SET statement_timeout='300s'")
@@ -133,12 +152,11 @@ def test_import_from_pageserver(test_output_dir,
             cur.execute("CHECKPOINT")
 
             cur.execute('SELECT pg_current_wal_insert_lsn()')
-            lsn = cur.fetchone()[0]
-            log.info(f"start_backup_lsn = {lsn}")
+            return cur.fetchone()[0]
 
-    logical_size = env.pageserver.http_client().timeline_detail(
-        env.initial_tenant, timeline)['local']['current_logical_size']
-    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+
+def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID):
+    log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
