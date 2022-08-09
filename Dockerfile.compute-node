@@ -1,15 +1,15 @@
 ARG COMPUTE_TOOLS_TAG=latest
 
 FROM debian:bullseye-slim AS build-deps
-RUN apt-get update &&  \
-    apt-get -yq install automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
+RUN apt update &&  \
+    apt install -y git automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
     libcurl4-openssl-dev libossp-uuid-dev
 
 FROM neondatabase/compute-tools:$COMPUTE_TOOLS_TAG AS compute-deps
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
-ADD https://github.com/neondatabase/postgres.git#REL_14_STABLE postgres
+RUN git clone https://github.com/neondatabase/postgres.git#REL_14_STABLE postgres
 RUN configure
 RUN make install
 
