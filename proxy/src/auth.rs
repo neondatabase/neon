@@ -45,6 +45,14 @@ pub enum AuthErrorImpl {
     #[error("Malformed password message: {0}")]
     MalformedPassword(&'static str),
 
+    #[error(
+        "Project name is not specified. \
+        Either please upgrade the postgres client library (libpq) for SNI support \
+        or pass the project name as a parameter: '&options=project%3D<project-name>'. \
+        See more at https://neon.tech/sni"
+    )]
+    MissingProjectName,
+
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -77,6 +85,7 @@ impl UserFacingError for AuthError {
             Sasl(e) => e.to_string_client(),
             BadAuthMethod(_) => self.to_string(),
             MalformedPassword(_) => self.to_string(),
+            MissingProjectName => self.to_string(),
             _ => "Internal error".to_string(),
         }
     }

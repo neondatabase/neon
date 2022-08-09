@@ -76,8 +76,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
         let payload = PasswordHackPayload::parse(password)
-            // TODO: change the error message!
-            .ok_or(AuthErrorImpl::MalformedPassword("invalid payload"))?;
+            // If we ended up here and the payload is malformed, it means that
+            // the user neither enabled SNI nor resorted to any other method
+            // for passing the project name we rely on. We should show them
+            // the most helpful error message and point to the documentation.
+            .ok_or(AuthErrorImpl::MissingProjectName)?;
 
         Ok(payload)
     }
