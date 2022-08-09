@@ -31,8 +31,8 @@ RUN git clone -b stable-3.2 https://github.com/postgis/postgis.git postgis && \
     make install
 
 # Compile and run the Neon-specific `compute_ctl` binary
-FROM build-deps AS compute-tools-build
-COPY --from=compute-deps compute_tools compute_tools
+FROM compute-deps AS compute-tools-build
+#COPY --from=compute-deps compute_tools compute_tools
 RUN cargo build
 
 # Put it all together into the final image
