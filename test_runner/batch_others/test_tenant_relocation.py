@@ -229,7 +229,7 @@ def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path
         # basebackup and importing it into the new pageserver.
         # This kind of migration can tolerate breaking changes
         # to storage format
-        pytest.param('major', marks=pytest.mark.xfail(reason="Not implemented")),
+        'major',
     ])
 @pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
 def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
@@ -345,6 +345,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         # Migrate either by attaching from s3 or import/export basebackup
         if method == "major":
             cmd = [
+                "poetry",
+                "run",
                 "python",
                 os.path.join(base_dir, "scripts/export_import_between_pageservers.py"),
                 "--tenant-id",
@@ -361,12 +363,12 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                 str(new_pageserver_http_port),
                 "--to-pg-port",
                 str(new_pageserver_pg_port),
-                "--psql-path",
-                os.path.join(pg_distrib_dir, "bin", "psql"),
+                "--pg-distrib-dir",
+                pg_distrib_dir,
                 "--work-dir",
                 os.path.join(test_output_dir),
             ]
-            subprocess_capture(str(env.repo_dir), cmd, check=True)
+            subprocess_capture(test_output_dir, cmd, check=True)
         elif method == "minor":
             # call to attach timeline to new pageserver
             new_pageserver_http.tenant_attach(tenant_id)
@@ -426,6 +428,22 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
         post_migration_check(pg_main, 500500, old_local_path_main)
         post_migration_check(pg_second, 1001000, old_local_path_second)
+
+        # ensure that we can successfully read all relations on the new pageserver
+        with pg_cur(pg_second) as cur:
+            cur.execute('''
+                DO $$
+                DECLARE
+                r RECORD;
+                BEGIN
+                FOR r IN
+                SELECT relname FROM pg_class WHERE relkind='r'
+                LOOP
+                    RAISE NOTICE '%', r.relname;
+                    EXECUTE 'SELECT count(*) FROM quote_ident($1)' USING r.relname;
+                END LOOP;
+                END$$;
+                ''')
 
         if with_load == 'with_load':
             assert load_ok_event.wait(3)

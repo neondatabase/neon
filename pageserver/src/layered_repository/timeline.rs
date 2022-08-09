@@ -60,12 +60,30 @@ use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
 
+/// Prometheus histogram buckets (in seconds) that capture the majority of
+/// latencies in the microsecond range but also extend far enough up to distinguish
+/// "bad" from "really bad".
+fn get_buckets_for_critical_operations() -> Vec<f64> {
+    let buckets_per_digit = 5;
+    let min_exponent = -6;
+    let max_exponent = 2;
+
+    let mut buckets = vec![];
+    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
+    // because it's more numerically stable and doesn't result in numbers like 9.999999
+    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
+        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
+    }
+    buckets
+}
+
 // Metrics collected on operations on the storage repository.
 pub static STORAGE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_storage_operations_seconds",
         "Time spent on storage operations",
-        &["operation", "tenant_id", "timeline_id"]
+        &["operation", "tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric")
 });
@@ -75,7 +93,8 @@ static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric")
 });
@@ -93,7 +112,8 @@ static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "timeline_id"],
+        get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric")
 });

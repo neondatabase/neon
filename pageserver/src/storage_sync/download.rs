@@ -202,8 +202,6 @@ where
         })
         .map_err(DownloadError::BadInput)?;
 
-    warn!("part_storage_path {:?}", part_storage_path);
-
     let mut index_part_download = storage.download(&part_storage_path).await?;
 
     let mut index_part_bytes = Vec::new();
