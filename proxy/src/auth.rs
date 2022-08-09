@@ -60,11 +60,8 @@ impl AuthError {
     }
 }
 
-impl<T> From<T> for AuthError
-where
-    AuthErrorImpl: From<T>,
-{
-    fn from(e: T) -> Self {
+impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
+    fn from(e: E) -> Self {
         Self(Box::new(e.into()))
     }
 }

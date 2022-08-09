@@ -65,10 +65,7 @@ impl UserFacingError for GetAuthInfoError {
     }
 }
 
-impl<E> From<E> for GetAuthInfoError
-where
-    TransportError: From<E>,
-{
+impl<E: Into<TransportError>> From<E> for GetAuthInfoError {
     fn from(e: E) -> Self {
         Self::Transport(e.into())
     }
@@ -94,10 +91,7 @@ impl UserFacingError for WakeComputeError {
     }
 }
 
-impl<E> From<E> for WakeComputeError
-where
-    TransportError: From<E>,
-{
+impl<E: Into<TransportError>> From<E> for WakeComputeError {
     fn from(e: E) -> Self {
         Self::Transport(e.into())
     }
