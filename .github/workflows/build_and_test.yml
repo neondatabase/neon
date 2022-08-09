@@ -456,6 +456,27 @@ jobs:
         working-directory: ./vendor/postgres/
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
+  build-compute-node2-image:
+    name: 'kaniko-compute-node2'
+    if: needs.dockerfile-check.outputs.value != 'true'
+    runs-on: dev
+    needs: [ dockerfile-check ]
+    container: gcr.io/kaniko-project/executor:debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build console
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID-2
+
   promote-images:
     name: 'promote-images'
     runs-on: dev
@@ -560,15 +581,16 @@ jobs:
   deploy:
     name: deploy
     runs-on: dev
-    container: python:bullseye
-    # We need both storage **and** compute images for deploy, because control plane
-    # picks the compute version based on the storage version. If it notices a fresh
-    # storage it may bump the compute version. And if compute image failed to build
-    # it may break things badly.
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly.
     needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
@@ -578,6 +600,11 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
       - name: Setup ansible
         run: |
@@ -612,12 +639,14 @@ jobs:
     name: deploy-proxy
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
-    # Compute image isn't strictly required for proxy deploy, but let's still wait for it
-    # to run all deploy jobs consistently.
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
@@ -642,11 +671,9 @@ jobs:
         run: |
           curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
-        shell: bash
 
       - name: Re-deploy proxy
         run: |
           DOCKER_TAG=${{needs.docker-image.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
-        shell: bash

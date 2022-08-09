@@ -1,0 +1,23 @@
+# Build Postgres from the neon postgres repository.
+FROM build-deps AS pg-build
+ADD https://github.com/neondatabase/postgres.git#REL_14_STABLE postgres
+RUN configure
+RUN make install
+
+# Build PostGIS from upstream the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
+# Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
+# investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
+FROM pg-build AS postgis-build
+COPY /usr/local/pgsql/
+ADD https://github.com/postgis/postgis.git#stable-3.2 postgis
+
+# Compile and run the Neon-specific `compute_ctl` binary
+FROM build-deps AS compute-tools-build
+COPY compute_tools
+RUN cargo build
+
+# Put it all together into the final image
+FROM debian:bullseye-slim
+COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=postgis-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=compute-tools-build /home/runner/target/release/compute_ctl /usr/local/bin/compute_ctl
