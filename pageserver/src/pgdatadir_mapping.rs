@@ -708,20 +708,25 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
     /// Truncate relation
     pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
         ensure!(rel.relnode != 0, "invalid relnode");
-        let size_key = rel_size_to_key(rel);
+        let last_lsn = self.tline.get_last_record_lsn();
+        if self.tline.get_rel_exists(rel, last_lsn)? {
+            let size_key = rel_size_to_key(rel);
+            // Fetch the old size first
+            let old_size = self.get(size_key)?.get_u32_le();
 
-        // Fetch the old size first
-        let old_size = self.get(size_key)?.get_u32_le();
+            // Update the entry with the new size.
+            let buf = nblocks.to_le_bytes();
+            self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        // Update the entry with the new size.
-        let buf = nblocks.to_le_bytes();
-        self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
-        // Update relation size cache
-        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
-        // Update logical database size.
-        self.pending_nblocks -= old_size as isize - nblocks as isize;
+            // Update logical database size.
+            self.pending_nblocks -= old_size as isize - nblocks as isize;
+        }
         Ok(())
     }
 
