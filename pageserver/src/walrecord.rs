@@ -384,6 +384,7 @@ impl XlXactParsedRecord {
         if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
             let nmsgs = buf.get_i32_le();
             for _i in 0..nmsgs {
+                //FIXME: what does this code do?
                 let sizeof_shared_invalidation_message = 0;
                 buf.advance(sizeof_shared_invalidation_message);
             }
@@ -393,12 +394,12 @@ impl XlXactParsedRecord {
             trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
         }
         if xinfo & pg_constants::XACT_XINFO_HAS_DROPPED_STATS != 0 {
-            info!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STATS");
-            //FIXME: do we need to handle dropped stats here?
-
             let nitems = buf.get_i32_le();
-            let sizeof_xl_xact_stats_item = 12 as usize;
-            buf.advance((nitems as usize) * sizeof_xl_xact_stats_item);
+            debug!(
+                "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
+                nitems
+            );
+            //FIXME: do we need to handle dropped stats here?
         }
 
         XlXactParsedRecord {

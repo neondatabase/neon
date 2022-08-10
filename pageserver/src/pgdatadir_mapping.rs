@@ -362,8 +362,8 @@ pub trait DatadirTimeline: Timeline {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
-    pub fn get_pg_version(&self, lsn: Lsn) -> Result<Bytes> {
-        self.tline.get(PG_VERSION_KEY, lsn)
+    fn get_pg_version(&self, lsn: Lsn) -> Result<Bytes> {
+        self.get(PG_VERSION_KEY, lsn)
     }
 
     /// Does the same as get_current_logical_size but counted on demand.

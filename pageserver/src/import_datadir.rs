@@ -97,7 +97,6 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
     len: usize,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
-    info!("importing rel file {}", path.display());
 
     let filename = &path
         .file_name()
@@ -127,7 +126,7 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
     // ignore "relation already exists" error
     if let Err(e) = modification.put_rel_creation(rel, nblocks as u32) {
         if e.to_string().contains("already exists") {
-            info!("relation {} already exists. we must be extending it", rel);
+            debug!("relation {} already exists. we must be extending it", rel);
         } else {
             return Err(e);
         }
@@ -161,7 +160,6 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
     //
     // If we process rel segments out of order,
     // put_rel_extend will skip the update.
-    info!("updating rel {} size to {}", rel, blknum);
     modification.put_rel_extend(rel, blknum)?;
 
     Ok(())

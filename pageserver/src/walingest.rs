@@ -116,7 +116,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             let truncate = XlSmgrTruncate::decode(&mut buf);
             self.ingest_xlog_smgr_truncate(modification, &truncate)?;
         } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
-            info!(
+            debug!(
                 "handle RM_DBASE_ID for Postgres version {:?}",
                 self.pg_version
             );
@@ -125,7 +125,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
                     == pg_constants::XLOG_DBASE_CREATE_v14
                 {
                     let createdb = XlCreateDatabase::decode(&mut buf);
-                    info!("XLOG_DBASE_CREATE_v14");
+                    debug!("XLOG_DBASE_CREATE_v14");
 
                     self.ingest_xlog_dbase_create(modification, &createdb)?;
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
@@ -141,14 +141,14 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
                 if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == pg_constants::XLOG_DBASE_CREATE_WAL_LOG_v15
                 {
-                    info!("XLOG_DBASE_CREATE_WAL_LOG_v15: noop");
+                    debug!("XLOG_DBASE_CREATE_WAL_LOG_v15: noop");
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == pg_constants::XLOG_DBASE_CREATE_FILE_COPY_v15
                 {
                     // The XLOG record was renamed between v14 and v15,
                     // but the record format is the same.
                     // So we can reuse XlCreateDatabase here.
-                    info!("XLOG_DBASE_CREATE_FILE_COPY_v15");
+                    debug!("XLOG_DBASE_CREATE_FILE_COPY_v15");
                     let createdb = XlCreateDatabase::decode(&mut buf);
                     self.ingest_xlog_dbase_create(modification, &createdb)?;
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
