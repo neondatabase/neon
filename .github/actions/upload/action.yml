@@ -29,8 +29,12 @@ runs:
           time tar -C ${SOURCE} -cf ${ARCHIVE} --zstd .
         elif [ -f ${SOURCE} ]; then
           time tar -cf ${ARCHIVE} --zstd ${SOURCE}
+        elif ! ls ${SOURCE} > /dev/null 2>&1; then
+          echo 2>&1 "${SOURCE} does not exist"
+          exit 2
         else
-          echo 2>&1 "${SOURCE} neither directory nor file, don't know how to handle it"
+          echo 2>&1 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
+          exit 3
         fi
 
     - name: Upload artifact
