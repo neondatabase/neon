@@ -26,6 +26,7 @@ pytest-lazy-fixture = "^0.6.3"
 prometheus-client = "^0.14.1"
 pytest-timeout = "^2.1.0"
 Werkzeug = "2.1.2"
+pytest-order = "^1.0.1"
 
 [tool.poetry.dev-dependencies]
 yapf = "==0.31.0"
