@@ -1,5 +1,4 @@
 ARG COMPUTE_TOOLS_TAG=latest
-ARG BRANCH=main
 
 FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
@@ -8,7 +7,7 @@ RUN apt update &&  \
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
-RUN git clone -b $BRANCH https://github.com/neondatabase/postgres.git postgres && \
+RUN git clone -b main https://github.com/neondatabase/postgres.git postgres && \
     cd postgres &&  \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
