@@ -72,13 +72,12 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: str = "all"):
     env.zenbenchmark.record("scale", scale, '', MetricReport.TEST_PARAM)
 
-    if filter in ["all", "init"]:
+    if filter == "init":
         # Run initialize
         init_pgbench(
-            env,
-            ['pgbench', f'-s{scale}', '-i', env.pg.connstr(options='-cstatement_timeout=600s')])
+            env, ['pgbench', f'-s{scale}', '-i', env.pg.connstr(options='-cstatement_timeout=1h')])
 
-    if filter in ["all", "simple-update"]:
+    if filter == "simple-update":
         # Run simple-update workload
         run_pgbench(env,
                     "simple-update",
@@ -86,14 +85,13 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: str = "a
                         'pgbench',
                         '-N',
                         '-c4',
-                        '-j2',
                         f'-T{duration}',
                         '-P2',
                         '--progress-timestamp',
                         env.pg.connstr(),
                     ])
 
-    if filter in ["all", "select-only"]:
+    if filter == "select-only":
         # Run SELECT workload
         run_pgbench(env,
                     "select-only",
@@ -101,15 +99,13 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: str = "a
                         'pgbench',
                         '-S',
                         '-c4',
-                        '-j2',
                         f'-T{duration}',
                         '-P2',
                         '--progress-timestamp',
                         env.pg.connstr(),
                     ])
 
-    if filter == "all":
-        env.report_size()
+    env.report_size()
 
 
 def get_durations_matrix(default: int = 45) -> List[int]:
@@ -176,7 +172,20 @@ profiling="page_requests"
 # Run the pgbench tests against an existing Postgres cluster
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
-@pytest.mark.parametrize("filter", ["init", "simple-update", "select-only"])
 @pytest.mark.remote_cluster
-def test_pgbench_remote(remote_compare: PgCompare, scale: int, duration: int, filter: str):
-    run_test_pgbench(remote_compare, scale, duration, filter)
+def test_pgbench_remote_init(remote_compare: PgCompare, scale: int, duration: int):
+    run_test_pgbench(remote_compare, scale, duration, filter="init")
+
+
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("duration", get_durations_matrix())
+@pytest.mark.remote_cluster
+def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, duration: int):
+    run_test_pgbench(remote_compare, scale, duration, filter="simple-update")
+
+
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("duration", get_durations_matrix())
+@pytest.mark.remote_cluster
+def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
+    run_test_pgbench(remote_compare, scale, duration, filter="select-only")

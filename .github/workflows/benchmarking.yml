@@ -99,7 +99,7 @@ jobs:
         # since it might generate duplicates when calling ingest_perf_test_result.py
         rm -rf perf-report-staging
         mkdir -p perf-report-staging
-        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-staging --timeout 3600
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --sparse-ordering --skip-interfering-proc-check --out-dir perf-report-staging --timeout 3600
 
     - name: Submit result
       env:
@@ -166,7 +166,7 @@ jobs:
         mkdir -p perf-report-captest
 
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "init" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_init -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark simple-update
       env:
@@ -176,7 +176,7 @@ jobs:
         mkdir -p perf-report-captest
 
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "simple-update" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_simple_update -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark select-only
       env:
@@ -187,7 +187,7 @@ jobs:
         mkdir -p perf-report-captest
 
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py -v -m "remote_cluster" -k "select-only" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_select_only -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
 
     - name: Submit result
       env:
