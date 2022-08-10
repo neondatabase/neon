@@ -232,7 +232,7 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    let _new_timeline = match ancestor_timeline_id {
+    match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline_load(ancestor_timeline_id)
