@@ -1,4 +1,5 @@
 ARG COMPUTE_TOOLS_TAG=latest
+ARG BRANCH=main
 
 FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
@@ -7,7 +8,7 @@ RUN apt update &&  \
 
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
-RUN git clone -b main https://github.com/neondatabase/postgres.git postgres && \
+RUN git clone -b $BRANCH https://github.com/neondatabase/postgres.git postgres && \
     cd postgres &&  \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
@@ -39,6 +40,6 @@ RUN cd compute_tools && cargo build --release
 
 # Put it all together into the final image
 FROM debian:bullseye-slim
-COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
+#COPY --from=pg-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=postgis-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=compute-tools /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
