@@ -1090,6 +1090,7 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file
+        m.put_pg_version(Bytes::from("15"))?; // dummy pg_version file
         m.commit()?;
         let walingest = WalIngest::new(tline, Lsn(0x10))?;
 
