@@ -19,6 +19,11 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
+concurrency:
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     # this workflow runs on self hosteed runner
@@ -117,12 +122,13 @@ jobs:
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
-  bench-captest:
+  pgbench-compare:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: "10gb"
       REMOTE_ENV: "1"
       POSTGRES_DISTRIB_DIR: /usr
+      TEST_OUTPUT: /tmp/test_output
 
     strategy:
       fail-fast: false
@@ -130,37 +136,49 @@ jobs:
         connstr: [ BENCHMARK_CAPTEST_CONNSTR, BENCHMARK_RDS_CONNSTR ]
 
     runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2817580636
+
     timeout-minutes: 360 # 6h
 
-    container:
-      image: python:3.9-buster
-
     steps:
-    - name: Checkout Neon repo
-      uses: actions/checkout@v3
+    - uses: actions/checkout@v3
+
+    - name: Cache poetry deps
+      id: cache_poetry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      run: ./scripts/pysync
+
+    - name: Calculate platform
+      id: calculate-platform
+      env:
+        CONNSTR: ${{ matrix.connstr }}
+      run: |
+        if [ "${CONNSTR}" = "BENCHMARK_CAPTEST_CONNSTR" ]; then
+          PLATFORM=neon-captest
+        elif [ "${CONNSTR}" = "BENCHMARK_RDS_CONNSTR" ]; then
+          PLATFORM=rds-aurora
+        else
+          echo 2>&1 "Unknown CONNSTR=${CONNSTR}. Allowed are BENCHMARK_CAPTEST_CONNSTR, and BENCHMARK_RDS_CONNSTR only"
+          exit 1
+        fi
+
+        echo "::set-output name=PLATFORM::${PLATFORM}"
 
     - name: Install Deps
       run: |
-        # Newer git required for submiting results
-        echo "deb http://deb.debian.org/debian buster-backports main" > /etc/apt/sources.list.d/buster-backports.list
-
-        echo "deb http://apt.postgresql.org/pub/repos/apt buster-pgdg main" > /etc/apt/sources.list.d/pgdg.list
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-        apt -y update
-        apt install -y postgresql-14 -t buster-backports git
-
-        psql --version
-        pgbench --version
-        git --version
-
-    - name: Install poetry & python deps
-      run: |
-        python3 -m pip install --upgrade poetry
-        ./scripts/pysync
+        echo "deb http://apt.postgresql.org/pub/repos/apt focal-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt -y update
+        sudo apt install -y postgresql-14 postgresql-client-14
 
     - name: Benchmark init
       env:
-        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
       run: |
         mkdir -p perf-report-captest
@@ -170,22 +188,17 @@ jobs:
 
     - name: Benchmark simple-update
       env:
-        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
       run: |
-        mkdir -p perf-report-captest
-
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_simple_update -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark select-only
       env:
-        PLATFORM: ${{ (matrix.connstr == 'BENCHMARK_RDS_CONNSTR' && 'rds-aurora') || 'neon-captest' }}
+        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
-
       run: |
-        mkdir -p perf-report-captest
-
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
         ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_select_only -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
 
@@ -195,6 +208,13 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       run: |
         REPORT_FROM=$(realpath perf-report-captest) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
+
+    - name: Upload logs
+      if: always()
+      uses: ./.github/actions/upload
+      with:
+        name: bench-captest-${{ steps.calculate-platform.outputs.PLATFORM }}
+        path: /tmp/test_output/
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
