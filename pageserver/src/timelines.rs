@@ -3,7 +3,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
-use postgres_ffi::ControlFileData;
+use postgres_ffi::{pg_constants, xlog_utils::normalize_lsn, ControlFileData};
 use std::{
     fs,
     path::Path,
@@ -232,7 +232,7 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    let _new_timeline = match ancestor_timeline_id {
+    match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline_load(ancestor_timeline_id)
@@ -245,7 +245,7 @@ pub(crate) fn create_timeline(
                 // decoding the new WAL might need to look up previous pages, relation
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
-                *lsn = lsn.align();
+                *lsn = normalize_lsn(*lsn, pg_constants::WAL_SEGMENT_SIZE);
                 ancestor_timeline.wait_lsn(*lsn)?;
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();

@@ -90,10 +90,21 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         assert res[0] == (100000 * scale, )
 
 
-XLOG_BLCKSZ = 8192
-
-
+# Test branching from an "unormalized" LSN.
+#
+# Context:
+# When doing basebackup for a newly created branch, pageserver generates
+# 'pg_control' file to bootstrap WAL segment by specifying the redo position
+# a "normalized" LSN based on the timeline's starting LSN:
+#
+# checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
+#
+# This test checks if the pageserver is able to handle a "unormalized" starting LSN.
+#
+# Related: see discussion in https://github.com/neondatabase/neon/pull/2143#issuecomment-1209092186
 def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
+    XLOG_BLCKSZ = 8192
+
     env = neon_simple_env
 
     env.neon_cli.create_branch('b0')
@@ -107,4 +118,5 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
     env.neon_cli.create_branch('b1', 'b0', ancestor_start_lsn=lsn_to_hex(start_lsn))
     pg1 = env.postgres.create_start('b1')
+
     pg_bin.run_capture(['pgbench', '-i', pg1.connstr()])
