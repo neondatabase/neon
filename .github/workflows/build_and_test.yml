@@ -397,7 +397,8 @@ jobs:
 
   build-neon-image:
     name: 'kaniko-neon'
-    if: needs.dockerfile-check.outputs.value != 'false'
+    # force building for now
+    if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -418,7 +419,7 @@ jobs:
 
   build-compute-tools-image:
     name: 'kaniko-compute-tools'
-    if: needs.dockerfile-check.outputs.value != 'false'
+    if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -436,7 +437,7 @@ jobs:
 
   build-compute-node-image:
     name: 'kaniko-compute-node'
-    if: needs.dockerfile-check.outputs.value != 'false'
+    if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:debug
@@ -515,22 +516,22 @@ jobs:
         run: |
           # ECR Credential Helper & Docker Hub don't work together in config, hence config reset
           echo "" > /github/home/.docker/config.json
-          crane auth login -u ${{ secrets.RORY_DOCKERHUB_USERNAME }} -p ${{ secrets.RORY_DOCKERHUB_PASSWORD }} index.docker.io
+          crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
       - name: Push neon image to Docker Hub
-        run: crane push neon roryneon/neon:${{steps.build-tag.outputs.tag}}
+        run: crane push neon neondatabase/neon:${{steps.build-tag.outputs.tag}}
 
       - name: Push compute tools image to Docker Hub
-        run: crane push compute-tools roryneon/compute-tools:${{steps.build-tag.outputs.tag}}
+        run: crane push compute-tools neondatabase/compute-tools:${{steps.build-tag.outputs.tag}}
 
       - name: Push compute node image to Docker Hub
-        run: crane push compute-node roryneon/compute-node:${{steps.build-tag.outputs.tag}}
+        run: crane push compute-node neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
 
-      - name: Add latest tag to images
-        run: |
-          crane tag roryneon/neon:${{steps.build-tag.outputs.tag}} latest
-          crane tag roryneon/compute-tools:${{steps.build-tag.outputs.tag}} latest
-          crane tag roryneon/compute-node:${{steps.build-tag.outputs.tag}} latest
+#      - name: Add latest tag to images
+#        run: |
+#          crane tag neondatabase/neon:${{steps.build-tag.outputs.tag}} latest
+#          crane tag neondatabase/compute-tools:${{steps.build-tag.outputs.tag}} latest
+#          crane tag neondatabase/compute-node:${{steps.build-tag.outputs.tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
