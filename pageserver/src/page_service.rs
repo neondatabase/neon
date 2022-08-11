@@ -31,7 +31,7 @@ use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{self, Claims, JwtAuth, Scope},
+    auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
@@ -39,6 +39,7 @@ use utils::{
     simple_rcu::RcuReadGuard,
 };
 
+use crate::auth::check_permission;
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::import_wal_from_tar;
@@ -670,7 +671,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        auth::check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id)
     }
 }
 

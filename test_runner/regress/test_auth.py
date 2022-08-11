@@ -16,13 +16,13 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())
     invalid_tenant_http_client = env.pageserver.http_client(invalid_tenant_token)
 
-    management_token = env.auth_keys.generate_management_token()
-    management_http_client = env.pageserver.http_client(management_token)
+    pageserver_token = env.auth_keys.generate_pageserver_token()
+    pageserver_http_client = env.pageserver.http_client(pageserver_token)
 
     # this does not invoke auth check and only decodes jwt and checks it for validity
     # check both tokens
     ps.safe_psql("set FOO", password=tenant_token)
-    ps.safe_psql("set FOO", password=management_token)
+    ps.safe_psql("set FOO", password=pageserver_token)
 
     new_timeline_id = env.neon_cli.create_branch(
         "test_pageserver_auth", tenant_id=env.initial_tenant
@@ -33,7 +33,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
     )
     # console can create branches for tenant
-    management_http_client.timeline_create(
+    pageserver_http_client.timeline_create(
         tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
     )
 
@@ -46,7 +46,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         )
 
     # create tenant using management token
-    management_http_client.tenant_create()
+    pageserver_http_client.tenant_create()
 
     # fail to create tenant using tenant token
     with pytest.raises(
