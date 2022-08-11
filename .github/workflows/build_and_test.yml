@@ -388,7 +388,7 @@ jobs:
 
       - name: Get specific changed files
         id: dockerfile-check
-        uses: tj-actions/changed-files@v24.1
+        uses: tj-actions/changed-files@802732316a11c01531ea72773ec7998155238e31 # v25
         with:
           files: |
             Dockerfile
