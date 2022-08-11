@@ -396,7 +396,7 @@ jobs:
             ./vendor/postgres/Dockerfile
 
   build-neon-image:
-    name: 'kaniko-neon'
+    #name: 'kaniko-neon'
     # force building for now
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
