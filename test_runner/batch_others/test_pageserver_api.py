@@ -1,7 +1,10 @@
 from typing import Optional
 from uuid import uuid4, UUID
 import pytest
+import pathlib
+import subprocess
 from fixtures.utils import lsn_from_hex
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
@@ -9,16 +12,22 @@ from fixtures.neon_fixtures import (
     NeonPageserverHttpClient,
     NeonPageserverApiException,
     wait_until,
+    neon_binpath,
 )
 
 
-# test that we cannot override node id
+# test that we cannot override node id after init
 def test_pageserver_init_node_id(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init()
-    with pytest.raises(
-            Exception,
-            match="node id can only be set during pageserver init and cannot be overridden"):
-        env.pageserver.start(overrides=['--pageserver-config-override=id=10'])
+    pageserver_bin = pathlib.Path(neon_binpath) / 'pageserver'
+    completed_process = subprocess.run(
+        [str(pageserver_bin), '-D', f'{env.repo_dir}', '--update-config', '-c', 'id = 1'],
+        check=False,
+        universal_newlines=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE)
+    assert completed_process.returncode == 1, 'pageserver should not allow updating node id'
+    assert "has node id already, it cannot be overridden" in completed_process.stderr
 
 
 def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):

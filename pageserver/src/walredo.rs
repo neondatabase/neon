@@ -82,24 +82,6 @@ pub trait WalRedoManager: Send + Sync {
     ) -> Result<Bytes, WalRedoError>;
 }
 
-///
-/// A dummy WAL Redo Manager implementation that doesn't allow replaying
-/// anything. Currently used during bootstrapping (zenith init), to create
-/// a Repository object without launching the real WAL redo process.
-///
-pub struct DummyRedoManager {}
-impl crate::walredo::WalRedoManager for DummyRedoManager {
-    fn request_redo(
-        &self,
-        _key: Key,
-        _lsn: Lsn,
-        _base_img: Option<Bytes>,
-        _records: Vec<(Lsn, ZenithWalRecord)>,
-    ) -> Result<Bytes, WalRedoError> {
-        Err(WalRedoError::InvalidState)
-    }
-}
-
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting

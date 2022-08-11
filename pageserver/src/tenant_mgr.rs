@@ -9,7 +9,6 @@ use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr::ThreadKind;
-use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use anyhow::Context;
@@ -284,10 +283,8 @@ pub fn create_tenant_repository(
                 conf,
                 tenant_conf,
                 tenant_id,
-                CreateRepo::Real {
-                    wal_redo_manager,
-                    remote_index,
-                },
+                wal_redo_manager,
+                remote_index,
             )?;
             v.insert(Tenant {
                 state: TenantState::Idle,

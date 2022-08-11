@@ -44,30 +44,22 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
     cannot use NeonPageserver yet because it depends on neon cli
     which currently lacks support for multiple pageservers
     """
-    cmd = [
-        str(pageserver_bin),
-        '--init',
-        '--workdir',
-        str(new_pageserver_dir),
-        f"-c listen_pg_addr='localhost:{pg_port}'",
-        f"-c listen_http_addr='localhost:{http_port}'",
-        f"-c pg_distrib_dir='{pg_distrib_dir}'",
-        f"-c id=2",
-        f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
-    ]
-
-    if broker is not None:
-        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
-
-    subprocess.check_output(cmd, text=True)
-
     # actually run new pageserver
     cmd = [
         str(pageserver_bin),
         '--workdir',
         str(new_pageserver_dir),
         '--daemonize',
+        '--update-config',
+        f"-c listen_pg_addr='localhost:{pg_port}'",
+        f"-c listen_http_addr='localhost:{http_port}'",
+        f"-c pg_distrib_dir='{pg_distrib_dir}'",
+        f"-c id=2",
+        f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
+    if broker is not None:
+        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
+
     log.info("starting new pageserver %s", cmd)
     out = subprocess.check_output(cmd, text=True)
     log.info("started new pageserver %s", out)

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use std::{io, result, thread};
@@ -102,23 +102,19 @@ impl PageServerNode {
 
     /// Construct libpq connection string for connecting to the pageserver.
     fn pageserver_connection_config(password: &str, listen_addr: &str) -> Config {
-        format!("postgresql://no_user:{}@{}/no_db", password, listen_addr)
+        format!("postgresql://no_user:{password}@{listen_addr}/no_db")
             .parse()
             .unwrap()
     }
 
-    pub fn init(
+    pub fn initialize(
         &self,
         create_tenant: Option<ZTenantId>,
         initial_timeline_id: Option<ZTimelineId>,
         config_overrides: &[&str],
     ) -> anyhow::Result<ZTimelineId> {
-        let mut cmd = Command::new(self.env.pageserver_bin()?);
-
         let id = format!("id={}", self.env.pageserver.id);
-
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
-        let base_data_dir_param = self.env.base_data_dir.display().to_string();
         let pg_distrib_dir_param =
             format!("pg_distrib_dir='{}'", self.env.pg_distrib_dir.display());
         let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
@@ -138,67 +134,52 @@ impl PageServerNode {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let mut args = Vec::with_capacity(20);
-
-        args.push("--init");
-        args.extend(["-D", &base_data_dir_param]);
-        args.extend(["-c", &pg_distrib_dir_param]);
-        args.extend(["-c", &authg_type_param]);
-        args.extend(["-c", &listen_http_addr_param]);
-        args.extend(["-c", &listen_pg_addr_param]);
-        args.extend(["-c", &broker_endpoints_param]);
-        args.extend(["-c", &id]);
-
         let broker_etcd_prefix_param = self
             .env
             .etcd_broker
             .broker_etcd_prefix
             .as_ref()
             .map(|prefix| format!("broker_etcd_prefix='{prefix}'"));
-        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
-            args.extend(["-c", broker_etcd_prefix_param]);
-        }
 
-        for config_override in config_overrides {
-            args.extend(["-c", config_override]);
+        let mut init_config_overrides = config_overrides.to_vec();
+        init_config_overrides.push(&id);
+        init_config_overrides.push(&pg_distrib_dir_param);
+        init_config_overrides.push(&authg_type_param);
+        init_config_overrides.push(&listen_http_addr_param);
+        init_config_overrides.push(&listen_pg_addr_param);
+        init_config_overrides.push(&broker_endpoints_param);
+
+        if let Some(broker_etcd_prefix_param) = broker_etcd_prefix_param.as_deref() {
+            init_config_overrides.push(broker_etcd_prefix_param);
         }
 
         if self.env.pageserver.auth_type != AuthType::Trust {
-            args.extend([
-                "-c",
-                "auth_validation_public_key_path='auth_public_key.pem'",
-            ]);
+            init_config_overrides.push("auth_validation_public_key_path='auth_public_key.pem'");
         }
 
-        let create_tenant = create_tenant.map(|id| id.to_string());
-        if let Some(tenant_id) = create_tenant.as_deref() {
-            args.extend(["--create-tenant", tenant_id])
+        self.start_node(&init_config_overrides, &self.env.base_data_dir, true)?;
+        let init_result = self
+            .try_init_timeline(create_tenant, initial_timeline_id)
+            .context("Failed to create initial tenant and timeline for pageserver");
+        match &init_result {
+            Ok(initial_timeline_id) => {
+                println!("Successfully initialized timeline {initial_timeline_id}")
+            }
+            Err(e) => eprintln!("{e:#}"),
         }
+        self.stop(false)?;
+        init_result
+    }
 
-        let initial_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
-        let initial_timeline_id_string = initial_timeline_id.to_string();
-        args.extend(["--initial-timeline-id", &initial_timeline_id_string]);
-
-        let cmd_with_args = cmd.args(args);
-        let init_output = fill_rust_env_vars(cmd_with_args)
-            .output()
-            .with_context(|| {
-                format!("failed to init pageserver with command {:?}", cmd_with_args)
-            })?;
-
-        if !init_output.status.success() {
-            bail!(
-                "init invocation failed, {}\nStdout: {}\nStderr: {}",
-                init_output.status,
-                String::from_utf8_lossy(&init_output.stdout),
-                String::from_utf8_lossy(&init_output.stderr)
-            );
-        }
-
-        // echo the captured output of the init command
-        println!("{}", String::from_utf8_lossy(&init_output.stdout));
-
-        Ok(initial_timeline_id)
+    fn try_init_timeline(
+        &self,
+        new_tenant_id: Option<ZTenantId>,
+        new_timeline_id: Option<ZTimelineId>,
+    ) -> anyhow::Result<ZTimelineId> {
+        let initial_tenant_id = self.tenant_create(new_tenant_id, HashMap::new())?;
+        let initial_timeline_info =
+            self.timeline_create(initial_tenant_id, new_timeline_id, None, None)?;
+        Ok(initial_timeline_info.timeline_id)
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -210,15 +191,35 @@ impl PageServerNode {
     }
 
     pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        print!(
+        self.start_node(config_overrides, &self.repo_path(), false)
+    }
+
+    fn start_node(
+        &self,
+        config_overrides: &[&str],
+        datadir: &Path,
+        update_config: bool,
+    ) -> anyhow::Result<()> {
+        println!(
             "Starting pageserver at '{}' in '{}'",
             connection_address(&self.pg_connection_config),
-            self.repo_path().display()
+            datadir.display()
         );
-        io::stdout().flush().unwrap();
+        io::stdout().flush()?;
 
-        let repo_path = self.repo_path();
-        let mut args = vec!["-D", repo_path.to_str().unwrap()];
+        let mut args = vec![
+            "-D",
+            datadir.to_str().with_context(|| {
+                format!(
+                    "Datadir path '{}' cannot be represented as a unicode string",
+                    datadir.display()
+                )
+            })?,
+        ];
+
+        if update_config {
+            args.push("--update-config");
+        }
 
         for config_override in config_overrides {
             args.extend(["-c", config_override]);
@@ -230,8 +231,8 @@ impl PageServerNode {
 
         if !filled_cmd.status()?.success() {
             bail!(
-                "Pageserver failed to start. See '{}' for details.",
-                self.repo_path().join("pageserver.log").display()
+                "Pageserver failed to start. See console output and '{}' for details.",
+                datadir.join("pageserver.log").display()
             );
         }
 
@@ -240,7 +241,7 @@ impl PageServerNode {
         const RETRIES: i8 = 15;
         for retries in 1..RETRIES {
             match self.check_status() {
-                Ok(_) => {
+                Ok(()) => {
                     println!("\nPageserver started");
                     return Ok(());
                 }
@@ -254,21 +255,18 @@ impl PageServerNode {
                                 if retries == 5 {
                                     println!() // put a line break after dots for second message
                                 }
-                                println!(
-                                    "Pageserver not responding yet, err {} retrying ({})...",
-                                    err, retries
-                                );
+                                println!("Pageserver not responding yet, err {err} retrying ({retries})...");
                             }
                         }
                         PageserverHttpError::Response(msg) => {
-                            bail!("pageserver failed to start: {} ", msg)
+                            bail!("pageserver failed to start: {msg} ")
                         }
                     }
                     thread::sleep(Duration::from_secs(1));
                 }
             }
         }
-        bail!("pageserver failed to start in {} seconds", RETRIES);
+        bail!("pageserver failed to start in {RETRIES} seconds");
     }
 
     ///
@@ -298,15 +296,11 @@ impl PageServerNode {
         match kill(pid, sig) {
             Ok(_) => (),
             Err(Errno::ESRCH) => {
-                println!(
-                    "Pageserver with pid {} does not exist, but a PID file was found",
-                    pid
-                );
+                println!("Pageserver with pid {pid} does not exist, but a PID file was found");
                 return Ok(());
             }
             Err(err) => bail!(
-                "Failed to send signal to pageserver with pid {}: {}",
-                pid,
+                "Failed to send signal to pageserver with pid {pid}: {}",
                 err.desc()
             ),
         }
@@ -335,13 +329,13 @@ impl PageServerNode {
             thread::sleep(Duration::from_millis(100));
         }
 
-        bail!("Failed to stop pageserver with pid {}", pid);
+        bail!("Failed to stop pageserver with pid {pid}");
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
         let mut client = self.pg_connection_config.connect(NoTls).unwrap();
 
-        println!("Pageserver query: '{}'", sql);
+        println!("Pageserver query: '{sql}'");
         client.simple_query(sql).unwrap()
     }
 
@@ -376,9 +370,8 @@ impl PageServerNode {
         &self,
         new_tenant_id: Option<ZTenantId>,
         settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<Option<ZTenantId>> {
-        let tenant_id_string = self
-            .http_request(Method::POST, format!("{}/tenant", self.http_base_url))
+    ) -> anyhow::Result<ZTenantId> {
+        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
             .json(&TenantCreateRequest {
                 new_tenant_id,
                 checkpoint_distance: settings
@@ -417,18 +410,16 @@ impl PageServerNode {
             })
             .send()?
             .error_from_body()?
-            .json::<Option<String>>()?;
-
-        tenant_id_string
-            .map(|id| {
-                id.parse().with_context(|| {
-                    format!(
-                        "Failed to parse tennat creation response as tenant id: {}",
-                        id
-                    )
+            .json::<Option<String>>()
+            .with_context(|| {
+                format!("Failed to parse tenant creation response for tenant id: {new_tenant_id:?}")
+            })?
+            .context("No tenant id was found in the tenant creation response")
+            .and_then(|tenant_id_string| {
+                tenant_id_string.parse().with_context(|| {
+                    format!("Failed to parse response string as tenant id: '{tenant_id_string}'")
                 })
             })
-            .transpose()
     }
 
     pub fn tenant_config(&self, tenant_id: ZTenantId, settings: HashMap<&str, &str>) -> Result<()> {
@@ -499,22 +490,27 @@ impl PageServerNode {
         new_timeline_id: Option<ZTimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<ZTimelineId>,
-    ) -> anyhow::Result<Option<TimelineInfo>> {
-        let timeline_info_response = self
-            .http_request(
-                Method::POST,
-                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
+    ) -> anyhow::Result<TimelineInfo> {
+        self.http_request(
+            Method::POST,
+            format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
+        )
+        .json(&TimelineCreateRequest {
+            new_timeline_id,
+            ancestor_start_lsn,
+            ancestor_timeline_id,
+        })
+        .send()?
+        .error_from_body()?
+        .json::<Option<TimelineInfo>>()
+        .with_context(|| {
+            format!("Failed to parse timeline creation response for tenant id: {tenant_id}")
+        })?
+        .with_context(|| {
+            format!(
+                "No timeline id was found in the timeline creation response for tenant {tenant_id}"
             )
-            .json(&TimelineCreateRequest {
-                new_timeline_id,
-                ancestor_start_lsn,
-                ancestor_timeline_id,
-            })
-            .send()?
-            .error_from_body()?
-            .json::<Option<TimelineInfo>>()?;
-
-        Ok(timeline_info_response)
+        })
     }
 
     /// Import a basebackup prepared using either:

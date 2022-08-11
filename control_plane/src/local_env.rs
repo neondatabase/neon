@@ -24,7 +24,7 @@ use crate::safekeeper::SafekeeperNode;
 // This data structures represents neon_local CLI config
 //
 // It is deserialized from the .neon/config file, or the config file passed
-// to 'zenith init --config=<path>' option. See control_plane/simple.conf for
+// to 'neon_local init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
 #[serde_as]
@@ -320,7 +320,7 @@ impl LocalEnv {
 
         if !repopath.exists() {
             bail!(
-                "Zenith config is not found in {}. You need to run 'zenith init' first",
+                "Zenith config is not found in {}. You need to run 'neon_local init' first",
                 repopath.to_str().unwrap()
             );
         }
@@ -337,12 +337,12 @@ impl LocalEnv {
     }
 
     pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
-        // Currently, the user first passes a config file with 'zenith init --config=<path>'
+        // Currently, the user first passes a config file with 'neon_local init --config=<path>'
         // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
         // to .neon/config. TODO: We lose any formatting and comments along the way, which is
         // a bit sad.
         let mut conf_content = r#"# This file describes a locale deployment of the page server
-# and safekeeeper node. It is read by the 'zenith' command-line
+# and safekeeeper node. It is read by the 'neon_local' command-line
 # utility.
 "#
         .to_string();
@@ -382,7 +382,7 @@ impl LocalEnv {
     }
 
     //
-    // Initialize a new Zenith repository
+    // Initialize a new Neon repository
     //
     pub fn init(&mut self) -> anyhow::Result<()> {
         // check if config already exists
