@@ -113,6 +113,8 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     pg_bin.run_capture(['pgbench', '-i', pg0.connstr()])
 
     curr_lsn = lsn_from_hex(pg0.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    # Specify the `start_lsn` as a number that is divided by `XLOG_BLCKSZ`
+    # and is smaller than `curr_lsn`.
     start_lsn = (curr_lsn - XLOG_BLCKSZ) // XLOG_BLCKSZ * XLOG_BLCKSZ
 
     log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
