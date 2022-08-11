@@ -90,7 +90,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
         assert res[0] == (100000 * scale, )
 
 
-# Test branching from an "unormalized" LSN.
+# Test branching from an "unnormalized" LSN.
 #
 # Context:
 # When doing basebackup for a newly created branch, pageserver generates
@@ -99,7 +99,7 @@ def test_branching_with_pgbench(neon_simple_env: NeonEnv,
 #
 # checkpoint.redo = normalize_lsn(self.lsn, pg_constants::WAL_SEGMENT_SIZE).0;
 #
-# This test checks if the pageserver is able to handle a "unormalized" starting LSN.
+# This test checks if the pageserver is able to handle a "unnormalized" starting LSN.
 #
 # Related: see discussion in https://github.com/neondatabase/neon/pull/2143#issuecomment-1209092186
 def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
