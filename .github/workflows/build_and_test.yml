@@ -399,7 +399,7 @@ jobs:
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
-    container: gcr.io/kaniko-project/executor:debug
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
     environment: dev
 
     steps:
@@ -419,7 +419,7 @@ jobs:
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
-    container: gcr.io/kaniko-project/executor:debug
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
     environment: dev
 
     steps:
@@ -436,7 +436,7 @@ jobs:
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
-    container: gcr.io/kaniko-project/executor:debug
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
     environment: dev
 
     steps:
