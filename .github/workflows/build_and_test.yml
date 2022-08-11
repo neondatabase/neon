@@ -471,7 +471,7 @@ jobs:
   push-docker-hub:
     runs-on: dev
     needs: [ promote-images ]
-    container: golang:1.19.0-bullseye
+    container: golang:1.19-bullseye
     environment: dev
 
     steps:
