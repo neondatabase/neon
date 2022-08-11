@@ -2440,7 +2440,7 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
                     timeline: uuid.UUID,
                     lsn: int):
     """waits for local timeline upload up to specified lsn"""
-    for i in range(10):
+    for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
             return
