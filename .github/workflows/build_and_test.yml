@@ -376,7 +376,6 @@ jobs:
             }"
 
   dockerfile-check:
-    name: 'dockerfile check'
     if: github.event_name != 'workflow_dispatch'
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
@@ -395,8 +394,8 @@ jobs:
             Dockerfile.compute-tools
             ./vendor/postgres/Dockerfile
 
-  build-neon-image:
-    # force building for now
+  neon-image:
+    # force building for all 3 images
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
@@ -416,7 +415,7 @@ jobs:
       - name: Kaniko build console
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID
 
-  build-compute-tools-image:
+  compute-tools-image:
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
@@ -433,7 +432,7 @@ jobs:
       - name: Kaniko build console
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
-  build-compute-node-image:
+  compute-node-image:
     if: needs.dockerfile-check.outputs.value != 'true'
     runs-on: dev
     needs: [ dockerfile-check ]
@@ -456,7 +455,7 @@ jobs:
 
   promote-images:
     runs-on: dev
-    needs: [ build-neon-image, build-compute-tools-image, build-compute-node-image ]
+    needs: [ neon-image, compute-tools-image, compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
