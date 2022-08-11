@@ -115,8 +115,8 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
     pg = env.postgres.create_start('test_import_from_pageserver_small')
 
     num_rows = 3000
-    lsn = _start_workload(num_rows, pg)
-    _start_import(num_rows, lsn, env, pg_bin, timeline)
+    lsn = _generate_data(num_rows, pg)
+    _import(num_rows, lsn, env, pg_bin, timeline)
 
 
 @pytest.mark.timeout(1800)
@@ -134,14 +134,14 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     # at most 1GB. A large number of inserted rows (`30000000`) is used to increase the
     # DB size to above 1GB. Related: https://github.com/neondatabase/neon/issues/2097.
     num_rows = 30000000
-    lsn = _start_workload(num_rows, pg)
+    lsn = _generate_data(num_rows, pg)
 
     logical_size = env.pageserver.http_client().timeline_detail(
         env.initial_tenant, timeline)['local']['current_logical_size']
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _start_import(num_rows, lsn, env, pg_bin, timeline)
+    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline)
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -154,7 +154,11 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     assert cnt_seg_files > 0
 
 
-def _start_workload(num_rows: int, pg: Postgres) -> str:
+def _generate_data(num_rows: int, pg: Postgres) -> str:
+    """Generate a table with `num_rows` rows.
+
+    Returns:
+    the latest insert WAL's LSN"""
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             # data loading may take a while, so increase statement timeout
@@ -169,7 +173,15 @@ def _start_workload(num_rows: int, pg: Postgres) -> str:
             return res[0]
 
 
-def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID) -> str:
+def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID) -> str:
+    """Test importing backup data to the pageserver.
+
+    Args:
+    expected_num_rows: the expected number of rows of the test table in the backup data
+    lsn: the backup's base LSN
+
+    Returns:
+    path to the backup archive file"""
     log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
@@ -222,7 +234,7 @@ def _start_import(num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
-    assert pg.safe_psql('select count(*) from tbl') == [(num_rows, )]
+    assert pg.safe_psql('select count(*) from tbl') == [(expected_num_rows, )]
 
     # Take another fullbackup
     query = f"fullbackup { tenant.hex} {timeline.hex} {lsn}"
