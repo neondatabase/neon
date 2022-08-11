@@ -527,11 +527,14 @@ jobs:
       - name: Push compute node image to Docker Hub
         run: crane push compute-node neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
 
-#      - name: Add latest tag to images
-#        run: |
-#          crane tag neondatabase/neon:${{steps.build-tag.outputs.tag}} latest
-#          crane tag neondatabase/compute-tools:${{steps.build-tag.outputs.tag}} latest
-#          crane tag neondatabase/compute-node:${{steps.build-tag.outputs.tag}} latest
+      - name: Add latest tag to images
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
+        run: |
+          crane tag neondatabase/neon:${{steps.build-tag.outputs.tag}} latest
+          crane tag neondatabase/compute-tools:${{steps.build-tag.outputs.tag}} latest
+          crane tag neondatabase/compute-node:${{steps.build-tag.outputs.tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
