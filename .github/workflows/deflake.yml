@@ -1,0 +1,152 @@
+name: Run test several times
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        type: string
+        description: 'test name, full or part of it'
+        required: true
+      repetition:
+        type: number
+        default: 100
+        required: false
+      until-failure:
+        type: boolean
+        description: repeat test until it fails, no more than `repetition` times
+        required: false
+      build-type:
+        type: choice
+        options:
+        - debug
+        - release
+        default: debug
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  TEST_FILTER: ${{ github.event.inputs.test-filter }}
+  REPETITION: ${{ github.event.inputs.repetition }}
+  UNTIL_FAILURE: ${{ github.event.inputs.until-failure }}
+  BUILD_TYPE: ${{ github.event.inputs.build-type }}
+  GIT_VERSION: ${{ github.sha }}
+  RUST_TOOLCHAIN: 1.58
+
+jobs:
+  deflake:
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+
+    steps:
+      - name: Fix git ownerwhip
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Set pg revision for caching
+        id: pg_ver
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+
+      - name: Set env variables
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            CARGO_FEATURES=""
+            CARGO_FLAGS=""
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            CARGO_FEATURES="--features profiling"
+            CARGO_FLAGS="--release $CARGO_FEATURES"
+          fi
+          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
+          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+
+      # Don't include the ~/.cargo/registry/src directory. It contains just
+      # uncompressed versions of the crates in ~/.cargo/registry/cache
+      # directory, and it's faster to let 'cargo' to rebuild it from the
+      # compressed crates.
+      - name: Cache cargo deps
+        id: cache_cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/
+            !~/.cargo/registry/src
+            ~/.cargo/git/
+            target/
+          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+          key: |
+            v3-${{ runner.os }}-${{ env.BUILD_TYPE }}-cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+            v3-${{ runner.os }}-${{ env.BUILD_TYPE }}-cargo-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Cache postgres build
+        id: cache_pg
+        uses: actions/cache@v3
+        with:
+          path: tmp_install/
+          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres
+        if: steps.cache_pg.outputs.cache-hit != 'true'
+        run: mold -run make postgres -j$(nproc)
+
+      - name: Run cargo build
+        run: |
+          mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+
+      - name: Install rust binaries
+        run: |
+          # Install target binaries
+          mkdir -p /tmp/neon/bin/
+          binaries=$(
+            cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
+            jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+          )
+          for bin in $binaries; do
+            SRC=target/$BUILD_TYPE/$bin
+            DST=/tmp/neon/bin/$bin
+            cp "$SRC" "$DST"
+          done
+
+      - name: Install postgres binaries
+        run: cp -a tmp_install /tmp/neon/pg_install
+
+      - name: Upload Neon artifact
+        uses: ./.github/actions/upload
+        with:
+          name: neon-${{ runner.os }}-${{ env.BUILD_TYPE }}-${{ env.RUST_TOOLCHAIN }}-artifact
+          path: /tmp/neon
+
+      - name: Calculate extra params
+        id: calculate-extra-params
+        run: |
+          EXTRA_PARAMS="-k ${TEST_FILTER} --count=${REPETITION}"
+          if [ "${UNTIL_FAILURE}" = "true" ]; then
+            EXTRA_PARAMS="-x ${EXTRA_PARAMS}"
+          fi
+
+          echo "::set-output name=EXTRA_PARAMS::${EXTRA_PARAMS}"
+
+      - name: Run test
+        uses: ./.github/actions/run-python-test-set
+        with:
+          build_type: ${{ env.BUILD_TYPE }}
+          rust_toolchain: ${{ env.RUST_TOOLCHAIN }}
+          test_selection:
+          extra_params: ${{ steps.calculate-extra-params.outputs.EXTRA_PARAMS }}
+          run_with_real_s3: true
+          real_s3_bucket: ci-tests-s3
+          real_s3_region: us-west-2
+          real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
+          real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
