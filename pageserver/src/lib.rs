@@ -1,3 +1,4 @@
+mod auth;
 pub mod basebackup;
 pub mod config;
 pub mod http;

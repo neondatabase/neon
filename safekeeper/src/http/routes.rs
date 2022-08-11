@@ -21,7 +21,7 @@ use etcd_broker::subscription_value::SkTimelineInfo;
 use utils::{
     auth::JwtAuth,
     http::{
-        endpoint::{self, auth_middleware, check_permission},
+        endpoint::{self, auth_middleware, check_permission_with},
         error::ApiError,
         json::{json_request, json_response},
         request::{ensure_no_body, parse_request_param},
@@ -93,6 +93,12 @@ struct TimelineStatus {
     peer_horizon_lsn: Lsn,
     #[serde(serialize_with = "display_serialize")]
     remote_consistent_lsn: Lsn,
+}
+
+fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
+    check_permission_with(request, |claims| {
+        crate::auth::check_permission(claims, tenant_id)
+    })
 }
 
 /// Report info about timeline.

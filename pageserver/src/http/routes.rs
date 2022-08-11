@@ -21,7 +21,7 @@ use crate::{config::PageServerConf, tenant_mgr};
 use utils::{
     auth::JwtAuth,
     http::{
-        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission},
+        endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
         json::{json_request, json_response},
         request::parse_request_param,
@@ -77,6 +77,12 @@ fn get_state(request: &Request<Body>) -> &State {
 #[inline(always)]
 fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
+}
+
+fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
+    check_permission_with(request, |claims| {
+        crate::auth::check_permission(claims, tenant_id)
+    })
 }
 
 // Helper function to construct a TimelineInfo struct for a timeline

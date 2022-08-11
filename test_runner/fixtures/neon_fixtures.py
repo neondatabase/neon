@@ -432,7 +432,7 @@ class AuthKeys:
 
         return token
 
-    def generate_management_token(self) -> str:
+    def generate_pageserver_token(self) -> str:
         return self.generate_token(scope="pageserverapi")
 
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
