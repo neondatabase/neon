@@ -75,7 +75,7 @@ where
 #[derive(Debug)]
 pub(super) enum UploadedTimeline {
     /// Upload failed due to some error, the upload task is rescheduled for another retry.
-    FailedAndRescheduled,
+    FailedAndRescheduled(anyhow::Error),
     /// No issues happened during the upload, all task files were put into the remote storage.
     Successful(SyncData<LayersUpload>),
 }
@@ -179,7 +179,7 @@ where
         })
         .collect::<FuturesUnordered<_>>();
 
-    let mut errors_happened = false;
+    let mut errors = Vec::new();
     while let Some(upload_result) = upload_tasks.next().await {
         match upload_result {
             Ok(uploaded_path) => {
@@ -188,13 +188,13 @@ where
             }
             Err(e) => match e {
                 UploadError::Other(e) => {
-                    errors_happened = true;
                     error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
+                    errors.push(format!("{e:#}"));
                 }
                 UploadError::MissingLocalFile(source_path, e) => {
                     if source_path.exists() {
-                        errors_happened = true;
                         error!("Failed to upload a layer for timeline {sync_id}: {e:?}");
+                        errors.push(format!("{e:#}"));
                     } else {
                         // We have run the upload sync task, but the file we wanted to upload is gone.
                         // This is "fine" due the asynchronous nature of the sync loop: it only reacts to events and might need to
@@ -217,14 +217,17 @@ where
         }
     }
 
-    if errors_happened {
+    if errors.is_empty() {
+        info!("Successfully uploaded all layers");
+        UploadedTimeline::Successful(upload_data)
+    } else {
         debug!("Reenqueuing failed upload task for timeline {sync_id}");
         upload_data.retries += 1;
         sync_queue.push(sync_id, SyncTask::Upload(upload_data));
-        UploadedTimeline::FailedAndRescheduled
-    } else {
-        info!("Successfully uploaded all layers");
-        UploadedTimeline::Successful(upload_data)
+        UploadedTimeline::FailedAndRescheduled(anyhow::anyhow!(
+            "Errors appeared during layer uploads: {:?}",
+            errors
+        ))
     }
 }
 
