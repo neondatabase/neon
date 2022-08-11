@@ -471,14 +471,14 @@ jobs:
   push-docker-hub:
     runs-on: dev
     needs: [ promote-images ]
-    container: golang:bullseye
+    container: golang:1.19.0-bullseye
     environment: dev
 
     steps:
       - name: Install Crane & ECR helper
         run: |
-          go install github.com/google/go-containerregistry/cmd/crane@main
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@latest
+          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
+          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
           
       - name: Get build tag
         run: |
