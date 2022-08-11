@@ -404,7 +404,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v1 # v3 won't work with kaniko
         with:
           submodules: true
           fetch-depth: 0
@@ -424,7 +424,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v1 # v3 won't work with kaniko
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
@@ -441,7 +441,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v1 # v3 won't work with kaniko
         with:
           submodules: true
           fetch-depth: 0
@@ -508,7 +508,7 @@ jobs:
 
       - name: Configure docker login
         run: |
-          # ECR Credential Helper & Docker Hub don't work together in config, hence config reset
+          # ECR Credential Helper & Docker Hub don't work together in config, hence reset
           echo "" > /github/home/.docker/config.json
           crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
