@@ -455,7 +455,7 @@ pub fn import_file<T: DatadirTimeline, Reader: Read>(
             }
             "PG_VERSION" => {
                 let version_bytes = read_all_bytes(reader)?;
-                modification.put_pg_version(version_bytes.clone())?;
+                modification.put_pg_version(version_bytes)?;
 
                 debug!("imported PG_VERSION file");
             }
@@ -486,7 +486,7 @@ pub fn import_file<T: DatadirTimeline, Reader: Read>(
             }
             "PG_VERSION" => {
                 let version_bytes = read_all_bytes(reader)?;
-                modification.put_pg_version(version_bytes.clone())?;
+                modification.put_pg_version(version_bytes)?;
 
                 debug!("imported PG_VERSION file");
             }
