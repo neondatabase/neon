@@ -456,27 +456,6 @@ jobs:
         working-directory: ./vendor/postgres/
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
-  build-compute-node2-image:
-    name: 'kaniko-compute-node2'
-    if: needs.dockerfile-check.outputs.value != 'true'
-    runs-on: dev
-    needs: [ dockerfile-check ]
-    container: gcr.io/kaniko-project/executor:debug
-    environment: dev
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v1
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-
-      - name: Kaniko build console
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID-2
-
   promote-images:
     name: 'promote-images'
     runs-on: dev
@@ -492,9 +471,6 @@ jobs:
       - name: Promote image to latest
         run:
           MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
-#      - name: Add release tag
-#        run:
-#          MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name ${{ matrix.name }} --image-tag release --image-manifest "$MANIFEST"
 
   push-docker-hub:
     name: 'push-docker-hub'
