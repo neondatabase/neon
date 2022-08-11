@@ -172,6 +172,7 @@ use self::{
 };
 use crate::{
     config::PageServerConf,
+    exponential_backoff,
     layered_repository::{
         ephemeral_file::is_ephemeral_file,
         metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
@@ -1065,7 +1066,7 @@ where
                             "upload",
                         )
                         .await;
-                        return Some(());
+                        Some(true)
                     }
                     ControlFlow::Break(failed_upload_data) => {
                         if let Err(e) = update_remote_data(
@@ -1082,10 +1083,13 @@ where
                         {
                             error!("Failed to update remote timeline {sync_id}: {e:?}");
                         }
+
+                        Some(false)
                     }
                 }
+            } else {
+                None
             }
-            None
         }
         .instrument(info_span!("upload_timeline_data")),
         async {
@@ -1120,42 +1124,44 @@ where
         .instrument(info_span!("download_timeline_data")),
     );
 
-    if let Some(mut delete_data) = batch.delete {
-        if upload_result.is_some() {
-            match validate_task_retries(delete_data, max_sync_errors)
-                .instrument(info_span!("retries_validation"))
-                .await
-            {
-                ControlFlow::Continue(new_delete_data) => {
-                    delete_timeline_data(
-                        conf,
-                        (storage.as_ref(), &index, sync_queue),
-                        sync_id,
-                        new_delete_data,
-                        sync_start,
-                        "delete",
-                    )
-                    .instrument(info_span!("delete_timeline_data"))
-                    .await;
-                }
-                ControlFlow::Break(failed_delete_data) => {
-                    if let Err(e) = update_remote_data(
-                        conf,
-                        storage.as_ref(),
-                        &index,
-                        sync_id,
-                        RemoteDataUpdate::Delete(&failed_delete_data.data.deleted_layers),
-                    )
+    if let Some(delete_data) = batch.delete {
+        match upload_result {
+            Some(true) | None => {
+                match validate_task_retries(delete_data, max_sync_errors)
+                    .instrument(info_span!("retries_validation"))
                     .await
-                    {
-                        error!("Failed to update remote timeline {sync_id}: {e:?}");
+                {
+                    ControlFlow::Continue(new_delete_data) => {
+                        delete_timeline_data(
+                            conf,
+                            (storage.as_ref(), &index, sync_queue),
+                            sync_id,
+                            new_delete_data,
+                            sync_start,
+                            "delete",
+                        )
+                        .instrument(info_span!("delete_timeline_data"))
+                        .await;
+                    }
+                    ControlFlow::Break(failed_delete_data) => {
+                        if let Err(e) = update_remote_data(
+                            conf,
+                            storage.as_ref(),
+                            &index,
+                            sync_id,
+                            RemoteDataUpdate::Delete(&failed_delete_data.data.deleted_layers),
+                        )
+                        .await
+                        {
+                            error!("Failed to update remote timeline {sync_id}: {e:?}");
+                        }
                     }
                 }
             }
-        } else {
-            delete_data.retries += 1;
-            sync_queue.push(sync_id, SyncTask::Delete(delete_data));
-            warn!("Skipping delete task due to failed upload tasks, reenqueuing");
+            Some(false) => {
+                warn!("Skipping delete task due to failed upload tasks, reenqueuing");
+                sync_queue.push(sync_id, SyncTask::Delete(delete_data));
+            }
         }
     }
 
@@ -1493,11 +1499,7 @@ async fn validate_task_retries<T>(
         return ControlFlow::Break(sync_data);
     }
 
-    if current_attempt > 0 {
-        let seconds_to_wait = 2.0_f64.powf(current_attempt as f64 - 1.0).min(30.0);
-        info!("Waiting {seconds_to_wait} seconds before starting the task");
-        tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
-    }
+    exponential_backoff(current_attempt, 1.0, 30.0).await;
     ControlFlow::Continue(sync_data)
 }
 
