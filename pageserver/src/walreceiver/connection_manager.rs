@@ -25,7 +25,11 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::repository::{Repository, Timeline};
+use crate::{
+    exponential_backoff,
+    repository::{Repository, Timeline},
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
 use crate::{RepositoryImpl, TimelineImpl};
 use utils::{
     lsn::Lsn,
@@ -227,28 +231,6 @@ async fn subscribe_for_timeline_updates(
                 continue;
             }
         }
-    }
-}
-
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
-
-fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
-    if n == 0 {
-        0.0
-    } else {
-        (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
-    }
-}
-
-async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
-    let backoff_duration_seconds =
-        exponential_backoff_duration_seconds(n, base_increment, max_seconds);
-    if backoff_duration_seconds > 0.0 {
-        info!(
-            "Backoff: waiting {backoff_duration_seconds} seconds before proceeding with the task",
-        );
-        tokio::time::sleep(Duration::from_secs_f64(backoff_duration_seconds)).await;
     }
 }
 
@@ -1225,36 +1207,5 @@ mod tests {
             wal_stream_candidates: HashMap::new(),
             wal_connection_attempts: HashMap::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod backoff_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn backoff_defaults_produce_growing_backoff_sequence() {
-        let mut current_backoff_value = None;
-
-        for i in 0..10_000 {
-            let new_backoff_value = exponential_backoff_duration_seconds(
-                i,
-                DEFAULT_BASE_BACKOFF_SECONDS,
-                DEFAULT_MAX_BACKOFF_SECONDS,
-            );
-
-            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
-                assert!(
-                    old_backoff_value <= new_backoff_value,
-                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
-                )
-            }
-        }
-
-        assert_eq!(
-            current_backoff_value.expect("Should have produced backoff values to compare"),
-            DEFAULT_MAX_BACKOFF_SECONDS,
-            "Given big enough of retries, backoff should reach its allowed max value"
-        );
     }
 }
