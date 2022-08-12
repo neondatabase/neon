@@ -445,6 +445,7 @@ pub mod repo_harness {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
                 checkpoint_distance: Some(tenant_conf.checkpoint_distance),
+                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),

@@ -25,7 +25,11 @@ use etcd_broker::{
 use tokio::select;
 use tracing::*;
 
-use crate::repository::{Repository, Timeline};
+use crate::{
+    exponential_backoff,
+    repository::{Repository, Timeline},
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
 use crate::{RepositoryImpl, TimelineImpl};
 use utils::{
     lsn::Lsn,
@@ -228,18 +232,6 @@ async fn subscribe_for_timeline_updates(
             }
         }
     }
-}
-
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
-
-async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
-    if n == 0 {
-        return;
-    }
-    let seconds_to_wait = base.powf(f64::from(n) - 1.0).min(max_seconds);
-    info!("Backoff: waiting {seconds_to_wait} seconds before proceeding with the task");
-    tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
 }
 
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.

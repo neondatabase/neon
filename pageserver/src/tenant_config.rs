@@ -23,6 +23,7 @@ pub mod defaults {
     // which is good for now to trigger bugs.
     // This parameter actually determines L0 layer file size.
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
+    pub const DEFAULT_CHECKPOINT_TIMEOUT: &str = "10 m";
 
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.
@@ -48,6 +49,9 @@ pub struct TenantConf {
     // page server crashes.
     // This parameter actually determines L0 layer file size.
     pub checkpoint_distance: u64,
+    // Inmemory layer is also flushed at least once in checkpoint_timeout to
+    // eventually upload WAL after activity is stopped.
+    pub checkpoint_timeout: Duration,
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.
     pub compaction_target_size: u64,
@@ -90,6 +94,7 @@ pub struct TenantConf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TenantConfOpt {
     pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<Duration>,
     pub compaction_target_size: Option<u64>,
     #[serde(with = "humantime_serde")]
     pub compaction_period: Option<Duration>,
@@ -113,6 +118,9 @@ impl TenantConfOpt {
             checkpoint_distance: self
                 .checkpoint_distance
                 .unwrap_or(global_conf.checkpoint_distance),
+            checkpoint_timeout: self
+                .checkpoint_timeout
+                .unwrap_or(global_conf.checkpoint_timeout),
             compaction_target_size: self
                 .compaction_target_size
                 .unwrap_or(global_conf.compaction_target_size),
@@ -141,6 +149,9 @@ impl TenantConfOpt {
     pub fn update(&mut self, other: &TenantConfOpt) {
         if let Some(checkpoint_distance) = other.checkpoint_distance {
             self.checkpoint_distance = Some(checkpoint_distance);
+        }
+        if let Some(checkpoint_timeout) = other.checkpoint_timeout {
+            self.checkpoint_timeout = Some(checkpoint_timeout);
         }
         if let Some(compaction_target_size) = other.compaction_target_size {
             self.compaction_target_size = Some(compaction_target_size);
@@ -181,6 +192,8 @@ impl TenantConf {
 
         TenantConf {
             checkpoint_distance: DEFAULT_CHECKPOINT_DISTANCE,
+            checkpoint_timeout: humantime::parse_duration(DEFAULT_CHECKPOINT_TIMEOUT)
+                .expect("cannot parse default checkpoint timeout"),
             compaction_target_size: DEFAULT_COMPACTION_TARGET_SIZE,
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
@@ -212,6 +225,7 @@ impl TenantConf {
     pub fn dummy_conf() -> Self {
         TenantConf {
             checkpoint_distance: defaults::DEFAULT_CHECKPOINT_DISTANCE,
+            checkpoint_timeout: Duration::from_secs(600),
             compaction_target_size: 4 * 1024 * 1024,
             compaction_period: Duration::from_secs(10),
             compaction_threshold: defaults::DEFAULT_COMPACTION_THRESHOLD,

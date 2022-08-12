@@ -32,6 +32,7 @@ pub struct TenantCreateRequest {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<ZTenantId>,
     pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
@@ -70,6 +71,7 @@ pub struct TenantConfigRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
@@ -87,6 +89,7 @@ impl TenantConfigRequest {
         TenantConfigRequest {
             tenant_id,
             checkpoint_distance: None,
+            checkpoint_timeout: None,
             compaction_target_size: None,
             compaction_period: None,
             compaction_threshold: None,

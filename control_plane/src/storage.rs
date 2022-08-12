@@ -401,6 +401,7 @@ impl PageServerNode {
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
                     .transpose()?,
+                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
                     .get("compaction_target_size")
                     .map(|x| x.parse::<u64>())
@@ -455,6 +456,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'checkpoint_distance' as an integer")?,
+                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
                     .get("compaction_target_size")
                     .map(|x| x.parse::<u64>())

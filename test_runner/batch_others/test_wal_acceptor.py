@@ -284,9 +284,12 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env.neon_cli.create_branch('test_safekeepers_wal_removal')
     pg = env.postgres.create_start('test_safekeepers_wal_removal')
 
+    # Note: it is important to insert at least two segments, as currently
+    # control file is synced roughly once in segment range and WAL is not
+    # removed until all horizons are persisted.
     pg.safe_psql_many([
         'CREATE TABLE t(key int primary key, value text)',
-        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        "INSERT INTO t SELECT generate_series(1,200000), 'payload'",
     ])
 
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
