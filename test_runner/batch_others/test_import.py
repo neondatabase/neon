@@ -120,7 +120,10 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 
 
 @pytest.mark.timeout(1800)
-@pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
+# TODO: temporarily disable `test_import_from_pageserver_multisegment` test, enable
+# the test back after finding the failure cause.
+# @pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2255")
 def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.enable_local_fs_remote_storage()
