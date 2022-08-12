@@ -76,8 +76,7 @@ jobs:
         path: ${{ env.TEST_OUTPUT }}
 
     - name: Post to a Slack channel
-      if: failure()
-      id: slack
+      if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
