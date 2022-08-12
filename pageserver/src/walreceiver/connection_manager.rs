@@ -689,7 +689,6 @@ fn wal_stream_connection_string(
 
 #[cfg(test)]
 mod tests {
-    
 
     use crate::repository::{
         repo_harness::{RepoHarness, TIMELINE_ID},
@@ -1289,36 +1288,5 @@ mod tests {
             wal_stream_candidates: HashMap::new(),
             wal_connection_attempts: HashMap::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod backoff_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn backoff_defaults_produce_growing_backoff_sequence() {
-        let mut current_backoff_value = None;
-
-        for i in 0..10_000 {
-            let new_backoff_value = exponential_backoff_duration_seconds(
-                i,
-                DEFAULT_BASE_BACKOFF_SECONDS,
-                DEFAULT_MAX_BACKOFF_SECONDS,
-            );
-
-            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
-                assert!(
-                    old_backoff_value <= new_backoff_value,
-                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
-                )
-            }
-        }
-
-        assert_eq!(
-            current_backoff_value.expect("Should have produced backoff values to compare"),
-            DEFAULT_MAX_BACKOFF_SECONDS,
-            "Given big enough of retries, backoff should reach its allowed max value"
-        );
     }
 }
