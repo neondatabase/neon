@@ -2,35 +2,12 @@
 
 set -e
 
-if [ -z "${DOCKER_TAG}" ]; then
-  # DOCKER_TAG absent, trying to find latest one in docker hub
-
-  RELEASE=${RELEASE:-false}
-  # look at docker hub for latest tag for neon docker image
-  if [ "${RELEASE}" = "true" ]; then
-      echo "search latest release tag"
-      VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
-      if [ -z "${VERSION}" ]; then
-          echo "no any docker tags found, exiting..."
-          exit 1
-      else
-          TAG="release-${VERSION}"
-      fi
-  else
-      echo "search latest dev tag"
-      VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -E '^[0-9]+$' | sort -n | tail -1)
-      if [ -z "${VERSION}" ]; then
-          echo "no any docker tags found, exiting..."
-          exit 1
-      else
-          TAG="${VERSION}"
-      fi
-  fi
-  echo "found ${VERSION}"
-
+if [ -n "${DOCKER_TAG}" ]; then
+  # Verson is DOCKER_TAG but without prefix
+  VERSION=$(echo $DOCKER_TAG | sed 's/^.*-//g')
 else
-  # DOCKER_TAG present, using it
-  TAG=${DOCKER_TAG}
+  echo "Please set DOCKER_TAG environment variable"
+  exit 1
 fi
 
 
@@ -40,8 +17,8 @@ mkdir neon_install
 
 # retrieve binaries from docker image
 echo "getting binaries from docker image"
-docker pull --quiet neondatabase/neon:${TAG}
-ID=$(docker create neondatabase/neon:${TAG})
+docker pull --quiet neondatabase/neon:${DOCKER_TAG}
+ID=$(docker create neondatabase/neon:${DOCKER_TAG})
 docker cp ${ID}:/data/postgres_install.tar.gz .
 tar -xzf postgres_install.tar.gz -C neon_install
 docker cp ${ID}:/usr/local/bin/pageserver neon_install/bin/
