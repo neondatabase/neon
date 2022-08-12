@@ -1494,7 +1494,7 @@ class NeonPageserver(PgProtocol):
         pid = read_pid(pid_path)
         retries_left = 20
         while check_pid(pid):
-            time.sleep(0.1)
+            time.sleep(0.2)
             retries_left -= 1
             if retries_left == 0:
                 raise AssertionError("Pageserver failed to die")
