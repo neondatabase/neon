@@ -7,9 +7,6 @@ from fixtures.log_helper import log
 def test_fixture_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch('test_fixture_restart')
-    pg = env.postgres.create_start('test_fixture_restart')
-
     for i in range(3):
         env.pageserver.stop()
         env.pageserver.start()
