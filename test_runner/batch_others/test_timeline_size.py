@@ -4,7 +4,7 @@ from uuid import UUID
 import re
 import psycopg2.extras
 import psycopg2.errors
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_timeline_local
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, assert_timeline_local, wait_for_last_flush_lsn
 from fixtures.log_helper import log
 import time
 
@@ -192,6 +192,8 @@ def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
            FROM generate_series(1, 1000) g""",
     ])
 
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+
     # restart the pageserer to force calculating timeline's initial physical size
     env.pageserver.stop()
     env.pageserver.start()
@@ -211,7 +213,9 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
            FROM generate_series(1, 1000) g""",
     ])
 
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
 
@@ -232,8 +236,10 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
            FROM generate_series(1, 100000) g""",
     ])
 
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
     env.pageserver.safe_psql(f"compact {env.initial_tenant.hex} {new_timeline_id.hex}")
+
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
 
@@ -254,15 +260,21 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
            SELECT 'long string to consume some space' || g
            FROM generate_series(1, 100000) g""",
     ])
+
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+
     pg.safe_psql("""
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
             FROM generate_series(1, 100000) g
     """)
+
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
 
     env.pageserver.safe_psql(f"do_gc {env.initial_tenant.hex} {new_timeline_id.hex} 0")
+
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
 
@@ -279,6 +291,7 @@ def test_timeline_physical_size_metric(neon_simple_env: NeonEnv):
            FROM generate_series(1, 100000) g""",
     ])
 
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
     env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
 
     # get the metrics and parse the metric for the current timeline's physical size
@@ -319,6 +332,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
             f"INSERT INTO foo SELECT 'long string to consume some space' || g FROM generate_series(1, {n_rows}) g",
         ])
 
+        wait_for_last_flush_lsn(env, pg, tenant, timeline)
         env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
 
         timeline_total_size += get_timeline_physical_size(timeline)
