@@ -332,7 +332,7 @@ impl Storage for PhysicalStorage {
         self.write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            Lsn(find_end_of_wal(&self.timeline_dir, wal_seg_size, true, state.commit_lsn)?.0)
+            find_end_of_wal(&self.timeline_dir, wal_seg_size, state.commit_lsn)?
         };
 
         self.write_record_lsn = self.write_lsn;
