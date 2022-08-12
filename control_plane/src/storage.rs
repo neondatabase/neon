@@ -319,7 +319,7 @@ impl PageServerNode {
                 println!("done!");
                 return Ok(());
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
