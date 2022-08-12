@@ -1,6 +1,9 @@
 name: Run test several times
 
 on:
+  push:
+    branches:
+      - "bayandin/deflake"
   workflow_dispatch:
     inputs:
       test-filter:
@@ -27,11 +30,11 @@ on:
         required: true
 
 env:
-  TEST_FILTER: ${{ inputs.test-filter }}
-  REPETITION: ${{ inputs.repetition }}
-  UNTIL_FAILURE: ${{ inputs.until-failure }}
-  BUILD_TYPE: ${{ inputs.build-type }}
-  RUST_TOOLCHAIN: BUILD_TYPE: ${{ inputs.rust-toolchain }}
+  TEST_FILTER: ${{ inputs.test-filter || 'test_timeline_physical_size_post_compaction' }}
+  REPETITION: ${{ inputs.repetition || '100' }}
+  UNTIL_FAILURE: ${{ inputs.until-failure || 'false'}}
+  BUILD_TYPE: ${{ inputs.build-type || 'release' }}
+  RUST_TOOLCHAIN: ${{ inputs.rust-toolchain || '1.58' }}
 
 jobs:
   deflake:

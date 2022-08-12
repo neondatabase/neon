@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - release
-  pull_request:
+  # pull_request:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
