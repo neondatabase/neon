@@ -15,7 +15,7 @@ listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
 checkpoint_distance = '268435456' # in bytes
-checkpoint_period = '1 s'
+checkpoint_timeout = '10m'
 
 gc_period = '100 s'
 gc_horizon = '67108864'
@@ -46,7 +46,7 @@ Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#ta
 
 All values can be passed as an argument to the pageserver binary, using the `-c` parameter and specified as a valid TOML string. All tables should be passed in the inline form.
 
-Example: `${PAGESERVER_BIN} -c "checkpoint_period = '100 s'" -c "remote_storage={local_path='/some/local/path/'}"`
+Example: `${PAGESERVER_BIN} -c "checkpoint_timeout = '10 m'" -c "remote_storage={local_path='/some/local/path/'}"`
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
 
@@ -81,6 +81,14 @@ safekeeper because it hasn't reached checkpoint_distance yet.
 S3.
 
 The unit is # of bytes.
+
+#### checkpoint_timeout
+
+Apart from `checkpoint_distance`, open layer flushing is also triggered
+`checkpoint_timeout` after the last flush. This makes WAL eventually uploaded to
+s3 when activity is stopped.
+
+The default is 10m.
 
 #### compaction_period
 

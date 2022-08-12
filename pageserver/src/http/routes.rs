@@ -623,6 +623,11 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+    if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
+        tenant_conf.checkpoint_timeout =
+            Some(humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_err)?);
+    }
+
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
 
@@ -683,6 +688,10 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+    if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
+        tenant_conf.checkpoint_timeout =
+            Some(humantime::parse_duration(&checkpoint_timeout).map_err(ApiError::from_err)?);
+    }
     tenant_conf.compaction_target_size = request_data.compaction_target_size;
     tenant_conf.compaction_threshold = request_data.compaction_threshold;
 

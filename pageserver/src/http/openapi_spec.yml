@@ -560,6 +560,8 @@ components:
           type: string
         checkpoint_distance:
           type: integer
+        checkpoint_timeout:
+          type: string
         compaction_period:
           type: string
         compaction_threshold:
@@ -578,6 +580,8 @@ components:
           type: string
         checkpoint_distance:
           type: integer
+        checkpoint_timeout:
+          type: string
         compaction_period:
           type: string
         compaction_threshold:
