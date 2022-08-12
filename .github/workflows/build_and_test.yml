@@ -562,6 +562,7 @@ jobs:
 
       - name: Redeploy
         run: |
+          export DOCKER_TAG=${{needs.docker-image.outputs.build-tag}}
           cd "$(pwd)/.github/ansible"
 
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
