@@ -312,7 +312,7 @@ impl PageServerNode {
         }
 
         // Wait until process is gone
-        for i in 0..600 {
+        for i in 0..1000 {
             // ESRCH: No process or process group can be found corresponding to
             //        that specified by pid.
             if let Err(Errno::ESRCH) = kill(pid, None) {
