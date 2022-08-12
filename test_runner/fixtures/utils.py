@@ -35,7 +35,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     try:
         with open(stdout_filename, 'w') as stdout_f:
             with open(stderr_filename, 'w') as stderr_f:
-                log.info('(capturing output to "{}.stdout")'.format(base))
+                log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
                 subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
     finally:
         # Remove empty files if there is no output
