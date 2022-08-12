@@ -597,6 +597,7 @@ impl WalreceiverState {
     ) -> impl Iterator<Item = (NodeId, &SkTimelineInfo, String)> {
         self.wal_stream_candidates
             .iter()
+            .filter(|(_, info)| info.timeline.commit_lsn.is_some())
             .filter_map(|(sk_id, etcd_info)| {
                 let info = &etcd_info.timeline;
                 match wal_stream_connection_string(
@@ -686,634 +687,638 @@ fn wal_stream_connection_string(
     ))
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::time::SystemTime;
+#[cfg(test)]
+mod tests {
+    
 
-//     use crate::repository::{
-//         repo_harness::{RepoHarness, TIMELINE_ID},
-//         Repository,
-//     };
+    use crate::repository::{
+        repo_harness::{RepoHarness, TIMELINE_ID},
+        Repository,
+    };
 
-//     use super::*;
+    use super::*;
 
-//     #[test]
-//     fn no_connection_no_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("no_connection_no_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let now = Utc::now().naive_utc();
+    #[test]
+    fn no_connection_no_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("no_connection_no_candidate")?;
+        let mut state = dummy_state(&harness);
+        let now = Utc::now().naive_utc();
 
-//         let lagging_wal_timeout = chrono::Duration::from_std(state.lagging_wal_timeout)?;
-//         let delay_over_threshold = now - lagging_wal_timeout - lagging_wal_timeout;
+        let lagging_wal_timeout = chrono::Duration::from_std(state.lagging_wal_timeout)?;
+        let delay_over_threshold = now - lagging_wal_timeout - lagging_wal_timeout;
 
-//         state.wal_connection = None;
-//         state.wal_stream_candidates = HashMap::from([
-//             (
-//                 NodeId(0),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(1)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: None,
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(1),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: None,
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("no commit_lsn".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(2),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: None,
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("no commit_lsn".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(3),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: delay_over_threshold,
-//                 },
-//             ),
-//         ]);
+        state.wal_connection = None;
+        state.wal_stream_candidates = HashMap::from([
+            (
+                NodeId(0),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(1)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: None,
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(1),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: None,
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("no commit_lsn".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(2),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: None,
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("no commit_lsn".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(3),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: None,
+                    },
+                    etcd_version: 0,
+                    latest_update: delay_over_threshold,
+                },
+            ),
+        ]);
 
-//         let no_candidate = state.next_connection_candidate();
-//         assert!(
-//             no_candidate.is_none(),
-//             "Expected no candidate selected out of non full data options, but got {no_candidate:?}"
-//         );
+        let no_candidate = state.next_connection_candidate();
+        assert!(
+            no_candidate.is_none(),
+            "Expected no candidate selected out of non full data options, but got {no_candidate:?}"
+        );
 
-//         Ok(())
-//     }
+        Ok(())
+    }
 
-//     #[tokio::test]
-//     async fn connection_no_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("connection_no_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let now = Utc::now().naive_utc();
+    #[tokio::test]
+    async fn connection_no_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("connection_no_candidate")?;
+        let mut state = dummy_state(&harness);
+        let now = Utc::now().naive_utc();
 
-//         let connected_sk_id = NodeId(0);
-//         let current_lsn = 100_000;
+        let connected_sk_id = NodeId(0);
+        let current_lsn = 100_000;
 
-//         state.max_lsn_wal_lag = NonZeroU64::new(100).unwrap();
-//         state.wal_connection = Some(WalConnection {
-//             sk_id: connected_sk_id,
-//             latest_connection_update: now,
-//             connection_task: TaskHandle::spawn(move |sender, _| async move {
-//                 sender
-//                     .send(TaskEvent::NewEvent(ReplicationFeedback {
-//                         current_timeline_size: 1,
-//                         ps_writelsn: 1,
-//                         ps_applylsn: current_lsn,
-//                         ps_flushlsn: 1,
-//                         ps_replytime: SystemTime::now(),
-//                     }))
-//                     .ok();
-//                 Ok(())
-//             }),
-//         });
-//         state.wal_stream_candidates = HashMap::from([
-//             (
-//                 connected_sk_id,
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() * 2)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(1),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(current_lsn)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("not advanced Lsn".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(2),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() / 2)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("not enough advanced Lsn".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//         ]);
+        let connection_status = WalConnectionStatus {
+            is_connected: true,
+            is_received_wal: true,
+            latest_connection_update: now,
+            latest_wal_update: now,
+            commit_lsn: Some(Lsn(current_lsn)),
+            streaming_lsn: Some(Lsn(current_lsn)),
+        };
 
-//         let no_candidate = state.next_connection_candidate();
-//         assert!(
-//             no_candidate.is_none(),
-//             "Expected no candidate selected out of valid options since candidate Lsn data is ignored and others' was not advanced enough, but got {no_candidate:?}"
-//         );
+        state.max_lsn_wal_lag = NonZeroU64::new(100).unwrap();
+        state.wal_connection = Some(WalConnection {
+            sk_id: connected_sk_id,
+            status: connection_status.clone(),
+            connection_task: TaskHandle::spawn(move |sender, _| async move {
+                sender
+                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .ok();
+                Ok(())
+            }),
+            discovered_new_wal: None,
+        });
+        state.wal_stream_candidates = HashMap::from([
+            (
+                connected_sk_id,
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() * 2)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(1),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(current_lsn)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("not advanced Lsn".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(2),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(current_lsn + state.max_lsn_wal_lag.get() / 2)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("not enough advanced Lsn".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+        ]);
 
-//         Ok(())
-//     }
+        let no_candidate = state.next_connection_candidate();
+        assert!(
+            no_candidate.is_none(),
+            "Expected no candidate selected out of valid options since candidate Lsn data is ignored and others' was not advanced enough, but got {no_candidate:?}"
+        );
 
-//     #[test]
-//     fn no_connection_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("no_connection_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let now = Utc::now().naive_utc();
+        Ok(())
+    }
 
-//         state.wal_connection = None;
-//         state.wal_stream_candidates = HashMap::from([(
-//             NodeId(0),
-//             EtcdSkTimeline {
-//                 timeline: SkTimelineInfo {
-//                     last_log_term: None,
-//                     flush_lsn: None,
-//                     commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
-//                     backup_lsn: None,
-//                     remote_consistent_lsn: None,
-//                     peer_horizon_lsn: None,
-//                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                 },
-//                 etcd_version: 0,
-//                 latest_update: now,
-//             },
-//         )]);
+    #[test]
+    fn no_connection_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("no_connection_candidate")?;
+        let mut state = dummy_state(&harness);
+        let now = Utc::now().naive_utc();
 
-//         let only_candidate = state
-//             .next_connection_candidate()
-//             .expect("Expected one candidate selected out of the only data option, but got none");
-//         assert_eq!(only_candidate.safekeeper_id, NodeId(0));
-//         assert_eq!(
-//             only_candidate.reason,
-//             ReconnectReason::NoExistingConnection,
-//             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
-//         );
-//         assert!(only_candidate
-//             .wal_source_connstr
-//             .contains(DUMMY_SAFEKEEPER_CONNSTR));
+        state.wal_connection = None;
+        state.wal_stream_candidates = HashMap::from([(
+            NodeId(0),
+            EtcdSkTimeline {
+                timeline: SkTimelineInfo {
+                    last_log_term: None,
+                    flush_lsn: None,
+                    commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
+                    backup_lsn: None,
+                    remote_consistent_lsn: None,
+                    peer_horizon_lsn: None,
+                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                },
+                etcd_version: 0,
+                latest_update: now,
+            },
+        )]);
 
-//         let selected_lsn = 100_000;
-//         state.wal_stream_candidates = HashMap::from([
-//             (
-//                 NodeId(0),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(selected_lsn - 100)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("smaller commit_lsn".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(1),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(selected_lsn)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(2),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(Lsn(selected_lsn + 100)),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: None,
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//         ]);
-//         let biggest_wal_candidate = state.next_connection_candidate().expect(
-//             "Expected one candidate selected out of multiple valid data options, but got none",
-//         );
+        let only_candidate = state
+            .next_connection_candidate()
+            .expect("Expected one candidate selected out of the only data option, but got none");
+        assert_eq!(only_candidate.safekeeper_id, NodeId(0));
+        assert_eq!(
+            only_candidate.reason,
+            ReconnectReason::NoExistingConnection,
+            "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
+        );
+        assert!(only_candidate
+            .wal_source_connstr
+            .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
-//         assert_eq!(biggest_wal_candidate.safekeeper_id, NodeId(1));
-//         assert_eq!(
-//             biggest_wal_candidate.reason,
-//             ReconnectReason::NoExistingConnection,
-//             "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
-//         );
-//         assert!(biggest_wal_candidate
-//             .wal_source_connstr
-//             .contains(DUMMY_SAFEKEEPER_CONNSTR));
+        let selected_lsn = 100_000;
+        state.wal_stream_candidates = HashMap::from([
+            (
+                NodeId(0),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(selected_lsn - 100)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("smaller commit_lsn".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(1),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(selected_lsn)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(2),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(Lsn(selected_lsn + 100)),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: None,
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+        ]);
+        let biggest_wal_candidate = state.next_connection_candidate().expect(
+            "Expected one candidate selected out of multiple valid data options, but got none",
+        );
 
-//         Ok(())
-//     }
+        assert_eq!(biggest_wal_candidate.safekeeper_id, NodeId(1));
+        assert_eq!(
+            biggest_wal_candidate.reason,
+            ReconnectReason::NoExistingConnection,
+            "Should select new safekeeper due to missing connection, even if there's also a lag in the wal over the threshold"
+        );
+        assert!(biggest_wal_candidate
+            .wal_source_connstr
+            .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
-//     #[tokio::test]
-//     async fn candidate_with_many_connection_failures() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("candidate_with_many_connection_failures")?;
-//         let mut state = dummy_state(&harness);
-//         let now = Utc::now().naive_utc();
+        Ok(())
+    }
 
-//         let current_lsn = Lsn(100_000).align();
-//         let bigger_lsn = Lsn(current_lsn.0 + 100).align();
+    #[tokio::test]
+    async fn candidate_with_many_connection_failures() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("candidate_with_many_connection_failures")?;
+        let mut state = dummy_state(&harness);
+        let now = Utc::now().naive_utc();
 
-//         state.wal_connection = None;
-//         state.wal_stream_candidates = HashMap::from([
-//             (
-//                 NodeId(0),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(bigger_lsn),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(1),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(current_lsn),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//         ]);
-//         state.wal_connection_attempts = HashMap::from([(NodeId(0), 1), (NodeId(1), 0)]);
+        let current_lsn = Lsn(100_000).align();
+        let bigger_lsn = Lsn(current_lsn.0 + 100).align();
 
-//         let candidate_with_less_errors = state
-//             .next_connection_candidate()
-//             .expect("Expected one candidate selected, but got none");
-//         assert_eq!(
-//             candidate_with_less_errors.safekeeper_id,
-//             NodeId(1),
-//             "Should select the node with less connection errors"
-//         );
+        state.wal_connection = None;
+        state.wal_stream_candidates = HashMap::from([
+            (
+                NodeId(0),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(bigger_lsn),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(1),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(current_lsn),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+        ]);
+        state.wal_connection_attempts = HashMap::from([(NodeId(0), 1), (NodeId(1), 0)]);
 
-//         Ok(())
-//     }
+        let candidate_with_less_errors = state
+            .next_connection_candidate()
+            .expect("Expected one candidate selected, but got none");
+        assert_eq!(
+            candidate_with_less_errors.safekeeper_id,
+            NodeId(1),
+            "Should select the node with less connection errors"
+        );
 
-//     #[tokio::test]
-//     async fn connection_no_etcd_data_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("connection_no_etcd_data_candidate")?;
-//         let mut state = dummy_state(&harness);
+        Ok(())
+    }
 
-//         let now = Utc::now().naive_utc();
-//         let current_lsn = Lsn(100_000).align();
-//         let connected_sk_id = NodeId(0);
-//         let other_sk_id = NodeId(connected_sk_id.0 + 1);
+    #[tokio::test]
+    async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("lsn_wal_over_threshcurrent_candidate")?;
+        let mut state = dummy_state(&harness);
+        let current_lsn = Lsn(100_000).align();
+        let now = Utc::now().naive_utc();
 
-//         state.wal_connection = Some(WalConnection {
-//             sk_id: connected_sk_id,
-//             latest_connection_update: now,
-//             connection_task: TaskHandle::spawn(move |sender, _| async move {
-//                 sender
-//                     .send(TaskEvent::NewEvent(ReplicationFeedback {
-//                         current_timeline_size: 1,
-//                         ps_writelsn: current_lsn.0,
-//                         ps_applylsn: 1,
-//                         ps_flushlsn: 1,
-//                         ps_replytime: SystemTime::now(),
-//                     }))
-//                     .ok();
-//                 Ok(())
-//             }),
-//         });
-//         state.wal_stream_candidates = HashMap::from([(
-//             other_sk_id,
-//             EtcdSkTimeline {
-//                 timeline: SkTimelineInfo {
-//                     last_log_term: None,
-//                     flush_lsn: None,
-//                     commit_lsn: Some(Lsn(1 + state.max_lsn_wal_lag.get())),
-//                     backup_lsn: None,
-//                     remote_consistent_lsn: None,
-//                     peer_horizon_lsn: None,
-//                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                 },
-//                 etcd_version: 0,
-//                 latest_update: now,
-//             },
-//         )]);
+        let connected_sk_id = NodeId(0);
+        let new_lsn = Lsn(current_lsn.0 + state.max_lsn_wal_lag.get() + 1);
 
-//         let only_candidate = state
-//             .next_connection_candidate()
-//             .expect("Expected one candidate selected out of the only data option, but got none");
-//         assert_eq!(only_candidate.safekeeper_id, other_sk_id);
-//         assert_eq!(
-//             only_candidate.reason,
-//             ReconnectReason::NoEtcdDataForExistingConnection,
-//             "Should select new safekeeper due to missing etcd data, even if there's an existing connection with this safekeeper"
-//         );
-//         assert!(only_candidate
-//             .wal_source_connstr
-//             .contains(DUMMY_SAFEKEEPER_CONNSTR));
+        let connection_status = WalConnectionStatus {
+            is_connected: true,
+            is_received_wal: true,
+            latest_connection_update: now,
+            latest_wal_update: now,
+            commit_lsn: Some(current_lsn),
+            streaming_lsn: Some(current_lsn),
+        };
 
-//         Ok(())
-//     }
+        state.wal_connection = Some(WalConnection {
+            sk_id: connected_sk_id,
+            status: connection_status.clone(),
+            connection_task: TaskHandle::spawn(move |sender, _| async move {
+                sender
+                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .ok();
+                Ok(())
+            }),
+            discovered_new_wal: None,
+        });
+        state.wal_stream_candidates = HashMap::from([
+            (
+                connected_sk_id,
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(current_lsn),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+            (
+                NodeId(1),
+                EtcdSkTimeline {
+                    timeline: SkTimelineInfo {
+                        last_log_term: None,
+                        flush_lsn: None,
+                        commit_lsn: Some(new_lsn),
+                        backup_lsn: None,
+                        remote_consistent_lsn: None,
+                        peer_horizon_lsn: None,
+                        safekeeper_connstr: Some("advanced by Lsn safekeeper".to_string()),
+                    },
+                    etcd_version: 0,
+                    latest_update: now,
+                },
+            ),
+        ]);
 
-//     #[tokio::test]
-//     async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("lsn_wal_over_threshcurrent_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let current_lsn = Lsn(100_000).align();
-//         let now = Utc::now().naive_utc();
+        let over_threshcurrent_candidate = state.next_connection_candidate().expect(
+            "Expected one candidate selected out of multiple valid data options, but got none",
+        );
 
-//         let connected_sk_id = NodeId(0);
-//         let new_lsn = Lsn(current_lsn.0 + state.max_lsn_wal_lag.get() + 1);
+        assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(1));
+        assert_eq!(
+            over_threshcurrent_candidate.reason,
+            ReconnectReason::LaggingWal {
+                current_commit_lsn: current_lsn,
+                new_commit_lsn: new_lsn,
+                threshold: state.max_lsn_wal_lag
+            },
+            "Should select bigger WAL safekeeper if it starts to lag enough"
+        );
+        assert!(over_threshcurrent_candidate
+            .wal_source_connstr
+            .contains("advanced by Lsn safekeeper"));
 
-//         state.wal_connection = Some(WalConnection {
-//             sk_id: connected_sk_id,
-//             latest_connection_update: now,
-//             connection_task: TaskHandle::spawn(move |sender, _| async move {
-//                 sender
-//                     .send(TaskEvent::NewEvent(ReplicationFeedback {
-//                         current_timeline_size: 1,
-//                         ps_writelsn: current_lsn.0,
-//                         ps_applylsn: 1,
-//                         ps_flushlsn: 1,
-//                         ps_replytime: SystemTime::now(),
-//                     }))
-//                     .ok();
-//                 Ok(())
-//             }),
-//         });
-//         state.wal_stream_candidates = HashMap::from([
-//             (
-//                 connected_sk_id,
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(current_lsn),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//             (
-//                 NodeId(1),
-//                 EtcdSkTimeline {
-//                     timeline: SkTimelineInfo {
-//                         last_log_term: None,
-//                         flush_lsn: None,
-//                         commit_lsn: Some(new_lsn),
-//                         backup_lsn: None,
-//                         remote_consistent_lsn: None,
-//                         peer_horizon_lsn: None,
-//                         safekeeper_connstr: Some("advanced by Lsn safekeeper".to_string()),
-//                     },
-//                     etcd_version: 0,
-//                     latest_update: now,
-//                 },
-//             ),
-//         ]);
+        Ok(())
+    }
 
-//         let over_threshcurrent_candidate = state.next_connection_candidate().expect(
-//             "Expected one candidate selected out of multiple valid data options, but got none",
-//         );
+    #[tokio::test]
+    async fn timeout_connection_threshhold_current_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("timeout_connection_threshhold_current_candidate")?;
+        let mut state = dummy_state(&harness);
+        let current_lsn = Lsn(100_000).align();
+        let now = Utc::now().naive_utc();
 
-//         assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(1));
-//         assert_eq!(
-//             over_threshcurrent_candidate.reason,
-//             ReconnectReason::LaggingWal {
-//                 current_lsn,
-//                 new_lsn,
-//                 threshold: state.max_lsn_wal_lag
-//             },
-//             "Should select bigger WAL safekeeper if it starts to lag enough"
-//         );
-//         assert!(over_threshcurrent_candidate
-//             .wal_source_connstr
-//             .contains("advanced by Lsn safekeeper"));
+        let wal_connect_timeout = chrono::Duration::from_std(state.wal_connect_timeout)?;
+        let time_over_threshold =
+            Utc::now().naive_utc() - wal_connect_timeout - wal_connect_timeout;
 
-//         Ok(())
-//     }
+        let connection_status = WalConnectionStatus {
+            is_connected: true,
+            is_received_wal: true,
+            latest_connection_update: time_over_threshold,
+            latest_wal_update: time_over_threshold,
+            commit_lsn: Some(current_lsn),
+            streaming_lsn: Some(current_lsn),
+        };
 
-//     #[tokio::test]
-//     async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("timeout_wal_over_threshhold_current_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let current_lsn = Lsn(100_000).align();
-//         let now = Utc::now().naive_utc();
+        state.wal_connection = Some(WalConnection {
+            sk_id: NodeId(1),
+            status: connection_status.clone(),
+            connection_task: TaskHandle::spawn(move |sender, _| async move {
+                sender
+                    .send(TaskEvent::NewEvent(connection_status.clone()))
+                    .ok();
+                Ok(())
+            }),
+            discovered_new_wal: None,
+        });
+        state.wal_stream_candidates = HashMap::from([(
+            NodeId(0),
+            EtcdSkTimeline {
+                timeline: SkTimelineInfo {
+                    last_log_term: None,
+                    flush_lsn: None,
+                    commit_lsn: Some(current_lsn),
+                    backup_lsn: None,
+                    remote_consistent_lsn: None,
+                    peer_horizon_lsn: None,
+                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                },
+                etcd_version: 0,
+                latest_update: now,
+            },
+        )]);
 
-//         let lagging_wal_timeout = chrono::Duration::from_std(state.lagging_wal_timeout)?;
-//         let time_over_threshold =
-//             Utc::now().naive_utc() - lagging_wal_timeout - lagging_wal_timeout;
+        let over_threshcurrent_candidate = state.next_connection_candidate().expect(
+            "Expected one candidate selected out of multiple valid data options, but got none",
+        );
 
-//         state.wal_connection = Some(WalConnection {
-//             sk_id: NodeId(1),
-//             latest_connection_update: time_over_threshold,
-//             connection_task: TaskHandle::spawn(move |sender, _| async move {
-//                 sender
-//                     .send(TaskEvent::NewEvent(ReplicationFeedback {
-//                         current_timeline_size: 1,
-//                         ps_writelsn: current_lsn.0,
-//                         ps_applylsn: 1,
-//                         ps_flushlsn: 1,
-//                         ps_replytime: SystemTime::now(),
-//                     }))
-//                     .ok();
-//                 Ok(())
-//             }),
-//         });
-//         state.wal_stream_candidates = HashMap::from([(
-//             NodeId(0),
-//             EtcdSkTimeline {
-//                 timeline: SkTimelineInfo {
-//                     last_log_term: None,
-//                     flush_lsn: None,
-//                     commit_lsn: Some(current_lsn),
-//                     backup_lsn: None,
-//                     remote_consistent_lsn: None,
-//                     peer_horizon_lsn: None,
-//                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                 },
-//                 etcd_version: 0,
-//                 latest_update: now,
-//             },
-//         )]);
+        assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(0));
+        match over_threshcurrent_candidate.reason {
+            ReconnectReason::NoKeepAlives {
+                last_keep_alive,
+                threshold,
+                ..
+            } => {
+                assert_eq!(last_keep_alive, Some(time_over_threshold));
+                assert_eq!(threshold, state.lagging_wal_timeout);
+            }
+            unexpected => panic!("Unexpected reason: {unexpected:?}"),
+        }
+        assert!(over_threshcurrent_candidate
+            .wal_source_connstr
+            .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
-//         let over_threshcurrent_candidate = state.next_connection_candidate().expect(
-//             "Expected one candidate selected out of multiple valid data options, but got none",
-//         );
+        Ok(())
+    }
 
-//         assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(0));
-//         match over_threshcurrent_candidate.reason {
-//             ReconnectReason::NoWalTimeout {
-//                 last_wal_interaction,
-//                 threshold,
-//                 ..
-//             } => {
-//                 assert_eq!(last_wal_interaction, Some(time_over_threshold));
-//                 assert_eq!(threshold, state.lagging_wal_timeout);
-//             }
-//             unexpected => panic!("Unexpected reason: {unexpected:?}"),
-//         }
-//         assert!(over_threshcurrent_candidate
-//             .wal_source_connstr
-//             .contains(DUMMY_SAFEKEEPER_CONNSTR));
+    #[tokio::test]
+    async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
+        let harness = RepoHarness::create("timeout_wal_over_threshhold_current_candidate")?;
+        let mut state = dummy_state(&harness);
+        let current_lsn = Lsn(100_000).align();
+        let new_lsn = Lsn(100_100).align();
+        let now = Utc::now().naive_utc();
 
-//         Ok(())
-//     }
+        let lagging_wal_timeout = chrono::Duration::from_std(state.lagging_wal_timeout)?;
+        let time_over_threshold =
+            Utc::now().naive_utc() - lagging_wal_timeout - lagging_wal_timeout;
 
-//     #[tokio::test]
-//     async fn timeout_connection_over_threshhold_current_candidate() -> anyhow::Result<()> {
-//         let harness = RepoHarness::create("timeout_connection_over_threshhold_current_candidate")?;
-//         let mut state = dummy_state(&harness);
-//         let current_lsn = Lsn(100_000).align();
-//         let now = Utc::now().naive_utc();
+        let connection_status = WalConnectionStatus {
+            is_connected: true,
+            is_received_wal: true,
+            latest_connection_update: now,
+            latest_wal_update: time_over_threshold,
+            commit_lsn: Some(current_lsn),
+            streaming_lsn: Some(current_lsn),
+        };
 
-//         let lagging_wal_timeout = chrono::Duration::from_std(state.lagging_wal_timeout)?;
-//         let time_over_threshold =
-//             Utc::now().naive_utc() - lagging_wal_timeout - lagging_wal_timeout;
+        state.wal_connection = Some(WalConnection {
+            sk_id: NodeId(1),
+            status: connection_status,
+            connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
+            discovered_new_wal: Some(NewCommittedWAL {
+                discovered_at: time_over_threshold,
+                lsn: new_lsn,
+            }),
+        });
+        state.wal_stream_candidates = HashMap::from([(
+            NodeId(0),
+            EtcdSkTimeline {
+                timeline: SkTimelineInfo {
+                    last_log_term: None,
+                    flush_lsn: None,
+                    commit_lsn: Some(new_lsn),
+                    backup_lsn: None,
+                    remote_consistent_lsn: None,
+                    peer_horizon_lsn: None,
+                    safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
+                },
+                etcd_version: 0,
+                latest_update: now,
+            },
+        )]);
 
-//         state.wal_connection = Some(WalConnection {
-//             sk_id: NodeId(1),
-//             latest_connection_update: time_over_threshold,
-//             connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
-//         });
-//         state.wal_stream_candidates = HashMap::from([(
-//             NodeId(0),
-//             EtcdSkTimeline {
-//                 timeline: SkTimelineInfo {
-//                     last_log_term: None,
-//                     flush_lsn: None,
-//                     commit_lsn: Some(current_lsn),
-//                     backup_lsn: None,
-//                     remote_consistent_lsn: None,
-//                     peer_horizon_lsn: None,
-//                     safekeeper_connstr: Some(DUMMY_SAFEKEEPER_CONNSTR.to_string()),
-//                 },
-//                 etcd_version: 0,
-//                 latest_update: now,
-//             },
-//         )]);
+        let over_threshcurrent_candidate = state.next_connection_candidate().expect(
+            "Expected one candidate selected out of multiple valid data options, but got none",
+        );
 
-//         let over_threshcurrent_candidate = state.next_connection_candidate().expect(
-//             "Expected one candidate selected out of multiple valid data options, but got none",
-//         );
+        assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(0));
+        match over_threshcurrent_candidate.reason {
+            ReconnectReason::NoWalTimeout {
+                current_lsn,
+                current_commit_lsn,
+                candidate_commit_lsn,
+                last_wal_interaction,
+                threshold,
+                ..
+            } => {
+                assert_eq!(current_lsn, current_lsn);
+                assert_eq!(current_commit_lsn, current_lsn);
+                assert_eq!(candidate_commit_lsn, new_lsn);
+                assert_eq!(last_wal_interaction, Some(time_over_threshold));
+                assert_eq!(threshold, state.lagging_wal_timeout);
+            }
+            unexpected => panic!("Unexpected reason: {unexpected:?}"),
+        }
+        assert!(over_threshcurrent_candidate
+            .wal_source_connstr
+            .contains(DUMMY_SAFEKEEPER_CONNSTR));
 
-//         assert_eq!(over_threshcurrent_candidate.safekeeper_id, NodeId(0));
-//         match over_threshcurrent_candidate.reason {
-//             ReconnectReason::NoWalTimeout {
-//                 last_wal_interaction,
-//                 threshold,
-//                 ..
-//             } => {
-//                 assert_eq!(last_wal_interaction, Some(time_over_threshold));
-//                 assert_eq!(threshold, state.lagging_wal_timeout);
-//             }
-//             unexpected => panic!("Unexpected reason: {unexpected:?}"),
-//         }
-//         assert!(over_threshcurrent_candidate
-//             .wal_source_connstr
-//             .contains(DUMMY_SAFEKEEPER_CONNSTR));
+        Ok(())
+    }
 
-//         Ok(())
-//     }
+    const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
 
-//     const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
+    fn dummy_state(harness: &RepoHarness) -> WalreceiverState {
+        WalreceiverState {
+            id: ZTenantTimelineId {
+                tenant_id: harness.tenant_id,
+                timeline_id: TIMELINE_ID,
+            },
+            local_timeline: harness
+                .load()
+                .create_empty_timeline(TIMELINE_ID, Lsn(0))
+                .expect("Failed to create an empty timeline for dummy wal connection manager"),
+            wal_connect_timeout: Duration::from_secs(1),
+            lagging_wal_timeout: Duration::from_secs(1),
+            max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
+            wal_connection: None,
+            wal_stream_candidates: HashMap::new(),
+            wal_connection_attempts: HashMap::new(),
+        }
+    }
+}
 
-//     fn dummy_state(harness: &RepoHarness) -> WalreceiverState {
-//         WalreceiverState {
-//             id: ZTenantTimelineId {
-//                 tenant_id: harness.tenant_id,
-//                 timeline_id: TIMELINE_ID,
-//             },
-//             local_timeline: harness
-//                 .load()
-//                 .create_empty_timeline(TIMELINE_ID, Lsn(0))
-//                 .expect("Failed to create an empty timeline for dummy wal connection manager"),
-//             wal_connect_timeout: Duration::from_secs(1),
-//             lagging_wal_timeout: Duration::from_secs(1),
-//             max_lsn_wal_lag: NonZeroU64::new(1).unwrap(),
-//             wal_connection: None,
-//             wal_stream_candidates: HashMap::new(),
-//             wal_connection_attempts: HashMap::new(),
-//         }
-//     }
-// }
+#[cfg(test)]
+mod backoff_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_defaults_produce_growing_backoff_sequence() {
+        let mut current_backoff_value = None;
+
+        for i in 0..10_000 {
+            let new_backoff_value = exponential_backoff_duration_seconds(
+                i,
+                DEFAULT_BASE_BACKOFF_SECONDS,
+                DEFAULT_MAX_BACKOFF_SECONDS,
+            );
+
+            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
+                assert!(
+                    old_backoff_value <= new_backoff_value,
+                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
+                )
+            }
+        }
+
+        assert_eq!(
+            current_backoff_value.expect("Should have produced backoff values to compare"),
+            DEFAULT_MAX_BACKOFF_SECONDS,
+            "Given big enough of retries, backoff should reach its allowed max value"
+        );
+    }
+}
