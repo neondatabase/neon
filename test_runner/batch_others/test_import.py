@@ -1,5 +1,6 @@
 import re
 import pytest
+import time
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, Postgres, wait_for_upload, wait_for_last_record_lsn
 from fixtures.utils import lsn_from_hex
 from uuid import UUID, uuid4
@@ -165,6 +166,9 @@ def _generate_data(num_rows: int, pg: Postgres) -> str:
             cur.execute("SET statement_timeout='300s'")
             cur.execute(f'''CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
                         from generate_series(1,{num_rows}) g''')
+
+            time.sleep(5)
+
             cur.execute("CHECKPOINT")
 
             cur.execute('SELECT pg_current_wal_insert_lsn()')
