@@ -2269,6 +2269,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "bstr",
  "bytes",
  "clap 3.2.12",
  "futures",

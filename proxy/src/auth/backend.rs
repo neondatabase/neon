@@ -1,10 +1,13 @@
-mod link;
 mod postgres;
 
-pub mod console;
+mod link;
+pub use link::LinkAuthError;
+
+mod console;
+pub use console::{GetAuthInfoError, WakeComputeError};
 
 mod legacy_console;
-pub use legacy_console::{AuthError, AuthErrorImpl};
+pub use legacy_console::LegacyAuthError;
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},

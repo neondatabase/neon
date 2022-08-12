@@ -3,7 +3,7 @@
 use crate::{
     auth::{
         self,
-        backend::console::{self, AuthInfo, Result},
+        backend::console::{self, AuthInfo, GetAuthInfoError, TransportError, WakeComputeError},
         ClientCredentials,
     },
     compute::{self, ComputeConnCfg},
@@ -18,6 +18,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub(super) struct Api<'a> {
     endpoint: &'a ApiUrl,
     creds: &'a ClientCredentials,
+}
+
+// Helps eliminate graceless `.map_err` calls without introducing another ctor.
+impl From<tokio_postgres::Error> for TransportError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        io_error(e).into()
+    }
 }
 
 impl<'a> Api<'a> {
@@ -36,21 +43,16 @@ impl<'a> Api<'a> {
     }
 
     /// This implementation fetches the auth info from a local postgres instance.
-    async fn get_auth_info(&self) -> Result<AuthInfo> {
+    async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
         // Perhaps we could persist this connection, but then we'd have to
         // write more code for reopening it if it got closed, which doesn't
         // seem worth it.
         let (client, connection) =
-            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls)
-                .await
-                .map_err(io_error)?;
+            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
         tokio::spawn(connection);
         let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
-        let rows = client
-            .query(query, &[&self.creds.user])
-            .await
-            .map_err(io_error)?;
+        let rows = client.query(query, &[&self.creds.user]).await?;
 
         match &rows[..] {
             // We can't get a secret if there's no such user.
@@ -74,13 +76,13 @@ impl<'a> Api<'a> {
                         }))
                     })
                     // Putting the secret into this message is a security hazard!
-                    .ok_or(console::ConsoleAuthError::BadSecret)
+                    .ok_or(GetAuthInfoError::BadSecret)
             }
         }
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg> {
+    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
         let mut config = ComputeConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
