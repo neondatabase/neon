@@ -279,12 +279,13 @@ impl PageServerNode {
     ///
     /// If the server is not running, returns success
     ///
-    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
+    pub fn stop(&self, _immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
             println!("Pageserver is already stopped");
             return Ok(());
         }
+        let immediate = true; // HACK
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
         let sig = if immediate {
@@ -313,8 +314,7 @@ impl PageServerNode {
 
         // Wait until process is gone
         for i in 0..1000 {
-            // Kill with None just checks if the pid is there
-            match kill(pid, None) {
+            match kill(pid, sig) {
                 Ok(_) => (),
                 Err(Errno::ESRCH) => {
                     // Process not found, we're done
