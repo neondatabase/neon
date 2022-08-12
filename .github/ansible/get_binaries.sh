@@ -2,30 +2,37 @@
 
 set -e
 
-RELEASE=${RELEASE:-false}
+if [ -z "${DOCKER_TAG}" ]; then
+  # DOCKER_TAG absent, trying to find latest one in docker hub
 
-# look at docker hub for latest tag for neon docker image
-if [ "${RELEASE}" = "true" ]; then
-    echo "search latest release tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
-    if [ -z "${VERSION}" ]; then
-        echo "no any docker tags found, exiting..."
-        exit 1
-    else
-        TAG="release-${VERSION}"
-    fi
+  RELEASE=${RELEASE:-false}
+  # look at docker hub for latest tag for neon docker image
+  if [ "${RELEASE}" = "true" ]; then
+      echo "search latest release tag"
+      VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep release | sed 's/release-//g' | grep -E '^[0-9]+$' | sort -n | tail -1)
+      if [ -z "${VERSION}" ]; then
+          echo "no any docker tags found, exiting..."
+          exit 1
+      else
+          TAG="release-${VERSION}"
+      fi
+  else
+      echo "search latest dev tag"
+      VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -E '^[0-9]+$' | sort -n | tail -1)
+      if [ -z "${VERSION}" ]; then
+          echo "no any docker tags found, exiting..."
+          exit 1
+      else
+          TAG="${VERSION}"
+      fi
+  fi
+  echo "found ${VERSION}"
+
 else
-    echo "search latest dev tag"
-    VERSION=$(curl -s https://registry.hub.docker.com/v1/repositories/neondatabase/neon/tags |jq -r -S '.[].name' | grep -E '^[0-9]+$' | sort -n | tail -1)
-    if [ -z "${VERSION}" ]; then
-        echo "no any docker tags found, exiting..."
-        exit 1
-    else
-        TAG="${VERSION}"
-    fi
+  # DOCKER_TAG present, using it
+  TAG=${DOCKER_TAG}
 fi
 
-echo "found ${VERSION}"
 
 # do initial cleanup
 rm -rf neon_install postgres_install.tar.gz neon_install.tar.gz .neon_current_version
