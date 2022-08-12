@@ -3,10 +3,10 @@ import shutil
 import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from urllib.parse import urlparse
 
 import pytest
 from fixtures.neon_fixtures import RemotePostgres
+from fixtures.utils import subprocess_capture
 
 
 @pytest.mark.remote_cluster
@@ -25,7 +25,7 @@ from fixtures.neon_fixtures import RemotePostgres
         "typescript/postgresql-client",
     ],
 )
-def test_pg_clients(remote_pg: RemotePostgres, client: str):
+def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: str):
     conn_options = remote_pg.conn_options()
 
     env_file = None
@@ -43,12 +43,10 @@ def test_pg_clients(remote_pg: RemotePostgres, client: str):
     if docker_bin is None:
         raise RuntimeError("docker is required for running this test")
 
-    build_cmd = [
-        docker_bin, "build", "--quiet", "--tag", image_tag, f"{Path(__file__).parent / client}"
-    ]
+    build_cmd = [docker_bin, "build", "--tag", image_tag, f"{Path(__file__).parent / client}"]
+    subprocess_capture(str(test_output_dir), build_cmd, check=True)
+
     run_cmd = [docker_bin, "run", "--rm", "--env-file", env_file, image_tag]
+    basepath = subprocess_capture(str(test_output_dir), run_cmd, check=True)
 
-    subprocess.run(build_cmd, check=True)
-    result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
-
-    assert result.stdout.strip() == "1"
+    assert Path(f"{basepath}.stdout").read_text().strip() == "1"
