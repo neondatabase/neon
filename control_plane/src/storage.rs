@@ -285,16 +285,18 @@ impl PageServerNode {
             println!("Pageserver is already stopped");
             return Ok(());
         }
-        let immediate = true; // HACK
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
-        let sig = if immediate {
-            print!("Stopping pageserver immediately..");
-            Signal::SIGQUIT
-        } else {
-            print!("Stopping pageserver gracefully..");
-            Signal::SIGTERM
-        };
+        // let sig = if immediate {
+        //     print!("Stopping pageserver immediately..");
+        //     Signal::SIGQUIT
+        // } else {
+        //     print!("Stopping pageserver gracefully..");
+        //     Signal::SIGTERM
+        // };
+
+        let sig = Signal::SIGKILL;
+
         io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
