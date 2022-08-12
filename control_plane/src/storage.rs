@@ -312,15 +312,22 @@ impl PageServerNode {
         }
 
         // Wait until process is gone
-        loop {
+        for i in 0..600 {
             // ESRCH: No process or process group can be found corresponding to
             //        that specified by pid.
             if let Err(Errno::ESRCH) = kill(pid, None) {
                 println!("done!");
                 return Ok(());
             }
+
+            if i % 10 == 0 {
+                print!(".");
+                io::stdout().flush().unwrap();
+            }
             thread::sleep(Duration::from_millis(100));
         }
+
+        bail!("Failed to stop pageserver with pid {}", pid);
     }
 
     pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
