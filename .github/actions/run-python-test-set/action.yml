@@ -83,6 +83,7 @@ runs:
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
         PLATFORM: github-actions-selfhosted
+        BUILD_TYPE: ${{ inputs.build_type }}
         AWS_ACCESS_KEY_ID: ${{ inputs.real_s3_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
       shell: bash -euxo pipefail {0}

@@ -966,8 +966,8 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
                 bail!("unexpected pending WAL record");
             }
         } else {
-            let last_lsn = self.tline.get_last_record_lsn();
-            self.tline.get(key, last_lsn)
+            let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+            self.tline.get(key, lsn)
         }
     }
 
