@@ -310,7 +310,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
-            profiling::exit_profiler(conf, &profiler_guard);
+            // TODO bring back profiler
             std::process::exit(111);
         }
 
