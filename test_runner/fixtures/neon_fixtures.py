@@ -1488,17 +1488,6 @@ class NeonPageserver(PgProtocol):
         self.running = True
         return self
 
-    def _wait_for_death(self):
-        """Wait for pageserver to die. Assumes kill signal is sent."""
-        pid_path = pathlib.Path(self.env.repo_dir) / "pageserver.pid"
-        pid = read_pid(pid_path)
-        retries_left = 20
-        while check_pid(pid):
-            time.sleep(0.1)
-            retries_left -= 1
-            if retries_left == 0:
-                raise AssertionError("Pageserver failed to die")
-
     def stop(self, immediate=False) -> 'NeonPageserver':
         """
         Stop the page server.
@@ -1506,7 +1495,10 @@ class NeonPageserver(PgProtocol):
         """
         if self.running:
             self.env.neon_cli.pageserver_stop(immediate)
-            self._wait_for_death()
+            # HACK This fixes https://github.com/neondatabase/neon/issues/2247
+            #      in most cases, but we should probably wait on some event rather
+            #      than wait 0.1 seconds.
+            time.sleep(0.1)
             self.running = False
         return self
 
@@ -2014,17 +2006,6 @@ class PostgresFactory:
 def read_pid(path: Path) -> int:
     """ Read content of file into number """
     return int(path.read_text())
-
-
-def check_pid(pid):
-    """Check whether pid is running."""
-    try:
-        # If sig is 0, then no signal is sent, but error checking is still performed.
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    else:
-        return True
 
 
 @dataclass
