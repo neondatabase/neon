@@ -1495,10 +1495,6 @@ class NeonPageserver(PgProtocol):
         """
         if self.running:
             self.env.neon_cli.pageserver_stop(immediate)
-            # HACK This fixes https://github.com/neondatabase/neon/issues/2247
-            #      in most cases, but we should probably wait on some event rather
-            #      than wait 0.1 seconds.
-            time.sleep(0.1)
             self.running = False
         return self
 
