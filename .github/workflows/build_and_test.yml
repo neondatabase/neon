@@ -11,10 +11,10 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-concurrency:
-  # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
-  cancel-in-progress: true
+# concurrency:
+#   # Allow only one workflow per any non-`main` branch.
+#   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+#   cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ release ]
         rust_toolchain: [ 1.58 ]
 
     env:
@@ -176,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ release ]
         rust_toolchain: [ 1.58 ]
     steps:
       - name: Checkout
@@ -204,7 +204,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ release ]
         rust_toolchain: [ 1.58 ]
     steps:
       - name: Checkout
