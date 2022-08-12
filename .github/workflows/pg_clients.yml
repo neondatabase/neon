@@ -19,7 +19,11 @@ concurrency:
 
 jobs:
   test-postgres-client-libs:
+    # TODO: switch to gen2 runner, requires docker
     runs-on: [ ubuntu-latest ]
+
+    env:
+      TEST_OUTPUT: /tmp/test_output
 
     steps:
     - name: Checkout
@@ -47,7 +51,7 @@ jobs:
       env:
         REMOTE_ENV: 1
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-        TEST_OUTPUT: /tmp/test_output
+
         POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       shell: bash -euxo pipefail {0}
       run: |
@@ -61,9 +65,18 @@ jobs:
           -m "remote_cluster" \
           -rA "test_runner/pg_clients"
 
+    # We use GitHub's action upload-artifact because `ubuntu-latest` doesn't have configured AWS CLI.
+    # It will be fixed after switching to gen2 runner
+    - name: Upload python test logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        retention-days: 7
+        name: python-test-pg_clients-${{ runner.os }}-stage-logs
+        path: ${{ env.TEST_OUTPUT }}
+
     - name: Post to a Slack channel
-      if: failure()
-      id: slack
+      if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream

@@ -75,13 +75,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
             .strip_suffix(&[0])
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
-        // The so-called "password" should contain a base64-encoded json.
-        // We will use it later to route the client to their project.
-        let bytes = base64::decode(password)
-            .map_err(|_| AuthErrorImpl::MalformedPassword("bad encoding"))?;
-
-        let payload = serde_json::from_slice(&bytes)
-            .map_err(|_| AuthErrorImpl::MalformedPassword("invalid payload"))?;
+        let payload = PasswordHackPayload::parse(password)
+            // If we ended up here and the payload is malformed, it means that
+            // the user neither enabled SNI nor resorted to any other method
+            // for passing the project name we rely on. We should show them
+            // the most helpful error message and point to the documentation.
+            .ok_or(AuthErrorImpl::MissingProjectName)?;
 
         Ok(payload)
     }
@@ -98,7 +97,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {
-            return Err(AuthErrorImpl::auth_failed("method not supported").into());
+            return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
         let secret = self.state.0;

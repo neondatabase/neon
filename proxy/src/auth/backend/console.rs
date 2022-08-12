@@ -13,21 +13,11 @@ use std::future::Future;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub type Result<T> = std::result::Result<T, ConsoleAuthError>;
+const REQUEST_FAILED: &str = "Console request failed";
 
 #[derive(Debug, Error)]
-pub enum ConsoleAuthError {
-    #[error(transparent)]
-    BadProjectName(#[from] auth::credentials::ClientCredsParseError),
-
-    // We shouldn't include the actual secret here.
-    #[error("Bad authentication secret")]
-    BadSecret,
-
-    #[error("Console responded with a malformed compute address: '{0}'")]
-    BadComputeAddress(String),
-
-    #[error("Console responded with a malformed JSON: '{0}'")]
+pub enum TransportError {
+    #[error("Console responded with a malformed JSON: {0}")]
     BadResponse(#[from] serde_json::Error),
 
     /// HTTP status (other than 200) returned by the console.
@@ -38,19 +28,72 @@ pub enum ConsoleAuthError {
     Io(#[from] std::io::Error),
 }
 
-impl UserFacingError for ConsoleAuthError {
+impl UserFacingError for TransportError {
     fn to_string_client(&self) -> String {
-        use ConsoleAuthError::*;
+        use TransportError::*;
         match self {
-            BadProjectName(e) => e.to_string_client(),
-            _ => "Internal error".to_string(),
+            HttpStatus(_) => self.to_string(),
+            _ => REQUEST_FAILED.to_owned(),
         }
     }
 }
 
-impl From<&auth::credentials::ClientCredsParseError> for ConsoleAuthError {
-    fn from(e: &auth::credentials::ClientCredsParseError) -> Self {
-        ConsoleAuthError::BadProjectName(e.clone())
+// Helps eliminate graceless `.map_err` calls without introducing another ctor.
+impl From<reqwest::Error> for TransportError {
+    fn from(e: reqwest::Error) -> Self {
+        io_error(e).into()
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum GetAuthInfoError {
+    // We shouldn't include the actual secret here.
+    #[error("Console responded with a malformed auth secret")]
+    BadSecret,
+
+    #[error(transparent)]
+    Transport(TransportError),
+}
+
+impl UserFacingError for GetAuthInfoError {
+    fn to_string_client(&self) -> String {
+        use GetAuthInfoError::*;
+        match self {
+            BadSecret => REQUEST_FAILED.to_owned(),
+            Transport(e) => e.to_string_client(),
+        }
+    }
+}
+
+impl<E: Into<TransportError>> From<E> for GetAuthInfoError {
+    fn from(e: E) -> Self {
+        Self::Transport(e.into())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum WakeComputeError {
+    // We shouldn't show users the address even if it's broken.
+    #[error("Console responded with a malformed compute address: {0}")]
+    BadComputeAddress(String),
+
+    #[error(transparent)]
+    Transport(TransportError),
+}
+
+impl UserFacingError for WakeComputeError {
+    fn to_string_client(&self) -> String {
+        use WakeComputeError::*;
+        match self {
+            BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
+            Transport(e) => e.to_string_client(),
+        }
+    }
+}
+
+impl<E: Into<TransportError>> From<E> for WakeComputeError {
+    fn from(e: E) -> Self {
+        Self::Transport(e.into())
     }
 }
 
@@ -95,7 +138,7 @@ impl<'a> Api<'a> {
         handle_user(client, &self, Self::get_auth_info, Self::wake_compute).await
     }
 
-    async fn get_auth_info(&self) -> Result<AuthInfo> {
+    async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
@@ -105,21 +148,20 @@ impl<'a> Api<'a> {
         // TODO: use a proper logger
         println!("cplane request: {url}");
 
-        let resp = reqwest::get(url.into_inner()).await.map_err(io_error)?;
+        let resp = reqwest::get(url.into_inner()).await?;
         if !resp.status().is_success() {
-            return Err(ConsoleAuthError::HttpStatus(resp.status()));
+            return Err(TransportError::HttpStatus(resp.status()).into());
         }
 
-        let response: GetRoleSecretResponse =
-            serde_json::from_str(&resp.text().await.map_err(io_error)?)?;
+        let response: GetRoleSecretResponse = serde_json::from_str(&resp.text().await?)?;
 
-        scram::ServerSecret::parse(response.role_secret.as_str())
+        scram::ServerSecret::parse(&response.role_secret)
             .map(AuthInfo::Scram)
-            .ok_or(ConsoleAuthError::BadSecret)
+            .ok_or(GetAuthInfoError::BadSecret)
     }
 
     /// Wake up the compute node and return the corresponding connection info.
-    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg> {
+    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push("proxy_wake_compute");
         url.query_pairs_mut()
@@ -128,17 +170,16 @@ impl<'a> Api<'a> {
         // TODO: use a proper logger
         println!("cplane request: {url}");
 
-        let resp = reqwest::get(url.into_inner()).await.map_err(io_error)?;
+        let resp = reqwest::get(url.into_inner()).await?;
         if !resp.status().is_success() {
-            return Err(ConsoleAuthError::HttpStatus(resp.status()));
+            return Err(TransportError::HttpStatus(resp.status()).into());
         }
 
-        let response: GetWakeComputeResponse =
-            serde_json::from_str(&resp.text().await.map_err(io_error)?)?;
+        let response: GetWakeComputeResponse = serde_json::from_str(&resp.text().await?)?;
 
         // Unfortunately, ownership won't let us use `Option::ok_or` here.
         let (host, port) = match parse_host_port(&response.address) {
-            None => return Err(ConsoleAuthError::BadComputeAddress(response.address)),
+            None => return Err(WakeComputeError::BadComputeAddress(response.address)),
             Some(x) => x,
         };
 
@@ -162,8 +203,8 @@ pub(super) async fn handle_user<'a, Endpoint, GetAuthInfo, WakeCompute>(
     wake_compute: impl FnOnce(&'a Endpoint) -> WakeCompute,
 ) -> auth::Result<compute::NodeInfo>
 where
-    GetAuthInfo: Future<Output = Result<AuthInfo>>,
-    WakeCompute: Future<Output = Result<ComputeConnCfg>>,
+    GetAuthInfo: Future<Output = Result<AuthInfo, GetAuthInfoError>>,
+    WakeCompute: Future<Output = Result<ComputeConnCfg, WakeComputeError>>,
 {
     let auth_info = get_auth_info(endpoint).await?;
 
@@ -171,7 +212,7 @@ where
     let scram_keys = match auth_info {
         AuthInfo::Md5(_) => {
             // TODO: decide if we should support MD5 in api v2
-            return Err(auth::AuthErrorImpl::auth_failed("MD5 is not supported").into());
+            return Err(auth::AuthError::bad_auth_method("MD5"));
         }
         AuthInfo::Scram(secret) => {
             let scram = auth::Scram(&secret);
