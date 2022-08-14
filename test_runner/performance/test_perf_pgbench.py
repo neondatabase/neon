@@ -1,4 +1,5 @@
 import calendar
+import enum
 import os
 import timeit
 from datetime import datetime
@@ -10,6 +11,13 @@ from fixtures.benchmark_fixture import MetricReport, PgBenchInitResult, PgBenchR
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.neon_fixtures import profiling_supported
 from fixtures.utils import get_scale_for_db
+
+
+@enum.unique
+class PgBenchLoadType(enum.Enum):
+    INIT = "init"
+    SIMPLE_UPDATE = "simple_update"
+    SELECT_ONLY = "select-only"
 
 
 def utc_now_timestamp() -> int:
@@ -69,15 +77,15 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 # the test database.
 #
 # Currently, the # of connections is hardcoded at 4
-def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: str = "all"):
+def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: PgBenchLoadType):
     env.zenbenchmark.record("scale", scale, '', MetricReport.TEST_PARAM)
 
-    if filter == "init":
+    if filter == PgBenchLoadType.INIT:
         # Run initialize
         init_pgbench(
             env, ['pgbench', f'-s{scale}', '-i', env.pg.connstr(options='-cstatement_timeout=1h')])
 
-    if filter == "simple-update":
+    if filter == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
         run_pgbench(env,
                     "simple-update",
@@ -91,7 +99,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: str = "a
                         env.pg.connstr(),
                     ])
 
-    if filter == "select-only":
+    if filter == PgBenchLoadType.SELECT_ONLY:
         # Run SELECT workload
         run_pgbench(env,
                     "select-only",
@@ -144,7 +152,9 @@ def get_scales_matrix(default: int = 10) -> List[int]:
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
-    run_test_pgbench(neon_with_baseline, scale, duration)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # Run the pgbench tests, and generate a flamegraph from it
@@ -166,7 +176,10 @@ profiling="page_requests"
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("empty", "main")
 
-    run_test_pgbench(NeonCompare(zenbenchmark, env, pg_bin, "pgbench"), scale, duration)
+    neon_compare = NeonCompare(zenbenchmark, env, pg_bin, "pgbench")
+    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.INIT)
+    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # Run the pgbench tests against an existing Postgres cluster
@@ -174,18 +187,18 @@ profiling="page_requests"
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_init(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter="init")
+    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.INIT)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter="simple-update")
+    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.SIMPLE_UPDATE)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter="select-only")
+    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.SELECT_ONLY)
