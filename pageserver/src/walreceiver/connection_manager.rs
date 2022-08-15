@@ -118,7 +118,7 @@ async fn connection_manager_loop_step(
                         *walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0) += 1;
                     },
                     TaskEvent::NewEvent(status) => {
-                        if status.is_received_wal {
+                        if status.has_received_wal {
                             // Reset connection attempts here only, we know that safekeeper is healthy
                             // because it can send us a WAL update.
                             walreceiver_state.wal_connection_attempts.remove(&wal_connection.sk_id);
@@ -270,7 +270,7 @@ struct WalConnection {
 }
 
 /// Notion of a new committed WAL, which exists on other safekeeper.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct NewCommittedWAL {
     /// LSN of the new committed WAL.
     lsn: Lsn,
@@ -347,7 +347,7 @@ impl WalreceiverState {
             sk_id: new_sk_id,
             status: WalConnectionStatus {
                 is_connected: false,
-                is_received_wal: false,
+                has_received_wal: false,
                 latest_connection_update: now,
                 latest_wal_update: now,
                 streaming_lsn: None,
@@ -469,7 +469,6 @@ impl WalreceiverState {
                 // Keep discovered_new_wal only if connected safekeeper has not caught up yet.
                 let mut discovered_new_wal = existing_wal_connection
                     .discovered_new_wal
-                    .clone()
                     .filter(|new_wal| new_wal.lsn > current_commit_lsn);
 
                 if discovered_new_wal.is_none() {
@@ -794,7 +793,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            is_received_wal: true,
+            has_received_wal: true,
             latest_connection_update: now,
             latest_wal_update: now,
             commit_lsn: Some(Lsn(current_lsn)),
@@ -1048,7 +1047,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            is_received_wal: true,
+            has_received_wal: true,
             latest_connection_update: now,
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
@@ -1135,7 +1134,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            is_received_wal: true,
+            has_received_wal: true,
             latest_connection_update: time_over_threshold,
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
@@ -1207,7 +1206,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            is_received_wal: true,
+            has_received_wal: true,
             latest_connection_update: now,
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),

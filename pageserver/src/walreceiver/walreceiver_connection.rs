@@ -36,7 +36,7 @@ pub struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
     /// Defines a healthy connection as one on which we have received at least some WAL bytes.
-    pub is_received_wal: bool,
+    pub has_received_wal: bool,
     /// Connection establishment time or the timestamp of a latest connection message received.
     pub latest_connection_update: NaiveDateTime,
     /// Time of the latest WAL message received.
@@ -71,7 +71,7 @@ pub async fn handle_walreceiver_connection(
     info!("connected!");
     let mut connection_status = WalConnectionStatus {
         is_connected: true,
-        is_received_wal: false,
+        has_received_wal: false,
         latest_connection_update: Utc::now().naive_utc(),
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
@@ -193,7 +193,7 @@ pub async fn handle_walreceiver_connection(
                 ));
                 if !xlog_data.data().is_empty() {
                     connection_status.latest_wal_update = now;
-                    connection_status.is_received_wal = true;
+                    connection_status.has_received_wal = true;
                 }
             }
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
