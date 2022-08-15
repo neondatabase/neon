@@ -121,8 +121,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v6-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+            v6-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
       - name: Cache postgres build
         id: cache_pg
