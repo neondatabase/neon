@@ -1090,11 +1090,9 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # Remove initial tenant fully (two branches are active)
     response = sk_http.tenant_delete_force(tenant_id)
-    assert response == {
-        timeline_id_3: {
-            "dir_existed": True,
-            "was_active": True,
-        }
+    assert response[timeline_id_3] == {
+        "dir_existed": True,
+        "was_active": True,
     }
     assert not (sk_data_dir / tenant_id).exists()
     assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()
