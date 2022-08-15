@@ -84,11 +84,14 @@ impl WalStreamDecoder {
             }
             match self.state {
                 State::WaitingForRecord => {
-                    if hdr.xlp_info & XLP_FIRST_IS_CONTRECORD != 0 {
-                        return Err(
-                            "invalid xlog page header: unexpected XLP_FIRST_IS_CONTRECORD".into(),
-                        );
-                    }
+                    // TODO: uncomment once all WAL with redundant bit reaches
+                    // pageserver(s) on prod/staging. Stamping redundant bit was
+                    // removed in 49015ce98f550d postgres commit.
+                    // if hdr.xlp_info & XLP_FIRST_IS_CONTRECORD != 0 {
+                    //     return Err(
+                    //         "invalid xlog page header: unexpected XLP_FIRST_IS_CONTRECORD".into(),
+                    //     );
+                    // }
                     if hdr.xlp_rem_len != 0 {
                         return Err(format!(
                             "invalid xlog page header: xlp_rem_len={}, but it's not a contrecord",
