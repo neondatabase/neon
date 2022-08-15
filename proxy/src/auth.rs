@@ -12,7 +12,7 @@ use password_hack::PasswordHackPayload;
 mod flow;
 pub use flow::*;
 
-use crate::{error::UserFacingError, waiters};
+use crate::error::UserFacingError;
 use std::io;
 use thiserror::Error;
 
@@ -22,51 +22,54 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 /// Common authentication error.
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
-    /// Authentication error reported by the console.
+    // This will be dropped in the future.
     #[error(transparent)]
-    Console(#[from] backend::AuthError),
+    Legacy(#[from] backend::LegacyAuthError),
 
     #[error(transparent)]
-    GetAuthInfo(#[from] backend::console::ConsoleAuthError),
+    Link(#[from] backend::LinkAuthError),
 
+    #[error(transparent)]
+    GetAuthInfo(#[from] backend::GetAuthInfoError),
+
+    #[error(transparent)]
+    WakeCompute(#[from] backend::WakeComputeError),
+
+    /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
+
+    #[error("Unsupported authentication method: {0}")]
+    BadAuthMethod(Box<str>),
 
     #[error("Malformed password message: {0}")]
     MalformedPassword(&'static str),
 
-    /// Errors produced by [`crate::stream::PqStream`].
+    #[error(
+        "Project name is not specified. \
+        Either please upgrade the postgres client library (libpq) for SNI support \
+        or pass the project name as a parameter: '&options=project%3D<project-name>'. \
+        See more at https://neon.tech/sni"
+    )]
+    MissingProjectName,
+
+    /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
     Io(#[from] io::Error),
-}
-
-impl AuthErrorImpl {
-    pub fn auth_failed(msg: impl Into<String>) -> Self {
-        Self::Console(backend::AuthError::auth_failed(msg))
-    }
-}
-
-impl From<waiters::RegisterError> for AuthErrorImpl {
-    fn from(e: waiters::RegisterError) -> Self {
-        Self::Console(backend::AuthError::from(e))
-    }
-}
-
-impl From<waiters::WaitError> for AuthErrorImpl {
-    fn from(e: waiters::WaitError) -> Self {
-        Self::Console(backend::AuthError::from(e))
-    }
 }
 
 #[derive(Debug, Error)]
 #[error(transparent)]
 pub struct AuthError(Box<AuthErrorImpl>);
 
-impl<T> From<T> for AuthError
-where
-    AuthErrorImpl: From<T>,
-{
-    fn from(e: T) -> Self {
+impl AuthError {
+    pub fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
+        AuthErrorImpl::BadAuthMethod(name.into()).into()
+    }
+}
+
+impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
+    fn from(e: E) -> Self {
         Self(Box::new(e.into()))
     }
 }
@@ -75,10 +78,14 @@ impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Console(e) => e.to_string_client(),
+            Legacy(e) => e.to_string_client(),
+            Link(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
+            WakeCompute(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
+            BadAuthMethod(_) => self.to_string(),
             MalformedPassword(_) => self.to_string(),
+            MissingProjectName => self.to_string(),
             _ => "Internal error".to_string(),
         }
     }

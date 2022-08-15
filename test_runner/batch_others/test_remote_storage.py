@@ -110,7 +110,7 @@ def test_remote_storage_backup_and_restore(
     client.tenant_attach(UUID(tenant_id))
 
     log.info("waiting for timeline redownload")
-    wait_until(number_of_iterations=10,
+    wait_until(number_of_iterations=20,
                interval=1,
                func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)))
 

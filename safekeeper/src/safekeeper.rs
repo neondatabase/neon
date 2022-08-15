@@ -727,7 +727,7 @@ where
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);
             }
             // Initializing commit_lsn before acking first flushed record is
-            // important to let find_end_of_wal skip the whole in the beginning
+            // important to let find_end_of_wal skip the hole in the beginning
             // of the first segment.
             //
             // NB: on new clusters, this happens at the same time as
@@ -738,6 +738,10 @@ where
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
+            // Initializing remote_consistent_lsn sets that we have nothing to
+            // stream to pageserver(s) immediately after creation.
+            self.inmem.remote_consistent_lsn =
+                max(self.inmem.remote_consistent_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
             self.persist_control_file(state)?;

@@ -1,10 +1,13 @@
-mod link;
 mod postgres;
 
-pub mod console;
+mod link;
+pub use link::LinkAuthError;
+
+mod console;
+pub use console::{GetAuthInfoError, WakeComputeError};
 
 mod legacy_console;
-pub use legacy_console::{AuthError, AuthErrorImpl};
+pub use legacy_console::LegacyAuthError;
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
@@ -12,13 +15,12 @@ use crate::{
     stream::PqStream,
     waiters::{self, Waiter, Waiters},
 };
-use lazy_static::lazy_static;
+
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-lazy_static! {
-    static ref CPLANE_WAITERS: Waiters<mgmt::ComputeReady> = Default::default();
-}
+static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
 
 /// Give caller an opportunity to wait for the cloud's reply.
 pub async fn with_waiter<R, T, E>(

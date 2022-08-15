@@ -22,7 +22,7 @@ pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use tracing::info;
 
 use crate::thread_mgr::ThreadKind;
@@ -42,14 +42,14 @@ pub const STORAGE_FORMAT_VERSION: u16 = 3;
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
-lazy_static! {
-    static ref LIVE_CONNECTIONS_COUNT: IntGaugeVec = register_int_gauge_vec!(
+static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "pageserver_live_connections",
         "Number of live network connections",
         &["pageserver_connection_kind"]
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 pub const LOG_FILE_NAME: &str = "pageserver.log";
 
@@ -92,4 +92,57 @@ pub fn shutdown_pageserver(exit_code: i32) {
 
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
+}
+
+const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
+const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
+
+async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
+    let backoff_duration_seconds =
+        exponential_backoff_duration_seconds(n, base_increment, max_seconds);
+    if backoff_duration_seconds > 0.0 {
+        info!(
+            "Backoff: waiting {backoff_duration_seconds} seconds before processing with the task",
+        );
+        tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_duration_seconds)).await;
+    }
+}
+
+fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
+    if n == 0 {
+        0.0
+    } else {
+        (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
+    }
+}
+
+#[cfg(test)]
+mod backoff_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_defaults_produce_growing_backoff_sequence() {
+        let mut current_backoff_value = None;
+
+        for i in 0..10_000 {
+            let new_backoff_value = exponential_backoff_duration_seconds(
+                i,
+                DEFAULT_BASE_BACKOFF_SECONDS,
+                DEFAULT_MAX_BACKOFF_SECONDS,
+            );
+
+            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
+                assert!(
+                    old_backoff_value <= new_backoff_value,
+                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
+                )
+            }
+        }
+
+        assert_eq!(
+            current_backoff_value.expect("Should have produced backoff values to compare"),
+            DEFAULT_MAX_BACKOFF_SECONDS,
+            "Given big enough of retries, backoff should reach its allowed max value"
+        );
+    }
 }

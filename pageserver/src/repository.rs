@@ -408,7 +408,7 @@ pub trait TimelineWriter<'a> {
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::BytesMut;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
@@ -439,14 +439,13 @@ pub mod repo_harness {
         buf.freeze()
     }
 
-    lazy_static! {
-        static ref LOCK: RwLock<()> = RwLock::new(());
-    }
+    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
 
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
                 checkpoint_distance: Some(tenant_conf.checkpoint_distance),
+                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
@@ -589,11 +588,10 @@ mod tests {
     //use std::sync::Arc;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
 
-    lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
-    }
+    static TEST_KEY: Lazy<Key> =
+        Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
 
     #[test]
     fn test_basic() -> Result<()> {

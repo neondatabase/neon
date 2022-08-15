@@ -5,7 +5,7 @@
 //! get/put call, walking back the timeline branching history as needed.
 //!
 //! The files are stored in the .neon/tenants/<tenantid>/timelines/<timelineid>
-//! directory. See layered_repository/README for how the files are managed.
+//! directory. See docs/pageserver-storage.md for how the files are managed.
 //! In addition to the layer files, there is a metadata file in the same
 //! directory that contains information about the timeline, in particular its
 //! parent timeline, and the last LSN that has been written to disk.
@@ -431,6 +431,13 @@ impl LayeredRepository {
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
+    }
+
+    pub fn get_checkpoint_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_timeout
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     pub fn get_compaction_target_size(&self) -> u64 {

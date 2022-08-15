@@ -32,10 +32,16 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     stdout_filename = basepath + '.stdout'
     stderr_filename = basepath + '.stderr'
 
-    with open(stdout_filename, 'w') as stdout_f:
-        with open(stderr_filename, 'w') as stderr_f:
-            log.info('(capturing output to "{}.stdout")'.format(base))
-            subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+    try:
+        with open(stdout_filename, 'w') as stdout_f:
+            with open(stderr_filename, 'w') as stderr_f:
+                log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
+                subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+    finally:
+        # Remove empty files if there is no output
+        for filename in (stdout_filename, stderr_filename):
+            if os.stat(filename).st_size == 0:
+                os.remove(filename)
 
     return basepath
 
@@ -140,3 +146,12 @@ def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
     key_parts = parts[0].split("-")
     lsn_parts = parts[1].split("-")
     return int(key_parts[0], 16), int(key_parts[1], 16), int(lsn_parts[0], 16), int(lsn_parts[1], 16)
+
+
+def get_scale_for_db(size_mb: int) -> int:
+    """Returns pgbench scale factor for given target db size in MB.
+
+    Ref https://www.cybertec-postgresql.com/en/a-formula-to-calculate-pgbench-scaling-factor-for-target-db-size/
+    """
+
+    return round(0.06689 * size_mb - 0.5)

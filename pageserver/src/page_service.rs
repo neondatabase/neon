@@ -11,7 +11,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -434,15 +434,15 @@ const TIME_BUCKETS: &[f64] = &[
     0.1,  // 1/10 s
 ];
 
-lazy_static! {
-    static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
+static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
         TIME_BUCKETS.into()
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 impl PageServerHandler {
     pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
@@ -1044,6 +1044,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"checkpoint_timeout"),
                 RowDescriptor::int8_col(b"compaction_target_size"),
                 RowDescriptor::int8_col(b"compaction_period"),
                 RowDescriptor::int8_col(b"compaction_threshold"),
@@ -1054,6 +1055,12 @@ impl postgres_backend::Handler for PageServerHandler {
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+                Some(
+                    repo.get_checkpoint_timeout()
+                        .as_secs()
+                        .to_string()
+                        .as_bytes(),
+                ),
                 Some(repo.get_compaction_target_size().to_string().as_bytes()),
                 Some(
                     repo.get_compaction_period()

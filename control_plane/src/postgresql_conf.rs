@@ -5,7 +5,7 @@
 /// enough to extract a few settings we need in Zenith, assuming you don't do
 /// funny stuff like include-directives or funny escaping.
 use anyhow::{bail, Context, Result};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
@@ -19,9 +19,7 @@ pub struct PostgresConf {
     hash: HashMap<String, String>,
 }
 
-lazy_static! {
-    static ref CONF_LINE_RE: Regex = Regex::new(r"^((?:\w|\.)+)\s*=\s*(\S+)$").unwrap();
-}
+static CONF_LINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^((?:\w|\.)+)\s*=\s*(\S+)$").unwrap());
 
 impl PostgresConf {
     pub fn new() -> PostgresConf {
@@ -139,10 +137,10 @@ fn escape_str(s: &str) -> String {
     //
     // This regex is a bit more conservative than the rules in guc-file.l, so we quote some
     // strings that PostgreSQL would accept without quoting, but that's OK.
-    lazy_static! {
-        static ref UNQUOTED_RE: Regex =
-            Regex::new(r"(^[-+]?[0-9]+[a-zA-Z]*$)|(^[a-zA-Z][a-zA-Z0-9]*$)").unwrap();
-    }
+
+    static UNQUOTED_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(^[-+]?[0-9]+[a-zA-Z]*$)|(^[a-zA-Z][a-zA-Z0-9]*$)").unwrap());
+
     if UNQUOTED_RE.is_match(s) {
         s.to_string()
     } else {
