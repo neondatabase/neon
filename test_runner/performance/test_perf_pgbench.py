@@ -77,15 +77,15 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 # the test database.
 #
 # Currently, the # of connections is hardcoded at 4
-def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: PgBenchLoadType):
+def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: PgBenchLoadType):
     env.zenbenchmark.record("scale", scale, '', MetricReport.TEST_PARAM)
 
-    if filter == PgBenchLoadType.INIT:
+    if workload_type == PgBenchLoadType.INIT:
         # Run initialize
         init_pgbench(
             env, ['pgbench', f'-s{scale}', '-i', env.pg.connstr(options='-cstatement_timeout=1h')])
 
-    if filter == PgBenchLoadType.SIMPLE_UPDATE:
+    if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
         run_pgbench(env,
                     "simple-update",
@@ -99,7 +99,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, filter: PgBenchL
                         env.pg.connstr(),
                     ])
 
-    if filter == PgBenchLoadType.SELECT_ONLY:
+    if workload_type == PgBenchLoadType.SELECT_ONLY:
         # Run SELECT workload
         run_pgbench(env,
                     "select-only",
@@ -182,23 +182,28 @@ profiling="page_requests"
     run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
+# The following 3 tests run on an existing database as it was set up by previous tests,
+# and leaves the database in a state that would be used in the next tests.
+# Modifying the definition order of these functions or adding other remote tests in between will alter results.
+# See usage of --sparse-ordering flag in the pytest invocation in the CI workflow
+#
 # Run the pgbench tests against an existing Postgres cluster
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_init(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.INIT)
+    run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.INIT)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
 def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
-    run_test_pgbench(remote_compare, scale, duration, filter=PgBenchLoadType.SELECT_ONLY)
+    run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
