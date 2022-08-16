@@ -312,7 +312,7 @@ impl PageServerNode {
         }
 
         // Wait until process is gone
-        for i in 0..1000 {
+        for i in 0..600 {
             let signal = None; // Send no signal, just get the error code
             match kill(pid, signal) {
                 Ok(_) => (), // Process exists, keep waiting
