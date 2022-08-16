@@ -26,20 +26,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          ref: main
 
       - name: Get build tag
         run: |
           echo ref:$GITHUB_REF_NAME
-          echo rev:$(git rev-list --count HEAD)
           echo run:$GITHUB_RUN_ID
+          echo head:$(git rev-list --count HEAD)
+          echo main:$(git rev-list --count main)
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             echo "ref=main"
-            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+            echo "::set-output name=tag::$(git rev-list --count main)"
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             echo "ref=release"
-            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+            echo "::set-output name=tag::release-$(git rev-list --count main)"
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             echo "::set-output name=tag::$GITHUB_RUN_ID"
