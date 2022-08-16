@@ -33,7 +33,7 @@ env:
   TEST_FILTER: ${{ inputs.test-filter || 'test_timeline_physical_size_post_compaction' }}
   REPETITION: ${{ inputs.repetition || '100' }}
   UNTIL_FAILURE: ${{ inputs.until-failure || 'false'}}
-  BUILD_TYPE: ${{ inputs.build-type || 'release' }}
+  BUILD_TYPE: ${{ inputs.build-type || 'debug' }}
   RUST_TOOLCHAIN: ${{ inputs.rust-toolchain || '1.58' }}
 
 jobs:
@@ -65,6 +65,13 @@ jobs:
           fi
 
           echo "::set-output name=EXTRA_PARAMS::${EXTRA_PARAMS}"
+
+      - name: DEBUG
+        shell: bash -euxo pipefail {0}
+        run: |
+          ps aux | grep pageserver
+          ps aux | grep postgres
+          ps aux | grep safekeeper
 
       - name: Run test
         uses: ./.github/actions/run-python-test-set
