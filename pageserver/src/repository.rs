@@ -5,6 +5,7 @@ use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::future::Future;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
@@ -182,6 +183,13 @@ impl Value {
 ///
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
+///
+/// There is exactly one implementation of this trait, LayeredRepository. This trait exist
+/// mostly for documentation purposes, to make it clear which functions are considered public,
+/// and which ones are implementation details of the storage format. Most code passes around
+/// concrete RepositoryImpl and TimelineImpl structs, but code outside layered_repository.rs
+/// should refrain from calling functions that are not listed in this trait.
+///
 pub trait Repository: Send + Sync {
     type Timeline: crate::DatadirTimeline;
 
@@ -269,6 +277,34 @@ impl AddAssign for GcResult {
     }
 }
 
+/// An error happened in a get() operation.
+///
+/// Normally
+#[derive(thiserror::Error)]
+pub enum PageReconstructError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+
+    #[error(transparent)]
+    WalRedo(#[from] crate::walredo::WalRedoError),
+
+    /// A layer file is missing locally. If it's downloaded, the operation will probably
+    /// succeed.
+    #[error("layer file needs to be downloaded")]
+    NeedDownload(std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>),
+}
+
+impl fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            PageReconstructError::Other(err) => err.fmt(f),
+            PageReconstructError::WalRedo(err) => err.fmt(f),
+            // TODO: print more info about the missing layer
+            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
+        }
+    }
+}
+
 pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
     // Public GET functions
@@ -293,7 +329,7 @@ pub trait Timeline: Send + Sync {
     /// the Repository implementation may incorrectly return a value from an ancestor
     /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
-    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
+    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError>;
 
     /// Get the ancestor's timeline id
     fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
@@ -301,11 +337,6 @@ pub trait Timeline: Send + Sync {
     /// Get the LSN where this branch was created
     fn get_ancestor_lsn(&self) -> Lsn;
 
-    //------------------------------------------------------------------------------
-    // Public PUT functions, to update the repository with new page versions.
-    //
-    // These are called by the WAL receiver to digest WAL records.
-    //------------------------------------------------------------------------------
     /// Atomically get both last and prev.
     fn get_last_record_rlsn(&self) -> RecordLsn;
 
@@ -318,12 +349,16 @@ pub trait Timeline: Send + Sync {
 
     fn get_remote_consistent_lsn(&self) -> Option<Lsn>;
 
-    /// Mutate the timeline with a [`TimelineWriter`].
-    ///
-    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
-    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
-    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
+    // Mutate the timeline with a [`TimelineWriter`].
+    //
+    // FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
+    // is a generic type in this trait. But that doesn't currently work in
+    // Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
+    // So for now, this function is not part of the trait. In practice, all callers
+    // have a reference to the concrete TimelineImpl type, and can call the writer
+    // function directly from TimelineImpl.
+    //
+    //fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
 
     ///
     /// Flush to disk all data that was written with the put_* functions
@@ -346,11 +381,29 @@ pub trait Timeline: Send + Sync {
     fn get_physical_size_non_incremental(&self) -> Result<u64>;
 }
 
+pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    loop {
+        let result = f();
+        let future = match result {
+            Err(PageReconstructError::NeedDownload(future)) => {
+                tracing::error!("RETRYING");
+                future
+            }
+            _ => return Ok(result?),
+        };
+        future.await?;
+    }
+}
+
 /// Various functions to mutate the timeline.
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
 // This is probably considered a bad practice in Rust and should be fixed eventually,
 // but will cause large code changes.
-pub trait TimelineWriter<'a> {
+pub trait TimelineWriter {
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the

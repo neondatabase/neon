@@ -64,7 +64,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
 fn build_timeline_info(
-    timeline: &TimelineImpl,
+    timeline: &Arc<TimelineImpl>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
@@ -140,7 +140,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         ) {
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
-                Ok(Some(build_timeline_info(new_timeline.as_ref(), false, false)?))
+                Ok(Some(build_timeline_info(&new_timeline, false, false)?))
             }
             Ok(None) => Ok(None), // timeline already exists
             Err(err) => Err(err),
@@ -232,7 +232,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    info!("Handling tenant attach {}", tenant_id,);
+    info!("Handling tenant attach {}", tenant_id);
 
     let conf = get_config(&request);
 
@@ -318,7 +318,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     check_permission(&request, Some(tenant_id))?;
 
     let tenant_info = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        let _enter = info_span!("tenant_status_handler", tenant = %tenant_id).entered();
         let repo = tenant_mgr::get_tenant(tenant_id)?;
 
         // Calculate total physical size of all timelines

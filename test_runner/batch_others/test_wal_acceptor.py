@@ -232,6 +232,12 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
+    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
+    # Create a tenant after bootstrapping and use that instead.
+    # See https://github.com/neondatabase/neon/pull/2272
+    tenant, _ = env.neon_cli.create_tenant()
+    env.initial_tenant = tenant
+
     env.neon_cli.create_branch("test_broker", "main")
     pg = env.postgres.create_start('test_broker')
     pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
@@ -275,6 +281,12 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.enable_local_fs_remote_storage()
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
+
+    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
+    # Create a tenant after bootstrapping and use that instead.
+    # See https://github.com/neondatabase/neon/pull/2272
+    tenant, _ = env.neon_cli.create_tenant()
+    env.initial_tenant = tenant
 
     env.neon_cli.create_branch('test_safekeepers_wal_removal')
     pg = env.postgres.create_start('test_safekeepers_wal_removal')

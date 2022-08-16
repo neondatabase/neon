@@ -32,7 +32,9 @@ use tracing::*;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::repository::Timeline;
 use crate::walrecord::*;
+use crate::TimelineImpl;
 use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::xlog_utils::*;
 use postgres_ffi::TransactionId;
@@ -41,15 +43,15 @@ use utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
 
-pub struct WalIngest<'a, T: DatadirTimeline> {
-    timeline: &'a T,
+pub struct WalIngest<'a> {
+    timeline: &'a TimelineImpl,
 
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
 }
 
-impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
-    pub fn new(timeline: &T, startpoint: Lsn) -> Result<WalIngest<T>> {
+impl<'a> WalIngest<'a> {
+    pub fn new(timeline: &TimelineImpl, startpoint: Lsn) -> Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint)?;
@@ -75,7 +77,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
         &mut self,
         recdata: Bytes,
         lsn: Lsn,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         modification.lsn = lsn;
@@ -264,7 +266,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_decoded_block(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         lsn: Lsn,
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
@@ -324,7 +326,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
     fn ingest_heapam_record(
         &mut self,
         buf: &mut Bytes,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         decoded: &mut DecodedWALRecord,
     ) -> Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -468,7 +470,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
     /// Subroutine of ingest_record(), to handle an XLOG_DBASE_CREATE record.
     fn ingest_xlog_dbase_create(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rec: &XlCreateDatabase,
     ) -> Result<()> {
         let db_id = rec.db_id;
@@ -535,7 +537,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_xlog_smgr_create(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rec: &XlSmgrCreate,
     ) -> Result<()> {
         let rel = RelTag {
@@ -553,7 +555,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
     /// This is the same logic as in PostgreSQL's smgr_redo() function.
     fn ingest_xlog_smgr_truncate(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rec: &XlSmgrTruncate,
     ) -> Result<()> {
         let spcnode = rec.rnode.spcnode;
@@ -618,7 +620,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
     ///
     fn ingest_xact_record(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
     ) -> Result<()> {
@@ -687,7 +689,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_clog_truncate_record(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         xlrec: &XlClogTruncate,
     ) -> Result<()> {
         info!(
@@ -745,7 +747,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_multixact_create_record(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         xlrec: &XlMultiXactCreate,
     ) -> Result<()> {
         // Create WAL record for updating the multixact-offsets page
@@ -824,7 +826,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_multixact_truncate_record(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         xlrec: &XlMultiXactTruncate,
     ) -> Result<()> {
         self.checkpoint.oldestMulti = xlrec.end_trunc_off;
@@ -858,7 +860,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn ingest_relmap_page(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         xlrec: &XlRelmapUpdate,
         decoded: &DecodedWALRecord,
     ) -> Result<()> {
@@ -874,7 +876,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_rel_creation(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
     ) -> Result<()> {
         modification.put_rel_creation(rel, 0)?;
@@ -883,7 +885,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_rel_page_image(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
@@ -895,7 +897,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_rel_wal_record(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
         blknum: BlockNumber,
         rec: ZenithWalRecord,
@@ -907,7 +909,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_rel_truncation(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
         nblocks: BlockNumber,
     ) -> Result<()> {
@@ -917,7 +919,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_rel_drop(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
     ) -> Result<()> {
         modification.put_rel_drop(rel)?;
@@ -935,7 +937,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn handle_rel_extend(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         rel: RelTag,
         blknum: BlockNumber,
     ) -> Result<()> {
@@ -966,7 +968,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn put_slru_page_image(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
@@ -979,7 +981,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
 
     fn handle_slru_extend(
         &mut self,
-        modification: &mut DatadirModification<T>,
+        modification: &mut DatadirModification<TimelineImpl>,
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
@@ -1032,7 +1034,6 @@ mod tests {
     use super::*;
     use crate::layered_repository::repo_harness::*;
     use crate::pgdatadir_mapping::create_test_timeline;
-    use crate::repository::Timeline;
     use postgres_ffi::pg_constants;
 
     /// Arbitrary relation tag, for testing.
@@ -1043,13 +1044,13 @@ mod tests {
         forknum: 0,
     };
 
-    fn assert_current_logical_size<T: Timeline>(_timeline: &T, _lsn: Lsn) {
+    fn assert_current_logical_size(_timeline: &TimelineImpl, _lsn: Lsn) {
         // TODO
     }
 
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    fn init_walingest_test<T: DatadirTimeline>(tline: &T) -> Result<WalIngest<T>> {
+    fn init_walingest_test(tline: &TimelineImpl) -> Result<WalIngest> {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""))?; // dummy relmapper file

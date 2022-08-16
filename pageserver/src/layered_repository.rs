@@ -58,6 +58,7 @@ mod inmemory_layer;
 mod layer_map;
 pub mod metadata;
 mod par_fsync;
+mod remote_layer;
 mod storage_layer;
 
 mod timeline;
@@ -611,12 +612,15 @@ impl LayeredRepository {
             conf.remote_storage_config.is_some(),
         ));
 
+        info!("spawn_attach {}", tenant_id);
+
         // Do all the hard work in the background
         let repo_clone = Arc::clone(&repo);
         tokio::spawn(async move {
             match repo_clone.attach_tenant().await {
                 Ok(_) => {}
                 Err(e) => {
+                    repo_clone.update_state(TenantState::Broken);
                     error!("error attaching tenant: {:?}", e);
                 }
             }
@@ -631,6 +635,10 @@ impl LayeredRepository {
     async fn attach_tenant(self: &Arc<LayeredRepository>) -> Result<()> {
         // Get list of remote timelines
         // download index files for every tenant timeline
+        info!(
+            "attach: listing remote timelines for tenant {}",
+            self.tenant_id
+        );
         let remote_timelines = list_remote_timelines(self.conf, self.tenant_id).await?;
 
         info!(
@@ -705,7 +713,10 @@ impl LayeredRepository {
             timeline.reconcile_with_remote(Some(index_part)).await?;
 
             info!("calculating initial size of {}", timeline.timeline_id);
-            timeline.init_logical_size()?;
+            // FIXME: This will retry the whole init_logical_size operation, if it needs
+            // to download any layer files. Better to push this down into init_logical_size()
+            // itself?
+            crate::repository::retry_get(|| timeline.init_logical_size()).await?;
 
             let mut timelines = self.timelines.lock().unwrap();
             timelines.insert(timeline_id, Arc::clone(&timeline));
@@ -957,6 +968,7 @@ impl LayeredRepository {
 
         let timelines: Vec<Arc<LayeredTimeline>> =
             self.timelines.lock().unwrap().values().cloned().collect();
+
         for timeline in timelines.iter() {
             timeline.shutdown().await?;
         }
@@ -968,9 +980,8 @@ impl LayeredRepository {
         // to think that the tenant data is valid on disk.
         // FIXME: this isn't bulletproof either, if we crash after deleting some of the index
         // files, but not all.
-        let timelines = self.timelines.lock().unwrap();
-        for (&timeline_id, _timeline) in timelines.iter() {
-            timeline::delete_metadata(self.conf, timeline_id, self.tenant_id)?;
+        for timeline in timelines.iter() {
+            timeline::delete_metadata(self.conf, timeline.timeline_id, self.tenant_id)?;
         }
 
         // If removal fails there will be no way to successfully retry detach,
@@ -1596,23 +1607,24 @@ pub mod repo_harness {
     }
 }
 
-///
-/// Tests that should work the same with any Repository/Timeline implementation.
-///
-#[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
-mod repo_tests {
+mod tests {
     use super::repo_harness::*;
     use super::*;
     use crate::pgdatadir_mapping::create_test_timeline;
     use crate::pgdatadir_mapping::DatadirTimeline;
+    use crate::repository::TimelineWriter;
     use crate::repository::{Key, Value};
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
+    use rand::{thread_rng, Rng};
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
+
+    use super::metadata::METADATA_FILE_NAME;
+    use crate::keyspace::KeySpaceAccum;
 
     pub fn assert_current_logical_size(timeline: &LayeredTimeline, lsn: Lsn) {
         let incremental = timeline.get_current_logical_size();
@@ -1671,8 +1683,8 @@ mod repo_tests {
     fn test_branch() -> Result<()> {
         let mut repo = RepoHarness::create("test_branch")?.load();
         let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
-        tline.init_logical_size()?;
         let writer = tline.writer();
+        tline.init_logical_size()?;
         use std::str::from_utf8;
 
         #[allow(non_snake_case)]
@@ -1720,7 +1732,7 @@ mod repo_tests {
         Ok(())
     }
 
-    fn make_some_layers<T: Timeline>(tline: &T, start_lsn: Lsn) -> Result<()> {
+    fn make_some_layers(tline: &LayeredTimeline, start_lsn: Lsn) -> Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -1876,24 +1888,6 @@ mod repo_tests {
 
         Ok(())
     }
-}
-
-///
-/// Tests that are specific to the layered storage format.
-///
-/// There are more unit tests in repository.rs that work through the
-/// Repository interface and are expected to work regardless of the
-/// file format and directory layout. The test here are more low level.
-///
-#[cfg(test)]
-pub mod tests {
-    use super::metadata::METADATA_FILE_NAME;
-    use super::repo_harness::*;
-    use super::*;
-    use crate::keyspace::KeySpaceAccum;
-    use crate::pgdatadir_mapping::create_test_timeline;
-    use crate::repository::{Key, Value};
-    use rand::{thread_rng, Rng};
 
     #[test]
     fn corrupt_metadata() -> Result<()> {
@@ -1933,22 +1927,13 @@ pub mod tests {
         Ok(())
     }
 
-    // Target file size in the unit tests. In production, the target
-    // file size is much larger, maybe 1 GB. But a small size makes it
-    // much faster to exercise all the logic for creating the files,
-    // garbage collection, compaction etc.
-    pub const TEST_FILE_SIZE: u64 = 4 * 1024 * 1024;
-
     #[test]
     fn test_images() -> Result<()> {
         let repo = RepoHarness::create("test_images")?.load();
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
-        #[allow(non_snake_case)]
-        let TEST_KEY: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
-
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -1956,7 +1941,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -1964,7 +1949,7 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -1972,18 +1957,18 @@ pub mod tests {
         tline.compact()?;
 
         let writer = tline.writer();
-        writer.put(TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
         tline.checkpoint(CheckpointConfig::Forced)?;
         tline.compact()?;
 
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x30))?, TEST_IMG("foo at 0x30"));
-        assert_eq!(tline.get(TEST_KEY, Lsn(0x40))?, TEST_IMG("foo at 0x40"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x10))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x1f))?, TEST_IMG("foo at 0x10"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x20))?, TEST_IMG("foo at 0x20"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x30))?, TEST_IMG("foo at 0x30"));
+        assert_eq!(tline.get(*TEST_KEY, Lsn(0x40))?, TEST_IMG("foo at 0x40"));
 
         Ok(())
     }
@@ -2013,7 +1998,6 @@ pub mod tests {
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
-                drop(writer);
 
                 keyspace.add_key(test_key);
 
@@ -2060,7 +2044,6 @@ pub mod tests {
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
-            drop(writer);
 
             keyspace.add_key(test_key);
         }

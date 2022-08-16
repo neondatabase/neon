@@ -33,6 +33,7 @@ use crate::layered_repository::{
     layer_map::{LayerMap, SearchResult},
     metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
     par_fsync,
+    remote_layer::RemoteLayer,
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
 
@@ -40,7 +41,8 @@ use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::pgdatadir_mapping::{BlockNumber, DatadirTimeline, LsnForTimestamp};
 use crate::reltag::RelTag;
-use crate::storage_sync::{index::IndexPart, index::RelativePath, RemoteTimelineClient};
+use crate::repository::TimelineWriter;
+use crate::storage_sync::{index::IndexPart, RemoteTimelineClient};
 use crate::tenant_config::TenantConfOpt;
 
 use postgres_ffi::xlog_utils::to_pg_timestamp;
@@ -51,7 +53,7 @@ use utils::{
 };
 
 use crate::page_cache;
-use crate::repository::{GcResult, Timeline, TimelineWriter};
+use crate::repository::{GcResult, PageReconstructError, Timeline};
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
@@ -161,6 +163,8 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
 pub struct LayeredTimeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
+
+    myself: std::sync::Weak<LayeredTimeline>,
 
     pub tenant_id: ZTenantId,
     pub timeline_id: ZTimelineId,
@@ -384,7 +388,7 @@ impl Timeline for LayeredTimeline {
     }
 
     /// Look up the value with the given a key
-    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
+    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -468,13 +472,6 @@ impl Timeline for LayeredTimeline {
         } else {
             None
         }
-    }
-
-    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
-        Box::new(LayeredTimelineWriter {
-            tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
-        })
     }
 
     fn get_physical_size(&self) -> u64 {
@@ -589,6 +586,7 @@ impl LayeredTimeline {
         let mut result = LayeredTimeline {
             conf,
             tenant_conf,
+            myself: std::sync::Weak::new(),
             timeline_id,
             tenant_id,
             layers: RwLock::new(LayerMap::default()),
@@ -640,10 +638,23 @@ impl LayeredTimeline {
         };
         result.repartition_threshold = result.get_checkpoint_distance() / 10;
 
-        Arc::new(result)
+        let arc = Arc::new(result);
+        let weak_arc = Arc::downgrade(&arc);
+
+        {
+            // Raw IMMUTABLE pointer to the struct
+            let ptr = Arc::as_ptr(&arc);
+            // Unsafely coerce it to MUTABLE
+            unsafe {
+                let mut_ptr: *mut Self = std::mem::transmute(ptr);
+                (*mut_ptr).myself = weak_arc;
+            };
+        }
+
+        arc
     }
 
-    pub fn launch_wal_receiver(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn launch_wal_receiver(&self) -> anyhow::Result<()> {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
@@ -661,7 +672,7 @@ impl LayeredTimeline {
         drop(tenant_conf_guard);
         let walreceiver = spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
-            Arc::clone(self),
+            self.myself.upgrade().unwrap(),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
@@ -758,7 +769,7 @@ impl LayeredTimeline {
     /// (Re-)calculate the logical size of the database at the latest LSN.
     ///
     /// This can be a slow operation.
-    pub fn init_logical_size(&self) -> Result<()> {
+    pub fn init_logical_size(&self) -> Result<(), PageReconstructError> {
         // Try a fast-path first:
         // Copy logical size from ancestor timeline if there has been no changes on this
         // branch, and no changes on the ancestor branch since the branch point.
@@ -783,7 +794,14 @@ impl LayeredTimeline {
 
         // Have to calculate it the hard way
         let last_lsn = self.get_last_record_lsn();
-        let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
+        let logical_size = match self.get_current_logical_size_non_incremental(last_lsn) {
+            Ok(sz) => sz,
+            Err(err) => {
+                error!("GOT ERR: {:?}", err);
+                return Err(err);
+            }
+        };
+        //let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
         self.current_logical_size
             .store(logical_size as isize, AtomicOrdering::SeqCst);
         debug!("calculated logical size the hard way: {}", logical_size);
@@ -820,7 +838,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -932,6 +950,18 @@ impl LayeredTimeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
+                if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
+                    info!("need remote layer {}", remote_layer.filename().display());
+                    let tl = timeline.myself.upgrade().unwrap();
+
+                    let future = tl.download_remote_layer(Arc::clone(&remote_layer));
+
+                    let dynfuture: std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<()>> + Send + Sync>,
+                    > = Box::pin(future);
+                    return Err(PageReconstructError::NeedDownload(dynfuture));
+                }
+
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
                 result = layer.get_value_reconstruct_data(
                     key,
@@ -987,7 +1017,7 @@ impl LayeredTimeline {
 
         let remote_consistent_lsn = remote_metadata.disk_consistent_lsn();
 
-        let mut downloaded_physical_size = 0;
+        //let mut downloaded_physical_size = 0;
 
         // Build a map of local layers for quick lookups
         let mut local_filenames: HashSet<PathBuf> = HashSet::new();
@@ -1020,18 +1050,14 @@ impl LayeredTimeline {
                     continue;
                 }
 
-                remote_client
-                    .download_layer_file(&RelativePath::from_local_path(&PathBuf::from(""), path)?)
-                    .await?;
+                let remote_layer =
+                    RemoteLayer::new_img(self.tenant_id, self.timeline_id, &imgfilename);
 
-                let layer =
-                    ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
-
-                downloaded_physical_size += layer.path().metadata()?.len();
+                // FIXME: when to update physical size?
                 self.layers
                     .write()
                     .unwrap()
-                    .insert_historic(Arc::new(layer));
+                    .insert_historic(Arc::new(remote_layer));
             } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
@@ -1047,25 +1073,21 @@ impl LayeredTimeline {
                     continue;
                 }
 
-                remote_client
-                    .download_layer_file(&RelativePath::from_local_path(&PathBuf::from(""), path)?)
-                    .await?;
+                let remote_layer =
+                    RemoteLayer::new_delta(self.tenant_id, self.timeline_id, &deltafilename);
 
-                let layer =
-                    DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
-
-                downloaded_physical_size += layer.path().metadata()?.len();
+                // FIXME: when to update physical size?
                 self.layers
                     .write()
                     .unwrap()
-                    .insert_historic(Arc::new(layer));
+                    .insert_historic(Arc::new(remote_layer));
             } else {
                 bail!("unexpected layer filename in remote storage: {}", fname);
             }
         }
 
-        self.current_physical_size_gauge
-            .add(downloaded_physical_size);
+        //self.current_physical_size_gauge
+        //    .add(downloaded_physical_size);
 
         remote_client.init_queue(
             &index_part.timeline_layers,
@@ -1188,6 +1210,13 @@ impl LayeredTimeline {
         Ok(layer)
     }
 
+    pub fn writer(&self) -> LayeredTimelineWriter {
+        LayeredTimelineWriter {
+            tl: self,
+            _write_guard: self.write_lock.lock().unwrap(),
+        }
+    }
+
     fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
@@ -1238,7 +1267,7 @@ impl LayeredTimeline {
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated
     /// in the in-memory layer, and initiate flushing it if so.
     ///
-    pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
+    pub fn check_checkpoint_distance(&self) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
@@ -1267,7 +1296,7 @@ impl LayeredTimeline {
                 // in flush_frozen_layers())
                 if let Ok(guard) = self.layer_flush_lock.try_lock() {
                     drop(guard);
-                    let self_clone = Arc::clone(self);
+                    let self_clone = self.myself.upgrade().unwrap();
                     thread_mgr::spawn(
                         thread_mgr::ThreadKind::LayerFlushThread,
                         Some(self.tenant_id),
@@ -1338,6 +1367,7 @@ impl LayeredTimeline {
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
                 let (partitioning, _lsn) =
                     self.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
+                // Since we have just imported it, should not require downloading anything.
                 self.create_image_layers(&partitioning, self.initdb_lsn, true)?
             } else {
                 // normal case, write out a L0 delta layer file.
@@ -1622,6 +1652,7 @@ impl LayeredTimeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
+                        // FIXME: download if needed
                         let img = self.get(key, lsn)?;
                         image_layer_writer.put_image(key, &img)?;
                         key = key.next();
@@ -1721,38 +1752,40 @@ impl LayeredTimeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = deltas_to_compact
-            .iter()
-            .map(|l| l.iter())
-            .kmerge_by(|a, b| {
-                if let Ok((a_key, a_lsn, _)) = a {
-                    if let Ok((b_key, b_lsn, _)) = b {
-                        match a_key.cmp(b_key) {
-                            Ordering::Less => true,
-                            Ordering::Equal => a_lsn <= b_lsn,
-                            Ordering::Greater => false,
+        let all_values_iter =
+            itertools::process_results(deltas_to_compact.iter().map(|l| l.iter()), |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    if let Ok((a_key, a_lsn, _)) = a {
+                        if let Ok((b_key, b_lsn, _)) = b {
+                            match a_key.cmp(b_key) {
+                                Ordering::Less => true,
+                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Greater => false,
+                            }
+                        } else {
+                            false
                         }
                     } else {
-                        false
+                        true
                     }
-                } else {
-                    true
-                }
-            });
+                })
+            })?;
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = deltas_to_compact
-            .iter()
-            .map(|l| l.key_iter())
-            .kmerge_by(|a, b| {
-                let (a_key, a_lsn, _) = a;
-                let (b_key, b_lsn, _) = b;
-                match a_key.cmp(b_key) {
-                    Ordering::Less => true,
-                    Ordering::Equal => a_lsn <= b_lsn,
-                    Ordering::Greater => false,
-                }
-            });
+        let mut all_keys_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.key_iter()),
+            |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    let (a_key, a_lsn, _) = a;
+                    let (b_key, b_lsn, _) = b;
+                    match a_key.cmp(b_key) {
+                        Ordering::Less => true,
+                        Ordering::Equal => a_lsn <= b_lsn,
+                        Ordering::Greater => false,
+                    }
+                })
+            },
+        )?;
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -1914,7 +1947,7 @@ impl LayeredTimeline {
                 layer_paths_to_delete.insert(path);
             }
             l.delete()?;
-            layers.remove_historic(Arc::clone(l));
+            layers.remove_historic(l);
         }
         drop(layers);
 
@@ -2166,7 +2199,7 @@ impl LayeredTimeline {
                 layer_paths_to_delete.insert(path);
             }
             doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer);
+            layers.remove_historic(&doomed_layer);
             result.layers_removed += 1;
         }
 
@@ -2188,7 +2221,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
-    ) -> Result<Bytes> {
+    ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
 
@@ -2202,7 +2235,11 @@ impl LayeredTimeline {
                 );
                 Ok(img.clone())
             } else {
-                bail!("base image for {} at {} not found", key, request_lsn);
+                Err(PageReconstructError::Other(anyhow!(
+                    "base image for {} at {} not found",
+                    key,
+                    request_lsn
+                )))
             }
         } else {
             // We need to do WAL redo.
@@ -2210,12 +2247,12 @@ impl LayeredTimeline {
             // If we don't have a base image, then the oldest WAL record better initialize
             // the page
             if data.img.is_none() && !data.records.first().unwrap().1.will_init() {
-                bail!(
+                Err(PageReconstructError::Other(anyhow!(
                     "Base image for {} at {} not found, but got {} WAL records",
                     key,
                     request_lsn,
                     data.records.len()
-                );
+                )))
             } else {
                 let base_img = if let Some((_lsn, img)) = data.img {
                     trace!(
@@ -2251,6 +2288,62 @@ impl LayeredTimeline {
             }
         }
     }
+
+    pub async fn download_remote_layer(
+        self: Arc<Self>,
+        remote_layer: Arc<RemoteLayer>,
+    ) -> Result<()> {
+        let s = Arc::clone(&self);
+        let remote_layer = Arc::clone(&remote_layer);
+
+        let mut receiver = {
+            let mut download_watch = remote_layer.download_watch.lock().unwrap();
+            if let Some(sender) = &*download_watch {
+                info!(
+                    "download of layer {} has already started, waiting",
+                    remote_layer.filename().display()
+                );
+                sender.subscribe()
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(Ok(()));
+                *download_watch = Some(sender);
+
+                // need to spawn, because the future returned by download_layer_file is not Sync
+                let remote_layer = Arc::clone(&remote_layer);
+
+                // FIXME: spawn in different runtime?
+                tokio::spawn(async move {
+                    let remote_client = s.remote_client.as_ref().unwrap();
+                    let result = remote_client.download_layer_file(&remote_layer.path).await;
+
+                    let new_layer = remote_layer.download_finished(self.conf);
+
+                    let mut layers = self.layers.write().unwrap();
+                    let l: Arc<dyn Layer> = remote_layer.clone();
+                    layers.remove_historic(&l);
+                    layers.insert_historic(new_layer);
+                    drop(layers);
+
+                    if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
+                        let _ = sender.send_replace(result);
+                    }
+                });
+                receiver
+            }
+        };
+
+        receiver.changed().await?;
+
+        let x = receiver.borrow();
+        match x.as_ref() {
+            Ok(_) => Ok(()),
+            Err(err) => Err(anyhow!(
+                "could not download layer file {}: {:?}",
+                remote_layer.filename().display(),
+                err
+            )),
+        }
+    }
 }
 
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
@@ -2258,7 +2351,7 @@ impl LayeredTimeline {
 fn layer_traversal_error(
     msg: String,
     path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(), PageReconstructError> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
@@ -2276,23 +2369,24 @@ fn layer_traversal_error(
     let err = anyhow!(msg_iter.next().unwrap());
 
     // Append all subsequent traversals, and the error message 'msg', as contexts.
-    Err(msg_iter.fold(err, |err, msg| err.context(msg)))
+    let msg = msg_iter.fold(err, |err, msg| err.context(msg));
+    Err(PageReconstructError::Other(msg))
 }
 
-struct LayeredTimelineWriter<'a> {
+pub struct LayeredTimelineWriter<'a> {
     tl: &'a LayeredTimeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
 impl Deref for LayeredTimelineWriter<'_> {
-    type Target = dyn Timeline;
+    type Target = LayeredTimeline;
 
     fn deref(&self) -> &Self::Target {
         self.tl
     }
 }
 
-impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
+impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
     fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
@@ -2393,9 +2487,19 @@ pub fn save_metadata(
 
 /// Delete the metadata file.
 pub fn delete_metadata(
-    _conf: &'static PageServerConf,
-    _timelineid: ZTimelineId,
-    _tenantid: ZTenantId,
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
 ) -> Result<()> {
-    todo!()
+    let path = metadata_path(conf, timelineid, tenantid);
+    fs::remove_file(&path)?;
+
+    // fsync the parent directory to ensure the removal is durable
+    let timeline_dir = File::open(
+        &path
+            .parent()
+            .expect("Metadata should always have a parent dir"),
+    )?;
+    timeline_dir.sync_all()?;
+    Ok(())
 }

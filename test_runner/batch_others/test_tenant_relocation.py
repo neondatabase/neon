@@ -32,7 +32,7 @@ def assert_tenant_active(
     tenant: UUID,
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
-    log.info(f"KRAAH: {tenant_status}")
+    log.info(f"tenant status: {tenant_status}")
     assert tenant_status['state'] == 'Active', tenant_status
 
 
@@ -248,6 +248,12 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
     env = neon_env_builder.init_start()
 
+    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
+    # Create a tenant after bootstrapping and use that instead.
+    # See https://github.com/neondatabase/neon/pull/2272
+    tenant, _ = env.neon_cli.create_tenant()
+    env.initial_tenant = tenant
+
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
 
@@ -385,7 +391,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
             assert tenant_status['state'] == 'Attaching'
 
             # wait until tenant is downloaded
-            wait_until(number_of_iterations=10,
+            wait_until(number_of_iterations=100,
                        interval=1,
                        func=lambda: assert_tenant_active(new_pageserver_http, tenant_id))
 

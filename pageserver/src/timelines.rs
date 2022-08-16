@@ -120,12 +120,12 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
 //
-fn bootstrap_timeline<R: Repository>(
+fn bootstrap_timeline(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
-    repo: &R,
-) -> Result<Arc<R::Timeline>> {
+    repo: &RepositoryImpl,
+) -> Result<Arc<TimelineImpl>> {
     let initdb_path = conf
         .tenant_path(&tenantid)
         .join(format!("tmp-timeline-{}", tli));

@@ -18,6 +18,7 @@ use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
+
 use std::ops::Range;
 use std::sync::Arc;
 use tracing::*;
@@ -185,7 +186,7 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn remove_historic(&mut self, layer: &Arc<dyn Layer>) {
         let len_before = self.historic_layers.len();
 
         // FIXME: ptr_eq might fail to return true for 'dyn'
@@ -194,7 +195,7 @@ impl LayerMap {
         // otherwise but this ought to be fixed.
         #[allow(clippy::vtable_address_comparisons)]
         self.historic_layers
-            .retain(|other| !Arc::ptr_eq(other, &layer));
+            .retain(|other| !Arc::ptr_eq(other, layer));
 
         assert_eq!(self.historic_layers.len(), len_before - 1);
         NUM_ONDISK_LAYERS.dec();

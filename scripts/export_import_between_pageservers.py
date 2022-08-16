@@ -314,15 +314,9 @@ def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
                           timeline: uuid.UUID) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail['remote'] is None:
-        # No remote information at all. This happens right after creating
-        # a timeline, before any part of it has been uploaded to remote
-        # storage yet.
-        return 0
-    else:
-        lsn_str = detail['remote']['remote_consistent_lsn']
-        assert isinstance(lsn_str, str)
-        return lsn_from_hex(lsn_str)
+    lsn_str = detail['remote_consistent_lsn']
+    assert isinstance(lsn_str, str)
+    return lsn_from_hex(lsn_str)
 
 
 def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,

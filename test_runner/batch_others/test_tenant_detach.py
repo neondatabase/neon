@@ -1,20 +1,30 @@
 from threading import Thread
-from uuid import uuid4
-import uuid
+from uuid import uuid4, UUID
 import psycopg2
 import pytest
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException, NeonPageserverHttpClient, wait_until
 
 
-def do_gc_target(env: NeonEnv, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+
+def do_gc_target(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
         env.pageserver.safe_psql(f'do_gc {tenant_id.hex} {timeline_id.hex} 0')
     except Exception as e:
         log.error("do_gc failed: %s", e)
 
+def check_tenant_exists(
+    pageserver_http_client: NeonPageserverHttpClient,
+    tenant_id: UUID,
+):
+    log.info(f"polling")
+    with pytest.raises(expected_exception=NeonPageserverApiException,
+                       match=f'Tenant {tenant_id.hex} not found'):
+        tenant_status = pageserver_http_client.tenant_status(tenant_id)
+        log.info(f"tenant status: {tenant_status}")
+        raise "still running"
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
@@ -63,6 +73,11 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         pytest.fail(f"could not detach timeline: {last_error}")
 
     gc_thread.join(timeout=10)
+
+    # Wait for the detach operation to finish
+    wait_until(number_of_iterations=300,
+               interval=0.1,
+               func=lambda: check_tenant_exists(pageserver_http, tenant_id))
 
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / tenant_id.hex).exists()

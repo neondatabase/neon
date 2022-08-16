@@ -11,7 +11,7 @@ use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Timeline;
 use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::xlog_utils::TimestampTz;
 use postgres_ffi::{pg_constants, Oid, TransactionId};
@@ -91,8 +91,15 @@ pub trait DatadirTimeline: Timeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    fn get_rel_page_at_lsn(
+        &self,
+        tag: RelTag,
+        blknum: BlockNumber,
+        lsn: Lsn,
+    ) -> Result<Bytes, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         let nblocks = self.get_rel_size(tag, lsn)?;
         if blknum >= nblocks {
@@ -108,7 +115,12 @@ pub trait DatadirTimeline: Timeline {
     }
 
     // Get size of a database in blocks
-    fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+    fn get_db_size(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
         let rels = self.list_rels(spcnode, dbnode, lsn)?;
@@ -121,8 +133,10 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get size of a relation file
-    fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
             return Ok(nblocks);
@@ -149,8 +163,10 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Does relation exist?
-    fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(anyhow!("invalid relnode").into());
+        }
 
         // first try to lookup relation in cache
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -159,7 +175,7 @@ pub trait DatadirTimeline: Timeline {
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
 
         let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
 
@@ -167,11 +183,16 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    fn list_rels(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = self.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let dir = RelDirectory::des(&buf).context("deserialization failure")?;
 
         let rels: HashSet<RelTag> =
             HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
@@ -191,24 +212,34 @@ pub trait DatadirTimeline: Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes> {
+    ) -> Result<Bytes, PageReconstructError> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn)
     }
 
     /// Get size of an SLRU segment
-    fn get_slru_segment_size(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<BlockNumber> {
+    fn get_slru_segment_size(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+    ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = self.get(key, lsn)?;
         Ok(buf.get_u32_le())
     }
 
     /// Get size of an SLRU segment
-    fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
+    fn get_slru_segment_exists(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+    ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
         let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
 
         let exists = dir.segments.get(&segno).is_some();
         Ok(exists)
@@ -221,7 +252,10 @@ pub trait DatadirTimeline: Timeline {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
-    fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
+    fn find_lsn_for_timestamp(
+        &self,
+        search_timestamp: TimestampTz,
+    ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
         let max_lsn = self.get_last_record_lsn();
@@ -290,7 +324,7 @@ pub trait DatadirTimeline: Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-    ) -> Result<bool> {
+    ) -> Result<bool, PageReconstructError> {
         for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
             let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
             for blknum in (0..nblocks).rev() {
@@ -315,50 +349,66 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get a list of SLRU segments
-    fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
+    fn list_slru_segments(
+        &self,
+        kind: SlruKind,
+        lsn: Lsn,
+    ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
         let buf = self.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.segments)
     }
 
-    fn get_relmap_file(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<Bytes> {
+    fn get_relmap_file(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        lsn: Lsn,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
+    fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn)?;
-        let dir = DbDirectory::des(&buf)?;
+        let dir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.dbdirs)
     }
 
-    fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
+    fn get_twophase_file(
+        &self,
+        xid: TransactionId,
+        lsn: Lsn,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = twophase_file_key(xid);
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    fn list_twophase_files(&self, lsn: Lsn) -> Result<HashSet<TransactionId>> {
+    fn list_twophase_files(
+        &self,
+        lsn: Lsn,
+    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let dir = TwoPhaseDirectory::des(&buf)?;
+        let dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
 
         Ok(dir.xids)
     }
 
-    fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
+    fn get_control_file(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
+    fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -367,10 +417,13 @@ pub trait DatadirTimeline: Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
+    fn get_current_logical_size_non_incremental(
+        &self,
+        lsn: Lsn,
+    ) -> Result<usize, PageReconstructError> {
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut total_size: usize = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -389,7 +442,7 @@ pub trait DatadirTimeline: Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
+    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace, PageReconstructError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -398,7 +451,7 @@ pub trait DatadirTimeline: Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -431,7 +484,7 @@ pub trait DatadirTimeline: Timeline {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
             let buf = self.get(slrudir_key, lsn)?;
-            let dir = SlruSegmentDirectory::des(&buf)?;
+            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
@@ -449,7 +502,7 @@ pub trait DatadirTimeline: Timeline {
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
         let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {
@@ -496,7 +549,7 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     pending_nblocks: isize,
 }
 
-impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
+impl<'a> DatadirModification<'a, crate::TimelineImpl> {
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -943,7 +996,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
 
     // Internal helper functions to batch the modifications
 
-    fn get(&self, key: Key) -> Result<Bytes> {
+    fn get(&self, key: Key) -> Result<Bytes, PageReconstructError> {
         // Have we already updated the same key? Read the pending updated
         // version in that case.
         //
@@ -958,7 +1011,7 @@ impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
                 // work directly with Images, and we never need to read actual
                 // data pages. We could handle this if we had to, by calling
                 // the walredo manager, but let's keep it simple for now.
-                bail!("unexpected pending WAL record");
+                return Err(anyhow!("unexpected pending WAL record").into());
             }
         } else {
             let last_lsn = self.tline.get_last_record_lsn();
@@ -1361,10 +1414,10 @@ fn is_slru_block_key(key: Key) -> bool {
 //
 
 #[cfg(test)]
-pub fn create_test_timeline<R: Repository>(
-    repo: &mut R,
+pub fn create_test_timeline(
+    repo: &mut crate::RepositoryImpl,
     timeline_id: utils::zid::ZTimelineId,
-) -> Result<std::sync::Arc<R::Timeline>> {
+) -> Result<std::sync::Arc<crate::TimelineImpl>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;

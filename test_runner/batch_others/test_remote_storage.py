@@ -49,7 +49,8 @@ def test_remote_storage_backup_and_restore(
     env = neon_env_builder.init_start()
 
     # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead 
+    # Create a tenant after bootstrapping and use that instead.
+    # See https://github.com/neondatabase/neon/pull/2272
     tenant, _ = env.neon_cli.create_tenant()
     env.initial_tenant = tenant
 

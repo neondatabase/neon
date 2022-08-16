@@ -210,6 +210,7 @@ pub fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<RepositoryI
 pub fn detach_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
     let repo = get_tenant(tenant_id)?;
     let task = repo.spawn_detach()?;
+    drop(repo);
 
     // FIXME: Should we go ahead and remove the tenant anyway, if detaching fails? It's a bit
     // annoying if a tenant gets wedged so that you can't even detach it. OTOH, it's scary

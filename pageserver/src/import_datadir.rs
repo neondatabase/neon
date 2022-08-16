@@ -13,8 +13,10 @@ use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::repository::TimelineWriter;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
+use crate::TimelineImpl;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::*;
 use postgres_ffi::xlog_utils::*;
@@ -28,9 +30,9 @@ use utils::lsn::Lsn;
 /// This is currently only used to import a cluster freshly created by initdb.
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
-pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
+pub fn import_timeline_from_postgres_datadir(
     path: &Path,
-    tline: &T,
+    tline: &TimelineImpl,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
@@ -88,8 +90,8 @@ pub fn import_timeline_from_postgres_datadir<T: DatadirTimeline>(
 }
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
-fn import_rel<T: DatadirTimeline, Reader: Read>(
-    modification: &mut DatadirModification<T>,
+fn import_rel<Reader: Read>(
+    modification: &mut DatadirModification<TimelineImpl>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
@@ -168,8 +170,8 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
 
 /// Import an SLRU segment file
 ///
-fn import_slru<T: DatadirTimeline, Reader: Read>(
-    modification: &mut DatadirModification<T>,
+fn import_slru<Reader: Read>(
+    modification: &mut DatadirModification<TimelineImpl>,
     slru: SlruKind,
     path: &Path,
     mut reader: Reader,
@@ -224,12 +226,7 @@ fn import_slru<T: DatadirTimeline, Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal<T: DatadirTimeline>(
-    walpath: &Path,
-    tline: &T,
-    startpoint: Lsn,
-    endpoint: Lsn,
-) -> Result<()> {
+fn import_wal(walpath: &Path, tline: &TimelineImpl, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
@@ -295,8 +292,8 @@ fn import_wal<T: DatadirTimeline>(
     Ok(())
 }
 
-pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
-    tline: &T,
+pub fn import_basebackup_from_tar<Reader: Read>(
+    tline: &TimelineImpl,
     reader: Reader,
     base_lsn: Lsn,
 ) -> Result<()> {
@@ -337,8 +334,8 @@ pub fn import_basebackup_from_tar<T: DatadirTimeline, Reader: Read>(
     Ok(())
 }
 
-pub fn import_wal_from_tar<T: DatadirTimeline, Reader: Read>(
-    tline: &T,
+pub fn import_wal_from_tar<Reader: Read>(
+    tline: &TimelineImpl,
     reader: Reader,
     start_lsn: Lsn,
     end_lsn: Lsn,
@@ -418,8 +415,8 @@ pub fn import_wal_from_tar<T: DatadirTimeline, Reader: Read>(
     Ok(())
 }
 
-pub fn import_file<T: DatadirTimeline, Reader: Read>(
-    modification: &mut DatadirModification<T>,
+pub fn import_file<Reader: Read>(
+    modification: &mut DatadirModification<TimelineImpl>,
     file_path: &Path,
     reader: Reader,
     len: usize,
