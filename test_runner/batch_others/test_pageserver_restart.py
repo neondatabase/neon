@@ -2,16 +2,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
 
 
-# Test that the pageserver fixture is implemented correctly, allowing quick restarts.
-# This is a regression test, see https://github.com/neondatabase/neon/issues/2247
-def test_fixture_restart(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-
-    for i in range(3):
-        env.pageserver.stop()
-        env.pageserver.start()
-
-
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):

@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -241,37 +240,23 @@ impl SafekeeperNode {
             ),
         }
 
-        let address = connection_address(&self.pg_connection_config);
-
-        // TODO Remove this "timeout" and handle it on caller side instead.
-        // Shutting down may take a long time,
-        // if safekeeper flushes a lot of data
-        let mut tcp_stopped = false;
+        // Wait until process is gone
         for i in 0..600 {
-            if !tcp_stopped {
-                if let Err(err) = TcpStream::connect(&address) {
-                    tcp_stopped = true;
-                    if err.kind() != io::ErrorKind::ConnectionRefused {
-                        eprintln!("\nSafekeeper connection failed with error: {err}");
-                    }
+            let signal = None; // Send no signal, just get the error code
+            match kill(pid, signal) {
+                Ok(_) => (), // Process exists, keep waiting
+                Err(Errno::ESRCH) => {
+                    // Process not found, we're done
+                    println!("done!");
+                    return Ok(());
                 }
-            }
-            if tcp_stopped {
-                // Also check status on the HTTP port
-                match self.check_status() {
-                    Err(SafekeeperHttpError::Transport(err)) if err.is_connect() => {
-                        println!("done!");
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        eprintln!("\nSafekeeper status check failed with error: {err}");
-                        return Ok(());
-                    }
-                    Ok(()) => {
-                        // keep waiting
-                    }
-                }
-            }
+                Err(err) => bail!(
+                    "Failed to send signal to pageserver with pid {}: {}",
+                    pid,
+                    err.desc()
+                ),
+            };
+
             if i % 10 == 0 {
                 print!(".");
                 io::stdout().flush().unwrap();
