@@ -80,12 +80,12 @@ pub fn XLogSegNoOffsetToRecPtr(
 
 #[allow(non_snake_case)]
 pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize) -> String {
-    return format!(
+    format!(
         "{:>08X}{:>08X}{:>08X}",
         tli,
         logSegNo / XLogSegmentsPerXLogId(wal_segsz_bytes),
         logSegNo % XLogSegmentsPerXLogId(wal_segsz_bytes)
-    );
+    )
 }
 
 #[allow(non_snake_case)]

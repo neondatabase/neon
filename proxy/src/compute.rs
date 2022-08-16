@@ -66,7 +66,7 @@ impl NodeInfo {
         let mut connection_error = None;
         let ports = self.config.get_ports();
         for (i, host) in self.config.get_hosts().iter().enumerate() {
-            let port = ports.get(i).or_else(|| ports.get(0)).unwrap_or(&5432);
+            let port = ports.get(i).or_else(|| ports.first()).unwrap_or(&5432);
             let host = match host {
                 Host::Tcp(host) => host.as_str(),
                 Host::Unix(_) => continue, // unix sockets are not welcome here

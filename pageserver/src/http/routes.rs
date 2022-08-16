@@ -167,7 +167,7 @@ fn local_timeline_info_from_repo_timeline(
 ) -> anyhow::Result<LocalTimelineInfo> {
     match repo_timeline {
         RepositoryTimeline::Loaded(timeline) => local_timeline_info_from_loaded_timeline(
-            &*timeline,
+            timeline,
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,
         ),

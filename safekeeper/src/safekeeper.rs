@@ -127,7 +127,7 @@ impl AcceptorState {
 
 /// Information about Postgres. Safekeeper gets it once and then verifies
 /// all further connections from computes match.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     /// Postgres server version
     pub pg_version: u32,
