@@ -230,7 +230,9 @@ jobs:
 
   other-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ build-neon ]
     strategy:
       fail-fast: false
