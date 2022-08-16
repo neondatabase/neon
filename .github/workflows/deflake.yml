@@ -39,7 +39,9 @@ env:
 jobs:
   deflake:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
 
     steps:
       - name: Checkout
