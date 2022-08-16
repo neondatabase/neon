@@ -279,7 +279,7 @@ impl PageServerNode {
     ///
     /// If the server is not running, returns success
     ///
-    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
+    pub fn stop(&self, _immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
             println!("Pageserver is already stopped");
@@ -287,13 +287,16 @@ impl PageServerNode {
         }
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
-        let sig = if immediate {
-            print!("Stopping pageserver immediately..");
-            Signal::SIGQUIT
-        } else {
-            print!("Stopping pageserver gracefully..");
-            Signal::SIGTERM
-        };
+        // let sig = if immediate {
+        //     print!("Stopping pageserver immediately..");
+        //     Signal::SIGQUIT
+        // } else {
+        //     print!("Stopping pageserver gracefully..");
+        //     Signal::SIGTERM
+        // };
+
+        let sig = Signal::SIGKILL;
+
         io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
@@ -312,13 +315,20 @@ impl PageServerNode {
         }
 
         // Wait until process is gone
-        for i in 0..600 {
-            // ESRCH: No process or process group can be found corresponding to
-            //        that specified by pid.
-            if let Err(Errno::ESRCH) = kill(pid, None) {
-                println!("done!");
-                return Ok(());
-            }
+        for i in 0..1000 {
+            match kill(pid, sig) {
+                Ok(_) => (),
+                Err(Errno::ESRCH) => {
+                    // Process not found, we're done
+                    println!("done!");
+                    return Ok(());
+                }
+                Err(err) => bail!(
+                    "Failed to send signal to pageserver with pid {}: {}",
+                    pid,
+                    err.desc()
+                ),
+            };
 
             if i % 10 == 0 {
                 print!(".");
