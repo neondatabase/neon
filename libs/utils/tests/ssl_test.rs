@@ -30,6 +30,9 @@ static CERT: Lazy<rustls::Certificate> = Lazy::new(|| {
 });
 
 #[test]
+// [false-positive](https://github.com/rust-lang/rust-clippy/issues/9274),
+// we resize the vector so doing some modifications after all
+#[allow(clippy::read_zero_byte_vec)]
 fn ssl() {
     let (mut client_sock, server_sock) = make_tcp_pair();
 

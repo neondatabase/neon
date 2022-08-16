@@ -18,7 +18,7 @@ pub const XLOG_BLCKSZ: u32 = 8192;
 pub struct Lsn(pub u64);
 
 /// We tried to parse an LSN from a string, but failed
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("LsnParseError")]
 pub struct LsnParseError;
 
