@@ -19,10 +19,10 @@ env:
 jobs:
   tag:
     runs-on: dev
-    environment: dev
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
+    steps:
       - name: Get build tag
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
