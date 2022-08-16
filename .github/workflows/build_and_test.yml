@@ -7,10 +7,6 @@ on:
       - release
   pull_request:
 
-defaults:
-  run:
-    shell: bash -euxo pipefail {0}
-
 concurrency:
   # Allow only one workflow per any non-`main` branch.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
@@ -23,7 +19,7 @@ env:
 jobs:
   build-neon:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +31,7 @@ jobs:
       GIT_VERSION: ${{ github.sha }}
 
     steps:
-      - name: Fix git ownerwhip
+      - name: Fix git ownership
         run: |
           # Workaround for `fatal: detected dubious ownership in repository at ...`
           #
@@ -54,6 +50,7 @@ jobs:
       - name: Set pg revision for caching
         id: pg_ver
         run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+        shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
       #
@@ -77,6 +74,7 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+        shell: bash -euxo pipefail {0}
 
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
@@ -93,8 +91,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+            v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
       - name: Cache postgres build
         id: cache_pg
@@ -106,14 +104,17 @@ jobs:
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: mold -run make postgres -j$(nproc)
+        shell: bash -euxo pipefail {0}
 
       - name: Run cargo build
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
+        shell: bash -euxo pipefail {0}
 
       - name: Run cargo test
         run: |
           ${cov_prefix} cargo test $CARGO_FLAGS
+        shell: bash -euxo pipefail {0}
 
       - name: Install rust binaries
         run: |
@@ -154,9 +155,11 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
+        shell: bash -euxo pipefail {0}
 
       - name: Install postgres binaries
         run: cp -a tmp_install /tmp/neon/pg_install
+        shell: bash -euxo pipefail {0}
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
@@ -171,7 +174,7 @@ jobs:
 
   pg_regress-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -199,7 +202,7 @@ jobs:
 
   other-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -230,7 +233,7 @@ jobs:
 
   benchmarks:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
@@ -261,7 +264,7 @@ jobs:
 
   coverage-report:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2746987948
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -284,7 +287,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git/
             target/
-          key: v3-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+          key: v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -300,6 +303,7 @@ jobs:
 
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
+        shell: bash -euxo pipefail {0}
 
       - name: Build and upload coverage report
         run: |
@@ -332,9 +336,11 @@ jobs:
               \"description\": \"Coverage report is ready\",
               \"target_url\": \"$REPORT_URL\"
             }"
+        shell: bash -euxo pipefail {0}
 
   trigger-e2e-tests:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
     needs: [ build-neon ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
@@ -369,32 +375,111 @@ jobs:
               }
             }"
 
-  docker-image:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ pg_regress-tests, other-tests ]
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
+  dockerfile-check:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
+      value: ${{ steps.dockerfile-check.outputs.any_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+
+      - name: Get specific changed files
+        id: dockerfile-check
+        uses: tj-actions/changed-files@802732316a11c01531ea72773ec7998155238e31 # v25
+        with:
+          files: |
+            Dockerfile
+            Dockerfile.compute-tools
+            ./vendor/postgres/Dockerfile
+
+  neon-image:
+    # force building for all 3 images
+    if: needs.dockerfile-check.outputs.value != 'true'
+    runs-on: dev
+    needs: [ dockerfile-check ]
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-        with:
-          driver: docker
+      - name: Kaniko build console
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID
 
+  compute-tools-image:
+    if: needs.dockerfile-check.outputs.value != 'true'
+    runs-on: dev
+    needs: [ dockerfile-check ]
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build console
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
+
+  compute-node-image:
+    if: needs.dockerfile-check.outputs.value != 'true'
+    runs-on: dev
+    needs: [ dockerfile-check ]
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build console
+        working-directory: ./vendor/postgres/
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+
+  promote-images:
+    runs-on: dev
+    needs: [ neon-image, compute-tools-image, compute-node-image ]
+    if: github.event_name != 'workflow_dispatch'
+    container: amazon/aws-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [ neon, compute-tools, compute-node ]
+
+    steps:
+      - name: Promote image to latest
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
+
+  push-docker-hub:
+    runs-on: dev
+    needs: [ promote-images ]
+    container: golang:1.19-bullseye
+    environment: dev
+
+    steps:
+      - name: Install Crane & ECR helper
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
+          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
+          
       - name: Get build tag
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -402,117 +487,48 @@ jobs:
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
           else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
+            echo "::set-output name=tag::$GITHUB_RUN_ID"
           fi
         id: build-tag
 
-      - name: Get legacy build tag
+      - name: Configure ECR login
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::latest"
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release"
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
-        id: legacy-build-tag
+          mkdir /github/home/.docker/
+          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
-      - name: Build neon Docker image
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          build-args: |
-            GIT_VERSION="${{github.sha}}"
-            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-          pull: true
-          push: true
-          tags: neondatabase/neon:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/neon:${{steps.build-tag.outputs.tag}}
+      - name: Pull neon image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:latest neon
 
-  docker-image-compute:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    needs: [ pg_regress-tests, other-tests ]
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
-    outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+      - name: Pull compute tools image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest compute-tools
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      - name: Pull compute node image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest compute-node
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-        with:
-          driver: docker
-
-      - name: Get build tag
+      - name: Configure docker login
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
-        id: build-tag
+          # ECR Credential Helper & Docker Hub don't work together in config, hence reset
+          echo "" > /github/home/.docker/config.json
+          crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
-      - name: Get legacy build tag
+      - name: Push neon image to Docker Hub
+        run: crane push neon neondatabase/neon:${{steps.build-tag.outputs.tag}}
+
+      - name: Push compute tools image to Docker Hub
+        run: crane push compute-tools neondatabase/compute-tools:${{steps.build-tag.outputs.tag}}
+
+      - name: Push compute node image to Docker Hub
+        run: crane push compute-node neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
+
+      - name: Add latest tag to images
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::latest"
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release"
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
-        id: legacy-build-tag
-
-      - name: Build compute-tools Docker image
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          build-args: |
-            GIT_VERSION="${{github.sha}}"
-            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-          push: false
-          file: Dockerfile.compute-tools
-          tags: neondatabase/compute-tools:local
-
-      - name: Push compute-tools Docker image
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          build-args: |
-            GIT_VERSION="${{github.sha}}"
-            AWS_ACCESS_KEY_ID="${{secrets.CACHEPOT_AWS_ACCESS_KEY_ID}}"
-            AWS_SECRET_ACCESS_KEY="${{secrets.CACHEPOT_AWS_SECRET_ACCESS_KEY}}"
-          push: true
-          file: Dockerfile.compute-tools
-          tags: neondatabase/compute-tools:${{steps.legacy-build-tag.outputs.tag}}
-
-      - name: Build compute-node Docker image
-        uses: docker/build-push-action@v2
-        with:
-          context: ./vendor/postgres/
-          build-args:
-            COMPUTE_TOOLS_TAG=local
-          push: true
-          tags: neondatabase/compute-node:${{steps.legacy-build-tag.outputs.tag}}, neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
+          crane tag neondatabase/neon:${{steps.build-tag.outputs.tag}} latest
+          crane tag neondatabase/compute-tools:${{steps.build-tag.outputs.tag}} latest
+          crane tag neondatabase/compute-node:${{steps.build-tag.outputs.tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
@@ -537,15 +553,17 @@ jobs:
           fi
 
   deploy:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    # We need both storage **and** compute images for deploy, because control plane
-    # picks the compute version based on the storage version. If it notices a fresh
-    # storage it may bump the compute version. And if compute image failed to build
-    # it may break things badly.
-    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
+    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
+    needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
@@ -556,8 +574,14 @@ jobs:
           submodules: true
           fetch-depth: 0
 
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
       - name: Setup ansible
         run: |
+          export PATH="/root/.local/bin:$PATH"
           pip install --progress-bar off --user ansible boto3
 
       - name: Redeploy
@@ -585,13 +609,16 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: [ self-hosted, Linux, k8s-runner ]
-    # Compute image isn't strictly required for proxy deploy, but let's still wait for it
-    # to run all deploy jobs consistently.
-    needs: [ docker-image, docker-image-compute, calculate-deploy-targets ]
+    runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
+    # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
+    needs: [ push-docker-hub, calculate-deploy-targets ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         include: ${{fromJSON(needs.calculate-deploy-targets.outputs.matrix-include)}}
@@ -603,6 +630,9 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+
+      - name: Add curl
+        run: apt update && apt install curl -y
 
       - name: Store kubeconfig file
         run: |
