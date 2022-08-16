@@ -47,7 +47,9 @@ jobs:
 
   build-neon:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     strategy:
       fail-fast: false
       matrix:
@@ -202,7 +204,9 @@ jobs:
 
   pg_regress-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -230,7 +234,9 @@ jobs:
 
   other-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ build-neon ]
     strategy:
       fail-fast: false
@@ -261,7 +267,9 @@ jobs:
 
   benchmarks:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
@@ -292,7 +300,9 @@ jobs:
 
   coverage-report:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ other-tests, pg_regress-tests ]
     strategy:
       fail-fast: false
@@ -368,7 +378,9 @@ jobs:
 
   trigger-e2e-tests:
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ build-neon ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
