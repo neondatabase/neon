@@ -10,7 +10,7 @@ In the CI, the performance tests are run in the same environment as the other in
 
 ## Remote tests
 
-There are a few tests that marked with `pytest.mark.remote_cluster`. These tests do not set up a local environment, and instead require a libpq connection string to connect to. So they can be run on any Postgres compatible database. Currently, the CI runs these tests our staging environment daily. Staging is not an isolated environment, so there can be noise in the results due to activity of other clusters.
+There are a few tests that marked with `pytest.mark.remote_cluster`. These tests do not set up a local environment, and instead require a libpq connection string to connect to. So they can be run on any Postgres compatible database. Currently, the CI runs these tests on our staging and captest environments daily. Those are not an isolated environments, so there can be noise in the results due to activity of other clusters.
 
 ## Noise
 

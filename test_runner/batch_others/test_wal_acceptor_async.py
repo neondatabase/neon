@@ -520,3 +520,68 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
     pg = env.postgres.create_start('test_safekeepers_race_conditions')
 
     asyncio.run(run_race_conditions(env, pg))
+
+
+# Check that pageserver can select safekeeper with largest commit_lsn
+# and switch if LSN is not updated for some time (NoWalTimeout).
+async def run_wal_lagging(env: NeonEnv, pg: Postgres):
+    def safekeepers_guc(env: NeonEnv, active_sk: List[bool]) -> str:
+        # use ports 10, 11 and 12 to simulate unavailable safekeepers
+        return ','.join([
+            f'localhost:{sk.port.pg if active else 10 + i}'
+            for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk))
+        ])
+
+    conn = await pg.connect_async()
+    await conn.execute('CREATE TABLE t(key int primary key, value text)')
+    await conn.close()
+    pg.stop()
+
+    n_iterations = 20
+    n_txes = 10000
+    expected_sum = 0
+    i = 1
+    quorum = len(env.safekeepers) // 2 + 1
+
+    for it in range(n_iterations):
+        active_sk = list(map(lambda _: random.random() >= 0.5, env.safekeepers))
+        active_count = sum(active_sk)
+
+        if active_count < quorum:
+            it -= 1
+            continue
+
+        pg.adjust_for_safekeepers(safekeepers_guc(env, active_sk))
+        log.info(f'Iteration {it}: {active_sk}')
+
+        pg.start()
+        conn = await pg.connect_async()
+
+        for _ in range(n_txes):
+            await conn.execute(f"INSERT INTO t values ({i}, 'payload')")
+            expected_sum += i
+            i += 1
+
+        await conn.close()
+        pg.stop()
+
+    pg.adjust_for_safekeepers(safekeepers_guc(env, [True] * len(env.safekeepers)))
+    pg.start()
+    conn = await pg.connect_async()
+
+    log.info(f'Executed {i-1} queries')
+
+    res = await conn.fetchval('SELECT sum(key) FROM t')
+    assert res == expected_sum
+
+
+# do inserts while restarting postgres and messing with safekeeper addresses
+def test_wal_lagging(neon_env_builder: NeonEnvBuilder):
+
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch('test_wal_lagging')
+    pg = env.postgres.create_start('test_wal_lagging')
+
+    asyncio.run(run_wal_lagging(env, pg))

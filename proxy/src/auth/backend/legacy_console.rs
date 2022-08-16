@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::BeMessage as Be;
 
 #[derive(Debug, Error)]
-pub enum AuthErrorImpl {
+pub enum LegacyAuthError {
     /// Authentication error reported by the console.
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
@@ -24,7 +24,7 @@ pub enum AuthErrorImpl {
     HttpStatus(reqwest::StatusCode),
 
     #[error("Console responded with a malformed JSON: {0}")]
-    MalformedResponse(#[from] serde_json::Error),
+    BadResponse(#[from] serde_json::Error),
 
     #[error(transparent)]
     Transport(#[from] reqwest::Error),
@@ -36,30 +36,10 @@ pub enum AuthErrorImpl {
     WaiterWait(#[from] waiters::WaitError),
 }
 
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct AuthError(Box<AuthErrorImpl>);
-
-impl AuthError {
-    /// Smart constructor for authentication error reported by `mgmt`.
-    pub fn auth_failed(msg: impl Into<String>) -> Self {
-        Self(Box::new(AuthErrorImpl::AuthFailed(msg.into())))
-    }
-}
-
-impl<T> From<T> for AuthError
-where
-    AuthErrorImpl: From<T>,
-{
-    fn from(e: T) -> Self {
-        Self(Box::new(e.into()))
-    }
-}
-
-impl UserFacingError for AuthError {
+impl UserFacingError for LegacyAuthError {
     fn to_string_client(&self) -> String {
-        use AuthErrorImpl::*;
-        match self.0.as_ref() {
+        use LegacyAuthError::*;
+        match self {
             AuthFailed(_) | HttpStatus(_) => self.to_string(),
             _ => "Internal error".to_string(),
         }
@@ -88,7 +68,7 @@ async fn authenticate_proxy_client(
     md5_response: &str,
     salt: &[u8; 4],
     psql_session_id: &str,
-) -> Result<DatabaseInfo, AuthError> {
+) -> Result<DatabaseInfo, LegacyAuthError> {
     let mut url = auth_endpoint.clone();
     url.query_pairs_mut()
         .append_pair("login", &creds.user)
@@ -102,17 +82,17 @@ async fn authenticate_proxy_client(
         // TODO: leverage `reqwest::Client` to reuse connections
         let resp = reqwest::get(url).await?;
         if !resp.status().is_success() {
-            return Err(AuthErrorImpl::HttpStatus(resp.status()).into());
+            return Err(LegacyAuthError::HttpStatus(resp.status()));
         }
 
-        let auth_info: ProxyAuthResponse = serde_json::from_str(resp.text().await?.as_str())?;
+        let auth_info = serde_json::from_str(resp.text().await?.as_str())?;
         println!("got auth info: {:?}", auth_info);
 
         use ProxyAuthResponse::*;
         let db_info = match auth_info {
             Ready { conn_info } => conn_info,
-            Error { error } => return Err(AuthErrorImpl::AuthFailed(error).into()),
-            NotReady { .. } => waiter.await?.map_err(AuthErrorImpl::AuthFailed)?,
+            Error { error } => return Err(LegacyAuthError::AuthFailed(error)),
+            NotReady { .. } => waiter.await?.map_err(LegacyAuthError::AuthFailed)?,
         };
 
         Ok(db_info)
@@ -124,7 +104,7 @@ async fn handle_existing_user(
     auth_endpoint: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
     creds: &ClientCredentials,
-) -> Result<compute::NodeInfo, auth::AuthError> {
+) -> auth::Result<compute::NodeInfo> {
     let psql_session_id = super::link::new_psql_session_id();
     let md5_salt = rand::random();
 

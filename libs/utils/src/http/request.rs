@@ -10,12 +10,10 @@ pub fn get_request_param<'a>(
 ) -> Result<&'a str, ApiError> {
     match request.param(param_name) {
         Some(arg) => Ok(arg),
-        None => {
-            return Err(ApiError::BadRequest(format!(
-                "no {} specified in path param",
-                param_name
-            )))
-        }
+        None => Err(ApiError::BadRequest(format!(
+            "no {} specified in path param",
+            param_name
+        ))),
     }
 }
 

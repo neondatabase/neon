@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
+use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
@@ -29,12 +30,29 @@ use crate::{
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
+/// Status of the connection.
+#[derive(Debug, Clone)]
+pub struct WalConnectionStatus {
+    /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
+    pub is_connected: bool,
+    /// Defines a healthy connection as one on which we have received at least some WAL bytes.
+    pub has_received_wal: bool,
+    /// Connection establishment time or the timestamp of a latest connection message received.
+    pub latest_connection_update: NaiveDateTime,
+    /// Time of the latest WAL message received.
+    pub latest_wal_update: NaiveDateTime,
+    /// Latest WAL update contained WAL up to this LSN. Next WAL message with start from that LSN.
+    pub streaming_lsn: Option<Lsn>,
+    /// Latest commit_lsn received from the safekeeper. Can be zero if no message has been received yet.
+    pub commit_lsn: Option<Lsn>,
+}
+
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
     wal_source_connstr: &str,
-    events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
+    events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
@@ -49,12 +67,26 @@ pub async fn handle_walreceiver_connection(
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
     .context("Failed to open walreceiver conection")?;
+
+    info!("connected!");
+    let mut connection_status = WalConnectionStatus {
+        is_connected: true,
+        has_received_wal: false,
+        latest_connection_update: Utc::now().naive_utc(),
+        latest_wal_update: Utc::now().naive_utc(),
+        streaming_lsn: None,
+        commit_lsn: None,
+    };
+    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
+        return Ok(());
+    }
+
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     let mut connection_cancellation = cancellation.clone();
     tokio::spawn(
         async move {
-            info!("connected!");
             select! {
                     connection_result = connection => match connection_result{
                             Ok(()) => info!("Walreceiver db connection closed"),
@@ -84,6 +116,14 @@ pub async fn handle_walreceiver_connection(
 
     let identify = identify_system(&mut replication_client).await?;
     info!("{identify:?}");
+
+    connection_status.latest_connection_update = Utc::now().naive_utc();
+    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
+        return Ok(());
+    }
+
+    // NB: this is a flush_lsn, not a commit_lsn.
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
     let ZTenantTimelineId {
@@ -118,7 +158,7 @@ pub async fn handle_walreceiver_connection(
     // There might be some padding after the last full record, skip it.
     startpoint += startpoint.calc_padding(8u32);
 
-    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, server is at {end_of_wal}...");
+    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
@@ -140,6 +180,33 @@ pub async fn handle_walreceiver_connection(
         }
     } {
         let replication_message = replication_message?;
+        let now = Utc::now().naive_utc();
+
+        // Update the connection status before processing the message. If the message processing
+        // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
+        match &replication_message {
+            ReplicationMessage::XLogData(xlog_data) => {
+                connection_status.latest_connection_update = now;
+                connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
+                connection_status.streaming_lsn = Some(Lsn::from(
+                    xlog_data.wal_start() + xlog_data.data().len() as u64,
+                ));
+                if !xlog_data.data().is_empty() {
+                    connection_status.latest_wal_update = now;
+                    connection_status.has_received_wal = true;
+                }
+            }
+            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                connection_status.latest_connection_update = now;
+                connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
+            }
+            &_ => {}
+        };
+        if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+            warn!("Wal connection event listener dropped, aborting the connection: {e}");
+            return Ok(());
+        }
+
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
@@ -257,10 +324,6 @@ pub async fn handle_walreceiver_connection(
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
                 .await?;
-            if let Err(e) = events_sender.send(TaskEvent::NewEvent(zenith_status_update)) {
-                warn!("Wal connection event listener dropped, aborting the connection: {e}");
-                return Ok(());
-            }
         }
     }
 

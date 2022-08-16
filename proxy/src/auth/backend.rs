@@ -1,10 +1,13 @@
-mod link;
 mod postgres;
 
-pub mod console;
+mod link;
+pub use link::LinkAuthError;
+
+mod console;
+pub use console::{GetAuthInfoError, WakeComputeError};
 
 mod legacy_console;
-pub use legacy_console::{AuthError, AuthErrorImpl};
+pub use legacy_console::LegacyAuthError;
 
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
@@ -83,7 +86,7 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType<T> {
     /// Legacy Cloud API (V1) + link auth.
     LegacyConsole(T),

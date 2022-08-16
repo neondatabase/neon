@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::io::Read;
 use utils::bin_ser::LeSer;
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct HeaderData {
     magic: u16,
     info: u16,
