@@ -294,7 +294,6 @@ impl PageServerNode {
             print!("Stopping pageserver gracefully..");
             Signal::SIGTERM
         };
-
         io::stdout().flush().unwrap();
         match kill(pid, sig) {
             Ok(_) => (),
