@@ -17,6 +17,24 @@ env:
   COPT: '-Werror'
 
 jobs:
+  tag:
+    runs-on: dev
+    environment: dev
+    outputs:
+      build-tag: ${{steps.build-tag.outputs.tag}}
+
+      - name: Get build tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
+            echo "::set-output name=tag::$GITHUB_RUN_ID"
+          fi
+        id: build-tag
+
   build-neon:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -473,8 +491,6 @@ jobs:
     needs: [ promote-images ]
     container: golang:1.19-bullseye
     environment: dev
-    outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
       - name: Install Crane & ECR helper
@@ -482,17 +498,17 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
           
-      - name: Get build tag
-        run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
-            echo "::set-output name=tag::$GITHUB_RUN_ID"
-          fi
-        id: build-tag
+#      - name: Get build tag
+#        run: |
+#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+#            echo "::set-output name=tag::$(git rev-list --count HEAD)"
+#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+#            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
+#          else
+#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
+#            echo "::set-output name=tag::$GITHUB_RUN_ID"
+#          fi
+#        id: build-tag
 
       - name: Configure ECR login
         run: |
@@ -515,22 +531,22 @@ jobs:
           crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
       - name: Push neon image to Docker Hub
-        run: crane push neon neondatabase/neon:${{steps.build-tag.outputs.tag}}
+        run: crane push neon neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
       - name: Push compute tools image to Docker Hub
-        run: crane push compute-tools neondatabase/compute-tools:${{steps.build-tag.outputs.tag}}
+        run: crane push compute-tools neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
 
       - name: Push compute node image to Docker Hub
-        run: crane push compute-node neondatabase/compute-node:${{steps.build-tag.outputs.tag}}
+        run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
 
       - name: Add latest tag to images
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
           github.event_name != 'workflow_dispatch'
         run: |
-          crane tag neondatabase/neon:${{steps.build-tag.outputs.tag}} latest
-          crane tag neondatabase/compute-tools:${{steps.build-tag.outputs.tag}} latest
-          crane tag neondatabase/compute-node:${{steps.build-tag.outputs.tag}} latest
+          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]
@@ -588,7 +604,7 @@ jobs:
 
       - name: Redeploy
         run: |
-          export DOCKER_TAG=${{needs.push-docker-hub.outputs.build-tag}}
+          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           cd "$(pwd)/.github/ansible"
 
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -648,6 +664,6 @@ jobs:
 
       - name: Re-deploy proxy
         run: |
-          DOCKER_TAG=${{needs.push-docker-hub.outputs.build-tag}}
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}       neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace default --install -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --wait --timeout 15m0s
