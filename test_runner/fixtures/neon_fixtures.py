@@ -1493,11 +1493,9 @@ class NeonPageserver(PgProtocol):
         Stop the page server.
         Returns self.
         """
-        started_at = time.time()
         if self.running:
             self.env.neon_cli.pageserver_stop(immediate)
             self.running = False
-        log.info(f"Pageserver stop took {time.time() - started_at} seconds")
         return self
 
     def __enter__(self):

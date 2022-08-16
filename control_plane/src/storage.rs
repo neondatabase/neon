@@ -279,7 +279,7 @@ impl PageServerNode {
     ///
     /// If the server is not running, returns success
     ///
-    pub fn stop(&self, _immediate: bool) -> anyhow::Result<()> {
+    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         let pid_file = self.pid_file();
         if !pid_file.exists() {
             println!("Pageserver is already stopped");
@@ -287,15 +287,13 @@ impl PageServerNode {
         }
         let pid = Pid::from_raw(read_pidfile(&pid_file)?);
 
-        // let sig = if immediate {
-        //     print!("Stopping pageserver immediately..");
-        //     Signal::SIGQUIT
-        // } else {
-        //     print!("Stopping pageserver gracefully..");
-        //     Signal::SIGTERM
-        // };
-
-        let sig = Signal::SIGKILL;
+        let sig = if immediate {
+            print!("Stopping pageserver immediately..");
+            Signal::SIGQUIT
+        } else {
+            print!("Stopping pageserver gracefully..");
+            Signal::SIGTERM
+        };
 
         io::stdout().flush().unwrap();
         match kill(pid, sig) {
@@ -316,8 +314,9 @@ impl PageServerNode {
 
         // Wait until process is gone
         for i in 0..1000 {
-            match kill(pid, sig) {
-                Ok(_) => (),
+            let signal = None; // Send no signal, just get the error code
+            match kill(pid, signal) {
+                Ok(_) => (), // Process exists, keep waiting
                 Err(Errno::ESRCH) => {
                     // Process not found, we're done
                     println!("done!");
