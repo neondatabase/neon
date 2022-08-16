@@ -39,6 +39,7 @@ fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Repositor
 
 pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
         .unwrap();
     let rt_guard = runtime.enter();
