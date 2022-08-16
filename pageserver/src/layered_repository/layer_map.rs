@@ -17,11 +17,15 @@ use crate::repository::Key;
 use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
 use once_cell::sync::Lazy;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
+
+use super::delta_layer::DeltaLayer;
+use super::image_layer::ImageLayer;
 
 static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
@@ -60,12 +64,103 @@ pub struct LayerMap {
     /// linear scan over it.  That obviously becomes slow as the
     /// number of layers grows. I'm imagining that an R-tree or some
     /// other 2D data structure would be the long-term solution here.
-    historic_layers: Vec<Arc<dyn Layer>>,
+    historic_layers: Vec<HistoricLayer>,
+}
+
+/// A representation of a layer that's on disk and tracked in pageserver.
+pub enum HistoricLayer {
+    Delta(DeltaLayer),
+    Image(ImageLayer),
+}
+
+impl From<ImageLayer> for HistoricLayer {
+    fn from(layer: ImageLayer) -> Self {
+        Self::Image(layer)
+    }
+}
+impl From<DeltaLayer> for HistoricLayer {
+    fn from(layer: DeltaLayer) -> Self {
+        Self::Delta(layer)
+    }
+}
+
+impl HistoricLayer {
+    pub fn path(&self) -> PathBuf {
+        match self {
+            Self::Image(l) => l.path(),
+            Self::Delta(l) => l.path(),
+        }
+    }
+
+    fn apply_to_layer<T>(&self, apply: impl FnOnce(&dyn Layer) -> T) -> T {
+        match self {
+            Self::Image(l) => apply(l),
+            Self::Delta(l) => apply(l),
+        }
+    }
+}
+
+impl Layer for HistoricLayer {
+    fn get_tenant_id(&self) -> utils::zid::ZTenantId {
+        self.apply_to_layer(|l| l.get_tenant_id())
+    }
+
+    fn get_timeline_id(&self) -> utils::zid::ZTimelineId {
+        self.apply_to_layer(|l| l.get_timeline_id())
+    }
+
+    fn get_key_range(&self) -> Range<Key> {
+        self.apply_to_layer(|l| l.get_key_range())
+    }
+
+    fn get_lsn_range(&self) -> Range<Lsn> {
+        self.apply_to_layer(|l| l.get_lsn_range())
+    }
+
+    fn filename(&self) -> std::path::PathBuf {
+        self.apply_to_layer(|l| l.filename())
+    }
+
+    fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut super::storage_layer::ValueReconstructState,
+    ) -> Result<super::storage_layer::ValueReconstructResult> {
+        self.apply_to_layer(|l| l.get_value_reconstruct_data(key, lsn_range, reconstruct_data))
+    }
+
+    fn is_incremental(&self) -> bool {
+        self.apply_to_layer(|l| l.is_incremental())
+    }
+
+    fn is_in_memory(&self) -> bool {
+        self.apply_to_layer(|l| l.is_in_memory())
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, crate::repository::Value)>> + '_> {
+        match self {
+            Self::Image(l) => l.iter(),
+            Self::Delta(l) => l.iter(),
+        }
+    }
+
+    fn delete(&self) -> Result<()> {
+        self.apply_to_layer(|l| l.delete())
+    }
+
+    fn dump(&self, verbose: bool) -> Result<()> {
+        self.apply_to_layer(|l| l.dump(verbose))
+    }
+
+    fn local_path(&self) -> Option<PathBuf> {
+        self.apply_to_layer(|l| l.local_path())
+    }
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult {
-    pub layer: Arc<dyn Layer>,
+pub struct SearchResult<'a> {
+    pub layer: &'a HistoricLayer,
     pub lsn_floor: Lsn,
 }
 
@@ -81,10 +176,10 @@ impl LayerMap {
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<'_>>> {
         // linear search
         // Find the latest image layer that covers the given key
-        let mut latest_img: Option<Arc<dyn Layer>> = None;
+        let mut latest_img: Option<&HistoricLayer> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         for l in self.historic_layers.iter() {
             if l.is_incremental() {
@@ -102,19 +197,19 @@ impl LayerMap {
             if Lsn(img_lsn.0 + 1) == end_lsn {
                 // found exact match
                 return Ok(Some(SearchResult {
-                    layer: Arc::clone(l),
+                    layer: l,
                     lsn_floor: img_lsn,
                 }));
             }
             if img_lsn > latest_img_lsn.unwrap_or(Lsn(0)) {
-                latest_img = Some(Arc::clone(l));
+                latest_img = Some(l);
                 latest_img_lsn = Some(img_lsn);
             }
         }
 
         // Search the delta layers
-        let mut latest_delta: Option<Arc<dyn Layer>> = None;
-        for l in self.historic_layers.iter() {
+        let mut latest_delta: Option<&HistoricLayer> = None;
+        for l in &self.historic_layers {
             if !l.is_incremental() {
                 continue;
             }
@@ -134,17 +229,17 @@ impl LayerMap {
                     "found layer {} for request on {key} at {end_lsn}",
                     l.filename().display(),
                 );
-                latest_delta.replace(Arc::clone(l));
+                latest_delta.replace(l);
                 break;
             }
             // this layer's end LSN is smaller than the requested point. If there's
             // nothing newer, this is what we need to return. Remember this.
-            if let Some(old_candidate) = &latest_delta {
+            if let Some(old_candidate) = latest_delta {
                 if l.get_lsn_range().end > old_candidate.get_lsn_range().end {
-                    latest_delta.replace(Arc::clone(l));
+                    latest_delta.replace(l);
                 }
             } else {
-                latest_delta.replace(Arc::clone(l));
+                latest_delta.replace(l);
             }
         }
         if let Some(l) = latest_delta {
@@ -175,8 +270,8 @@ impl LayerMap {
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
-        self.historic_layers.push(layer);
+    pub fn insert_historic<L: Into<HistoricLayer>>(&mut self, layer: L) {
+        self.historic_layers.push(layer.into());
         NUM_ONDISK_LAYERS.inc();
     }
 
@@ -185,19 +280,29 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
-        let len_before = self.historic_layers.len();
+    #[allow(clippy::unnecessary_filter_map)] // need filter_map to remove the layers
+    pub fn remove_historic_layers(
+        &mut self,
+        layer_paths_to_remove: HashSet<PathBuf>,
+    ) -> Vec<HistoricLayer> {
+        let mut removed_layers = Vec::with_capacity(layer_paths_to_remove.len());
 
-        // FIXME: ptr_eq might fail to return true for 'dyn'
-        // references.  Clippy complains about this. In practice it
-        // seems to work, the assertion below would be triggered
-        // otherwise but this ought to be fixed.
-        #[allow(clippy::vtable_address_comparisons)]
-        self.historic_layers
-            .retain(|other| !Arc::ptr_eq(other, &layer));
+        self.historic_layers = self
+            .historic_layers
+            .drain(..)
+            .filter_map(|l| {
+                let layer_path = l.path();
+                if layer_paths_to_remove.contains(&layer_path) {
+                    removed_layers.push(l);
+                    NUM_ONDISK_LAYERS.dec();
+                    None
+                } else {
+                    Some(l)
+                }
+            })
+            .collect();
 
-        assert_eq!(self.historic_layers.len(), len_before - 1);
-        NUM_ONDISK_LAYERS.dec();
+        removed_layers
     }
 
     /// Is there a newer image layer for given key- and LSN-range?
@@ -238,13 +343,13 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl Iterator<Item = &Arc<dyn Layer>> {
+    pub fn iter_historic_layers(&self) -> impl Iterator<Item = &HistoricLayer> {
         self.historic_layers.iter()
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<&HistoricLayer> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         for l in self.historic_layers.iter() {
@@ -265,7 +370,7 @@ impl LayerMap {
                 continue;
             }
             candidate_lsn = this_lsn;
-            candidate = Some(Arc::clone(l));
+            candidate = Some(l);
         }
 
         candidate
@@ -283,7 +388,7 @@ impl LayerMap {
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<&HistoricLayer>)>> {
         let mut points = vec![key_range.start];
         for l in self.historic_layers.iter() {
             if l.get_lsn_range().start > lsn {
@@ -346,16 +451,16 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<&HistoricLayer>> {
         let mut deltas = Vec::new();
-        for l in self.historic_layers.iter() {
-            if !l.is_incremental() {
+        for historic_layer in &self.historic_layers {
+            if !historic_layer.is_incremental() {
                 continue;
             }
-            if l.get_key_range() != (Key::MIN..Key::MAX) {
+            if historic_layer.get_key_range() != (Key::MIN..Key::MAX) {
                 continue;
             }
-            deltas.push(Arc::clone(l));
+            deltas.push(historic_layer);
         }
         Ok(deltas)
     }
@@ -371,12 +476,12 @@ impl LayerMap {
         }
 
         println!("frozen_layers:");
-        for frozen_layer in self.frozen_layers.iter() {
+        for frozen_layer in &self.frozen_layers {
             frozen_layer.dump(verbose)?;
         }
 
         println!("historic_layers:");
-        for layer in self.historic_layers.iter() {
+        for layer in &self.historic_layers {
             layer.dump(verbose)?;
         }
         println!("End dump LayerMap");

@@ -734,7 +734,7 @@ impl LayeredTimeline {
 
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic(layer);
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -758,7 +758,7 @@ impl LayeredTimeline {
 
                 trace!("found layer {}", layer.filename().display());
                 total_physical_size += layer.path().metadata()?.len();
-                layers.insert_historic(Arc::new(layer));
+                layers.insert_historic(layer);
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -854,7 +854,7 @@ impl LayeredTimeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, PathBuf)> = Vec::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -936,7 +936,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, open_layer.clone()));
+                    traversal_path.push((result, cont_lsn, open_layer.filename()));
                     continue;
                 }
             }
@@ -951,7 +951,7 @@ impl LayeredTimeline {
                         reconstruct_state,
                     )?;
                     cont_lsn = lsn_floor;
-                    traversal_path.push((result, cont_lsn, frozen_layer.clone()));
+                    traversal_path.push((result, cont_lsn, frozen_layer.filename()));
                     continue 'outer;
                 }
             }
@@ -966,7 +966,7 @@ impl LayeredTimeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, layer));
+                traversal_path.push((result, cont_lsn, layer.filename()));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -1344,7 +1344,7 @@ impl LayeredTimeline {
         // Add it to the layer map
         {
             let mut layers = self.layers.write().unwrap();
-            layers.insert_historic(Arc::new(new_delta));
+            layers.insert_historic(new_delta);
         }
 
         // update the timeline's physical size
@@ -1540,7 +1540,7 @@ impl LayeredTimeline {
         for l in image_layers {
             self.current_physical_size_gauge
                 .add(l.path().metadata()?.len());
-            layers.insert_historic(Arc::new(l));
+            layers.insert_historic(l);
         }
         drop(layers);
         timer.stop_and_record();
@@ -1555,7 +1555,6 @@ impl LayeredTimeline {
     fn compact_level0(&self, target_file_size: u64) -> Result<()> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
-        drop(layers);
 
         // Only compact if enough layers have accumulated.
         if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
@@ -1580,14 +1579,14 @@ impl LayeredTimeline {
 
         let first_level0_delta = level0_deltas_iter.next().unwrap();
         let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
-        let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
+        let mut deltas_to_compact = vec![first_level0_delta];
         for l in level0_deltas_iter {
             let lsn_range = l.get_lsn_range();
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(Arc::clone(l));
+            deltas_to_compact.push(l);
             prev_lsn_end = lsn_range.end;
         }
         let lsn_range = Range {
@@ -1595,43 +1594,58 @@ impl LayeredTimeline {
             end: deltas_to_compact.last().unwrap().get_lsn_range().end,
         };
 
+        let deltas_to_compact_count = deltas_to_compact.len();
         info!(
             "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
             lsn_range.start,
             lsn_range.end,
-            deltas_to_compact.len(),
+            deltas_to_compact_count,
             level0_deltas.len()
         );
         for l in deltas_to_compact.iter() {
             info!("compact includes {}", l.filename().display());
         }
-        // We don't need the original list of layers anymore. Drop it so that
-        // we don't accidentally use it later in the function.
-        drop(level0_deltas);
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = deltas_to_compact
-            .iter()
-            .map(|l| l.iter())
-            .kmerge_by(|a, b| {
-                if let Ok((a_key, a_lsn, _)) = a {
-                    if let Ok((b_key, b_lsn, _)) = b {
-                        match a_key.cmp(b_key) {
-                            Ordering::Less => true,
-                            Ordering::Equal => a_lsn <= b_lsn,
-                            Ordering::Greater => false,
-                        }
-                    } else {
-                        false
+        let mut lsn_range = None::<Range<Lsn>>;
+        let mut all_values_vec: Vec<anyhow::Result<(Key, Lsn, Value)>> = Vec::new();
+        let mut level0_delta_files_to_remove = HashSet::with_capacity(level0_deltas.len());
+
+        for l in &level0_deltas {
+            lsn_range = match lsn_range {
+                Some(old_range) => {
+                    let new_range = l.get_lsn_range();
+                    Some(min(old_range.start, new_range.start)..max(old_range.end, new_range.end))
+                }
+                None => Some(l.get_lsn_range()),
+            };
+
+            all_values_vec.extend(l.iter());
+            level0_delta_files_to_remove.insert(l.path());
+        }
+
+        all_values_vec.sort_by(|a, b| {
+            if let Ok((a_key, a_lsn, _)) = a {
+                if let Ok((b_key, b_lsn, _)) = b {
+                    match a_key.cmp(b_key) {
+                        cmp @ (Ordering::Less | Ordering::Greater) => cmp,
+                        Ordering::Equal => a_lsn.cmp(b_lsn),
                     }
                 } else {
-                    true
+                    Ordering::Greater
                 }
-            });
+            } else {
+                Ordering::Less
+            }
+        });
+        let lsn_range = match lsn_range {
+            Some(lsn_range) => lsn_range,
+            None => bail!("Failed to find at least one Lsn range in level0 deltas"),
+        };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = deltas_to_compact
+        let all_keys_vec = deltas_to_compact
             .iter()
             .map(|l| l.key_iter())
             .kmerge_by(|a, b| {
@@ -1642,7 +1656,13 @@ impl LayeredTimeline {
                     Ordering::Equal => a_lsn <= b_lsn,
                     Ordering::Greater => false,
                 }
-            });
+            })
+            .collect::<Vec<_>>();
+
+        // We don't need the original list of layers anymore. Drop it so that
+        // we don't accidentally use it later in the function.
+        drop(level0_deltas);
+        drop(layers);
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -1694,7 +1714,7 @@ impl LayeredTimeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        for x in all_values_iter {
+        for x in all_values_vec {
             let (key, lsn, value) = x?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
@@ -1706,7 +1726,7 @@ impl LayeredTimeline {
                     dup_end_lsn = Lsn::INVALID;
                 }
                 // Determine size occupied by this key. We stop at next key, or when size becomes larger than target_file_size
-                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
+                for &(next_key, next_lsn, next_size) in &all_keys_vec {
                     next_key_size = next_size;
                     if key != next_key {
                         if dup_end_lsn.is_valid() {
@@ -1764,6 +1784,8 @@ impl LayeredTimeline {
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
             prev_key = Some(key);
         }
+        drop(all_keys_vec);
+
         if let Some(writer) = writer {
             new_layers.push(writer.finish(prev_key.unwrap().next())?);
         }
@@ -1792,20 +1814,16 @@ impl LayeredTimeline {
                 .add(new_delta_path.metadata()?.len());
 
             new_layer_paths.insert(new_delta_path);
-            layers.insert_historic(Arc::new(l));
+            layers.insert_historic(l);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_do_delete = HashSet::with_capacity(deltas_to_compact.len());
-        drop(all_keys_iter);
-        for l in deltas_to_compact {
-            if let Some(path) = l.local_path() {
-                self.current_physical_size_gauge.sub(path.metadata()?.len());
-                layer_paths_do_delete.insert(path);
-            }
+        let mut layer_paths_to_delete = HashSet::with_capacity(deltas_to_compact_count);
+        let removed_layers = layers.remove_historic_layers(level0_delta_files_to_remove);
+        for l in removed_layers {
             l.delete()?;
-            layers.remove_historic(l);
+            layer_paths_to_delete.insert(l.path());
         }
         drop(layers);
 
@@ -1819,7 +1837,7 @@ impl LayeredTimeline {
             storage_sync::schedule_layer_delete(
                 self.tenant_id,
                 self.timeline_id,
-                layer_paths_do_delete,
+                layer_paths_to_delete,
             );
         }
 
@@ -1948,7 +1966,7 @@ impl LayeredTimeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        let mut layers_to_remove = Vec::new();
+        let mut layer_paths_to_remove = HashSet::new();
 
         // Scan all on-disk layers in the timeline.
         //
@@ -2049,20 +2067,19 @@ impl LayeredTimeline {
                 l.filename().display(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(l));
+            layer_paths_to_remove.insert(l.path());
         }
 
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
-        for doomed_layer in layers_to_remove {
+        let mut layer_paths_to_delete = HashSet::with_capacity(layer_paths_to_remove.len());
+        for doomed_layer in layers.remove_historic_layers(layer_paths_to_remove) {
             if let Some(path) = doomed_layer.local_path() {
                 self.current_physical_size_gauge.sub(path.metadata()?.len());
                 layer_paths_to_delete.insert(path);
             }
             doomed_layer.delete()?;
-            layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
         }
 
@@ -2155,18 +2172,18 @@ impl LayeredTimeline {
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+    path: Vec<(ValueReconstructResult, Lsn, PathBuf)>,
 ) -> anyhow::Result<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
         .iter()
-        .map(|(r, c, l)| {
+        .map(|(r, c, filename)| {
             format!(
                 "layer traversal: result {:?}, cont_lsn {}, layer: {}",
                 r,
                 c,
-                l.filename().display()
+                filename.display()
             )
         })
         .chain(std::iter::once(msg));
