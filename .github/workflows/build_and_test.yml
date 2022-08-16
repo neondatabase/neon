@@ -19,10 +19,14 @@ env:
 jobs:
   tag:
     runs-on: dev
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Get build tag
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -33,6 +37,7 @@ jobs:
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
             echo "::set-output name=tag::$GITHUB_RUN_ID"
           fi
+        shell: bash
         id: build-tag
 
   build-neon:
