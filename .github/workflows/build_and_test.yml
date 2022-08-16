@@ -31,10 +31,9 @@ jobs:
 
       - name: Get build tag
         run: |
-          echo ref:$GITHUB_REF_NAME
           echo run:$GITHUB_RUN_ID
-          echo head:$(git rev-list --count HEAD)
-          echo main:$(git rev-list --count main)
+          echo ref:$GITHUB_REF_NAME
+          echo rev:$(git rev-list --count HEAD)
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             echo "ref=main"
             echo "::set-output name=tag::$(git rev-list --count HEAD)"
