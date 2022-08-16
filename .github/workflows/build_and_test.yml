@@ -31,7 +31,6 @@ jobs:
 
       - name: Get build tag
         run: |
-          git checkout main
           echo ref:$GITHUB_REF_NAME
           echo run:$GITHUB_RUN_ID
           echo head:$(git rev-list --count HEAD)
