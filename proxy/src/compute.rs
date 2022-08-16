@@ -65,8 +65,17 @@ impl NodeInfo {
         // require for our business.
         let mut connection_error = None;
         let ports = self.config.get_ports();
-        for (i, host) in self.config.get_hosts().iter().enumerate() {
-            let port = ports.get(i).or_else(|| ports.get(0)).unwrap_or(&5432);
+        let hosts = self.config.get_hosts();
+        // the ports array is supposed to have 0 entries, 1 entry, or as many entries as in the hosts array
+        if ports.len() > 1 && ports.len() != hosts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("couldn't connect: bad compute config, ports and hosts entries' count does not match: {:?}", self.config),
+            ));
+        }
+
+        for (i, host) in hosts.iter().enumerate() {
+            let port = ports.get(i).or_else(|| ports.first()).unwrap_or(&5432);
             let host = match host {
                 Host::Tcp(host) => host.as_str(),
                 Host::Unix(_) => continue, // unix sockets are not welcome here

@@ -930,7 +930,7 @@ impl<'a> BeMessage<'a> {
 
 // Neon extension of postgres replication protocol
 // See NEON_STATUS_UPDATE_TAG_BYTE
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationFeedback {
     // Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,

@@ -59,6 +59,7 @@ pub mod defaults {
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
+#checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
 #compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
 #compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
 #compaction_threshold = '{DEFAULT_COMPACTION_THRESHOLD}'
@@ -450,6 +451,13 @@ impl PageServerConf {
         if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
             t_conf.checkpoint_distance =
                 Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
+        }
+
+        if let Some(checkpoint_timeout) = item.get("checkpoint_timeout") {
+            t_conf.checkpoint_timeout = Some(parse_toml_duration(
+                "checkpoint_timeout",
+                checkpoint_timeout,
+            )?);
         }
 
         if let Some(compaction_target_size) = item.get("compaction_target_size") {

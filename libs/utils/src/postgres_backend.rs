@@ -50,7 +50,7 @@ pub trait Handler {
 
 /// PostgresBackend protocol state.
 /// XXX: The order of the constructors matters.
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum ProtoState {
     Initialization,
     Encrypted,

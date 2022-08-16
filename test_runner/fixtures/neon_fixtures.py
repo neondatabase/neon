@@ -2424,7 +2424,7 @@ def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
                     timeline: uuid.UUID,
                     lsn: int):
     """waits for local timeline upload up to specified lsn"""
-    for i in range(10):
+    for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
             log.info("wait finished")
@@ -2460,3 +2460,9 @@ def wait_for_last_record_lsn(pageserver_http_client: NeonPageserverHttpClient,
         time.sleep(1)
     raise Exception("timed out while waiting for last_record_lsn to reach {}, was {}".format(
         lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
+
+
+def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: uuid.UUID, timeline: uuid.UUID):
+    """Wait for pageserver to catch up the latest flush LSN"""
+    last_flush_lsn = lsn_from_hex(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)

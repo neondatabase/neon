@@ -1,6 +1,33 @@
-use crate::{auth, compute, stream::PqStream};
+use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeMessage as Be, BeParameterStatusMessage};
+
+#[derive(Debug, Error)]
+pub enum LinkAuthError {
+    /// Authentication error reported by the console.
+    #[error("Authentication failed: {0}")]
+    AuthFailed(String),
+
+    #[error(transparent)]
+    WaiterRegister(#[from] waiters::RegisterError),
+
+    #[error(transparent)]
+    WaiterWait(#[from] waiters::WaitError),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+impl UserFacingError for LinkAuthError {
+    fn to_string_client(&self) -> String {
+        use LinkAuthError::*;
+        match self {
+            AuthFailed(_) => self.to_string(),
+            _ => "Internal error".to_string(),
+        }
+    }
+}
 
 fn hello_message(redirect_uri: &str, session_id: &str) -> String {
     format!(
@@ -34,7 +61,7 @@ pub async fn handle_user(
             .await?;
 
         // Wait for web console response (see `mgmt`)
-        waiter.await?.map_err(auth::AuthErrorImpl::auth_failed)
+        waiter.await?.map_err(LinkAuthError::AuthFailed)
     })
     .await?;
 

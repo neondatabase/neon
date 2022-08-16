@@ -1028,6 +1028,13 @@ impl LayeredRepository {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
+    pub fn get_checkpoint_timeout(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .checkpoint_timeout
+            .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
+    }
+
     pub fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1473,6 +1480,7 @@ pub mod repo_harness {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
                 checkpoint_distance: Some(tenant_conf.checkpoint_distance),
+                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),

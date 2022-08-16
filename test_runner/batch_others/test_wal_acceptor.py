@@ -291,9 +291,12 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env.neon_cli.create_branch('test_safekeepers_wal_removal')
     pg = env.postgres.create_start('test_safekeepers_wal_removal')
 
+    # Note: it is important to insert at least two segments, as currently
+    # control file is synced roughly once in segment range and WAL is not
+    # removed until all horizons are persisted.
     pg.safe_psql_many([
         'CREATE TABLE t(key int primary key, value text)',
-        "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        "INSERT INTO t SELECT generate_series(1,200000), 'payload'",
     ])
 
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
@@ -1098,11 +1101,9 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # Remove initial tenant fully (two branches are active)
     response = sk_http.tenant_delete_force(tenant_id)
-    assert response == {
-        timeline_id_3: {
-            "dir_existed": True,
-            "was_active": True,
-        }
+    assert response[timeline_id_3] == {
+        "dir_existed": True,
+        "was_active": True,
     }
     assert not (sk_data_dir / tenant_id).exists()
     assert (sk_data_dir / tenant_id_other / timeline_id_other).is_dir()

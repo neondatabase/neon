@@ -11,16 +11,14 @@ than it was before.
 
 ## Submitting changes
 
-1. Make a PR for every change.
-
-   Even seemingly trivial patches can break things in surprising ways.
-Use of common sense is OK. If you're only fixing a typo in a comment,
-it's probably fine to just push it. But if in doubt, open a PR.
-
-2. Get at least one +1 on your PR before you push.
+1. Get at least one +1 on your PR before you push.
 
    For simple patches, it will only take a minute for someone to review
 it.
+
+2. Don't force push small changes after making the PR ready for review.
+Doing so will force readers to re-read your entire PR, which will delay
+the review process.
 
 3. Always keep the CI green.
 
