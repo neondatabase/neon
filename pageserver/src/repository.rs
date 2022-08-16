@@ -277,34 +277,6 @@ impl AddAssign for GcResult {
     }
 }
 
-/// An error happened in a get() operation.
-///
-/// Normally
-#[derive(thiserror::Error)]
-pub enum PageReconstructError {
-    #[error(transparent)]
-    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
-
-    #[error(transparent)]
-    WalRedo(#[from] crate::walredo::WalRedoError),
-
-    /// A layer file is missing locally. If it's downloaded, the operation will probably
-    /// succeed.
-    #[error("layer file needs to be downloaded")]
-    NeedDownload(std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>),
-}
-
-impl fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        match self {
-            PageReconstructError::Other(err) => err.fmt(f),
-            PageReconstructError::WalRedo(err) => err.fmt(f),
-            // TODO: print more info about the missing layer
-            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
-        }
-    }
-}
-
 pub trait Timeline: Send + Sync {
     //------------------------------------------------------------------------------
     // Public GET functions
@@ -322,6 +294,15 @@ pub trait Timeline: Send + Sync {
     fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;
 
     /// Look up given page version.
+    ///
+    /// It's possible that we are missing some layer files locally that are needed
+    /// to reconstruct the page version. In that case, this returns
+    /// PageReconstructError::NeedDownload, with a future that can be used to download
+    /// the missing file.
+    ///
+    /// This function is synchronous, but it can block on local disk I/O or waiting for
+    /// locks. But it will not block waiting for remote storage, that's why the NeedDownload
+    /// return error exists.
     ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
     /// above this needs to store suitable metadata to track what data exists with
@@ -381,6 +362,38 @@ pub trait Timeline: Send + Sync {
     fn get_physical_size_non_incremental(&self) -> Result<u64>;
 }
 
+/// An error happened in a get() operation.
+#[derive(thiserror::Error)]
+pub enum PageReconstructError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+
+    #[error(transparent)]
+    WalRedo(#[from] crate::walredo::WalRedoError),
+
+    /// A layer file is missing locally. You can call the returned Future to
+    /// download the missing layer, and after that finishes, the operation will
+    /// probably succeed if you retry it. (It can return NeedDownload again, if
+    /// another layer needs to be downloaded.).
+    #[error("layer file needs to be downloaded")]
+    NeedDownload(std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>),
+}
+
+impl fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            PageReconstructError::Other(err) => err.fmt(f),
+            PageReconstructError::WalRedo(err) => err.fmt(f),
+            // TODO: print more info about the missing layer
+            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
+        }
+    }
+}
+
+///
+/// Run a function that can return PageReconstructError, downloading the missing
+/// file and retrying if needed.
+///
 pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
 where
     F: Send + Fn() -> Result<T, PageReconstructError>,

@@ -665,7 +665,7 @@ impl LayeredRepository {
 
         let mut attached_timelines = Vec::new();
 
-        // For every timeline, download every remote layer file that's missing locally
+        // For every timeline, download the metadata file.
         for timeline_id in sorted_timelines {
             info!("downloading timeline {}", timeline_id);
             let index_part = index_parts.get(&timeline_id).unwrap();

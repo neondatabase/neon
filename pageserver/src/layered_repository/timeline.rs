@@ -641,6 +641,8 @@ impl LayeredTimeline {
         let arc = Arc::new(result);
         let weak_arc = Arc::downgrade(&arc);
 
+        // Store a weak reference to "itself" in the struct. Arc::new_cyclic()
+        // would do this without unsafe, but that requires Rust 1.60.
         {
             // Raw IMMUTABLE pointer to the struct
             let ptr = Arc::as_ptr(&arc);
@@ -794,14 +796,7 @@ impl LayeredTimeline {
 
         // Have to calculate it the hard way
         let last_lsn = self.get_last_record_lsn();
-        let logical_size = match self.get_current_logical_size_non_incremental(last_lsn) {
-            Ok(sz) => sz,
-            Err(err) => {
-                error!("GOT ERR: {:?}", err);
-                return Err(err);
-            }
-        };
-        //let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
+        let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
         self.current_logical_size
             .store(logical_size as isize, AtomicOrdering::SeqCst);
         debug!("calculated logical size the hard way: {}", logical_size);
@@ -950,6 +945,10 @@ impl LayeredTimeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
 
+                //
+                // Is this a remote layer? If so, create a Future that the caller can use to
+                // download the missing layer, and return it.
+                //
                 if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
                     info!("need remote layer {}", remote_layer.filename().display());
                     let tl = timeline.myself.upgrade().unwrap();
@@ -2289,6 +2288,12 @@ impl LayeredTimeline {
         }
     }
 
+    ///
+    /// Download a layer file from remote storage,
+    ///
+    /// This does not retry if the download fails. TODO: we probably
+    /// should download a couple of times
+    ///
     pub async fn download_remote_layer(
         self: Arc<Self>,
         remote_layer: Arc<RemoteLayer>,

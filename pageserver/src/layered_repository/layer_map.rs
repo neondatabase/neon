@@ -18,7 +18,6 @@ use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
-
 use std::ops::Range;
 use std::sync::Arc;
 use tracing::*;
