@@ -473,6 +473,8 @@ jobs:
     needs: [ promote-images ]
     container: golang:1.19-bullseye
     environment: dev
+    outputs:
+      build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
       - name: Install Crane & ECR helper
@@ -491,8 +493,6 @@ jobs:
             echo "::set-output name=tag::$GITHUB_RUN_ID"
           fi
         id: build-tag
-        outputs:
-          build-tag: ${{steps.build-tag.outputs.tag}}
 
       - name: Configure ECR login
         run: |
