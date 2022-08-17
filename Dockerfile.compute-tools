@@ -16,7 +16,7 @@ COPY . .
 RUN aws s3 ls
 
 RUN set -e \
-    && sudo -E "PATH=$PATH" mold -run cargo build -p compute_tools --release \
+    && "PATH=$PATH" mold -run cargo build -p compute_tools --release \
     && cachepot -s
 
 # Final image that only has one binary
