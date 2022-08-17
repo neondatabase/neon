@@ -128,8 +128,11 @@ jobs:
       - name: Install Python deps
         run: ./scripts/pysync
 
-      - name: Run yapf to ensure code format
-        run: poetry run yapf --recursive --diff .
+      - name: Run isort to ensure code format
+        run: poetry run isort --diff --check .
+
+      - name: Run black to ensure code format
+        run: poetry run black --diff --check .
 
       - name: Run mypy to check types
         run: poetry run mypy .

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 
-from typing import List
+import argparse
+import enum
 import subprocess
 import sys
-import enum
-import argparse
-import os
+from typing import List
 
 
 @enum.unique
@@ -37,12 +36,17 @@ def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
     return cmd
 
 
-def yapf(fix_inplace: bool) -> str:
-    cmd = "poetry run yapf --recursive"
-    if fix_inplace:
-        cmd += " --in-place"
-    else:
-        cmd += " --diff"
+def black(fix_inplace: bool) -> str:
+    cmd = "poetry run black"
+    if not fix_inplace:
+        cmd += " --diff --check"
+    return cmd
+
+
+def isort(fix_inplace: bool) -> str:
+    cmd = "poetry run isort"
+    if not fix_inplace:
+        cmd += " --diff --check"
     return cmd
 
 
@@ -71,11 +75,13 @@ def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: 
         else:
             print("Please inspect the output below and run make fmt to fix automatically.")
         if suffix == ".py":
-            print("If the output is empty, ensure that you've installed Python tooling by\n"
-                  "running './scripts/pysync' in the current directory (no root needed)")
+            print(
+                "If the output is empty, ensure that you've installed Python tooling by\n"
+                "running './scripts/pysync' in the current directory (no root needed)"
+            )
         print()
         print(res.stdout.decode())
-        exit(1)
+        sys.exit(1)
 
     print(colorify("[OK]", Color.GREEN, no_color))
 
@@ -83,10 +89,12 @@ def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fix-inplace", action="store_true", help="apply fixes inplace")
-    parser.add_argument("--no-color",
-                        action="store_true",
-                        help="disable colored output",
-                        default=not sys.stdout.isatty())
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="disable colored output",
+        default=not sys.stdout.isatty(),
+    )
     args = parser.parse_args()
 
     files = get_commit_files()
@@ -101,9 +109,16 @@ if __name__ == "__main__":
         no_color=args.no_color,
     )
     check(
-        name="yapf",
+        name="isort",
         suffix=".py",
-        cmd=yapf(fix_inplace=args.fix_inplace),
+        cmd=isort(fix_inplace=args.fix_inplace),
+        changed_files=files,
+        no_color=args.no_color,
+    )
+    check(
+        name="black",
+        suffix=".py",
+        cmd=black(fix_inplace=args.fix_inplace),
         changed_files=files,
         no_color=args.no_color,
     )
