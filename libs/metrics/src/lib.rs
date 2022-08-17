@@ -2,7 +2,10 @@
 //! make sure that we use the same dep version everywhere.
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use prometheus::core::{AtomicU64, GenericGauge, GenericGaugeVec};
+pub use prometheus::opts;
+pub use prometheus::register;
 pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_gauge, Gauge};
@@ -18,6 +21,17 @@ pub use prometheus::{Encoder, TextEncoder};
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
 
+pub type UIntGauge = GenericGauge<AtomicU64>;
+pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;
+
+#[macro_export]
+macro_rules! register_uint_gauge_vec {
+    ($NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{
+        let gauge_vec = UIntGaugeVec::new($crate::opts!($NAME, $HELP), $LABELS_NAMES).unwrap();
+        $crate::register(Box::new(gauge_vec.clone())).map(|_| gauge_vec)
+    }};
+}
+
 /// Gathers all Prometheus metrics and records the I/O stats just before that.
 ///
 /// Metrics gathering is a relatively simple and standalone operation, so
@@ -27,19 +41,22 @@ pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     prometheus::gather()
 }
 
-lazy_static! {
-    static ref DISK_IO_BYTES: IntGaugeVec = register_int_gauge_vec!(
+static DISK_IO_BYTES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
         "libmetrics_disk_io_bytes_total",
         "Bytes written and read from disk, grouped by the operation (read|write)",
         &["io_operation"]
     )
-    .expect("Failed to register disk i/o bytes int gauge vec");
-    static ref MAXRSS_KB: IntGauge = register_int_gauge!(
+    .expect("Failed to register disk i/o bytes int gauge vec")
+});
+
+static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
         "libmetrics_maxrss_kb",
         "Memory usage (Maximum Resident Set Size)"
     )
-    .expect("Failed to register maxrss_kb int gauge");
-}
+    .expect("Failed to register maxrss_kb int gauge")
+});
 
 pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
     0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,

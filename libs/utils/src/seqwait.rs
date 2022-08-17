@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// An error happened while waiting for a number
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("SeqWaitError")]
 pub enum SeqWaitError {
     /// The wait timeout was reached

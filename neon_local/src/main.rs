@@ -9,6 +9,7 @@ use pageserver::config::defaults::{
     DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
     DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
 };
+use pageserver::http::models::TimelineInfo;
 use safekeeper::defaults::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -24,8 +25,6 @@ use utils::{
     project_git_version,
     zid::{NodeId, ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
-
-use pageserver::timelines::TimelineInfo;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -537,7 +536,13 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
     match tenant_match.subcommand() {
         Some(("list", _)) => {
             for t in pageserver.tenant_list()? {
-                println!("{} {}", t.id, t.state);
+                println!(
+                    "{} {}",
+                    t.id,
+                    t.state
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| String::from(""))
+                );
             }
         }
         Some(("create", create_match)) => {
@@ -879,7 +884,7 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     match sub_match.subcommand() {
         Some(("start", start_match)) => {
             if let Err(e) = pageserver.start(&pageserver_config_overrides(start_match)) {
-                eprintln!("pageserver start failed: {}", e);
+                eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
         }
@@ -901,10 +906,19 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
 
             if let Err(e) = pageserver.start(&pageserver_config_overrides(restart_match)) {
-                eprintln!("pageserver start failed: {}", e);
+                eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
         }
+
+        Some(("status", _)) => match PageServerNode::from_env(env).check_status() {
+            Ok(_) => println!("Page server is up and running"),
+            Err(err) => {
+                eprintln!("Page server is not available: {}", err);
+                exit(1);
+            }
+        },
+
         Some((sub_name, _)) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
         None => bail!("no pageserver subcommand provided"),
     }

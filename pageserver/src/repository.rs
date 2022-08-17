@@ -7,7 +7,6 @@ use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fmt::Display;
 use std::ops::{AddAssign, Range};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
@@ -182,33 +181,15 @@ impl Value {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum TimelineSyncStatusUpdate {
-    Downloaded,
-}
-
-impl Display for TimelineSyncStatusUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            TimelineSyncStatusUpdate::Downloaded => "Downloaded",
-        };
-        f.write_str(s)
-    }
-}
-
 ///
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
-    type Timeline: Timeline;
+    type Timeline: crate::DatadirTimeline;
 
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn apply_timeline_remote_sync_status_update(
-        &self,
-        timeline_id: ZTimelineId,
-        timeline_sync_status_update: TimelineSyncStatusUpdate,
-    ) -> Result<()>;
+    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
@@ -230,7 +211,12 @@ pub trait Repository: Send + Sync {
     ) -> Result<Arc<Self::Timeline>>;
 
     /// Branch a timeline
-    fn branch_timeline(&self, src: ZTimelineId, dst: ZTimelineId, start_lsn: Lsn) -> Result<()>;
+    fn branch_timeline(
+        &self,
+        src: ZTimelineId,
+        dst: ZTimelineId,
+        start_lsn: Option<Lsn>,
+    ) -> Result<()>;
 
     /// Flush all data to disk.
     ///
@@ -260,10 +246,10 @@ pub trait Repository: Send + Sync {
     /// api's 'compact' command.
     fn compaction_iteration(&self) -> Result<()>;
 
-    /// detaches timeline-related in-memory data.
-    fn detach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
+    /// removes timeline-related in-memory data
+    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()>;
 
-    // Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
+    /// Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
     fn get_remote_index(&self) -> &RemoteIndex;
 }
 
@@ -289,15 +275,6 @@ pub enum LocalTimelineState {
     Loaded,
     // timeline is on disk locally and ready to be loaded into memory.
     Unloaded,
-}
-
-impl<'a, T> From<&'a RepositoryTimeline<T>> for LocalTimelineState {
-    fn from(local_timeline_entry: &'a RepositoryTimeline<T>) -> Self {
-        match local_timeline_entry {
-            RepositoryTimeline::Loaded(_) => LocalTimelineState::Loaded,
-            RepositoryTimeline::Unloaded { .. } => LocalTimelineState::Unloaded,
-        }
-    }
 }
 
 ///
@@ -396,6 +373,11 @@ pub trait Timeline: Send + Sync {
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
     ) -> Result<()>;
+
+    /// Get the physical size of the timeline at the latest LSN
+    fn get_physical_size(&self) -> u64;
+    /// Get the physical size of the timeline at the latest LSN non incrementally
+    fn get_physical_size_non_incremental(&self) -> Result<u64>;
 }
 
 /// Various functions to mutate the timeline.
@@ -407,7 +389,7 @@ pub trait TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    fn put(&self, key: Key, lsn: Lsn, value: Value) -> Result<()>;
+    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()>;
 
     fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
 
@@ -419,16 +401,17 @@ pub trait TimelineWriter<'a> {
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
     fn finish_write(&self, lsn: Lsn);
+
+    fn update_current_logical_size(&self, delta: isize);
 }
 
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::BytesMut;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
-    use crate::RepositoryImpl;
     use crate::{
         config::PageServerConf,
         layered_repository::LayeredRepository,
@@ -455,14 +438,13 @@ pub mod repo_harness {
         buf.freeze()
     }
 
-    lazy_static! {
-        static ref LOCK: RwLock<()> = RwLock::new(());
-    }
+    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
 
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
                 checkpoint_distance: Some(tenant_conf.checkpoint_distance),
+                checkpoint_timeout: Some(tenant_conf.checkpoint_timeout),
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
@@ -525,11 +507,11 @@ pub mod repo_harness {
             })
         }
 
-        pub fn load(&self) -> RepositoryImpl {
+        pub fn load(&self) -> LayeredRepository {
             self.try_load().expect("failed to load test repo")
         }
 
-        pub fn try_load(&self) -> Result<RepositoryImpl> {
+        pub fn try_load(&self) -> Result<LayeredRepository> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let repo = LayeredRepository::new(
@@ -537,7 +519,7 @@ pub mod repo_harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
-                RemoteIndex::empty(),
+                RemoteIndex::default(),
                 false,
             );
             // populate repo with locally available timelines
@@ -553,10 +535,7 @@ pub mod repo_harness {
                     .parse()
                     .unwrap();
 
-                repo.apply_timeline_remote_sync_status_update(
-                    timeline_id,
-                    TimelineSyncStatusUpdate::Downloaded,
-                )?;
+                repo.attach_timeline(timeline_id)?;
             }
 
             Ok(repo)
@@ -608,11 +587,10 @@ mod tests {
     //use std::sync::Arc;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
 
-    lazy_static! {
-        static ref TEST_KEY: Key = Key::from_slice(&hex!("112222222233333333444444445500000001"));
-    }
+    static TEST_KEY: Lazy<Key> =
+        Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
 
     #[test]
     fn test_basic() -> Result<()> {
@@ -620,12 +598,12 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
 
         let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -672,24 +650,24 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), test_value("foobar at 0x20"))?;
+        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
+        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), test_value("foo at 0x30"))?;
+        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), test_value("foo at 0x40"))?;
+        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
 
         // Branch the history, modify relation differently on the new timeline
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x30)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer();
-        new_writer.put(TEST_KEY_A, Lsn(0x40), test_value("bar at 0x40"))?;
+        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -720,14 +698,14 @@ mod tests {
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
@@ -738,14 +716,14 @@ mod tests {
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
             lsn += 0x10;
             writer.put(
                 *TEST_KEY,
                 lsn,
-                Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
             )?;
             writer.finish_write(lsn);
         }
@@ -766,7 +744,7 @@ mod tests {
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(err.to_string().contains("invalid branch start lsn"));
@@ -787,7 +765,7 @@ mod tests {
 
         repo.create_empty_timeline(TIMELINE_ID, Lsn(0x50))?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
-        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x25)) {
+        match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
                 assert!(&err.to_string().contains("invalid branch start lsn"));
@@ -832,7 +810,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -848,7 +826,7 @@ mod tests {
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0))?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
         let newtline = repo
             .get_timeline_load(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
@@ -906,7 +884,7 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x20))?;
             tline.checkpoint(CheckpointConfig::Forced)?;
 
-            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x40))?;
+            repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
 
             let newtline = repo
                 .get_timeline_load(NEW_TIMELINE_ID)

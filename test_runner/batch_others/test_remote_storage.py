@@ -2,13 +2,12 @@
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import shutil, os
-from contextlib import closing
 from pathlib import Path
 import time
 from uuid import UUID
-from fixtures.neon_fixtures import NeonEnvBuilder, assert_local, wait_until, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import NeonEnvBuilder, RemoteStorageKind, assert_timeline_local, available_remote_storages, wait_until, wait_for_last_record_lsn, wait_for_upload
 from fixtures.log_helper import log
-from fixtures.utils import lsn_from_hex, lsn_to_hex
+from fixtures.utils import lsn_from_hex, query_scalar
 import pytest
 
 
@@ -29,18 +28,19 @@ import pytest
 #   * queries the specific data, ensuring that it matches the one stored before
 #
 # The tests are done for all types of remote storage pageserver supports.
-@pytest.mark.parametrize('storage_type', ['local_fs', 'mock_s3'])
-def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, storage_type: str):
+@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+def test_remote_storage_backup_and_restore(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storatge_kind: RemoteStorageKind,
+):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
-    if storage_type == 'local_fs':
-        neon_env_builder.enable_local_fs_remote_storage()
-    elif storage_type == 'mock_s3':
-        neon_env_builder.enable_s3_mock_remote_storage('test_remote_storage_backup_and_restore')
-    else:
-        raise RuntimeError(f'Unknown storage type: {storage_type}')
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storatge_kind,
+        test_name='test_remote_storage_backup_and_restore',
+    )
 
     data_id = 1
     data_secret = 'very secret secret'
@@ -57,14 +57,12 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     checkpoint_numbers = range(1, 3)
 
     for checkpoint_number in checkpoint_numbers:
-        with closing(pg.connect()) as conn:
-            with conn.cursor() as cur:
-                cur.execute(f'''
-                    CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                    INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
-                ''')
-                cur.execute("SELECT pg_current_wal_flush_lsn()")
-                current_lsn = lsn_from_hex(cur.fetchone()[0])
+        with pg.cursor() as cur:
+            cur.execute(f'''
+                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+            ''')
+            current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
         wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
@@ -91,14 +89,14 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     # Introduce failpoint in download
     env.pageserver.safe_psql(f"failpoints remote-storage-download-pre-rename=return")
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
-    # is there a better way to assert that fafilpoint triggered?
+    # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="Timeline download is already in progress"):
-        client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
+        client.tenant_attach(UUID(tenant_id))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail with active failpoint: %s", detail)
@@ -109,12 +107,12 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     env.pageserver.stop()
     env.pageserver.start()
 
-    client.timeline_attach(UUID(tenant_id), UUID(timeline_id))
+    client.tenant_attach(UUID(tenant_id))
 
     log.info("waiting for timeline redownload")
-    wait_until(number_of_iterations=10,
+    wait_until(number_of_iterations=20,
                interval=1,
-               func=lambda: assert_local(client, UUID(tenant_id), UUID(timeline_id)))
+               func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     assert detail['local'] is not None
@@ -123,8 +121,8 @@ def test_remote_storage_backup_and_restore(neon_env_builder: NeonEnvBuilder, sto
     assert not detail['remote']['awaits_download']
 
     pg = env.postgres.create_start('main')
-    with closing(pg.connect()) as conn:
-        with conn.cursor() as cur:
-            for checkpoint_number in checkpoint_numbers:
-                cur.execute(f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};')
-                assert cur.fetchone() == (f'{data_secret}|{checkpoint_number}', )
+    with pg.cursor() as cur:
+        for checkpoint_number in checkpoint_numbers:
+            assert query_scalar(cur,
+                                f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};'
+                                ) == f'{data_secret}|{checkpoint_number}'

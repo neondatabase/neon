@@ -35,10 +35,10 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         value = line.lstrip(name).strip()
         return int(value)
 
-    def detach_all_timelines(tenant):
+    def delete_all_timelines(tenant):
         timelines = [UUID(t["timeline_id"]) for t in client.timeline_list(tenant)]
         for t in timelines:
-            client.timeline_detach(tenant, t)
+            client.timeline_delete(tenant, t)
 
     def assert_idle(tenant):
         assert get_state(tenant) == "Idle"
@@ -56,7 +56,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     # TODO they should be already idle since there are no active computes
     for tenant_info in client.tenant_list():
         tenant_id = UUID(tenant_info["id"])
-        detach_all_timelines(tenant_id)
+        delete_all_timelines(tenant_id)
         wait_until(10, 0.2, lambda: assert_idle(tenant_id))
 
     # Assert that all tasks finish quickly after tenants go idle

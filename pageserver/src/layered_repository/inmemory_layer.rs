@@ -15,6 +15,7 @@ use crate::layered_repository::storage_layer::{
 use crate::repository::{Key, Value};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
 use utils::{
@@ -29,6 +30,12 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
+
+thread_local! {
+    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
+    /// This buffer is reused for each serialization to avoid additional malloc calls.
+    static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -234,6 +241,14 @@ impl Layer for InMemoryLayer {
 
 impl InMemoryLayer {
     ///
+    /// Get layer size on the disk
+    ///
+    pub fn size(&self) -> Result<u64> {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.file.size)
+    }
+
+    ///
     /// Create a new, empty, in-memory layer
     ///
     pub fn create(
@@ -267,13 +282,20 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_value(&self, key: Key, lsn: Lsn, val: Value) -> Result<()> {
+    pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timelineid, lsn);
         let mut inner = self.inner.write().unwrap();
-
         inner.assert_writeable();
 
-        let off = inner.file.write_blob(&Value::ser(&val)?)?;
+        let off = {
+            SER_BUFFER.with(|x| -> Result<_> {
+                let mut buf = x.borrow_mut();
+                buf.clear();
+                val.ser_into(&mut (*buf))?;
+                let off = inner.file.write_blob(&buf)?;
+                Ok(off)
+            })?
+        };
 
         let vec_map = inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
@@ -342,8 +364,8 @@ impl InMemoryLayer {
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf)?;
-                let val = Value::des(&buf)?;
-                delta_layer_writer.put_value(key, *lsn, val)?;
+                let will_init = Value::des(&buf)?.will_init();
+                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }
         }
 

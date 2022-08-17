@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use postgres_ffi::xlog_utils::XLogSegNo;
 
 use serde::Serialize;
@@ -137,7 +137,7 @@ impl SharedState {
         self.is_wal_backup_required()
             // FIXME: add tracking of relevant pageservers and check them here individually,
             // otherwise migration won't work (we suspend too early).
-            || self.sk.inmem.remote_consistent_lsn <= self.sk.inmem.commit_lsn
+            || self.sk.inmem.remote_consistent_lsn < self.sk.inmem.commit_lsn
     }
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
@@ -559,12 +559,12 @@ struct GlobalTimelinesState {
     wal_backup_launcher_tx: Option<Sender<ZTenantTimelineId>>,
 }
 
-lazy_static! {
-    static ref TIMELINES_STATE: Mutex<GlobalTimelinesState> = Mutex::new(GlobalTimelinesState {
+static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
+    Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
         wal_backup_launcher_tx: None,
-    });
-}
+    })
+});
 
 #[derive(Clone, Copy, Serialize)]
 pub struct TimelineDeleteForceResult {

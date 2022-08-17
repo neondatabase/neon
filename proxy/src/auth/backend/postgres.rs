@@ -3,10 +3,12 @@
 use crate::{
     auth::{
         self,
-        backend::console::{self, io_error, AuthInfo, Result},
-        ClientCredentials, DatabaseInfo,
+        backend::console::{self, AuthInfo, GetAuthInfoError, TransportError, WakeComputeError},
+        ClientCredentials,
     },
-    compute, scram,
+    compute::{self, ComputeConnCfg},
+    error::io_error,
+    scram,
     stream::PqStream,
     url::ApiUrl,
 };
@@ -18,10 +20,17 @@ pub(super) struct Api<'a> {
     creds: &'a ClientCredentials,
 }
 
+// Helps eliminate graceless `.map_err` calls without introducing another ctor.
+impl From<tokio_postgres::Error> for TransportError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        io_error(e).into()
+    }
+}
+
 impl<'a> Api<'a> {
     /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Result<Self> {
-        Ok(Self { endpoint, creds })
+    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
+        Self { endpoint, creds }
     }
 
     /// Authenticate the existing user or throw an error.
@@ -34,21 +43,16 @@ impl<'a> Api<'a> {
     }
 
     /// This implementation fetches the auth info from a local postgres instance.
-    async fn get_auth_info(&self) -> Result<AuthInfo> {
+    async fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError> {
         // Perhaps we could persist this connection, but then we'd have to
         // write more code for reopening it if it got closed, which doesn't
         // seem worth it.
         let (client, connection) =
-            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls)
-                .await
-                .map_err(io_error)?;
+            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
         tokio::spawn(connection);
         let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
-        let rows = client
-            .query(query, &[&self.creds.user])
-            .await
-            .map_err(io_error)?;
+        let rows = client.query(query, &[&self.creds.user]).await?;
 
         match &rows[..] {
             // We can't get a secret if there's no such user.
@@ -56,7 +60,10 @@ impl<'a> Api<'a> {
 
             // We shouldn't get more than one row anyway.
             [row, ..] => {
-                let entry = row.try_get(0).map_err(io_error)?;
+                let entry = row
+                    .try_get("rolpassword")
+                    .map_err(|e| io_error(format!("failed to read user's password: {e}")))?;
+
                 scram::ServerSecret::parse(entry)
                     .map(AuthInfo::Scram)
                     .or_else(|| {
@@ -69,20 +76,20 @@ impl<'a> Api<'a> {
                         }))
                     })
                     // Putting the secret into this message is a security hazard!
-                    .ok_or(console::ConsoleAuthError::BadSecret)
+                    .ok_or(GetAuthInfoError::BadSecret)
             }
         }
     }
 
     /// We don't need to wake anything locally, so we just return the connection info.
-    async fn wake_compute(&self) -> Result<DatabaseInfo> {
-        Ok(DatabaseInfo {
-            // TODO: handle that near CLI params parsing
-            host: self.endpoint.host_str().unwrap_or("localhost").to_owned(),
-            port: self.endpoint.port().unwrap_or(5432),
-            dbname: self.creds.dbname.to_owned(),
-            user: self.creds.user.to_owned(),
-            password: None,
-        })
+    pub(super) async fn wake_compute(&self) -> Result<ComputeConnCfg, WakeComputeError> {
+        let mut config = ComputeConnCfg::new();
+        config
+            .host(self.endpoint.host_str().unwrap_or("localhost"))
+            .port(self.endpoint.port().unwrap_or(5432))
+            .dbname(&self.creds.dbname)
+            .user(&self.creds.user);
+
+        Ok(config)
     }
 }

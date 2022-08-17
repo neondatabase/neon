@@ -3,6 +3,7 @@ import random
 
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.log_helper import log
+from fixtures.utils import query_scalar
 
 # Test configuration
 #
@@ -59,22 +60,21 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     pg = env.postgres.create_start('test_gc_aggressive')
     log.info('postgres is running on test_gc_aggressive branch')
 
-    conn = pg.connect()
-    cur = conn.cursor()
+    with pg.cursor() as cur:
+        timeline = query_scalar(cur, "SHOW neon.timeline_id")
 
-    cur.execute("SHOW neon.timeline_id")
-    timeline = cur.fetchone()[0]
+        # Create table, and insert the first 100 rows
+        cur.execute('CREATE TABLE foo (id int, counter int, t text)')
+        cur.execute(f'''
+            INSERT INTO foo
+                SELECT g, 0, 'long string to consume some space' || g
+                FROM generate_series(1, {num_rows}) g
+        ''')
+        cur.execute('CREATE INDEX ON foo(id)')
 
-    # Create table, and insert the first 100 rows
-    cur.execute('CREATE TABLE foo (id int, counter int, t text)')
-    cur.execute(f'''
-        INSERT INTO foo
-            SELECT g, 0, 'long string to consume some space' || g
-            FROM generate_series(1, {num_rows}) g
-    ''')
-    cur.execute('CREATE INDEX ON foo(id)')
+        asyncio.run(update_and_gc(env, pg, timeline))
 
-    asyncio.run(update_and_gc(env, pg, timeline))
-
-    cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
-    assert cur.fetchone() == (num_rows, updates_to_perform)
+        cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
+        r = cur.fetchone()
+        assert r is not None
+        assert r == (num_rows, updates_to_perform)

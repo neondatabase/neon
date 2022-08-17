@@ -349,9 +349,11 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     Ok(())
 }
 
-// Grant CREATE ON DATABASE to the database owner
-// to allow clients create trusted extensions.
-pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+/// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
+/// to allow users creating trusted extensions and re-creating `public` schema, for example.
+pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
+    let spec = &node.spec;
+
     info!("cluster spec grants:");
 
     // We now have a separate `web_access` role to connect to the database
@@ -378,6 +380,48 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         info!("grant query {}", &query);
 
         client.execute(query.as_str(), &[])?;
+    }
+
+    // Do some per-database access adjustments. We'd better do this at db creation time,
+    // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
+    // atomically.
+    let mut db_connstr = node.connstr.clone();
+    for db in &node.spec.cluster.databases {
+        // database name is always the last and the only component of the path
+        db_connstr.set_path(&db.name);
+
+        let mut db_client = Client::connect(db_connstr.as_str(), NoTls)?;
+
+        // This will only change ownership on the schema itself, not the objects
+        // inside it. Without it owner of the `public` schema will be `cloud_admin`
+        // and database owner cannot do anything with it. SQL procedure ensures
+        // that it won't error out if schema `public` doesn't exist.
+        let alter_query = format!(
+            "DO $$\n\
+                DECLARE\n\
+                    schema_owner TEXT;\n\
+                BEGIN\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        SELECT nspowner::regrole::text\n\
+                            FROM pg_catalog.pg_namespace\n\
+                            WHERE nspname = 'public'\n\
+                            INTO schema_owner;\n\
+                \n\
+                        IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'\n\
+                        THEN\n\
+                            ALTER SCHEMA public OWNER TO {};\n\
+                        END IF;\n\
+                    END IF;\n\
+                END\n\
+            $$;",
+            db.owner.quote()
+        );
+        db_client.simple_query(&alter_query)?;
     }
 
     Ok(())

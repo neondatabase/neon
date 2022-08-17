@@ -8,37 +8,57 @@ use std::{
 
 use anyhow::{bail, ensure, Context};
 use bytes::BytesMut;
+use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
+use futures::StreamExt;
 use postgres::{SimpleQueryMessage, SimpleQueryRow};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{pin, select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    http::models::WalReceiverEntry,
+    layered_repository::WalReceiverInfo,
+    pgdatadir_mapping::DatadirTimeline,
     repository::{Repository, Timeline},
     tenant_mgr,
     walingest::WalIngest,
+    walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback, zid::ZTenantTimelineId};
 
-/// Opens a conneciton to the given wal producer and streams the WAL, sending progress messages during streaming.
+/// Status of the connection.
+#[derive(Debug, Clone)]
+pub struct WalConnectionStatus {
+    /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
+    pub is_connected: bool,
+    /// Defines a healthy connection as one on which we have received at least some WAL bytes.
+    pub has_received_wal: bool,
+    /// Connection establishment time or the timestamp of a latest connection message received.
+    pub latest_connection_update: NaiveDateTime,
+    /// Time of the latest WAL message received.
+    pub latest_wal_update: NaiveDateTime,
+    /// Latest WAL update contained WAL up to this LSN. Next WAL message with start from that LSN.
+    pub streaming_lsn: Option<Lsn>,
+    /// Latest commit_lsn received from the safekeeper. Can be zero if no message has been received yet.
+    pub commit_lsn: Option<Lsn>,
+}
+
+/// Open a connection to the given safekeeper and receive WAL, sending back progress
+/// messages as we go.
 pub async fn handle_walreceiver_connection(
     id: ZTenantTimelineId,
-    wal_producer_connstr: &str,
-    events_sender: &watch::Sender<TaskEvent<ReplicationFeedback>>,
+    wal_source_connstr: &str,
+    events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
     connect_timeout: Duration,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
-    info!("connecting to {wal_producer_connstr}");
-    let connect_cfg =
-        format!("{wal_producer_connstr} application_name=pageserver replication=true");
+    info!("connecting to {wal_source_connstr}");
+    let connect_cfg = format!("{wal_source_connstr} application_name=pageserver replication=true");
 
     let (mut replication_client, connection) = time::timeout(
         connect_timeout,
@@ -47,12 +67,26 @@ pub async fn handle_walreceiver_connection(
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
     .context("Failed to open walreceiver conection")?;
+
+    info!("connected!");
+    let mut connection_status = WalConnectionStatus {
+        is_connected: true,
+        has_received_wal: false,
+        latest_connection_update: Utc::now().naive_utc(),
+        latest_wal_update: Utc::now().naive_utc(),
+        streaming_lsn: None,
+        commit_lsn: None,
+    };
+    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
+        return Ok(());
+    }
+
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     let mut connection_cancellation = cancellation.clone();
     tokio::spawn(
         async move {
-            info!("connected!");
             select! {
                     connection_result = connection => match connection_result{
                             Ok(()) => info!("Walreceiver db connection closed"),
@@ -82,6 +116,14 @@ pub async fn handle_walreceiver_connection(
 
     let identify = identify_system(&mut replication_client).await?;
     info!("{identify:?}");
+
+    connection_status.latest_connection_update = Utc::now().naive_utc();
+    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+        warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
+        return Ok(());
+    }
+
+    // NB: this is a flush_lsn, not a commit_lsn.
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
     let ZTenantTimelineId {
@@ -116,7 +158,7 @@ pub async fn handle_walreceiver_connection(
     // There might be some padding after the last full record, skip it.
     startpoint += startpoint.calc_padding(8u32);
 
-    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, server is at {end_of_wal}...");
+    info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
@@ -138,6 +180,33 @@ pub async fn handle_walreceiver_connection(
         }
     } {
         let replication_message = replication_message?;
+        let now = Utc::now().naive_utc();
+
+        // Update the connection status before processing the message. If the message processing
+        // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
+        match &replication_message {
+            ReplicationMessage::XLogData(xlog_data) => {
+                connection_status.latest_connection_update = now;
+                connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
+                connection_status.streaming_lsn = Some(Lsn::from(
+                    xlog_data.wal_start() + xlog_data.data().len() as u64,
+                ));
+                if !xlog_data.data().is_empty() {
+                    connection_status.latest_wal_update = now;
+                    connection_status.has_received_wal = true;
+                }
+            }
+            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                connection_status.latest_connection_update = now;
+                connection_status.commit_lsn = Some(Lsn::from(keepalive.wal_end()));
+            }
+            &_ => {}
+        };
+        if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+            warn!("Wal connection event listener dropped, aborting the connection: {e}");
+            return Ok(());
+        }
+
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
@@ -150,35 +219,31 @@ pub async fn handle_walreceiver_connection(
 
                 waldecoder.feed_bytes(data);
 
-                while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                    let _enter = info_span!("processing record", lsn = %lsn).entered();
+                {
+                    let mut decoded = DecodedWALRecord::default();
+                    let mut modification = timeline.begin_modification(endlsn);
+                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
 
-                    // It is important to deal with the aligned records as lsn in getPage@LSN is
-                    // aligned and can be several bytes bigger. Without this alignment we are
-                    // at risk of hitting a deadlock.
-                    ensure!(lsn.is_aligned());
+                        // It is important to deal with the aligned records as lsn in getPage@LSN is
+                        // aligned and can be several bytes bigger. Without this alignment we are
+                        // at risk of hitting a deadlock.
+                        ensure!(lsn.is_aligned());
 
-                    walingest.ingest_record(&timeline, recdata, lsn)?;
+                        walingest
+                            .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                            .context("could not ingest record at {lsn}")?;
 
-                    fail_point!("walreceiver-after-ingest");
+                        fail_point!("walreceiver-after-ingest");
 
-                    last_rec_lsn = lsn;
+                        last_rec_lsn = lsn;
+                    }
                 }
 
                 if !caught_up && endlsn >= end_of_wal {
                     info!("caught up at LSN {endlsn}");
                     caught_up = true;
                 }
-
-                let timeline_to_check = Arc::clone(&timeline.tline);
-                tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
-                    .await
-                    .with_context(|| {
-                        format!("Spawned checkpoint check task panicked for timeline {id}")
-                    })?
-                    .with_context(|| {
-                        format!("Failed to check checkpoint distance for timeline {id}")
-                    })?;
 
                 Some(endlsn)
             }
@@ -200,6 +265,12 @@ pub async fn handle_walreceiver_connection(
             _ => None,
         };
 
+        let timeline_to_check = Arc::clone(&timeline);
+        tokio::task::spawn_blocking(move || timeline_to_check.check_checkpoint_distance())
+            .await
+            .with_context(|| format!("Spawned checkpoint check task panicked for timeline {id}"))?
+            .with_context(|| format!("Failed to check checkpoint distance for timeline {id}"))?;
+
         if let Some(last_lsn) = status_update {
             let remote_index = repo.get_remote_index();
             let timeline_remote_consistent_lsn = remote_index
@@ -218,27 +289,22 @@ pub async fn handle_walreceiver_connection(
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let write_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.tline.get_disk_consistent_lsn());
+            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
             let apply_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
-            // Update the current WAL receiver's data stored inside the global hash table `WAL_RECEIVERS`
-            {
-                super::WAL_RECEIVER_ENTRIES.write().await.insert(
-                    id,
-                    WalReceiverEntry {
-                        wal_producer_connstr: Some(wal_producer_connstr.to_owned()),
-                        last_received_msg_lsn: Some(last_lsn),
-                        last_received_msg_ts: Some(
-                            ts.duration_since(SystemTime::UNIX_EPOCH)
-                                .expect("Received message time should be before UNIX EPOCH!")
-                                .as_micros(),
-                        ),
-                    },
-                );
-            }
+            // Update the status about what we just received. This is shown in the mgmt API.
+            let last_received_wal = WalReceiverInfo {
+                wal_source_connstr: wal_source_connstr.to_owned(),
+                last_received_msg_lsn: last_lsn,
+                last_received_msg_ts: ts
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("Received message time should be before UNIX EPOCH!")
+                    .as_micros(),
+            };
+            *timeline.last_received_wal.lock().unwrap() = Some(last_received_wal);
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
@@ -258,10 +324,6 @@ pub async fn handle_walreceiver_connection(
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
                 .await?;
-            if let Err(e) = events_sender.send(TaskEvent::NewEvent(zenith_status_update)) {
-                warn!("Wal connection event listener dropped, aborting the connection: {e}");
-                return Ok(());
-            }
         }
     }
 

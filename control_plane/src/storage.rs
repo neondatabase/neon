@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
-use std::net::TcpStream;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::Command;
@@ -12,9 +11,9 @@ use anyhow::{bail, Context};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pageserver::http::models::{TenantConfigRequest, TenantCreateRequest, TimelineCreateRequest};
-use pageserver::tenant_mgr::TenantInfo;
-use pageserver::timelines::TimelineInfo;
+use pageserver::http::models::{
+    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
+};
 use postgres::{Config, NoTls};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
@@ -312,41 +311,28 @@ impl PageServerNode {
             ),
         }
 
-        let address = connection_address(&self.pg_connection_config);
-
-        // TODO Remove this "timeout" and handle it on caller side instead.
-        // Shutting down may take a long time,
-        // if pageserver checkpoints a lot of data
-        let mut tcp_stopped = false;
-        for _ in 0..100 {
-            if !tcp_stopped {
-                if let Err(err) = TcpStream::connect(&address) {
-                    tcp_stopped = true;
-                    if err.kind() != io::ErrorKind::ConnectionRefused {
-                        eprintln!("\nPageserver connection failed with error: {err}");
-                    }
+        // Wait until process is gone
+        for i in 0..600 {
+            let signal = None; // Send no signal, just get the error code
+            match kill(pid, signal) {
+                Ok(_) => (), // Process exists, keep waiting
+                Err(Errno::ESRCH) => {
+                    // Process not found, we're done
+                    println!("done!");
+                    return Ok(());
                 }
-            }
-            if tcp_stopped {
-                // Also check status on the HTTP port
+                Err(err) => bail!(
+                    "Failed to send signal to pageserver with pid {}: {}",
+                    pid,
+                    err.desc()
+                ),
+            };
 
-                match self.check_status() {
-                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
-                        println!("done!");
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        eprintln!("\nPageserver status check failed with error: {err}");
-                        return Ok(());
-                    }
-                    Ok(()) => {
-                        // keep waiting
-                    }
-                }
+            if i % 10 == 0 {
+                print!(".");
+                io::stdout().flush().unwrap();
             }
-            print!(".");
-            io::stdout().flush().unwrap();
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(100));
         }
 
         bail!("Failed to stop pageserver with pid {}", pid);
@@ -399,6 +385,7 @@ impl PageServerNode {
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
                     .transpose()?,
+                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
                     .get("compaction_target_size")
                     .map(|x| x.parse::<u64>())
@@ -453,6 +440,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'checkpoint_distance' as an integer")?,
+                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
                     .get("compaction_target_size")
                     .map(|x| x.parse::<u64>())

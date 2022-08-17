@@ -8,11 +8,12 @@ on:
 
 defaults:
   run:
-    shell: bash -ex {0}
+    shell: bash -euxo pipefail {0}
 
 concurrency:
-   group: ${{ github.workflow }}-${{ github.ref }}
-   cancel-in-progress: true
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
 
 env:
   RUST_BACKTRACE: 1
@@ -26,7 +27,7 @@ jobs:
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
-    timeout-minutes: 50
+    timeout-minutes: 60
     name: run regression test suite
     runs-on: ${{ matrix.os }}
 
@@ -97,9 +98,10 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
+            !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
+          key: v2-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
 
       - name: Run cargo clippy
         run: ./run_clippy.sh

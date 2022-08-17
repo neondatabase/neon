@@ -27,22 +27,35 @@ inputs:
     description: 'Whether to upload the performance report'
     required: false
     default: 'false'
+  run_with_real_s3:
+    description: 'Whether to pass real s3 credentials to the test suite'
+    required: false
+    default: 'false'
+  real_s3_bucket:
+    description: 'Bucket name for real s3 tests'
+    required: false
+    default: ''
+  real_s3_region:
+    description: 'Region name for real s3 tests'
+    required: false
+    default: ''
+  real_s3_access_key_id:
+    description: 'Access key id'
+    required: false
+    default: ''
+  real_s3_secret_access_key:
+    description: 'Secret access key'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
   steps:
-    - name: Get Neon artifact for restoration
-      uses: actions/download-artifact@v3
+    - name: Get Neon artifact
+      uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
-        path: ./neon-artifact/
-
-    - name: Extract Neon artifact
-      shell: bash -ex {0}
-      run: |
-        mkdir -p /tmp/neon/
-        tar -xf ./neon-artifact/neon.tgz -C /tmp/neon/
-        rm -rf ./neon-artifact/
+        path: /tmp/neon
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
@@ -59,7 +72,7 @@ runs:
         key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
     - name: Run pytest
@@ -70,7 +83,10 @@ runs:
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
         PLATFORM: github-actions-selfhosted
-      shell: bash -ex {0}
+        BUILD_TYPE: ${{ inputs.build_type }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.real_s3_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
+      shell: bash -euxo pipefail {0}
       run: |
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR
@@ -84,6 +100,14 @@ runs:
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
           EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
         fi
+
+        if [[ "${{ inputs.run_with_real_s3 }}" == "true" ]]; then
+          echo "REAL S3 ENABLED"
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=${{ inputs.real_s3_bucket }}
+          export REMOTE_STORAGE_S3_REGION=${{ inputs.real_s3_region }}
+        fi
+
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
           if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
             mkdir -p "$PERF_REPORT_DIR"
@@ -99,7 +123,7 @@ runs:
 
         # Run the tests.
         #
-        # The junit.xml file allows CircleCI to display more fine-grained test information
+        # The junit.xml file allows CI tools to display more fine-grained test information
         # in its "Tests" tab in the results page.
         # --verbose prints name of each test (helpful when there are
         # multiple tests in one file)
@@ -123,7 +147,7 @@ runs:
         fi
 
     - name: Delete all data but logs
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       if: always()
       run: |
         du -sh /tmp/test_output/*
@@ -132,9 +156,7 @@ runs:
 
     - name: Upload python test logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: ./.github/actions/upload
       with:
-        retention-days: 7
-        if-no-files-found: error
         name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
         path: /tmp/test_output/

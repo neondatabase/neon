@@ -1,8 +1,7 @@
 //! Main authentication flow.
 
-use super::AuthErrorImpl;
-use crate::stream::PqStream;
-use crate::{sasl, scram};
+use super::{AuthErrorImpl, PasswordHackPayload};
+use crate::{sasl, scram, stream::PqStream};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
@@ -24,6 +23,17 @@ impl AuthMethod for Scram<'_> {
     #[inline(always)]
     fn first_message(&self) -> BeMessage<'_> {
         Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
+    }
+}
+
+/// Use an ad hoc auth flow (for clients which don't support SNI) proposed in
+/// <https://github.com/neondatabase/cloud/issues/1620#issuecomment-1165332290>.
+pub struct PasswordHack;
+
+impl AuthMethod for PasswordHack {
+    #[inline(always)]
+    fn first_message(&self) -> BeMessage<'_> {
+        Be::AuthenticationCleartextPassword
     }
 }
 
@@ -57,17 +67,37 @@ impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     }
 }
 
+impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
+    /// Perform user authentication. Raise an error in case authentication failed.
+    pub async fn authenticate(self) -> super::Result<PasswordHackPayload> {
+        let msg = self.stream.read_password_message().await?;
+        let password = msg
+            .strip_suffix(&[0])
+            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+
+        let payload = PasswordHackPayload::parse(password)
+            // If we ended up here and the payload is malformed, it means that
+            // the user neither enabled SNI nor resorted to any other method
+            // for passing the project name we rely on. We should show them
+            // the most helpful error message and point to the documentation.
+            .ok_or(AuthErrorImpl::MissingProjectName)?;
+
+        Ok(payload)
+    }
+}
+
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn authenticate(self) -> super::Result<scram::ScramKey> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
-        let sasl = sasl::FirstMessage::parse(&msg).ok_or(AuthErrorImpl::MalformedPassword)?;
+        let sasl = sasl::FirstMessage::parse(&msg)
+            .ok_or(AuthErrorImpl::MalformedPassword("bad sasl message"))?;
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {
-            return Err(AuthErrorImpl::auth_failed("method not supported").into());
+            return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
         let secret = self.state.0;

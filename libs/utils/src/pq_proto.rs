@@ -47,9 +47,11 @@ pub enum FeStartupPacket {
     StartupMessage {
         major_version: u32,
         minor_version: u32,
-        params: HashMap<String, String>,
+        params: StartupMessageParams,
     },
 }
+
+pub type StartupMessageParams = HashMap<String, String>;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CancelKeyData {
@@ -928,7 +930,7 @@ impl<'a> BeMessage<'a> {
 
 // Neon extension of postgres replication protocol
 // See NEON_STATUS_UPDATE_TAG_BYTE
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationFeedback {
     // Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,

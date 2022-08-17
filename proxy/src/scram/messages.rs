@@ -14,7 +14,7 @@ pub const SCRAM_RAW_NONCE_LEN: usize = 18;
 fn validate_sasl_extensions<'a>(parts: impl Iterator<Item = &'a str>) -> Option<()> {
     for mut chars in parts.map(|s| s.chars()) {
         let attr = chars.next()?;
-        if !('a'..'z').contains(&attr) && !('A'..'Z').contains(&attr) {
+        if !('a'..='z').contains(&attr) && !('A'..='Z').contains(&attr) {
             return None;
         }
         let eq = chars.next()?;

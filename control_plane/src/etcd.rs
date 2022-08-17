@@ -30,14 +30,14 @@ pub fn start_etcd_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     let etcd_stdout_file =
         fs::File::create(etcd_data_dir.join("etcd.stdout.log")).with_context(|| {
             format!(
-                "Failed to create ectd stout file in directory {}",
+                "Failed to create etcd stout file in directory {}",
                 etcd_data_dir.display()
             )
         })?;
     let etcd_stderr_file =
         fs::File::create(etcd_data_dir.join("etcd.stderr.log")).with_context(|| {
             format!(
-                "Failed to create ectd stderr file in directory {}",
+                "Failed to create etcd stderr file in directory {}",
                 etcd_data_dir.display()
             )
         })?;

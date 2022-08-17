@@ -8,7 +8,7 @@ use crate::page_cache;
 use crate::page_cache::PAGE_SZ;
 use crate::page_cache::{ReadBufResult, WriteBufResult};
 use crate::virtual_file::VirtualFile;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -21,15 +21,15 @@ use utils::zid::{ZTenantId, ZTimelineId};
 
 use std::os::unix::fs::FileExt;
 
-lazy_static! {
-    ///
-    /// This is the global cache of file descriptors (File objects).
-    ///
-    static ref EPHEMERAL_FILES: RwLock<EphemeralFiles> = RwLock::new(EphemeralFiles {
+///
+/// This is the global cache of file descriptors (File objects).
+///
+static EPHEMERAL_FILES: Lazy<RwLock<EphemeralFiles>> = Lazy::new(|| {
+    RwLock::new(EphemeralFiles {
         next_file_id: 1,
         files: HashMap::new(),
-    });
-}
+    })
+});
 
 pub struct EphemeralFiles {
     next_file_id: u64,
@@ -43,7 +43,7 @@ pub struct EphemeralFile {
     _timelineid: ZTimelineId,
     file: Arc<VirtualFile>,
 
-    size: u64,
+    pub size: u64,
 }
 
 impl EphemeralFile {

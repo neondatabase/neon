@@ -11,7 +11,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -30,7 +30,6 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::layered_repository::LayeredRepository;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -435,15 +434,15 @@ const TIME_BUCKETS: &[f64] = &[
     0.1,  // 1/10 s
 ];
 
-lazy_static! {
-    static ref SMGR_QUERY_TIME: HistogramVec = register_histogram_vec!(
+static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
         TIME_BUCKETS.into()
     )
-    .expect("failed to define a metric");
-}
+    .expect("failed to define a metric")
+});
 
 impl PageServerHandler {
     pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
@@ -555,9 +554,6 @@ impl PageServerHandler {
         info!("creating new timeline");
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
         let timeline = repo.create_empty_timeline(timeline_id, base_lsn)?;
-        let repartition_distance = repo.get_checkpoint_distance();
-        let mut datadir_timeline =
-            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -573,7 +569,7 @@ impl PageServerHandler {
         info!("importing basebackup");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
-        import_basebackup_from_tar(&mut datadir_timeline, reader, base_lsn)?;
+        import_basebackup_from_tar(&*timeline, reader, base_lsn)?;
 
         // TODO check checksum
         // Meanwhile you can verify client-side by taking fullbackup
@@ -583,7 +579,7 @@ impl PageServerHandler {
 
         // Flush data to disk, then upload to s3
         info!("flushing layers");
-        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush)?;
 
         info!("done");
         Ok(())
@@ -605,10 +601,6 @@ impl PageServerHandler {
         let timeline = repo.get_timeline_load(timeline_id)?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
-        let repartition_distance = repo.get_checkpoint_distance();
-        let mut datadir_timeline =
-            DatadirTimeline::<LayeredRepository>::new(timeline, repartition_distance);
-
         // TODO leave clean state on error. For now you can use detach to clean
         // up broken state from a failed import.
 
@@ -616,16 +608,16 @@ impl PageServerHandler {
         info!("importing wal");
         pgb.write_message(&BeMessage::CopyInResponse)?;
         let reader = CopyInReader::new(pgb);
-        import_wal_from_tar(&mut datadir_timeline, reader, start_lsn, end_lsn)?;
+        import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)?;
 
         // TODO Does it make sense to overshoot?
-        ensure!(datadir_timeline.tline.get_last_record_lsn() >= end_lsn);
+        ensure!(timeline.get_last_record_lsn() >= end_lsn);
 
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        datadir_timeline.tline.checkpoint(CheckpointConfig::Flush)?;
+        timeline.checkpoint(CheckpointConfig::Flush)?;
 
         info!("done");
         Ok(())
@@ -643,8 +635,8 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn<R: Repository>(
-        timeline: &DatadirTimeline<R>,
+    fn wait_or_get_last_lsn<T: DatadirTimeline>(
+        timeline: &T,
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
@@ -671,7 +663,7 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.tline.wait_lsn(lsn)?;
+                timeline.wait_lsn(lsn)?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -681,7 +673,7 @@ impl PageServerHandler {
             if lsn == Lsn(0) {
                 bail!("invalid LSN(0) in request");
             }
-            timeline.tline.wait_lsn(lsn)?;
+            timeline.wait_lsn(lsn)?;
         }
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
@@ -691,14 +683,14 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request<R: Repository>(
+    fn handle_get_rel_exists_request<T: DatadirTimeline>(
         &self,
-        timeline: &DatadirTimeline<R>,
+        timeline: &T,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
 
-        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let exists = timeline.get_rel_exists(req.rel, lsn)?;
@@ -708,13 +700,13 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_nblocks_request<R: Repository>(
+    fn handle_get_nblocks_request<T: DatadirTimeline>(
         &self,
-        timeline: &DatadirTimeline<R>,
+        timeline: &T,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
-        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
@@ -724,13 +716,13 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_db_size_request<R: Repository>(
+    fn handle_db_size_request<T: DatadirTimeline>(
         &self,
-        timeline: &DatadirTimeline<R>,
+        timeline: &T,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
-        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let total_blocks =
@@ -743,14 +735,14 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_page_at_lsn_request<R: Repository>(
+    fn handle_get_page_at_lsn_request<T: DatadirTimeline>(
         &self,
-        timeline: &DatadirTimeline<R>,
+        timeline: &T,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
             .entered();
-        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
         /*
         // Add a 1s delay to some requests. The delayed causes the requests to
@@ -772,6 +764,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend,
         timelineid: ZTimelineId,
         lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
         tenantid: ZTenantId,
         full_backup: bool,
     ) -> anyhow::Result<()> {
@@ -782,7 +775,7 @@ impl PageServerHandler {
         // check that the timeline exists
         let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
             .context("Cannot load local timeline")?;
-        let latest_gc_cutoff_lsn = timeline.tline.get_latest_gc_cutoff_lsn();
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
@@ -796,7 +789,8 @@ impl PageServerHandler {
         {
             let mut writer = CopyDataSink { pgb };
 
-            let basebackup = basebackup::Basebackup::new(&mut writer, &timeline, lsn, full_backup)?;
+            let basebackup =
+                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
             span.record("lsn", &basebackup.lsn.to_string().as_str());
             basebackup.send_tarball()?;
         }
@@ -899,8 +893,37 @@ impl postgres_backend::Handler for PageServerHandler {
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid, false)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, None, tenantid, false)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
+        // return pair of prev_lsn and last_lsn
+        else if query_string.starts_with("get_last_record_rlsn ") {
+            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            ensure!(
+                params.len() == 2,
+                "invalid param number for get_last_record_rlsn command"
+            );
+
+            let tenantid = ZTenantId::from_str(params[0])?;
+            let timelineid = ZTimelineId::from_str(params[1])?;
+
+            self.check_permission(Some(tenantid))?;
+            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
+                .context("Cannot load local timeline")?;
+
+            let end_of_timeline = timeline.get_last_record_rlsn();
+
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                RowDescriptor::text_col(b"prev_lsn"),
+                RowDescriptor::text_col(b"last_lsn"),
+            ]))?
+            .write_message_noflush(&BeMessage::DataRow(&[
+                Some(end_of_timeline.prev.to_string().as_bytes()),
+                Some(end_of_timeline.last.to_string().as_bytes()),
+            ]))?
+            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         // same as basebackup, but result includes relational data as well
         else if query_string.starts_with("fullbackup ") {
@@ -908,24 +931,29 @@ impl postgres_backend::Handler for PageServerHandler {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             ensure!(
-                params.len() == 3,
+                params.len() >= 2,
                 "invalid param number for fullbackup command"
             );
 
             let tenantid = ZTenantId::from_str(params[0])?;
             let timelineid = ZTimelineId::from_str(params[1])?;
 
+            // The caller is responsible for providing correct lsn and prev_lsn.
+            let lsn = if params.len() > 2 {
+                Some(Lsn::from_str(params[2])?)
+            } else {
+                None
+            };
+            let prev_lsn = if params.len() > 3 {
+                Some(Lsn::from_str(params[3])?)
+            } else {
+                None
+            };
+
             self.check_permission(Some(tenantid))?;
 
-            // Lsn is required for fullbackup, because otherwise we would not know
-            // at which lsn to upload this backup.
-            //
-            // The caller is responsible for providing a valid lsn
-            // and using it in the subsequent import.
-            let lsn = Some(Lsn::from_str(params[2])?);
-
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, timelineid, lsn, tenantid, true)?;
+            self.handle_basebackup_request(pgb, timelineid, lsn, prev_lsn, tenantid, true)?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
@@ -1016,6 +1044,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let repo = tenant_mgr::get_repository_for_tenant(tenantid)?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
+                RowDescriptor::int8_col(b"checkpoint_timeout"),
                 RowDescriptor::int8_col(b"compaction_target_size"),
                 RowDescriptor::int8_col(b"compaction_period"),
                 RowDescriptor::int8_col(b"compaction_threshold"),
@@ -1026,6 +1055,12 @@ impl postgres_backend::Handler for PageServerHandler {
             ]))?
             .write_message_noflush(&BeMessage::DataRow(&[
                 Some(repo.get_checkpoint_distance().to_string().as_bytes()),
+                Some(
+                    repo.get_checkpoint_timeout()
+                        .as_secs()
+                        .to_string()
+                        .as_bytes(),
+                ),
                 Some(repo.get_compaction_target_size().to_string().as_bytes()),
                 Some(
                     repo.get_compaction_period()
@@ -1103,7 +1138,7 @@ impl postgres_backend::Handler for PageServerHandler {
             let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Couldn't load timeline")?;
-            timeline.tline.compact()?;
+            timeline.compact()?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -1123,13 +1158,8 @@ impl postgres_backend::Handler for PageServerHandler {
             let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
                 .context("Cannot load local timeline")?;
 
-            timeline.tline.checkpoint(CheckpointConfig::Forced)?;
-
-            // Also compact it.
-            //
-            // FIXME: This probably shouldn't be part of a "checkpoint" command, but a
-            // separate operation. Update the tests if you change this.
-            timeline.tline.compact()?;
+            // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
+            timeline.checkpoint(CheckpointConfig::Forced)?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;

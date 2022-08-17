@@ -155,8 +155,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
-use lazy_static::lazy_static;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::{
     fs,
@@ -173,53 +172,54 @@ use self::{
 };
 use crate::{
     config::PageServerConf,
+    exponential_backoff,
     layered_repository::{
         ephemeral_file::is_ephemeral_file,
         metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
-        LayeredRepository,
     },
-    repository::TimelineSyncStatusUpdate,
     storage_sync::{self, index::RemoteIndex},
-    tenant_mgr::apply_timeline_sync_status_updates,
+    tenant_mgr::attach_downloaded_tenants,
     thread_mgr,
     thread_mgr::ThreadKind,
 };
 
 use metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge, HistogramVec,
+    IntCounterVec, IntGauge,
 };
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
-pub use self::download::download_index_part;
+use self::download::download_index_parts;
+pub use self::download::gather_tenant_timelines_index_parts;
 pub use self::download::TEMP_DOWNLOAD_EXTENSION;
 
-lazy_static! {
-    static ref REMAINING_SYNC_ITEMS: IntGauge = register_int_gauge!(
+static REMAINING_SYNC_ITEMS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
         "pageserver_remote_storage_remaining_sync_items",
         "Number of storage sync items left in the queue"
     )
-    .expect("failed to register pageserver remote storage remaining sync items int gauge");
-    static ref FATAL_TASK_FAILURES: IntCounter = register_int_counter!(
-        "pageserver_remote_storage_fatal_task_failures_total",
-        "Number of critically failed tasks"
-    )
-    .expect("failed to register pageserver remote storage remaining sync items int gauge");
-    static ref IMAGE_SYNC_TIME: HistogramVec = register_histogram_vec!(
+    .expect("failed to register pageserver remote storage remaining sync items int gauge")
+});
+
+static IMAGE_SYNC_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "pageserver_remote_storage_image_sync_seconds",
         "Time took to synchronize (download or upload) a whole pageserver image. \
         Grouped by tenant and timeline ids, `operation_kind` (upload|download) and `status` (success|failure)",
         &["tenant_id", "timeline_id", "operation_kind", "status"],
         vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 3.0, 10.0, 20.0]
     )
-    .expect("failed to register pageserver image sync time histogram vec");
-    static ref REMOTE_INDEX_UPLOAD: IntCounterVec = register_int_counter_vec!(
+    .expect("failed to register pageserver image sync time histogram vec")
+});
+
+static REMOTE_INDEX_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "pageserver_remote_storage_remote_index_uploads_total",
         "Number of remote index uploads",
         &["tenant_id", "timeline_id"],
     )
-    .expect("failed to register pageserver remote index upload vec");
-}
+    .expect("failed to register pageserver remote index upload vec")
+});
 
 static SYNC_QUEUE: OnceCell<SyncQueue> = OnceCell::new();
 
@@ -301,7 +301,7 @@ pub fn start_local_timeline_sync(
             }
             Ok(SyncStartupData {
                 local_timeline_init_statuses,
-                remote_index: RemoteIndex::empty(),
+                remote_index: RemoteIndex::default(),
             })
         }
     }
@@ -835,7 +835,7 @@ where
         .build()
         .context("Failed to create storage sync runtime")?;
 
-    let applicable_index_parts = runtime.block_on(try_fetch_index_parts(
+    let applicable_index_parts = runtime.block_on(download_index_parts(
         conf,
         &storage,
         local_timeline_files.keys().copied().collect(),
@@ -918,16 +918,48 @@ fn storage_sync_loop<P, S>(
         });
 
         match loop_step {
-            ControlFlow::Continue(new_timeline_states) => {
-                if new_timeline_states.is_empty() {
-                    debug!("Sync loop step completed, no new timeline states");
+            ControlFlow::Continue(updated_tenants) => {
+                if updated_tenants.is_empty() {
+                    debug!("Sync loop step completed, no new tenant states");
                 } else {
                     info!(
-                        "Sync loop step completed, {} new timeline state update(s)",
-                        new_timeline_states.len()
+                        "Sync loop step completed, {} new tenant state update(s)",
+                        updated_tenants.len()
                     );
+                    let mut sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>> =
+                        HashMap::new();
+                    let index_accessor = runtime.block_on(index.read());
+                    for tenant_id in updated_tenants {
+                        let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
+                            Some(tenant_entry) => tenant_entry,
+                            None => {
+                                error!(
+                                    "cannot find tenant in remote index for timeline sync update"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if tenant_entry.has_in_progress_downloads() {
+                            info!("Tenant {tenant_id} has pending timeline downloads, skipping repository registration");
+                            continue;
+                        } else {
+                            info!(
+                                "Tenant {tenant_id} download completed. Picking to register in repository"
+                            );
+                            // Here we assume that if tenant has no in-progress downloads that
+                            // means that it is the last completed timeline download that triggered
+                            // sync status update. So we look at the index for available timelines
+                            // and register them all at once in a repository for download
+                            // to be submitted in a single operation to repository
+                            // so it can apply them at once to internal timeline map.
+                            sync_status_updates
+                                .insert(tenant_id, tenant_entry.keys().copied().collect());
+                        }
+                    }
+                    drop(index_accessor);
                     // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                    apply_timeline_sync_status_updates(conf, &index, new_timeline_states);
+                    attach_downloaded_tenants(conf, &index, sync_status_updates);
                 }
             }
             ControlFlow::Break(()) => {
@@ -938,6 +970,19 @@ fn storage_sync_loop<P, S>(
     }
 }
 
+#[derive(Debug)]
+enum DownloadStatus {
+    Downloaded,
+    Nothing,
+}
+
+#[derive(Debug)]
+enum UploadStatus {
+    Uploaded,
+    Failed(anyhow::Error),
+    Nothing,
+}
+
 async fn process_batches<P, S>(
     conf: &'static PageServerConf,
     max_sync_errors: NonZeroU32,
@@ -945,7 +990,7 @@ async fn process_batches<P, S>(
     index: &RemoteIndex,
     batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
     sync_queue: &SyncQueue,
-) -> HashMap<ZTenantId, HashMap<ZTimelineId, TimelineSyncStatusUpdate>>
+) -> HashSet<ZTenantId>
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
@@ -970,22 +1015,19 @@ where
         })
         .collect::<FuturesUnordered<_>>();
 
-    let mut new_timeline_states: HashMap<
-        ZTenantId,
-        HashMap<ZTimelineId, TimelineSyncStatusUpdate>,
-    > = HashMap::new();
+    let mut downloaded_timelines = HashSet::new();
 
-    while let Some((sync_id, state_update)) = sync_results.next().await {
-        debug!("Finished storage sync task for sync id {sync_id}");
-        if let Some(state_update) = state_update {
-            new_timeline_states
-                .entry(sync_id.tenant_id)
-                .or_default()
-                .insert(sync_id.timeline_id, state_update);
+    while let Some((sync_id, download_marker)) = sync_results.next().await {
+        debug!(
+            "Finished storage sync task for sync id {sync_id} download marker {:?}",
+            download_marker
+        );
+        if matches!(download_marker, DownloadStatus::Downloaded) {
+            downloaded_timelines.insert(sync_id.tenant_id);
         }
     }
 
-    new_timeline_states
+    downloaded_timelines
 }
 
 async fn process_sync_task_batch<P, S>(
@@ -994,7 +1036,7 @@ async fn process_sync_task_batch<P, S>(
     max_sync_errors: NonZeroU32,
     sync_id: ZTenantTimelineId,
     batch: SyncTaskBatch,
-) -> Option<TimelineSyncStatusUpdate>
+) -> DownloadStatus
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
@@ -1011,66 +1053,71 @@ where
     // When operating in a system without tasks failing over the error threshold,
     // current batching and task processing systems aim to update the layer set and metadata files (remote and local),
     // without "losing" such layer files.
-    let (upload_result, status_update) = tokio::join!(
+    let (upload_status, download_status) = tokio::join!(
         async {
             if let Some(upload_data) = upload_data {
-                match validate_task_retries(upload_data, max_sync_errors)
+                let upload_retries = upload_data.retries;
+                match validate_task_retries(upload_retries, max_sync_errors)
                     .instrument(info_span!("retries_validation"))
                     .await
                 {
-                    ControlFlow::Continue(new_upload_data) => {
+                    ControlFlow::Continue(()) => {
                         upload_timeline_data(
                             conf,
                             (storage.as_ref(), &index, sync_queue),
                             current_remote_timeline.as_ref(),
                             sync_id,
-                            new_upload_data,
+                            upload_data,
                             sync_start,
                             "upload",
                         )
-                        .await;
-                        return Some(());
-                    }
-                    ControlFlow::Break(failed_upload_data) => {
-                        if let Err(e) = update_remote_data(
-                            conf,
-                            storage.as_ref(),
-                            &index,
-                            sync_id,
-                            RemoteDataUpdate::Upload {
-                                uploaded_data: failed_upload_data.data,
-                                upload_failed: true,
-                            },
-                        )
                         .await
-                        {
-                            error!("Failed to update remote timeline {sync_id}: {e:?}");
-                        }
                     }
+                    ControlFlow::Break(()) => match update_remote_data(
+                        conf,
+                        storage.as_ref(),
+                        &index,
+                        sync_id,
+                        RemoteDataUpdate::Upload {
+                            uploaded_data: upload_data.data,
+                            upload_failed: true,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(()) => UploadStatus::Failed(anyhow::anyhow!(
+                            "Aborted after retries validation, current retries: {upload_retries}, max retries allowed: {max_sync_errors}"
+                        )),
+                        Err(e) => {
+                            error!("Failed to update remote timeline {sync_id}: {e:?}");
+                            UploadStatus::Failed(e)
+                        }
+                    },
                 }
+            } else {
+                UploadStatus::Nothing
             }
-            None
         }
         .instrument(info_span!("upload_timeline_data")),
         async {
             if let Some(download_data) = download_data {
-                match validate_task_retries(download_data, max_sync_errors)
+                match validate_task_retries(download_data.retries, max_sync_errors)
                     .instrument(info_span!("retries_validation"))
                     .await
                 {
-                    ControlFlow::Continue(new_download_data) => {
+                    ControlFlow::Continue(()) => {
                         return download_timeline_data(
                             conf,
                             (storage.as_ref(), &index, sync_queue),
                             current_remote_timeline.as_ref(),
                             sync_id,
-                            new_download_data,
+                            download_data,
                             sync_start,
                             "download",
                         )
                         .await;
                     }
-                    ControlFlow::Break(_) => {
+                    ControlFlow::Break(()) => {
                         index
                             .write()
                             .await
@@ -1079,50 +1126,53 @@ where
                     }
                 }
             }
-            None
+            DownloadStatus::Nothing
         }
         .instrument(info_span!("download_timeline_data")),
     );
 
     if let Some(delete_data) = batch.delete {
-        if upload_result.is_some() {
-            match validate_task_retries(delete_data, max_sync_errors)
-                .instrument(info_span!("retries_validation"))
-                .await
-            {
-                ControlFlow::Continue(new_delete_data) => {
-                    delete_timeline_data(
-                        conf,
-                        (storage.as_ref(), &index, sync_queue),
-                        sync_id,
-                        new_delete_data,
-                        sync_start,
-                        "delete",
-                    )
-                    .instrument(info_span!("delete_timeline_data"))
-                    .await;
-                }
-                ControlFlow::Break(failed_delete_data) => {
-                    if let Err(e) = update_remote_data(
-                        conf,
-                        storage.as_ref(),
-                        &index,
-                        sync_id,
-                        RemoteDataUpdate::Delete(&failed_delete_data.data.deleted_layers),
-                    )
+        match upload_status {
+            UploadStatus::Uploaded | UploadStatus::Nothing => {
+                match validate_task_retries(delete_data.retries, max_sync_errors)
+                    .instrument(info_span!("retries_validation"))
                     .await
-                    {
-                        error!("Failed to update remote timeline {sync_id}: {e:?}");
+                {
+                    ControlFlow::Continue(()) => {
+                        delete_timeline_data(
+                            conf,
+                            (storage.as_ref(), &index, sync_queue),
+                            sync_id,
+                            delete_data,
+                            sync_start,
+                            "delete",
+                        )
+                        .instrument(info_span!("delete_timeline_data"))
+                        .await;
+                    }
+                    ControlFlow::Break(()) => {
+                        if let Err(e) = update_remote_data(
+                            conf,
+                            storage.as_ref(),
+                            &index,
+                            sync_id,
+                            RemoteDataUpdate::Delete(&delete_data.data.deleted_layers),
+                        )
+                        .await
+                        {
+                            error!("Failed to update remote timeline {sync_id}: {e:?}");
+                        }
                     }
                 }
             }
-        } else {
-            sync_queue.push(sync_id, SyncTask::Delete(delete_data));
-            warn!("Skipping delete task due to failed upload tasks, reenqueuing");
+            UploadStatus::Failed(e) => {
+                warn!("Skipping delete task due to failed upload tasks, reenqueuing. Upload data: {:?}, delete data: {delete_data:?}. Upload failure: {e:#}", batch.upload);
+                sync_queue.push(sync_id, SyncTask::Delete(delete_data));
+            }
         }
     }
 
-    status_update
+    download_status
 }
 
 async fn download_timeline_data<P, S>(
@@ -1133,7 +1183,7 @@ async fn download_timeline_data<P, S>(
     new_download_data: SyncData<LayersDownload>,
     sync_start: Instant,
     task_name: &str,
-) -> Option<TimelineSyncStatusUpdate>
+) -> DownloadStatus
 where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
@@ -1162,7 +1212,7 @@ where
                 Ok(()) => match index.write().await.set_awaits_download(&sync_id, false) {
                     Ok(()) => {
                         register_sync_status(sync_id, sync_start, task_name, Some(true));
-                        return Some(TimelineSyncStatusUpdate::Downloaded);
+                        return DownloadStatus::Downloaded;
                     }
                     Err(e) => {
                         error!("Timeline {sync_id} was expected to be in the remote index after a successful download, but it's absent: {e:?}");
@@ -1178,7 +1228,7 @@ where
         }
     }
 
-    None
+    DownloadStatus::Nothing
 }
 
 async fn update_local_metadata(
@@ -1220,7 +1270,13 @@ async fn update_local_metadata(
             timeline_id,
         } = sync_id;
         tokio::task::spawn_blocking(move || {
-            LayeredRepository::save_metadata(conf, timeline_id, tenant_id, &cloned_metadata, true)
+            crate::layered_repository::save_metadata(
+                conf,
+                timeline_id,
+                tenant_id,
+                &cloned_metadata,
+                true,
+            )
         })
         .await
         .with_context(|| {
@@ -1295,7 +1351,8 @@ async fn upload_timeline_data<P, S>(
     new_upload_data: SyncData<LayersUpload>,
     sync_start: Instant,
     task_name: &str,
-) where
+) -> UploadStatus
+where
     P: Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
@@ -1308,9 +1365,9 @@ async fn upload_timeline_data<P, S>(
     )
     .await
     {
-        UploadedTimeline::FailedAndRescheduled => {
+        UploadedTimeline::FailedAndRescheduled(e) => {
             register_sync_status(sync_id, sync_start, task_name, Some(false));
-            return;
+            return UploadStatus::Failed(e);
         }
         UploadedTimeline::Successful(upload_data) => upload_data,
     };
@@ -1329,12 +1386,14 @@ async fn upload_timeline_data<P, S>(
     {
         Ok(()) => {
             register_sync_status(sync_id, sync_start, task_name, Some(true));
+            UploadStatus::Uploaded
         }
         Err(e) => {
             error!("Failed to update remote timeline {sync_id}: {e:?}");
             uploaded_data.retries += 1;
             sync_queue.push(sync_id, SyncTask::Upload(uploaded_data));
             register_sync_status(sync_id, sync_start, task_name, Some(false));
+            UploadStatus::Failed(e)
         }
     }
 }
@@ -1437,54 +1496,17 @@ where
         .context("Failed to upload new index part")
 }
 
-async fn validate_task_retries<T>(
-    sync_data: SyncData<T>,
+async fn validate_task_retries(
+    current_attempt: u32,
     max_sync_errors: NonZeroU32,
-) -> ControlFlow<SyncData<T>, SyncData<T>> {
-    let current_attempt = sync_data.retries;
+) -> ControlFlow<(), ()> {
     let max_sync_errors = max_sync_errors.get();
     if current_attempt >= max_sync_errors {
-        error!(
-            "Aborting task that failed {current_attempt} times, exceeding retries threshold of {max_sync_errors}",
-        );
-        return ControlFlow::Break(sync_data);
+        return ControlFlow::Break(());
     }
 
-    if current_attempt > 0 {
-        let seconds_to_wait = 2.0_f64.powf(current_attempt as f64 - 1.0).min(30.0);
-        info!("Waiting {seconds_to_wait} seconds before starting the task");
-        tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
-    }
-    ControlFlow::Continue(sync_data)
-}
-
-async fn try_fetch_index_parts<P, S>(
-    conf: &'static PageServerConf,
-    storage: &S,
-    keys: HashSet<ZTenantTimelineId>,
-) -> HashMap<ZTenantTimelineId, IndexPart>
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
-    let mut index_parts = HashMap::with_capacity(keys.len());
-
-    let mut part_downloads = keys
-        .into_iter()
-        .map(|id| async move { (id, download_index_part(conf, storage, id).await) })
-        .collect::<FuturesUnordered<_>>();
-
-    while let Some((id, part_upload_result)) = part_downloads.next().await {
-        match part_upload_result {
-            Ok(index_part) => {
-                debug!("Successfully fetched index part for {id}");
-                index_parts.insert(id, index_part);
-            }
-            Err(e) => warn!("Failed to fetch index part for {id}: {e}"),
-        }
-    }
-
-    index_parts
+    exponential_backoff(current_attempt, 1.0, 30.0).await;
+    ControlFlow::Continue(())
 }
 
 fn schedule_first_sync_tasks(
@@ -1549,6 +1571,7 @@ fn schedule_first_sync_tasks(
     local_timeline_init_statuses
 }
 
+/// bool in return value stands for awaits_download
 fn compare_local_and_remote_timeline(
     new_sync_tasks: &mut VecDeque<(ZTenantTimelineId, SyncTask)>,
     sync_id: ZTenantTimelineId,
@@ -1558,14 +1581,6 @@ fn compare_local_and_remote_timeline(
 ) -> (LocalTimelineInitStatus, bool) {
     let remote_files = remote_entry.stored_files();
 
-    // TODO probably here we need more sophisticated logic,
-    //   if more data is available remotely can we just download what's there?
-    //   without trying to upload something. It may be tricky, needs further investigation.
-    //   For now looks strange that we can request upload
-    //   and download for the same timeline simultaneously.
-    //   (upload needs to be only for previously unsynced files, not whole timeline dir).
-    //   If one of the tasks fails they will be reordered in the queue which can lead
-    //   to timeline being stuck in evicted state
     let number_of_layers_to_download = remote_files.difference(&local_files).count();
     let (initial_timeline_status, awaits_download) = if number_of_layers_to_download > 0 {
         new_sync_tasks.push_back((

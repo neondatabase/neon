@@ -26,7 +26,6 @@ mod walreceiver_connection;
 use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use std::cell::Cell;
 use std::collections::{hash_map, HashMap, HashSet};
 use std::future::Future;
@@ -36,14 +35,13 @@ use std::thread_local;
 use std::time::Duration;
 use tokio::{
     select,
-    sync::{mpsc, watch, RwLock},
+    sync::{mpsc, watch},
     task::JoinHandle,
 };
 use tracing::*;
 use url::Url;
 
 use crate::config::PageServerConf;
-use crate::http::models::WalReceiverEntry;
 use crate::tenant_mgr::{self, LocalTimelineUpdate, TenantState};
 use crate::thread_mgr::{self, ThreadKind};
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
@@ -53,23 +51,6 @@ thread_local! {
     //
     // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
     pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
-}
-
-/// WAL receiver state for sharing with the outside world.
-/// Only entries for timelines currently available in pageserver are stored.
-static WAL_RECEIVER_ENTRIES: Lazy<RwLock<HashMap<ZTenantTimelineId, WalReceiverEntry>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-/// Gets the public WAL streaming entry for a certain timeline.
-pub async fn get_wal_receiver_entry(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> Option<WalReceiverEntry> {
-    WAL_RECEIVER_ENTRIES
-        .read()
-        .await
-        .get(&ZTenantTimelineId::new(tenant_id, timeline_id))
-        .cloned()
 }
 
 /// Sets up the main WAL receiver thread that manages the rest of the subtasks inside of it, per timeline.
@@ -85,7 +66,7 @@ pub fn init_wal_receiver_main_thread(
     );
     let broker_prefix = &conf.broker_etcd_prefix;
     info!(
-        "Starting wal receiver main thread, etdc endpoints: {}",
+        "Starting wal receiver main thread, etcd endpoints: {}",
         etcd_endpoints.iter().map(Url::to_string).join(", ")
     );
 
@@ -264,7 +245,10 @@ async fn wal_receiver_main_thread_loop_step<'a>(
             info!("Processing timeline update: {update:?}");
             match update {
                 // Timeline got detached, stop all related tasks and remove public timeline data.
-                LocalTimelineUpdate::Detach(id) => {
+                LocalTimelineUpdate::Detach {
+                    id,
+                    join_confirmation_sender,
+                } => {
                     match local_timeline_wal_receivers.get_mut(&id.tenant_id) {
                         Some(wal_receivers) => {
                             if let hash_map::Entry::Occupied(o) = wal_receivers.entry(id.timeline_id) {
@@ -278,60 +262,50 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                         }
                         None => warn!("Timeline {id} does not have a tenant entry in wal receiver main thread"),
                     };
-                    {
-                        WAL_RECEIVER_ENTRIES.write().await.remove(&id);
+                    if let Err(e) = join_confirmation_sender.send(()) {
+                        warn!("cannot send wal_receiver shutdown confirmation {e}")
+                    } else {
+                        info!("confirm walreceiver shutdown for {id}");
                     }
                 }
                 // Timeline got attached, retrieve all necessary information to start its broker loop and maintain this loop endlessly.
-                LocalTimelineUpdate::Attach(new_id, new_timeline) => {
+                LocalTimelineUpdate::Attach { id, datadir } => {
                     let timeline_connection_managers = local_timeline_wal_receivers
-                        .entry(new_id.tenant_id)
+                        .entry(id.tenant_id)
                         .or_default();
 
                     if timeline_connection_managers.is_empty() {
-                        if let Err(e) =
-                            change_tenant_state(new_id.tenant_id, TenantState::Active).await
+                        if let Err(e) = change_tenant_state(id.tenant_id, TenantState::Active).await
                         {
-                            error!("Failed to make tenant active for id {new_id}: {e:#}");
+                            error!("Failed to make tenant active for id {id}: {e:#}");
                             return;
                         }
                     }
 
                     let vacant_connection_manager_entry =
-                        match timeline_connection_managers.entry(new_id.timeline_id) {
+                        match timeline_connection_managers.entry(id.timeline_id) {
                             hash_map::Entry::Occupied(_) => {
-                                debug!("Attepted to readd an existing timeline {new_id}, ignoring");
+                                debug!("Attepted to readd an existing timeline {id}, ignoring");
                                 return;
                             }
                             hash_map::Entry::Vacant(v) => v,
                         };
 
                     let (wal_connect_timeout, lagging_wal_timeout, max_lsn_wal_lag) =
-                        match fetch_tenant_settings(new_id.tenant_id).await {
+                        match fetch_tenant_settings(id.tenant_id).await {
                             Ok(settings) => settings,
                             Err(e) => {
-                                error!("Failed to fetch tenant settings for id {new_id}: {e:#}");
+                                error!("Failed to fetch tenant settings for id {id}: {e:#}");
                                 return;
                             }
                         };
 
-                    {
-                        WAL_RECEIVER_ENTRIES.write().await.insert(
-                            new_id,
-                            WalReceiverEntry {
-                                wal_producer_connstr: None,
-                                last_received_msg_lsn: None,
-                                last_received_msg_ts: None,
-                            },
-                        );
-                    }
-
                     vacant_connection_manager_entry.insert(
                         connection_manager::spawn_connection_manager_task(
-                            new_id,
+                            id,
                             broker_prefix.to_owned(),
                             etcd_client.clone(),
-                            new_timeline,
+                            datadir,
                             wal_connect_timeout,
                             lagging_wal_timeout,
                             max_lsn_wal_lag,

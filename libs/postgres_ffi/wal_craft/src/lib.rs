@@ -1,8 +1,13 @@
 use anyhow::*;
 use core::time::Duration;
 use log::*;
+use once_cell::sync::Lazy;
 use postgres::types::PgLsn;
 use postgres::Client;
+use postgres_ffi::pg_constants::WAL_SEGMENT_SIZE;
+use postgres_ffi::xlog_utils::{
+    XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +27,16 @@ pub struct PostgresServer {
     client_config: postgres::Config,
 }
 
+pub static REQUIRED_POSTGRES_CONFIG: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec![
+        "wal_keep_size=50MB",            // Ensure old WAL is not removed
+        "shared_preload_libraries=neon", // can only be loaded at startup
+        // Disable background processes as much as possible
+        "wal_writer_delay=10s",
+        "autovacuum=off",
+    ]
+});
+
 impl Conf {
     fn pg_bin_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("bin")
@@ -29,6 +44,10 @@ impl Conf {
 
     fn pg_lib_dir(&self) -> PathBuf {
         self.pg_distrib_dir.join("lib")
+    }
+
+    pub fn wal_dir(&self) -> PathBuf {
+        self.datadir.join("pg_wal")
     }
 
     fn new_pg_command(&self, command: impl AsRef<Path>) -> Result<Command> {
@@ -85,12 +104,8 @@ impl Conf {
             .arg(unix_socket_dir_path.as_os_str())
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(&["-c", "wal_keep_size=50MB"]) // Ensure old WAL is not removed
             .args(&["-c", "logging_collector=on"]) // stderr will mess up with tests output
-            .args(&["-c", "shared_preload_libraries=neon"]) // can only be loaded at startup
-            // Disable background processes as much as possible
-            .args(&["-c", "wal_writer_delay=10s"])
-            .args(&["-c", "autovacuum=off"])
+            .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .stderr(Stdio::from(log_file))
             .spawn()?;
         let server = PostgresServer {
@@ -144,7 +159,7 @@ impl PostgresServer {
         bail!("Connection timed out");
     }
 
-    pub fn kill(&mut self) {
+    pub fn kill(mut self) {
         self.process.kill().unwrap();
         self.process.wait().unwrap();
     }
@@ -181,11 +196,15 @@ pub trait PostgresClientExt: postgres::GenericClient {
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-fn generate_internal<C: postgres::GenericClient>(
-    client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> Result<Option<PgLsn>>,
-) -> Result<PgLsn> {
+pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result<()> {
     client.execute("create extension if not exists neon_test_utils", &[])?;
+
+    let wal_keep_size: String = client.query_one("SHOW wal_keep_size", &[])?.get(0);
+    ensure!(wal_keep_size == "50MB");
+    let wal_writer_delay: String = client.query_one("SHOW wal_writer_delay", &[])?.get(0);
+    ensure!(wal_writer_delay == "10s");
+    let autovacuum: String = client.query_one("SHOW autovacuum", &[])?.get(0);
+    ensure!(autovacuum == "off");
 
     let wal_segment_size = client.query_one(
         "select cast(setting as bigint) as setting, unit \
@@ -197,44 +216,160 @@ fn generate_internal<C: postgres::GenericClient>(
         "Unexpected wal_segment_size unit"
     );
     ensure!(
-        wal_segment_size.get::<_, i64>("setting") == 16 * 1024 * 1024,
+        wal_segment_size.get::<_, i64>("setting") == WAL_SEGMENT_SIZE as i64,
         "Unexpected wal_segment_size in bytes"
     );
+
+    Ok(())
+}
+
+pub trait Crafter {
+    const NAME: &'static str;
+
+    /// Generates WAL using the client `client`. Returns a pair of:
+    /// * A vector of some valid "interesting" intermediate LSNs which one may start reading from.
+    ///   May include or exclude Lsn(0) and the end-of-wal.
+    /// * The expected end-of-wal LSN.
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)>;
+}
+
+fn craft_internal<C: postgres::GenericClient>(
+    client: &mut C,
+    f: impl Fn(&mut C, PgLsn) -> Result<(Vec<PgLsn>, Option<PgLsn>)>,
+) -> Result<(Vec<PgLsn>, PgLsn)> {
+    ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
     info!("LSN initial = {}", initial_lsn);
 
-    let last_lsn = match f(client, initial_lsn)? {
+    let (mut intermediate_lsns, last_lsn) = f(client, initial_lsn)?;
+    let last_lsn = match last_lsn {
         None => client.pg_current_wal_insert_lsn()?,
         Some(last_lsn) => match last_lsn.cmp(&client.pg_current_wal_insert_lsn()?) {
-            Ordering::Less => bail!("Some records were inserted after the generated WAL"),
+            Ordering::Less => bail!("Some records were inserted after the crafted WAL"),
             Ordering::Equal => last_lsn,
             Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
         },
     };
+    if !intermediate_lsns.starts_with(&[initial_lsn]) {
+        intermediate_lsns.insert(0, initial_lsn);
+    }
 
     // Some records may be not flushed, e.g. non-transactional logical messages.
     client.execute("select neon_xlogflush(pg_current_wal_insert_lsn())", &[])?;
     match last_lsn.cmp(&client.pg_current_wal_flush_lsn()?) {
-        Ordering::Less => bail!("Some records were flushed after the generated WAL"),
+        Ordering::Less => bail!("Some records were flushed after the crafted WAL"),
         Ordering::Equal => {}
         Ordering::Greater => bail!("Reported LSN is greater than flush_lsn"),
     }
-    Ok(last_lsn)
+    Ok((intermediate_lsns, last_lsn))
 }
 
-pub fn generate_simple(client: &mut impl postgres::GenericClient) -> Result<PgLsn> {
-    generate_internal(client, |client, _| {
+pub struct Simple;
+impl Crafter for Simple {
+    const NAME: &'static str = "simple";
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+        craft_internal(client, |client, _| {
+            client.execute("CREATE table t(x int)", &[])?;
+            Ok((Vec::new(), None))
+        })
+    }
+}
+
+pub struct LastWalRecordXlogSwitch;
+impl Crafter for LastWalRecordXlogSwitch {
+    const NAME: &'static str = "last_wal_record_xlog_switch";
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+        // Do not use generate_internal because here we end up with flush_lsn exactly on
+        // the segment boundary and insert_lsn after the initial page header, which is unusual.
+        ensure_server_config(client)?;
+
         client.execute("CREATE table t(x int)", &[])?;
-        Ok(None)
-    })
+        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
+        let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+        let next_segment = PgLsn::from(0x0200_0000);
+        ensure!(
+            after_xlog_switch <= next_segment,
+            "XLOG_SWITCH message ended after the expected segment boundary: {} > {}",
+            after_xlog_switch,
+            next_segment
+        );
+        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
+    }
 }
 
-fn generate_single_logical_message(
+pub struct LastWalRecordXlogSwitchEndsOnPageBoundary;
+impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
+    const NAME: &'static str = "last_wal_record_xlog_switch_ends_on_page_boundary";
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+        // Do not use generate_internal because here we end up with flush_lsn exactly on
+        // the segment boundary and insert_lsn after the initial page header, which is unusual.
+        ensure_server_config(client)?;
+
+        client.execute("CREATE table t(x int)", &[])?;
+
+        // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.
+        // We will use logical message as the padding. We start with detecting how much WAL
+        // it takes for one logical message, considering all alignments and headers.
+        let base_wal_advance = {
+            let before_lsn = client.pg_current_wal_insert_lsn()?;
+            // Small non-empty message bigger than few bytes is more likely than an empty
+            // message to have the same format as the big padding message.
+            client.execute(
+                "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', 10))",
+                &[],
+            )?;
+            // The XLOG_SWITCH record has no data => its size is exactly XLOG_SIZE_OF_XLOG_RECORD.
+            (u64::from(client.pg_current_wal_insert_lsn()?) - u64::from(before_lsn)) as usize
+                + XLOG_SIZE_OF_XLOG_RECORD
+        };
+        let mut remaining_lsn =
+            XLOG_BLCKSZ - u64::from(client.pg_current_wal_insert_lsn()?) as usize % XLOG_BLCKSZ;
+        if remaining_lsn < base_wal_advance {
+            remaining_lsn += XLOG_BLCKSZ;
+        }
+        let repeats = 10 + remaining_lsn - base_wal_advance;
+        info!(
+            "current_wal_insert_lsn={}, remaining_lsn={}, base_wal_advance={}, repeats={}",
+            client.pg_current_wal_insert_lsn()?,
+            remaining_lsn,
+            base_wal_advance,
+            repeats
+        );
+        client.execute(
+            "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
+            &[&(repeats as i32)],
+        )?;
+        info!(
+            "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
+            client.pg_current_wal_insert_lsn()?,
+            XLOG_SIZE_OF_XLOG_RECORD
+        );
+
+        // Emit the XLOG_SWITCH
+        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
+        let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+        let next_segment = PgLsn::from(0x0200_0000);
+        ensure!(
+            after_xlog_switch < next_segment,
+            "XLOG_SWITCH message ended on or after the expected segment boundary: {} > {}",
+            after_xlog_switch,
+            next_segment
+        );
+        ensure!(
+            u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ == XLOG_SIZE_OF_XLOG_SHORT_PHD,
+            "XLOG_SWITCH message ended not on page boundary: {}",
+            after_xlog_switch
+        );
+        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
+    }
+}
+
+fn craft_single_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
-) -> Result<PgLsn> {
-    generate_internal(client, |client, initial_lsn| {
+) -> Result<(Vec<PgLsn>, PgLsn)> {
+    craft_internal(client, |client, initial_lsn| {
         ensure!(
             initial_lsn < PgLsn::from(0x0200_0000 - 1024 * 1024),
             "Initial LSN is too far in the future"
@@ -265,21 +400,25 @@ fn generate_single_logical_message(
                 message_lsn < after_message_lsn,
                 "No record found after the emitted message"
             );
-            Ok(Some(after_message_lsn))
+            Ok((vec![message_lsn], Some(after_message_lsn)))
         } else {
-            Ok(Some(message_lsn))
+            Ok((Vec::new(), Some(message_lsn)))
         }
     })
 }
 
-pub fn generate_wal_record_crossing_segment_followed_by_small_one(
-    client: &mut impl postgres::GenericClient,
-) -> Result<PgLsn> {
-    generate_single_logical_message(client, true)
+pub struct WalRecordCrossingSegmentFollowedBySmallOne;
+impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
+    const NAME: &'static str = "wal_record_crossing_segment_followed_by_small_one";
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+        craft_single_logical_message(client, true)
+    }
 }
 
-pub fn generate_last_wal_record_crossing_segment<C: postgres::GenericClient>(
-    client: &mut C,
-) -> Result<PgLsn> {
-    generate_single_logical_message(client, false)
+pub struct LastWalRecordCrossingSegment;
+impl Crafter for LastWalRecordCrossingSegment {
+    const NAME: &'static str = "last_wal_record_crossing_segment";
+    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+        craft_single_logical_message(client, false)
+    }
 }

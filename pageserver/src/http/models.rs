@@ -7,6 +7,10 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
+// These enums are used in the API response fields.
+use crate::repository::LocalTimelineState;
+use crate::tenant_mgr::TenantState;
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
@@ -28,6 +32,7 @@ pub struct TenantCreateRequest {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<ZTenantId>,
     pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
@@ -66,6 +71,7 @@ pub struct TenantConfigRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
@@ -83,6 +89,7 @@ impl TenantConfigRequest {
         TenantConfigRequest {
             tenant_id,
             checkpoint_distance: None,
+            checkpoint_timeout: None,
             compaction_target_size: None,
             compaction_period: None,
             compaction_threshold: None,
@@ -97,14 +104,59 @@ impl TenantConfigRequest {
     }
 }
 
-/// A WAL receiver's data stored inside the global `WAL_RECEIVERS`.
-/// We keep one WAL receiver active per timeline.
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub id: ZTenantId,
+    pub state: Option<TenantState>,
+    pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
+    pub has_in_progress_downloads: Option<bool>,
+}
+
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WalReceiverEntry {
-    pub wal_producer_connstr: Option<String>,
+pub struct LocalTimelineInfo {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_timeline_id: Option<ZTimelineId>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub ancestor_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub last_record_lsn: Lsn,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub prev_record_lsn: Option<Lsn>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub latest_gc_cutoff_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub disk_consistent_lsn: Lsn,
+    pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
+    pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
+    pub current_logical_size_non_incremental: Option<usize>,
+    pub current_physical_size_non_incremental: Option<u64>,
+    pub timeline_state: LocalTimelineState,
+
+    pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoteTimelineInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
+    pub awaits_download: bool,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelineInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: ZTenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_id: ZTimelineId,
+    pub local: Option<LocalTimelineInfo>,
+    pub remote: Option<RemoteTimelineInfo>,
 }

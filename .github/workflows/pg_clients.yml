@@ -13,12 +13,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-   group: ${{ github.workflow }}-${{ github.ref }}
-   cancel-in-progress: true
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
 
 jobs:
   test-postgres-client-libs:
+    # TODO: switch to gen2 runner, requires docker
     runs-on: [ ubuntu-latest ]
+
+    env:
+      TEST_OUTPUT: /tmp/test_output
 
     steps:
     - name: Checkout
@@ -39,19 +44,16 @@ jobs:
         key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
     - name: Run pytest
       env:
         REMOTE_ENV: 1
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
-        TEST_OUTPUT: /tmp/test_output
+
         POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-        # this variable will be embedded in perf test report
-        # and is needed to distinguish different environments
-        PLATFORM: github-actions-selfhosted
-      shell: bash -ex {0}
+      shell: bash -euxo pipefail {0}
       run: |
         # Test framework expects we have psql binary;
         # but since we don't really need it in this test, let's mock it
@@ -63,9 +65,18 @@ jobs:
           -m "remote_cluster" \
           -rA "test_runner/pg_clients"
 
+    # We use GitHub's action upload-artifact because `ubuntu-latest` doesn't have configured AWS CLI.
+    # It will be fixed after switching to gen2 runner
+    - name: Upload python test logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        retention-days: 7
+        name: python-test-pg_clients-${{ runner.os }}-stage-logs
+        path: ${{ env.TEST_OUTPUT }}
+
     - name: Post to a Slack channel
-      if: failure()
-      id: slack
+      if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream

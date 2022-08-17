@@ -22,6 +22,49 @@ paths:
                 properties:
                   id:
                     type: integer
+
+  /v1/tenant/{tenant_id}:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get tenant status
+      responses:
+        "200":
+          description: Currently returns the flag whether the tenant has inprogress timeline downloads
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantInfo"
+        "400":
+          description: Error when no tenant id found in path or no timeline id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/timeline:
     parameters:
       - name: tenant_id
@@ -35,6 +78,11 @@ paths:
         schema:
           type: string
           description: Controls calculation of current_logical_size_non_incremental
+      - name: include-non-incremental-physical-size
+        in: query
+        schema:
+          type: string
+          description: Controls calculation of current_physical_size_non_incremental
     get:
       description: Get timelines for tenant
       responses:
@@ -70,6 +118,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
       - name: tenant_id
@@ -84,13 +133,19 @@ paths:
         schema:
           type: string
           format: hex
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
     get:
       description: Get info about the timeline
+      parameters:
+        - name: include-non-incremental-logical-size
+          in: query
+          schema:
+            type: string
+          description: Controls calculation of current_logical_size_non_incremental
+        - name: include-non-incremental-physical-size
+          in: query
+          schema:
+            type: string
+            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -122,30 +177,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/wal_receiver:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: timeline_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-    get:
-      description: Get wal receiver's data attached to the timeline
+    delete:
+      description: "Attempts to delete specified timeline. On 500 errors should be retried"
       responses:
         "200":
-          description: WalReceiverEntry
+          description: Ok
+        "400":
+          description: Error when no tenant id found in path or no timeline id
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WalReceiverEntry"
+                $ref: "#/components/schemas/Error"
         "401":
           description: Unauthorized Error
           content:
@@ -158,12 +200,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Error when no wal receiver is running or found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
         "500":
           description: Generic operation error
           content:
@@ -171,7 +207,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/attach:
+  /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
         in: path
@@ -179,19 +215,13 @@ paths:
         schema:
           type: string
           format: hex
-      - name: timeline_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
     post:
-      description: Attach remote timeline
+      description: Schedules attach operation to happen in the background for given tenant
       responses:
-        "200":
-          description: Timeline attaching scheduled
+        "202":
+          description: Tenant attaching scheduled
         "400":
-          description: Error when no tenant id found in path or no timeline id
+          description: Error when no tenant id found in path parameters
           content:
             application/json:
               schema:
@@ -215,7 +245,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "409":
-          description: Timeline download is already in progress
+          description: Tenant download is already in progress
           content:
             application/json:
               schema:
@@ -226,7 +256,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
     parameters:
@@ -243,10 +272,11 @@ paths:
           type: string
           format: hex
     post:
-      description: Detach local timeline
+      description: Deprecated, use DELETE /v1/tenant/{tenant_id}/timeline/{timeline_id} instead
+      deprecated: true
       responses:
         "200":
-          description: Timeline detached
+          description: Ok
         "400":
           description: Error when no tenant id found in path or no timeline id
           content:
@@ -272,6 +302,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/detach:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Detach local tenant
+      responses:
+        "200":
+          description: Tenant detached
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
@@ -467,12 +534,15 @@ components:
       type: object
       required:
         - id
-        - state
       properties:
         id:
           type: string
         state:
           type: string
+        current_physical_size:
+          type: integer
+        has_in_progress_downloads:
+          type: boolean
     TenantCreateInfo:
       type: object
       properties:
@@ -490,6 +560,8 @@ components:
           type: string
         checkpoint_distance:
           type: integer
+        checkpoint_timeout:
+          type: string
         compaction_period:
           type: string
         compaction_threshold:
@@ -508,6 +580,8 @@ components:
           type: string
         checkpoint_distance:
           type: integer
+        checkpoint_timeout:
+          type: string
         compaction_period:
           type: string
         compaction_threshold:
@@ -565,17 +639,13 @@ components:
           format: hex
         current_logical_size:
           type: integer
+        current_physical_size:
+          type: integer
         current_logical_size_non_incremental:
           type: integer
-    WalReceiverEntry:
-      type: object
-      required:
-        - thread_id
-        - wal_producer_connstr
-      properties:
-        thread_id:
+        current_physical_size_non_incremental:
           type: integer
-        wal_producer_connstr:
+        wal_source_connstr:
           type: string
         last_received_msg_lsn:
           type: string

@@ -95,6 +95,8 @@ where
         debug!("Reenqueuing failed delete task for timeline {sync_id}");
         delete_data.retries += 1;
         sync_queue.push(sync_id, SyncTask::Delete(delete_data));
+    } else {
+        info!("Successfully deleted all layers");
     }
     errored
 }

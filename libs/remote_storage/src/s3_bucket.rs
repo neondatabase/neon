@@ -19,7 +19,9 @@ use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
-use crate::{strip_path_prefix, Download, DownloadError, RemoteStorage, S3Config};
+use crate::{
+    strip_path_prefix, Download, DownloadError, RemoteObjectName, RemoteStorage, S3Config,
+};
 
 use super::StorageMetadata;
 
@@ -117,6 +119,25 @@ impl S3ObjectKey {
     }
 }
 
+impl RemoteObjectName for S3ObjectKey {
+    /// Turn a/b/c or a/b/c/ into c
+    fn object_name(&self) -> Option<&str> {
+        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
+        // see https://github.com/rust-lang/rust/issues/88674
+        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
+            return None;
+        }
+
+        if self.0.ends_with(S3_PREFIX_SEPARATOR) {
+            self.0.rsplit(S3_PREFIX_SEPARATOR).nth(1)
+        } else {
+            self.0
+                .rsplit_once(S3_PREFIX_SEPARATOR)
+                .map(|(_, last)| last)
+        }
+    }
+}
+
 /// AWS S3 storage.
 pub struct S3Bucket {
     workdir: PathBuf,
@@ -150,17 +171,25 @@ impl S3Bucket {
 
         let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        // session token is used when authorizing through sso
+        // which is typically the case when testing locally on developer machine
+        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
 
         let client = if access_key_id.is_none() && secret_access_key.is_none() {
             debug!("Using IAM-based AWS access");
             S3Client::new_with(request_dispatcher, InstanceMetadataProvider::new(), region)
         } else {
-            debug!("Using credentials-based AWS access");
+            debug!(
+                "Using credentials-based AWS access. Session token is set: {}",
+                session_token.is_some()
+            );
             S3Client::new_with(
                 request_dispatcher,
-                StaticProvider::new_minimal(
+                StaticProvider::new(
                     access_key_id.unwrap_or_default(),
                     secret_access_key.unwrap_or_default(),
+                    session_token,
+                    None,
                 ),
                 region,
             )
@@ -283,6 +312,69 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
+    /// See the doc for `RemoteStorage::list_prefixes`
+    /// Note: it wont include empty "directories"
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let list_prefix = prefix
+            .map(|p| p.0)
+            .or_else(|| self.prefix_in_bucket.clone())
+            .map(|mut p| {
+                // required to end with a separator
+                // otherwise request will return only the entry of a prefix
+                if !p.ends_with(S3_PREFIX_SEPARATOR) {
+                    p.push(S3_PREFIX_SEPARATOR);
+                }
+                p
+            });
+
+        let mut document_keys = Vec::new();
+
+        let mut continuation_token = None;
+        loop {
+            let _guard = self
+                .concurrency_limiter
+                .acquire()
+                .await
+                .context("Concurrency limiter semaphore got closed during S3 list")?;
+
+            metrics::inc_list_objects();
+
+            let fetch_response = self
+                .client
+                .list_objects_v2(ListObjectsV2Request {
+                    bucket: self.bucket_name.clone(),
+                    prefix: list_prefix.clone(),
+                    continuation_token,
+                    delimiter: Some(S3_PREFIX_SEPARATOR.to_string()),
+                    ..ListObjectsV2Request::default()
+                })
+                .await
+                .map_err(|e| {
+                    metrics::inc_list_objects_fail();
+                    e
+                })?;
+
+            document_keys.extend(
+                fetch_response
+                    .common_prefixes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|o| Some(S3ObjectKey(o.prefix?))),
+            );
+
+            match fetch_response.continuation_token {
+                Some(new_token) => continuation_token = Some(new_token),
+                None => break,
+            }
+        }
+
+        Ok(document_keys)
+    }
+
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
@@ -377,6 +469,25 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn object_name() {
+        let k = S3ObjectKey("a/b/c".to_owned());
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = S3ObjectKey("a/b/c/".to_owned());
+        assert_eq!(k.object_name(), Some("c"));
+
+        let k = S3ObjectKey("a/".to_owned());
+        assert_eq!(k.object_name(), Some("a"));
+
+        // XXX is it impossible to have an empty key?
+        let k = S3ObjectKey("".to_owned());
+        assert_eq!(k.object_name(), None);
+
+        let k = S3ObjectKey("/".to_owned());
+        assert_eq!(k.object_name(), None);
+    }
 
     #[test]
     fn download_destination() -> anyhow::Result<()> {

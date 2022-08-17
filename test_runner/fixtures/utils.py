@@ -1,9 +1,13 @@
+import contextlib
 import os
+import pathlib
 import shutil
 import subprocess
 from pathlib import Path
 
-from typing import Any, List
+from typing import Any, List, Tuple
+
+from psycopg2.extensions import cursor
 from fixtures.log_helper import log
 
 
@@ -28,10 +32,16 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     stdout_filename = basepath + '.stdout'
     stderr_filename = basepath + '.stderr'
 
-    with open(stdout_filename, 'w') as stdout_f:
-        with open(stderr_filename, 'w') as stderr_f:
-            log.info('(capturing output to "{}.stdout")'.format(base))
-            subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+    try:
+        with open(stdout_filename, 'w') as stdout_f:
+            with open(stderr_filename, 'w') as stderr_f:
+                log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
+                subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+    finally:
+        # Remove empty files if there is no output
+        for filename in (stdout_filename, stderr_filename):
+            if os.stat(filename).st_size == 0:
+                os.remove(filename)
 
     return basepath
 
@@ -77,12 +87,71 @@ def etcd_path() -> Path:
         return Path(path_output)
 
 
+def query_scalar(cur: cursor, query: str) -> Any:
+    """
+    It is a convenience wrapper to avoid repetitions
+    of cur.execute(); cur.fetchone()[0]
+
+    And this is mypy friendly, because without None
+    check mypy says that Optional is not indexable.
+    """
+    cur.execute(query)
+    var = cur.fetchone()
+    assert var is not None
+    return var[0]
+
+
 # Traverse directory to get total size.
 def get_dir_size(path: str) -> int:
     """Return size in bytes."""
     totalbytes = 0
     for root, dirs, files in os.walk(path):
         for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
+            try:
+                totalbytes += os.path.getsize(os.path.join(root, name))
+            except FileNotFoundError as e:
+                pass  # file could be concurrently removed
 
     return totalbytes
+
+
+def get_timeline_dir_size(path: pathlib.Path) -> int:
+    """Get the timeline directory's total size, which only counts the layer files' size."""
+    sz = 0
+    for dir_entry in path.iterdir():
+        with contextlib.suppress(Exception):
+            # file is an image layer
+            _ = parse_image_layer(dir_entry.name)
+            sz += dir_entry.stat().st_size
+            continue
+
+        with contextlib.suppress(Exception):
+            # file is a delta layer
+            _ = parse_delta_layer(dir_entry.name)
+            sz += dir_entry.stat().st_size
+            continue
+    return sz
+
+
+def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
+    """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
+    parts = f_name.split("__")
+    key_parts = parts[0].split("-")
+    return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
+
+
+def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
+    """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
+    parts = f_name.split("__")
+    key_parts = parts[0].split("-")
+    lsn_parts = parts[1].split("-")
+    return int(key_parts[0], 16), int(key_parts[1], 16), int(lsn_parts[0], 16), int(lsn_parts[1], 16)
+
+
+def get_scale_for_db(size_mb: int) -> int:
+    """Returns pgbench scale factor for given target db size in MB.
+
+    Ref https://www.cybertec-postgresql.com/en/a-formula-to-calculate-pgbench-scaling-factor-for-target-db-size/
+    """
+
+    return round(0.06689 * size_mb - 0.5)

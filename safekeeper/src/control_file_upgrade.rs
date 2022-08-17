@@ -40,7 +40,7 @@ struct SafeKeeperStateV1 {
     wal_start_lsn: Lsn,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfoV2 {
     /// Postgres server version
     pub pg_version: u32,
@@ -70,7 +70,7 @@ pub struct SafeKeeperStateV2 {
     pub wal_start_lsn: Lsn,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfoV3 {
     /// Postgres server version
     pub pg_version: u32,

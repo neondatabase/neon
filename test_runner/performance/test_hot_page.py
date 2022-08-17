@@ -18,6 +18,7 @@ def test_hot_page(env: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
+            cur.execute('drop table if exists t, f;')
 
             # Write many updates to the same row
             with env.record_duration('write'):
