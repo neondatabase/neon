@@ -1518,7 +1518,7 @@ class PSQL:
         assert shutil.which(path)
 
         self.path = path
-        self.database_url = f"postgres://{host}:{port}/main?options=project%3Dmy-cluster-123"
+        self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
     async def run(self, query=None) -> Union[tuple[int, str], Process]:
         run_args = [self.path, self.database_url]
