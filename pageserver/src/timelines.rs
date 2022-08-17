@@ -13,17 +13,17 @@ use std::{
 use tracing::*;
 
 use utils::{
-    crashsafe_dir, logging,
+    crashsafe_dir,
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
 
+use crate::import_datadir;
 use crate::tenant_mgr;
 use crate::{
     config::PageServerConf, repository::Repository, storage_sync::index::RemoteIndex,
     tenant_config::TenantConfOpt,
 };
-use crate::{import_datadir, LOG_FILE_NAME};
 use crate::{
     layered_repository::{LayeredRepository, LayeredTimeline},
     walredo::WalRedoManager,
@@ -36,69 +36,13 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn init_pageserver(
-    conf: &'static PageServerConf,
-    create_tenant: Option<ZTenantId>,
-    initial_timeline_id: Option<ZTimelineId>,
-) -> anyhow::Result<()> {
-    // Initialize logger
-    // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
-    let _log_file = logging::init(LOG_FILE_NAME, true)?;
-
-    crashsafe_dir::create_dir_all(conf.tenants_path())?;
-
-    if let Some(tenant_id) = create_tenant {
-        println!("initializing tenantid {}", tenant_id);
-        let repo = create_repo(conf, TenantConfOpt::default(), tenant_id, CreateRepo::Dummy)
-            .context("failed to create repo")?;
-        let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
-        bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())
-            .context("failed to create initial timeline")?;
-        println!("initial timeline {} created", new_timeline_id)
-    } else if initial_timeline_id.is_some() {
-        println!("Ignoring initial timeline parameter, due to no tenant id to create given");
-    }
-
-    println!("pageserver init succeeded");
-    Ok(())
-}
-
-pub enum CreateRepo {
-    Real {
-        wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-        remote_index: RemoteIndex,
-    },
-    Dummy,
-}
-
 pub fn create_repo(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
-    create_repo: CreateRepo,
+    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
+    remote_index: RemoteIndex,
 ) -> Result<Arc<LayeredRepository>> {
-    let (wal_redo_manager, remote_index) = match create_repo {
-        CreateRepo::Real {
-            wal_redo_manager,
-            remote_index,
-        } => (wal_redo_manager, remote_index),
-        CreateRepo::Dummy => {
-            // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
-            // process during repository initialization.
-            //
-            // FIXME: That caused trouble, because the WAL redo manager spawned a thread that launched
-            // initdb in the background, and it kept running even after the "zenith init" had exited.
-            // In tests, we started the  page server immediately after that, so that initdb was still
-            // running in the background, and we failed to run initdb again in the same directory. This
-            // has been solved for the rapid init+start case now, but the general race condition remains
-            // if you restart the server quickly. The WAL redo manager doesn't use a separate thread
-            // anymore, but I think that could still happen.
-            let wal_redo_manager = Arc::new(crate::walredo::DummyRedoManager {});
-
-            (wal_redo_manager as _, RemoteIndex::default())
-        }
-    };
-
     let repo_dir = conf.tenant_path(&tenant_id);
     ensure!(
         !repo_dir.exists(),

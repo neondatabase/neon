@@ -58,10 +58,7 @@ COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      
 COPY --from=pg-build /home/nonroot/tmp_install/ /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-
 VOLUME ["/data"]
 USER zenith
 EXPOSE 6400
-ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["pageserver"]
