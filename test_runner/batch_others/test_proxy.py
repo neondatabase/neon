@@ -37,7 +37,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     """
     psql = PSQL(
         host=link_proxy.host,
-        port=link_proxy.port,
+        port=link_proxy.proxy_port,
     )
     proc = await psql.run()
 

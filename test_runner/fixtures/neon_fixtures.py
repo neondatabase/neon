@@ -319,9 +319,6 @@ class PgProtocol:
         conn.autocommit = autocommit
         return conn
 
-<<<<<<< HEAD
-    def connect_async_prepare_connection_options(self, **kwargs):
-=======
     @contextmanager
     def cursor(self, autocommit=True, **kwargs):
         """
@@ -336,7 +333,7 @@ class PgProtocol:
         Connect to the node from async python.
         Returns asyncpg's connection object.
         """
->>>>>>> main
+
 
         # asyncpg takes slightly different
         # options than psycopg2.
@@ -350,7 +347,6 @@ class PgProtocol:
         # Convert options='-c<key>=<val>' to server_settings
         if 'options' in conn_options:
             options = conn_options.pop('options')
-<<<<<<< HEAD
             for match in options.split(" "):
                 print("match", match)
                 if "-c" in match:
@@ -371,13 +367,6 @@ class PgProtocol:
                         conn_options['server_settings'].update({key: val})
                     else:
                         conn_options['server_settings'] = {key: val}
-=======
-            for match in re.finditer(r'-c(\w*)=(\w*)', options):
-                key = match.group(1)
-                val = match.group(2)
-                if 'server_options' in conn_options:
-                    conn_options['server_settings'].update({key: val})
->>>>>>> main
                 else:
                     # invalid options
                     assert False
@@ -1773,25 +1762,12 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-<<<<<<< HEAD
-    def __init__(self, port: int, pg_port=None):
-        super().__init__(host="127.0.0.1",
-                         user="proxy_user",
-                         password="pytest2",
-                         port=port,
-                         dbname='postgres')
-        self.http_port = 7001
-        self.host = "127.0.0.1"
-        self.port = port
-        self.pg_port = pg_port
-=======
     def __init__(self, proxy_port: int, http_port: int, auth_endpoint: str):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = '127.0.0.1'
         self.http_port = http_port
         self.proxy_port = proxy_port
         self.auth_endpoint = auth_endpoint
->>>>>>> main
         self._popen: Optional[subprocess.Popen[bytes]] = None
         self.link_auth_uri = "http://dummy-uri"
 
@@ -1801,6 +1777,8 @@ class NeonProxy(PgProtocol):
         """
         assert self._popen is None
         assert self.pg_port is not None
+
+        assert self.auth_endpoint is not None
 
         # Start proxy
         args = [
@@ -1823,7 +1801,7 @@ class NeonProxy(PgProtocol):
         bin_proxy = os.path.join(str(neon_binpath), 'proxy')
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
-        args.extend(["--proxy", f"{self.host}:{self.port}"])
+        args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
         args.extend(["--auth-backend", "link"])
         args.extend(["--uri", self.link_auth_uri])
         arg_str = ' '.join(args)
@@ -1849,7 +1827,7 @@ class NeonProxy(PgProtocol):
 def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
     port = port_distributor.get_port()
-    with NeonProxy(port) as proxy:
+    with NeonProxy(port, 15000, None) as proxy:
         proxy.start_with_link_auth()
         yield proxy
 
