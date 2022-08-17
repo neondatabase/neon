@@ -96,12 +96,8 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
         "-p",
         "7000",
         '-c',
-        '{"session_id": "' + str(psql_session_id) + '"'
-        ',"result":'
-        '{"Success":'
-        '{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"proxy_auth","password":"pytest1"}'
-        '}'
-        '}'
+        '{"session_id": "' + str(psql_session_id) +
+        '","result":{"Success":{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"proxy_auth","password":"pytest1"}}}'
     ]
 
     for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
