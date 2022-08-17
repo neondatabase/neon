@@ -11,7 +11,7 @@ def test_proxy_select_1(static_proxy):
 
 
 @pytest.mark.asyncio
-async def test_psql_session_id(link_proxy):
+async def test_psql_session_id(vanilla_pg, link_proxy):
     """
     Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
     This is only one half of the test: the half that establishes connection to the proxy and retrieves the session_id
@@ -65,9 +65,30 @@ async def test_psql_session_id(link_proxy):
     log.debug(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
     log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
 
+
+
+    # send select 1.
+    # make a db and send to proxy.
+
+    # get vanilla_pg
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
+    vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
+
+
+
     cmd_line_args__to__mgmt = [
-        "psql", "-h", "127.0.0.1", "-p", "7000", '{"session_id":"{'+psql_session_id+'}}","result":{"Success":{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"stas","password":"stas"}}}'
+        "psql", "-h", "127.0.0.1", "-p", "7000", '-c',
+        '{"session_id": "'+str(psql_session_id)+'"'
+            ',"result":'
+                '{"Success":'
+                    '{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"proxy_auth","password":"pytest1"}'
+                '}'
+        '}'
     ]
+
+    for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
+        log.info(f"arg_id={arg_id}: {arg}")
 
     log.info(f"running cmd line: {cmd_line_args__to__mgmt}")
     p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)

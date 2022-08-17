@@ -1612,8 +1612,8 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
     vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-    port = port_distributor.get_port()
     pg_port = vanilla_pg.default_options['port']
+    port = port_distributor.get_port()
     with NeonProxy(port, pg_port) as proxy:
         proxy.start()
         yield proxy
