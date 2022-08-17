@@ -13,11 +13,15 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY . .
 
+# Debug
 RUN aws s3 ls
+ENV CACHEPOT_ERROR_LOG=/home/nonroot/cachepot_log.txt
+ENV CACHEPOT_LOG=debug
 
 RUN set -e \
     && mold -run cargo build -p compute_tools --release \
-    && cachepot -s
+    && cachepot -s \
+    && cat /home/nonroot/cachepot_log.txt
 
 # Final image that only has one binary
 FROM debian:bullseye-slim

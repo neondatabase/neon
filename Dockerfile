@@ -27,13 +27,17 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
+# Debug
 RUN aws s3 ls
+ENV CACHEPOT_ERROR_LOG=/home/nonroot/cachepot_log.txt
+ENV CACHEPOT_LOG=debug
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
     && mold -run cargo build --release \
-    && cachepot -s
+    && cachepot -s \
+    && cat /home/nonroot/cachepot_log.txt
 
 # Build final image
 #
