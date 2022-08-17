@@ -52,7 +52,7 @@ jobs:
         REMOTE_ENV: 1
         BENCHMARK_CONNSTR: "${{ secrets.BENCHMARK_STAGING_CONNSTR }}"
 
-        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install/v14
       shell: bash -euxo pipefail {0}
       run: |
         # Test framework expects we have psql binary;

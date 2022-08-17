@@ -78,7 +78,7 @@ runs:
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
-        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install/v14
         TEST_OUTPUT: /tmp/test_output
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
