@@ -257,10 +257,10 @@ jobs:
           rust_toolchain: ${{ matrix.rust_toolchain }}
           test_selection: batch_others
           run_with_real_s3: true
-          real_s3_bucket: neon-github-dev
-          real_s3_region: eu-central-1
-          #real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}" # instance's IAM role will be fetched from the EC2 metadata service
-          #real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+          real_s3_bucket: ci-tests-s3
+          real_s3_region: us-west-2
+          real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
+          real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
