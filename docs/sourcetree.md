@@ -112,11 +112,12 @@ Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.
 
 ### Obligatory checks
-We force code formatting via `yapf` and type hints via `mypy`.
-Run the following commands in the repository's root (next to `setup.cfg`):
+We force code formatting via `black`, `isort` and type hints via `mypy`.
+Run the following commands in the repository's root (next to `pyproject.toml`):
 
 ```bash
-poetry run yapf -ri .  # All code is reformatted
+poetry run isort .  # Imports are reformatted
+poetry run black .  # All code is reformatted
 poetry run mypy .  # Ensure there are no typing errors
 ```
 
