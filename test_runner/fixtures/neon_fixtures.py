@@ -2402,6 +2402,21 @@ def wait_until(number_of_iterations: int, interval: float, func):
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    last_exception = None
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception as e:
+            return
+    raise Exception("timed out while waiting for %s" % func)
 
 def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
                           tenant: uuid.UUID,

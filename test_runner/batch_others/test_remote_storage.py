@@ -105,10 +105,13 @@ def test_remote_storage_backup_and_restore(
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(Exception, match="attach is already in progress"):
+
+    # FIXME: we used to keep retrying the initial download on failure.
+    # (We need to download some layers to calculate the logical size.)
+    # Now we mark the timeline as broken, instead.
+    #with pytest.raises(Exception, match="attach is already in progress"):
+    with pytest.raises(Exception, match="is marked as broken"):
         client.tenant_attach(UUID(tenant_id))
-
-
 
     # FIXME: cannot call timeline_detail while it's still being downloaded
     #detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
