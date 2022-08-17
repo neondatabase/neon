@@ -1035,7 +1035,8 @@ mod tests {
     use crate::pgdatadir_mapping::create_test_timeline;
     use crate::repository::repo_harness::*;
     use crate::repository::Timeline;
-    use postgres_ffi::pg_constants;
+    use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
+    use postgres_ffi::RELSEG_SIZE;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -1324,7 +1325,7 @@ mod tests {
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
-        for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
+        for blknum in 0..RELSEG_SIZE + 1 {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
@@ -1334,31 +1335,22 @@ mod tests {
 
         assert_current_logical_size(&*tline, Lsn(lsn));
 
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE + 1
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE + 1);
 
         // Truncate one block
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
-        walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE)?;
+        walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE)?;
         m.commit()?;
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE);
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
-        walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE - 1)?;
+        walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1)?;
         m.commit()?;
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE - 1
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE - 1);
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time
