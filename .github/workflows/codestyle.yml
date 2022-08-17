@@ -28,7 +28,7 @@ jobs:
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
     timeout-minutes: 60
-    name: run regression test suite
+    name: check codestyle rust and postgres
     runs-on: ${{ matrix.os }}
 
     steps:
