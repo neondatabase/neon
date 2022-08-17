@@ -21,7 +21,6 @@ ARG GIT_VERSION=local
 # cachepot falls back to local filesystem if S3 is misconfigured, not failing the build
 ARG RUSTC_WRAPPER=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
-ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
@@ -42,8 +41,8 @@ FROM debian:bullseye-slim
 WORKDIR /data
 
 RUN set -e \
-    && apt-get update \
-    && apt-get install -y \
+    && apt update \
+    && apt install -y \
         libreadline-dev \
         libseccomp-dev \
         openssl \
