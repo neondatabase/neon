@@ -238,7 +238,6 @@ def can_bind(host: str, port: int) -> bool:
 
 
 class PortDistributor:
-
     def __init__(self, base_port: int, port_number: int):
         self.iterator = iter(range(base_port, base_port + port_number))
 
@@ -282,7 +281,6 @@ def mock_s3_server(port_distributor: PortDistributor):
 
 class PgProtocol:
     """ Reusable connection logic """
-
     def __init__(self, **kwargs):
         self.default_options = kwargs
 
@@ -448,7 +446,6 @@ class MockS3Server:
 
     Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
     """
-
     def __init__(
         self,
         port: int,
@@ -561,7 +558,6 @@ class NeonEnvBuilder:
     created in the right directory, based on the test name, and it's properly
     cleaned up after the test has finished.
     """
-
     def __init__(
         self,
         repo_dir: Path,
@@ -793,7 +789,6 @@ class NeonEnv:
     create_tenant() - initializes a new tenant in the page server, returns
         the tenant id
     """
-
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
@@ -983,7 +978,6 @@ class NeonPageserverApiException(Exception):
 
 
 class NeonPageserverHttpClient(requests.Session):
-
     def __init__(self, port: int, auth_token: Optional[str] = None):
         super().__init__()
         self.port = port
@@ -1129,7 +1123,6 @@ class AbstractNeonCli(abc.ABC):
     Supports a way to run arbitrary command directly via CLI.
     Do not use directly, use specific subclasses instead.
     """
-
     def __init__(self, env: NeonEnv):
         self.env = env
 
@@ -1508,7 +1501,6 @@ class NeonPageserver(PgProtocol):
 
     Initializes the repository via `neon init`.
     """
-
     def __init__(self, env: NeonEnv, port: PageserverPort, config_override: Optional[str] = None):
         super().__init__(host='localhost', port=port.pg, user='cloud_admin')
         self.env = env
@@ -1578,7 +1570,6 @@ def append_pageserver_param_overrides(
 
 class PgBin:
     """ A helper class for executing postgres binaries """
-
     def __init__(self, log_dir: Path):
         self.log_dir = log_dir
         self.pg_bin_path = os.path.join(str(pg_distrib_dir), 'bin')
@@ -1644,7 +1635,6 @@ def pg_bin(test_output_dir: Path) -> PgBin:
 
 
 class VanillaPostgres(PgProtocol):
-
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init=True):
         super().__init__(host='localhost', port=port, dbname='postgres')
         self.pgdatadir = pgdatadir
@@ -1698,7 +1688,6 @@ def vanilla_pg(test_output_dir: Path,
 
 
 class RemotePostgres(PgProtocol):
-
     def __init__(self, pg_bin: PgBin, remote_connstr: str):
         super().__init__(**parse_dsn(remote_connstr))
         self.pg_bin = pg_bin
@@ -1772,7 +1761,6 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-
     def __init__(self, proxy_port: int, http_port: int, auth_endpoint: str):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = '127.0.0.1'
@@ -1867,7 +1855,6 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
 
 class Postgres(PgProtocol):
     """ An object representing a running postgres daemon. """
-
     def __init__(self,
                  env: NeonEnv,
                  tenant_id: uuid.UUID,
@@ -2053,7 +2040,6 @@ class Postgres(PgProtocol):
 
 class PostgresFactory:
     """ An object representing multiple running postgres daemons. """
-
     def __init__(self, env: NeonEnv):
         self.env = env
         self.num_instances = 0
