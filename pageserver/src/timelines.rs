@@ -13,66 +13,20 @@ use std::{
 use tracing::*;
 
 use utils::{
-    crashsafe_dir, logging,
     lsn::Lsn,
     zid::{ZTenantId, ZTimelineId},
 };
 
+use crate::import_datadir;
+use crate::layered_repository::{LayeredRepository, LayeredTimeline};
 use crate::tenant_mgr;
-use crate::{config::PageServerConf, repository::Repository, tenant_config::TenantConfOpt};
-use crate::{import_datadir, LOG_FILE_NAME};
+use crate::{config::PageServerConf, repository::Repository};
 use crate::{repository::Timeline, CheckpointConfig};
-use crate::{RepositoryImpl, TimelineImpl};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
     pub timeline_id: ZTimelineId,
     pub lsn: Lsn,
-}
-
-pub fn init_pageserver(
-    conf: &'static PageServerConf,
-    create_tenant: Option<ZTenantId>,
-    initial_timeline_id: Option<ZTimelineId>,
-) -> anyhow::Result<()> {
-    // Initialize logger
-    // use true as daemonize parameter because otherwise we pollute zenith cli output with a few pages long output of info messages
-    let _log_file = logging::init(LOG_FILE_NAME, true)?;
-
-    crashsafe_dir::create_dir_all(conf.tenants_path())?;
-
-    if let Some(tenant_id) = create_tenant {
-        println!("initializing tenantid {}", tenant_id);
-
-        // FIXME: initialize storage sync, otherwise we panic
-        // Do we want this bootstrapping to really upload stuff to remote storage?
-        crate::storage_sync::init_storage_sync(conf)?;
-
-        // We don't use the real WAL redo manager, because we don't want to spawn the WAL redo
-        // process during repository initialization.
-        //
-        // FIXME: That caused trouble, because the WAL redo manager spawned a thread that launched
-        // initdb in the background, and it kept running even after the "zenith init" had exited.
-        // In tests, we started the  page server immediately after that, so that initdb was still
-        // running in the background, and we failed to run initdb again in the same directory. This
-        // has been solved for the rapid init+start case now, but the general race condition remains
-        // if you restart the server quickly. The WAL redo manager doesn't use a separate thread
-        // anymore, but I think that could still happen.
-        let wal_redo_manager = std::sync::Arc::new(crate::walredo::DummyRedoManager {});
-
-        let repo =
-            RepositoryImpl::create(conf, TenantConfOpt::default(), tenant_id, wal_redo_manager)
-                .context("failed to create repo")?;
-        let new_timeline_id = initial_timeline_id.unwrap_or_else(ZTimelineId::generate);
-        bootstrap_timeline(conf, tenant_id, new_timeline_id, &repo)
-            .context("failed to create initial timeline")?;
-        println!("initial timeline {} created", new_timeline_id)
-    } else if initial_timeline_id.is_some() {
-        println!("Ignoring initial timeline parameter, due to no tenant id to create given");
-    }
-
-    println!("pageserver init succeeded");
-    Ok(())
 }
 
 // Returns checkpoint LSN from controlfile
@@ -124,8 +78,8 @@ fn bootstrap_timeline(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
-    repo: &RepositoryImpl,
-) -> Result<Arc<TimelineImpl>> {
+    repo: &LayeredRepository,
+) -> Result<Arc<LayeredTimeline>> {
     let initdb_path = conf
         .tenant_path(&tenantid)
         .join(format!("tmp-timeline-{}", tli));
@@ -176,7 +130,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<Arc<TimelineImpl>>> {
+) -> Result<Option<Arc<LayeredTimeline>>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_tenant(tenant_id)?;
 

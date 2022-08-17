@@ -549,7 +549,7 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     pending_nblocks: isize,
 }
 
-impl<'a> DatadirModification<'a, crate::TimelineImpl> {
+impl<'a> DatadirModification<'a, crate::layered_repository::LayeredTimeline> {
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -1420,9 +1420,9 @@ fn is_slru_block_key(key: Key) -> bool {
 
 #[cfg(test)]
 pub fn create_test_timeline(
-    repo: &mut crate::RepositoryImpl,
+    repo: &mut crate::layered_repository::LayeredRepository,
     timeline_id: utils::zid::ZTimelineId,
-) -> Result<std::sync::Arc<crate::TimelineImpl>> {
+) -> Result<std::sync::Arc<crate::layered_repository::LayeredTimeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;

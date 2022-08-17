@@ -20,8 +20,9 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    layered_repository::WalReceiverInfo, pgdatadir_mapping::DatadirTimeline, repository::Timeline,
-    walingest::WalIngest, walrecord::DecodedWALRecord, TimelineImpl,
+    layered_repository::{LayeredTimeline, WalReceiverInfo},
+    pgdatadir_mapping::DatadirTimeline, repository::Timeline,
+    walingest::WalIngest, walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
@@ -46,7 +47,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    timeline: Arc<TimelineImpl>,
+    timeline: Arc<LayeredTimeline>,
     wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,

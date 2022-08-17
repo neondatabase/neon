@@ -4,14 +4,13 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use crate::layered_repository::TenantState;
+use crate::layered_repository::{LayeredRepository, TenantState};
 use crate::repository::Repository;
-use crate::RepositoryImpl;
 use anyhow;
 use std::sync::Arc;
 use tracing::*;
 
-pub fn start_background_loops(repo: &Arc<RepositoryImpl>) {
+pub fn start_background_loops(repo: &Arc<LayeredRepository>) {
     let repo_clone = Arc::clone(repo);
     tokio::spawn(async { crate::tenant_tasks::compaction_loop(repo_clone).await });
     let repo_clone = Arc::clone(repo);
@@ -21,7 +20,7 @@ pub fn start_background_loops(repo: &Arc<RepositoryImpl>) {
 ///
 /// Compaction task's main loop
 ///
-pub async fn compaction_loop(repo: Arc<RepositoryImpl>) {
+pub async fn compaction_loop(repo: Arc<LayeredRepository>) {
     loop {
         trace!("waking up");
 
@@ -80,7 +79,7 @@ pub async fn compaction_loop(repo: Arc<RepositoryImpl>) {
 ///
 /// GC task's main loop
 ///
-pub async fn gc_loop(repo: Arc<RepositoryImpl>) {
+pub async fn gc_loop(repo: Arc<LayeredRepository>) {
     loop {
         trace!("waking up");
 

@@ -30,6 +30,7 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
+use crate::layered_repository::LayeredTimeline;
 use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -40,7 +41,6 @@ use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
-use crate::TimelineImpl;
 use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::xlog_utils::to_pg_timestamp;
 
@@ -701,7 +701,7 @@ impl PageServerHandler {
 
     fn handle_get_rel_exists_request(
         &self,
-        timeline: &Arc<TimelineImpl>,
+        timeline: &Arc<LayeredTimeline>,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -723,7 +723,7 @@ impl PageServerHandler {
 
     fn handle_get_nblocks_request(
         &self,
-        timeline: &Arc<TimelineImpl>,
+        timeline: &Arc<LayeredTimeline>,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -744,7 +744,7 @@ impl PageServerHandler {
 
     fn handle_db_size_request(
         &self,
-        timeline: &Arc<TimelineImpl>,
+        timeline: &Arc<LayeredTimeline>,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
@@ -768,7 +768,7 @@ impl PageServerHandler {
 
     fn handle_get_page_at_lsn_request(
         &self,
-        timeline: &Arc<TimelineImpl>,
+        timeline: &Arc<LayeredTimeline>,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)

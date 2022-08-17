@@ -9,10 +9,10 @@ use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
     TimelineCreateRequest, TimelineInfo,
 };
+use crate::layered_repository::LayeredTimeline;
 use crate::pgdatadir_mapping::DatadirTimeline;
 use crate::repository::{Repository, Timeline};
 use crate::tenant_config::TenantConfOpt;
-use crate::TimelineImpl;
 use crate::{config::PageServerConf, tenant_mgr, timelines};
 use utils::{
     auth::JwtAuth,
@@ -64,7 +64,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
 fn build_timeline_info(
-    timeline: &Arc<TimelineImpl>,
+    timeline: &Arc<LayeredTimeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {

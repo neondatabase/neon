@@ -64,7 +64,8 @@ mod storage_layer;
 mod timeline;
 
 use storage_layer::Layer;
-use timeline::LayeredTimeline;
+
+pub use timeline::LayeredTimeline;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -1447,7 +1448,6 @@ pub mod repo_harness {
 
     use crate::repository::Key;
     use crate::walrecord::ZenithWalRecord;
-    use crate::RepositoryImpl;
     use crate::{
         config::PageServerConf,
         layered_repository::LayeredRepository,
@@ -1543,11 +1543,11 @@ pub mod repo_harness {
             })
         }
 
-        pub fn load(&self) -> RepositoryImpl {
+        pub fn load(&self) -> LayeredRepository {
             self.try_load().expect("failed to load test repo")
         }
 
-        pub fn try_load(&self) -> Result<RepositoryImpl> {
+        pub fn try_load(&self) -> Result<LayeredRepository> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let repo = LayeredRepository::new(
