@@ -1,6 +1,6 @@
 # First transient image to build compute_tools binaries
 # NB: keep in sync with rust image version in .github/workflows/build_and_test.yml
-FROM neondatabase/rust:1.58 AS rust-build
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS rust-build
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
 # Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
@@ -8,16 +8,18 @@ FROM neondatabase/rust:1.58 AS rust-build
 ARG RUSTC_WRAPPER=cachepot
 ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
+#ARG AWS_ACCESS_KEY_ID
+#ARG AWS_SECRET_ACCESS_KEY
 
 COPY . .
+
+RUN aws s3 ls
 
 RUN set -e \
     && sudo -E "PATH=$PATH" mold -run cargo build -p compute_tools --release \
     && cachepot -s
 
 # Final image that only has one binary
-FROM debian:buster-slim
+FROM debian:bullseye-slim
 
 COPY --from=rust-build /home/runner/target/release/compute_ctl /usr/local/bin/compute_ctl

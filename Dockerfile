@@ -1,5 +1,5 @@
 # Build Postgres
-FROM neondatabase/rust:1.58 AS pg-build
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS pg-build
 WORKDIR /pg
 
 USER root
@@ -14,7 +14,7 @@ RUN set -e \
     && tar -C tmp_install -czf /postgres_install.tar.gz .
 
 # Build zenith binaries
-FROM neondatabase/rust:1.58 AS build
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS build
 ARG GIT_VERSION=local
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
@@ -23,11 +23,13 @@ ARG GIT_VERSION=local
 ARG RUSTC_WRAPPER=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
 ENV CACHEPOT_S3_KEY_PREFIX=cachepot
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
+#ARG AWS_ACCESS_KEY_ID
+#ARG AWS_SECRET_ACCESS_KEY
 
 COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
+
+RUN aws s3 ls
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
