@@ -81,8 +81,6 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     log.debug(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
     log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
 
-
-
     # send select 1.
     # make a db and send to proxy.
 
@@ -91,15 +89,18 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     vanilla_pg.safe_psql("create user proxy_auth with password 'pytest1' superuser")
     vanilla_pg.safe_psql("create user proxy_user with password 'pytest2'")
 
-
-
     cmd_line_args__to__mgmt = [
-        "psql", "-h", "127.0.0.1", "-p", "7000", '-c',
-        '{"session_id": "'+str(psql_session_id)+'"'
-            ',"result":'
-                '{"Success":'
-                    '{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"proxy_auth","password":"pytest1"}'
-                '}'
+        "psql",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "7000",
+        '-c',
+        '{"session_id": "' + str(psql_session_id) + '"'
+        ',"result":'
+        '{"Success":'
+        '{"host":"127.0.0.1","port":5432,"dbname":"stas","user":"proxy_auth","password":"pytest1"}'
+        '}'
         '}'
     ]
 
