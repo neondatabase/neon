@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
-use std::net::TcpStream;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::Command;
@@ -312,38 +311,23 @@ impl PageServerNode {
             ),
         }
 
-        let address = connection_address(&self.pg_connection_config);
-
-        // TODO Remove this "timeout" and handle it on caller side instead.
-        // Shutting down may take a long time,
-        // if pageserver checkpoints a lot of data
-        let mut tcp_stopped = false;
+        // Wait until process is gone
         for i in 0..600 {
-            if !tcp_stopped {
-                if let Err(err) = TcpStream::connect(&address) {
-                    tcp_stopped = true;
-                    if err.kind() != io::ErrorKind::ConnectionRefused {
-                        eprintln!("\nPageserver connection failed with error: {err}");
-                    }
+            let signal = None; // Send no signal, just get the error code
+            match kill(pid, signal) {
+                Ok(_) => (), // Process exists, keep waiting
+                Err(Errno::ESRCH) => {
+                    // Process not found, we're done
+                    println!("done!");
+                    return Ok(());
                 }
-            }
-            if tcp_stopped {
-                // Also check status on the HTTP port
+                Err(err) => bail!(
+                    "Failed to send signal to pageserver with pid {}: {}",
+                    pid,
+                    err.desc()
+                ),
+            };
 
-                match self.check_status() {
-                    Err(PageserverHttpError::Transport(err)) if err.is_connect() => {
-                        println!("done!");
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        eprintln!("\nPageserver status check failed with error: {err}");
-                        return Ok(());
-                    }
-                    Ok(()) => {
-                        // keep waiting
-                    }
-                }
-            }
             if i % 10 == 0 {
                 print!(".");
                 io::stdout().flush().unwrap();
