@@ -17,8 +17,7 @@ COPY . .
 
 RUN set -e \
     && mold -run cargo build -p compute_tools --release \
-    && cachepot -s \
-    && cat /home/nonroot/cachepot_log.txt
+    && cachepot -s
 
 # Final image that only has one binary
 FROM debian:bullseye-slim

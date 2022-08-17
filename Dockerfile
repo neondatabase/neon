@@ -33,8 +33,7 @@ COPY . .
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
     && mold -run cargo build --release \
-    && cachepot -s \
-    && cat /home/nonroot/cachepot_log.txt
+    && cachepot -s
 
 # Build final image
 #
