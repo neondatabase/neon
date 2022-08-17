@@ -328,7 +328,7 @@ class PgProtocol:
         with closing(self.connect(autocommit=autocommit, **kwargs)) as conn:
             yield conn.cursor()
 
-    async def connect_async(self, **kwargs) -> asyncpg.Connection:
+    async def connect_async_prepare_connection_options(self, **kwargs) -> asyncpg.Connection:
         """
         Connect to the node from async python.
         Returns asyncpg's connection object.
@@ -1761,7 +1761,7 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, proxy_port: int, http_port: int, auth_endpoint: str):
+    def __init__(self, proxy_port: int, http_port: int, auth_endpoint):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = '127.0.0.1'
         self.http_port = http_port
@@ -1775,7 +1775,6 @@ class NeonProxy(PgProtocol):
         Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
         """
         assert self._popen is None
-        assert self.pg_port is not None
 
         assert self.auth_endpoint is not None
 
