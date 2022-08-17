@@ -1,8 +1,6 @@
 # Build Postgres
 FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS pg-build
-WORKDIR /pg
-
-USER root
+WORKDIR /home/nonroot
 
 COPY vendor/postgres vendor/postgres
 COPY Makefile Makefile
@@ -15,6 +13,7 @@ RUN set -e \
 
 # Build zenith binaries
 FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS build
+WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
@@ -34,7 +33,7 @@ RUN aws s3 ls
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-    && "PATH=$PATH" mold -run cargo build --release \
+    && mold -run cargo build --release \
     && cachepot -s
 
 # Build final image
