@@ -1,6 +1,6 @@
 //! Main entry point for the Page Server executable.
 
-use std::{env, path::Path, str::FromStr};
+use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -41,11 +41,18 @@ fn main() -> anyhow::Result<()> {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
         .arg(
+
             Arg::new("daemonize")
                 .short('d')
                 .long("daemonize")
                 .takes_value(false)
                 .help("Run in the background"),
+        )
+        .arg(
+            Arg::new("init")
+                .long("init")
+                .takes_value(false)
+                .help("Initialize pageserver with all given config overrides"),
         )
         .arg(
             Arg::new("workdir")
@@ -102,7 +109,13 @@ fn main() -> anyhow::Result<()> {
 
     let daemonize = arg_matches.is_present("daemonize");
 
-    let conf = initialize_config(&cfg_file_path, arg_matches, &workdir)?;
+    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
+        ControlFlow::Continue(conf) => conf,
+        ControlFlow::Break(()) => {
+            info!("Pageserver config init successful");
+            return Ok(());
+        }
+    };
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -131,8 +144,17 @@ fn initialize_config(
     cfg_file_path: &Path,
     arg_matches: clap::ArgMatches,
     workdir: &Path,
-) -> anyhow::Result<&'static PageServerConf> {
+) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
+    let init = arg_matches.is_present("init");
+    let update_config = init || arg_matches.is_present("update-config");
+
     let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
+        if init {
+            anyhow::bail!(
+                "Config file '{}' already exists, cannot init it, use --update-config to update it",
+                cfg_file_path.display()
+            );
+        }
         // Supplement the CLI arguments with the config file
         let cfg_file_contents = std::fs::read_to_string(&cfg_file_path).with_context(|| {
             format!(
@@ -166,8 +188,6 @@ fn initialize_config(
         )
     };
 
-    let update_config = arg_matches.is_present("update-config");
-
     if let Some(values) = arg_matches.values_of("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -178,7 +198,7 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                if config_file_exists && update_config && key == "id" {
+                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
                     anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.display());
                 }
                 toml.insert(key, item.clone());
@@ -205,7 +225,11 @@ fn initialize_config(
         )
     }
 
-    Ok(Box::leak(Box::new(conf)))
+    Ok(if init {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(Box::leak(Box::new(conf)))
+    })
 }
 
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
