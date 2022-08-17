@@ -59,7 +59,9 @@ mod storage_layer;
 mod timeline;
 
 use storage_layer::Layer;
-use timeline::{LayeredTimeline, LayeredTimelineEntry};
+use timeline::LayeredTimelineEntry;
+
+pub use timeline::LayeredTimeline;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;

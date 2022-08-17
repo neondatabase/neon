@@ -3,7 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
-use crate::layered_repository::{load_metadata, LayeredRepository};
+use crate::layered_repository::{load_metadata, LayeredRepository, LayeredTimeline};
 use crate::repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
@@ -12,7 +12,6 @@ use crate::thread_mgr::ThreadKind;
 use crate::timelines::CreateRepo;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
-use crate::{RepositoryImpl, TimelineImpl};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
@@ -96,13 +95,13 @@ mod tenants_state {
 struct Tenant {
     state: TenantState,
     /// Contains in-memory state, including the timeline that might not yet flushed on disk or loaded form disk.
-    repo: Arc<RepositoryImpl>,
+    repo: Arc<LayeredRepository>,
     /// Timelines, located locally in the pageserver's datadir.
     /// Timelines can entirely be removed entirely by the `detach` operation only.
     ///
     /// Local timelines have more metadata that's loaded into memory,
     /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
-    local_timelines: HashMap<ZTimelineId, Arc<<RepositoryImpl as Repository>::Timeline>>,
+    local_timelines: HashMap<ZTimelineId, Arc<LayeredTimeline>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +178,7 @@ pub enum LocalTimelineUpdate {
     },
     Attach {
         id: ZTenantTimelineId,
-        datadir: Arc<<RepositoryImpl as Repository>::Timeline>,
+        datadir: Arc<LayeredTimeline>,
     },
 }
 
@@ -369,7 +368,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<RepositoryImpl>> {
+pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<LayeredRepository>> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
@@ -383,7 +382,7 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Rep
 pub fn get_local_timeline_with_load(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<TimelineImpl>> {
+) -> anyhow::Result<Arc<LayeredTimeline>> {
     let mut m = tenants_state::write_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -488,9 +487,9 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
 }
 
 fn load_local_timeline(
-    repo: &RepositoryImpl,
+    repo: &LayeredRepository,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<TimelineImpl>> {
+) -> anyhow::Result<Arc<LayeredTimeline>> {
     let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;
@@ -634,7 +633,7 @@ fn load_local_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
-) -> anyhow::Result<Arc<RepositoryImpl>> {
+) -> anyhow::Result<Arc<LayeredRepository>> {
     let mut m = tenants_state::write_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
         // Set up a WAL redo manager, for applying WAL records.

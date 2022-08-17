@@ -21,10 +21,13 @@ use utils::{
 use crate::tenant_mgr;
 use crate::{
     config::PageServerConf, repository::Repository, storage_sync::index::RemoteIndex,
-    tenant_config::TenantConfOpt, RepositoryImpl, TimelineImpl,
+    tenant_config::TenantConfOpt,
 };
 use crate::{import_datadir, LOG_FILE_NAME};
-use crate::{layered_repository::LayeredRepository, walredo::WalRedoManager};
+use crate::{
+    layered_repository::{LayeredRepository, LayeredTimeline},
+    walredo::WalRedoManager,
+};
 use crate::{repository::Timeline, CheckpointConfig};
 
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +76,7 @@ pub fn create_repo(
     tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
     create_repo: CreateRepo,
-) -> Result<Arc<RepositoryImpl>> {
+) -> Result<Arc<LayeredRepository>> {
     let (wal_redo_manager, remote_index) = match create_repo {
         CreateRepo::Real {
             wal_redo_manager,
@@ -223,7 +226,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<(ZTimelineId, Arc<TimelineImpl>)>> {
+) -> Result<Option<(ZTimelineId, Arc<LayeredTimeline>)>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
