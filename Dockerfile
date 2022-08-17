@@ -9,7 +9,7 @@ ENV BUILD_TYPE release
 RUN set -e \
     && mold -run make -j $(nproc) -s postgres \
     && rm -rf tmp_install/build \
-    && tar -C tmp_install -czf /postgres_install.tar.gz .
+    && tar -C tmp_install -czf /home/nonroot/postgres_install.tar.gz .
 
 # Build zenith binaries
 FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS build
@@ -25,7 +25,7 @@ ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
-COPY --from=pg-build /pg/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
+COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
 RUN aws s3 ls
@@ -52,12 +52,12 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/runner/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/runner/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/runner/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
 
-COPY --from=pg-build /pg/tmp_install/         /usr/local/
-COPY --from=pg-build /postgres_install.tar.gz /data/
+COPY --from=pg-build /home/nonroot/tmp_install/ /usr/local/
+COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
