@@ -21,17 +21,13 @@ ARG GIT_VERSION=local
 # cachepot falls back to local filesystem if S3 is misconfigured, not failing the build
 ARG RUSTC_WRAPPER=cachepot
 ENV AWS_REGION=eu-central-1
+ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
-
-# Debug
-RUN aws s3 ls
-ENV CACHEPOT_ERROR_LOG=/home/nonroot/cachepot_log.txt
-ENV CACHEPOT_LOG=debug
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
