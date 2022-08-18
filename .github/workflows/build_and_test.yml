@@ -446,9 +446,29 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
+  promote-image-compute-tools:
+    runs-on: dev
+    needs: [ compute-tools-image ]
+    if: github.event_name != 'workflow_dispatch'
+    container: amazon/aws-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [ compute-tools ]
+
+    steps:
+      - name: Promote image to latest
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name ${{ matrix.name }} --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
+
   compute-node-image:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    # note: This image depends on neondatabase/compute-tools:latest (or :thisversion),
+    # which isn't available until after the image is promoted.
+    # Ergo, we must explicitly build and promote compute-tools separately.
+    needs:
+      - promote-image-compute-tools
 
     steps:
       - name: Checkout
@@ -462,17 +482,17 @@ jobs:
 
       - name: Kaniko build compute node
         working-directory: ./vendor/postgres/
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg=COMPUTE_TOOLS_TAG=$GITHUB_RUN_ID --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-tools-image, compute-node-image ]
+    needs: [ neon-image, compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
       fail-fast: false
       matrix:
-        name: [ neon, compute-tools, compute-node ]
+        name: [ neon, compute-node ]
 
     steps:
       - name: Promote image to latest
