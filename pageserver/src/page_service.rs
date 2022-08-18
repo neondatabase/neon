@@ -30,11 +30,11 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
+use crate::layered_repository::Timeline;
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::repository::Repository;
-use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -636,8 +636,8 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn<T: DatadirTimeline>(
-        timeline: &T,
+    fn wait_or_get_last_lsn(
+        timeline: &Timeline,
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
@@ -684,9 +684,9 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request<T: DatadirTimeline>(
+    fn handle_get_rel_exists_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -701,9 +701,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_nblocks_request<T: DatadirTimeline>(
+    fn handle_get_nblocks_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -717,9 +717,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_db_size_request<T: DatadirTimeline>(
+    fn handle_db_size_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
@@ -735,9 +735,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_page_at_lsn_request<T: DatadirTimeline>(
+    fn handle_get_page_at_lsn_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)

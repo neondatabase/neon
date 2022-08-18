@@ -22,8 +22,8 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
+use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
-use crate::DatadirTimeline;
 
 use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFileName};
@@ -36,13 +36,12 @@ use utils::lsn::Lsn;
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a, W, T>
+pub struct Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     ar: Builder<AbortableWrite<W>>,
-    timeline: &'a Arc<T>,
+    timeline: &'a Arc<Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
@@ -57,18 +56,17 @@ where
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a, W, T> Basebackup<'a, W, T>
+impl<'a, W> Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     pub fn new(
         write: W,
-        timeline: &'a Arc<T>,
+        timeline: &'a Arc<Timeline>,
         req_lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
-    ) -> Result<Basebackup<'a, W, T>> {
+    ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -404,10 +402,9 @@ where
     }
 }
 
-impl<'a, W, T> Drop for Basebackup<'a, W, T>
+impl<'a, W> Drop for Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     /// If the basebackup was not finished, prevent the Archive::drop() from
     /// writing the end-of-archive marker.

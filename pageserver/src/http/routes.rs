@@ -11,10 +11,9 @@ use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
     TimelineCreateRequest,
 };
-use crate::layered_repository::{metadata::TimelineMetadata, LayeredTimeline};
-use crate::pgdatadir_mapping::DatadirTimeline;
+use crate::layered_repository::{metadata::TimelineMetadata, Timeline};
+use crate::repository::Repository;
 use crate::repository::{LocalTimelineState, RepositoryTimeline};
-use crate::repository::{Repository, Timeline};
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
@@ -85,7 +84,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
 fn local_timeline_info_from_loaded_timeline(
-    timeline: &LayeredTimeline,
+    timeline: &Timeline,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<LocalTimelineInfo> {
@@ -160,7 +159,7 @@ fn local_timeline_info_from_unloaded_timeline(metadata: &TimelineMetadata) -> Lo
 }
 
 fn local_timeline_info_from_repo_timeline(
-    repo_timeline: &RepositoryTimeline<LayeredTimeline>,
+    repo_timeline: &RepositoryTimeline<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<LocalTimelineInfo> {
