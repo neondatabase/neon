@@ -144,6 +144,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     # Populate data for 2/3 timelines
     class MetricsChecker(threading.Thread):
+
         def __init__(self) -> None:
             super().__init__(daemon=True)
             self.should_stop = threading.Event()
@@ -534,6 +535,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: R
 
 class ProposerPostgres(PgProtocol):
     """Object for running postgres without NeonEnv"""
+
     def __init__(self,
                  pgdata_dir: str,
                  pg_bin,
@@ -720,6 +722,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
 
 class SafekeeperEnv:
+
     def __init__(self,
                  repo_dir: Path,
                  port_distributor: PortDistributor,
@@ -844,6 +847,7 @@ def test_safekeeper_without_pageserver(test_output_dir: str,
 
 
 def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
+
     def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
         return ','.join([f'localhost:{sk.port.pg}' for sk in env.safekeepers if sk.id in sk_names])
 

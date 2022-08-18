@@ -50,7 +50,8 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
 
     while os.path.isfile(pg_xact_0000_path):
-        log.info(f"file exists. wait for truncation. " "pg_xact_0000_path = {pg_xact_0000_path}")
+        log.info(f"file exists. wait for truncation. "
+                 "pg_xact_0000_path = {pg_xact_0000_path}")
         time.sleep(5)
 
     # checkpoint to advance latest lsn
