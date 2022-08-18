@@ -1414,6 +1414,7 @@ name = "integration_tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pg_bin",
  "tokio",
  "tokio-postgres",
  "utils",
@@ -1986,6 +1987,13 @@ checksum = "e6d5014253a1331579ce62aa67443b4a658c5e7dd03d4bc6d302b94474888143"
 dependencies = [
  "fixedbitset",
  "indexmap",
+]
+
+[[package]]
+name = "pg_bin"
+version = "0.1.0"
+dependencies = [
+ "tokio-postgres",
 ]
 
 [[package]]
