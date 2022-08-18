@@ -591,9 +591,11 @@ impl LayeredRepository {
     /// Attach a tenant that's available in cloud storage.
     ///
     /// This returns quickly, after just creating the in-memory object
-    /// LayeredRepository struct.  On return, the tenant is most likely still in
-    /// Attaching state, and it will become online in the background. You can
-    /// use wait_until_active() to wait for the download to complete.
+    /// LayeredRepository struct and launching a background task to download
+    /// the remote index files.  On return, the tenant is most likely still in
+    /// Attaching state, and it will become Active once the background task
+    /// finishes. You can use wait_until_active() to wait for the task to
+    /// complete.
     ///
     pub fn spawn_attach(
         conf: &'static PageServerConf,
@@ -748,12 +750,12 @@ impl LayeredRepository {
     /// Load a tenant that's available on local disk
     ///
     /// This is used at pageserver startup, to rebuild the in-memory
-    /// structures from on-disk state.
+    /// structures from on-disk state. This is similar to attaching a tenant,
+    /// but the index files already exist on local disk, as well as some layer
+    /// files.
     ///
     /// If the loading fails for some reason, the LayeredRepository will go into Broken
     /// state.
-    ///
-    /// TODO: initiate synchronization with remote storage
     ///
     pub fn spawn_load(
         conf: &'static PageServerConf,
