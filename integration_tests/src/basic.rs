@@ -1,9 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use tokio_postgres::NoTls;
     use pg_bin::LocalPostgres;
+    use std::path::PathBuf;
+    use tokio_postgres::NoTls;
 
     #[tokio::test]
     async fn test_postgres_select_1() -> anyhow::Result<()> {
