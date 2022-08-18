@@ -1,6 +1,6 @@
 //! Main entry point for the Page Server executable.
 
-use std::{env, path::Path, str::FromStr};
+use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -13,7 +13,7 @@ use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, tenant_mgr, thread_mgr,
     thread_mgr::ThreadKind,
-    timelines, virtual_file, LOG_FILE_NAME,
+    virtual_file, LOG_FILE_NAME,
 };
 use utils::{
     auth::JwtAuth,
@@ -24,7 +24,6 @@ use utils::{
     shutdown::exit_now,
     signals::{self, Signal},
     tcp_listener,
-    zid::{ZTenantId, ZTimelineId},
 };
 
 project_git_version!(GIT_VERSION);
@@ -42,6 +41,7 @@ fn main() -> anyhow::Result<()> {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(&*version())
         .arg(
+
             Arg::new("daemonize")
                 .short('d')
                 .long("daemonize")
@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             Arg::new("init")
                 .long("init")
                 .takes_value(false)
-                .help("Initialize pageserver service: creates an initial config, tenant and timeline, if specified"),
+                .help("Initialize pageserver with all given config overrides"),
         )
         .arg(
             Arg::new("workdir")
@@ -60,20 +60,6 @@ fn main() -> anyhow::Result<()> {
                 .long("workdir")
                 .takes_value(true)
                 .help("Working directory for the pageserver"),
-        )
-        .arg(
-            Arg::new("create-tenant")
-                .long("create-tenant")
-                .takes_value(true)
-                .help("Create tenant during init")
-                .requires("init"),
-        )
-        .arg(
-            Arg::new("initial-timeline-id")
-                .long("initial-timeline-id")
-                .takes_value(true)
-                .help("Use a specific timeline id during init and tenant creation")
-                .requires("create-tenant"),
         )
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
@@ -85,6 +71,9 @@ fn main() -> anyhow::Result<()> {
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there).
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
+        .arg(Arg::new("update-config").long("update-config").takes_value(false).help(
+            "Update the config file when started",
+        ))
         .arg(
             Arg::new("enabled-features")
                 .long("enabled-features")
@@ -110,18 +99,6 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
     let cfg_file_path = workdir.join("pageserver.toml");
 
-    let init = arg_matches.is_present("init");
-    let create_tenant = arg_matches
-        .value_of("create-tenant")
-        .map(ZTenantId::from_str)
-        .transpose()
-        .context("Failed to parse tenant id from the arguments")?;
-    let initial_timeline_id = arg_matches
-        .value_of("initial-timeline-id")
-        .map(ZTimelineId::from_str)
-        .transpose()
-        .context("Failed to parse timeline id from the arguments")?;
-
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
         format!(
@@ -131,30 +108,86 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let daemonize = arg_matches.is_present("daemonize");
-    if init && daemonize {
-        bail!("--daemonize cannot be used with --init")
-    }
 
-    let mut toml = if init {
-        // We're initializing the repo, so there's no config file yet
-        DEFAULT_CONFIG_FILE
-            .parse::<toml_edit::Document>()
-            .context("could not parse built-in config file")?
-    } else {
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path)
-            .with_context(|| format!("No pageserver config at '{}'", cfg_file_path.display()))?;
-        cfg_file_contents
-            .parse::<toml_edit::Document>()
-            .with_context(|| {
-                format!(
-                    "Failed to read '{}' as pageserver config",
-                    cfg_file_path.display()
-                )
-            })?
+    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
+        ControlFlow::Continue(conf) => conf,
+        ControlFlow::Break(()) => {
+            info!("Pageserver config init successful");
+            return Ok(());
+        }
     };
 
-    // Process any extra options given with -c
+    let tenants_path = conf.tenants_path();
+    if !tenants_path.exists() {
+        utils::crashsafe_dir::create_dir_all(conf.tenants_path()).with_context(|| {
+            format!(
+                "Failed to create tenants root dir at '{}'",
+                tenants_path.display()
+            )
+        })?;
+    }
+
+    // Initialize up failpoints support
+    let scenario = FailScenario::setup();
+
+    // Basic initialization of things that don't change after startup
+    virtual_file::init(conf.max_file_descriptors);
+    page_cache::init(conf.page_cache_size);
+
+    start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
+
+    scenario.teardown();
+    Ok(())
+}
+
+fn initialize_config(
+    cfg_file_path: &Path,
+    arg_matches: clap::ArgMatches,
+    workdir: &Path,
+) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
+    let init = arg_matches.is_present("init");
+    let update_config = init || arg_matches.is_present("update-config");
+
+    let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
+        if init {
+            anyhow::bail!(
+                "Config file '{}' already exists, cannot init it, use --update-config to update it",
+                cfg_file_path.display()
+            );
+        }
+        // Supplement the CLI arguments with the config file
+        let cfg_file_contents = std::fs::read_to_string(&cfg_file_path).with_context(|| {
+            format!(
+                "Failed to read pageserver config at '{}'",
+                cfg_file_path.display()
+            )
+        })?;
+        (
+            cfg_file_contents
+                .parse::<toml_edit::Document>()
+                .with_context(|| {
+                    format!(
+                        "Failed to parse '{}' as pageserver config",
+                        cfg_file_path.display()
+                    )
+                })?,
+            true,
+        )
+    } else if cfg_file_path.exists() {
+        anyhow::bail!(
+            "Config file '{}' exists but is not a regular file",
+            cfg_file_path.display()
+        );
+    } else {
+        // We're initializing the repo, so there's no config file yet
+        (
+            DEFAULT_CONFIG_FILE
+                .parse::<toml_edit::Document>()
+                .context("could not parse built-in config file")?,
+            false,
+        )
+    };
+
     if let Some(values) = arg_matches.values_of("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -165,49 +198,38 @@ fn main() -> anyhow::Result<()> {
             })?;
 
             for (key, item) in doc.iter() {
-                if key == "id" {
-                    anyhow::ensure!(
-                        init,
-                        "node id can only be set during pageserver init and cannot be overridden"
-                    );
+                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
+                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.display());
                 }
                 toml.insert(key, item.clone());
             }
         }
     }
-    trace!("Resulting toml: {}", toml);
-    let conf = PageServerConf::parse_and_validate(&toml, &workdir)
+
+    debug!("Resulting toml: {toml}");
+    let conf = PageServerConf::parse_and_validate(&toml, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    // The configuration is all set up now. Turn it into a 'static
-    // that can be freely stored in structs and passed across threads
-    // as a ref.
-    let conf: &'static PageServerConf = Box::leak(Box::new(conf));
+    if update_config {
+        info!("Writing pageserver config to '{}'", cfg_file_path.display());
 
-    // Initialize up failpoints support
-    let scenario = FailScenario::setup();
-
-    // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors);
-    page_cache::init(conf.page_cache_size);
-
-    // Create repo and exit if init was requested
-    if init {
-        timelines::init_pageserver(conf, create_tenant, initial_timeline_id)
-            .context("Failed to init pageserver")?;
-        // write the config file
         std::fs::write(&cfg_file_path, toml.to_string()).with_context(|| {
             format!(
-                "Failed to initialize pageserver config at '{}'",
+                "Failed to write pageserver config to '{}'",
                 cfg_file_path.display()
             )
         })?;
-    } else {
-        start_pageserver(conf, daemonize).context("Failed to start pageserver")?;
+        info!(
+            "Config successfully written to '{}'",
+            cfg_file_path.display()
+        )
     }
 
-    scenario.teardown();
-    Ok(())
+    Ok(if init {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(Box::leak(Box::new(conf)))
+    })
 }
 
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {

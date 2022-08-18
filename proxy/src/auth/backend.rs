@@ -86,7 +86,7 @@ impl From<DatabaseInfo> for tokio_postgres::Config {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendType<T> {
     /// Legacy Cloud API (V1) + link auth.
     LegacyConsole(T),

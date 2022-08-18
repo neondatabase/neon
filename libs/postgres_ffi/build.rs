@@ -44,7 +44,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
 
 fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
-    println!("cargo:rerun-if-changed=pg_control_ffi.h");
+    println!("cargo:rerun-if-changed=bindgen_deps.h");
 
     // Finding the location of C headers for the Postgres server:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/tmp_install`
@@ -88,9 +88,9 @@ fn main() {
     // the resulting bindings.
     let bindings = bindgen::Builder::default()
         //
-        // All the needed PostgreSQL headers are included from 'pg_control_ffi.h'
+        // All the needed PostgreSQL headers are included from 'bindgen_deps.h'
         //
-        .header("pg_control_ffi.h")
+        .header("bindgen_deps.h")
         //
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.

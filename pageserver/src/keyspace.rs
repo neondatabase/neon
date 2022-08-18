@@ -1,5 +1,5 @@
 use crate::repository::{key_range_size, singleton_range, Key};
-use postgres_ffi::pg_constants;
+use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
 ///
@@ -19,7 +19,7 @@ impl KeySpace {
     ///
     pub fn partition(&self, target_size: u64) -> KeyPartitioning {
         // Assume that each value is 8k in size.
-        let target_nblocks = (target_size / pg_constants::BLCKSZ as u64) as usize;
+        let target_nblocks = (target_size / BLCKSZ as u64) as usize;
 
         let mut parts = Vec::new();
         let mut current_part = Vec::new();

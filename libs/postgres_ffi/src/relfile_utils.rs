@@ -1,11 +1,11 @@
 //!
 //! Common utilities for dealing with PostgreSQL relation files.
 //!
-use crate::pg_constants;
+use super::pg_constants;
 use once_cell::sync::OnceCell;
 use regex::Regex;
 
-#[derive(Debug, Clone, thiserror::Error, PartialEq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum FilePathError {
     #[error("invalid relation fork name")]
     InvalidForkName,

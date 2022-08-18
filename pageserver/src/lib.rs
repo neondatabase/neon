@@ -28,7 +28,6 @@ use tracing::info;
 use crate::thread_mgr::ThreadKind;
 use metrics::{register_int_gauge_vec, IntGaugeVec};
 
-use layered_repository::LayeredRepository;
 use pgdatadir_mapping::DatadirTimeline;
 
 /// Current storage format version
@@ -61,9 +60,6 @@ pub enum CheckpointConfig {
     // Flush all in-memory data and reconstruct all page images
     Forced,
 }
-
-pub type RepositoryImpl = LayeredRepository;
-pub type TimelineImpl = <LayeredRepository as repository::Repository>::Timeline;
 
 pub fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint thread. This prevents new connections from

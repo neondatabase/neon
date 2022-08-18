@@ -40,9 +40,10 @@ use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
 use metrics::{register_histogram_vec, HistogramVec};
-use postgres_ffi::xlog_utils::to_pg_timestamp;
+use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
-use postgres_ffi::pg_constants;
+use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::BLCKSZ;
 
 // Wrapped in libpq CopyData
 enum PagestreamFeMessage {
@@ -725,10 +726,9 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let total_blocks =
-            timeline.get_db_size(pg_constants::DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
+        let total_blocks = timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
 
-        let db_size = total_blocks as i64 * pg_constants::BLCKSZ as i64;
+        let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
             db_size,

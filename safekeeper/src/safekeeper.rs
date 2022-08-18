@@ -5,9 +5,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use etcd_broker::subscription_value::SkTimelineInfo;
-use postgres_ffi::xlog_utils::TimeLineID;
-
-use postgres_ffi::xlog_utils::XLogSegNo;
+use postgres_ffi::v14::xlog_utils::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -19,7 +17,6 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use postgres_ffi::xlog_utils::MAX_SEND_SIZE;
 use utils::{
     bin_ser::LeSer,
     lsn::Lsn,
@@ -127,7 +124,7 @@ impl AcceptorState {
 
 /// Information about Postgres. Safekeeper gets it once and then verifies
 /// all further connections from computes match.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
     /// Postgres server version
     pub pg_version: u32,

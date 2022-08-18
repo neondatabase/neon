@@ -7,21 +7,62 @@
 // https://github.com/rust-lang/rust-bindgen/issues/1651
 #![allow(deref_nullptr)]
 
-use serde::{Deserialize, Serialize};
 use utils::lsn::Lsn;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+macro_rules! postgres_ffi {
+    ($version:ident) => {
+        #[path = "."]
+        pub mod $version {
+            // fixme: does this have to be 'pub'?
+            pub mod bindings {
+                // bindgen generates bindings for a lot of stuff we don't need
+                #![allow(dead_code)]
 
-pub mod controlfile_utils;
-pub mod nonrelfile_utils;
-pub mod pg_constants;
-pub mod relfile_utils;
-pub mod waldecoder;
-pub mod xlog_utils;
+                use serde::{Deserialize, Serialize};
+                include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+            }
+            pub mod controlfile_utils;
+            pub mod nonrelfile_utils;
+            pub mod pg_constants;
+            pub mod relfile_utils;
+            pub mod waldecoder;
+            pub mod xlog_utils;
+
+            // Re-export some symbols from bindings
+            pub use bindings::DBState_DB_SHUTDOWNED;
+            pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
+        }
+    };
+}
+
+postgres_ffi!(v14);
+
+// Export some widely used datatypes that are unlikely to change across Postgres versions
+pub use v14::bindings::{uint32, uint64, Oid};
+pub use v14::bindings::{BlockNumber, OffsetNumber};
+pub use v14::bindings::{MultiXactId, TransactionId};
+
+// Likewise for these, although the assumption that these don't change is a little more iffy.
+pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
+
+// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
+// --with-segsize=SEGSIZE, but assume the defaults for now.
+pub const BLCKSZ: u16 = 8192;
+pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
+pub const XLOG_BLCKSZ: usize = 8192;
+
+// PG timeline is always 1, changing it doesn't have any useful meaning in Neon.
+//
+// NOTE: this is not to be confused with Neon timelines; different concept!
+//
+// It's a shaky assumption, that it's always 1. We might import a
+// PostgreSQL data directory that has gone through timeline bumps,
+// for example. FIXME later.
+pub const PG_TLI: u32 = 1;
 
 //  See TransactionIdIsNormal in transam.h
 pub const fn transaction_id_is_normal(id: TransactionId) -> bool {
-    id > pg_constants::FIRST_NORMAL_TRANSACTION_ID
+    id > v14::pg_constants::FIRST_NORMAL_TRANSACTION_ID
 }
 
 // See TransactionIdPrecedes in transam.c
