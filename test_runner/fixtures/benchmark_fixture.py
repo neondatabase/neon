@@ -60,6 +60,7 @@ class PgBenchRunResult:
     run_duration: float
     run_start_timestamp: int
     run_end_timestamp: int
+    scale: int
 
     # TODO progress
 
@@ -130,6 +131,7 @@ class PgBenchRunResult:
             run_duration=run_duration,
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
+            scale=scale,
         )
 
 
@@ -301,6 +303,12 @@ class NeonBenchmarker:
         self.record(
             f"{prefix}.run_end_timestamp",
             pg_bench_result.run_end_timestamp,
+            "",
+            MetricReport.TEST_PARAM,
+        )
+        self.record(
+            f"{prefix}.scale",
+            pg_bench_result.scale,
             "",
             MetricReport.TEST_PARAM,
         )

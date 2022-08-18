@@ -125,7 +125,7 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
         elapsed = time.time() - started_at
         if elapsed > timeout:
             raise RuntimeError(
-                f"timed out waiting for pageserver to reach pg_current_wal_flush_lsn()"
+                "timed out waiting for pageserver to reach pg_current_wal_flush_lsn()"
             )
 
         res = pgmain.safe_psql(
@@ -390,7 +390,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
     tenant, timeline = env.neon_cli.create_tenant()
 
     def get_timeline_physical_size(timeline: UUID):
-        res = client.timeline_detail(tenant, timeline)
+        res = client.timeline_detail(tenant, timeline, include_non_incremental_physical_size=True)
         return res["local"]["current_physical_size_non_incremental"]
 
     timeline_total_size = get_timeline_physical_size(timeline)

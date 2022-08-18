@@ -65,7 +65,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
         }
     )
 
-    timeline_main = env.neon_cli.create_timeline(f"test_main", tenant_id=tenant)
+    timeline_main = env.neon_cli.create_timeline("test_main", tenant_id=tenant)
     pg_main = env.postgres.create_start("test_main", tenant_id=tenant)
 
     main_cur = pg_main.connect().cursor()
@@ -148,7 +148,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     # Use `failpoint=sleep` and `threading` to make the GC iteration triggers *before* the
     # branch creation task but the individual timeline GC iteration happens *after*
     # the branch creation task.
-    env.pageserver.safe_psql(f"failpoints before-timeline-gc=sleep(2000)")
+    env.pageserver.safe_psql("failpoints before-timeline-gc=sleep(2000)")
 
     def do_gc():
         env.pageserver.safe_psql(f"do_gc {tenant.hex} {b0.hex} 0")

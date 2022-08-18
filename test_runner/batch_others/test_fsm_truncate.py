@@ -1,6 +1,4 @@
-import pytest
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def test_fsm_truncate(neon_env_builder: NeonEnvBuilder):

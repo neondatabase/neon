@@ -180,7 +180,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 while not self.should_stop.is_set():
                     collect_metrics("during INSERT INTO")
                     time.sleep(1)
-            except:
+            except:  # noqa: E722
                 log.error(
                     "MetricsChecker's thread failed, the test will be failed on .stop() call",
                     exc_info=True,
@@ -552,7 +552,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: R
     while True:
         elapsed = time.time() - started_at
         if elapsed > wait_lsn_timeout:
-            raise RuntimeError(f"Timed out waiting for WAL redo")
+            raise RuntimeError("Timed out waiting for WAL redo")
 
         pageserver_lsn = env.pageserver.http_client().timeline_detail(
             uuid.UUID(tenant_id), uuid.UUID((timeline_id))
@@ -615,7 +615,7 @@ class ProposerPostgres(PgProtocol):
                 "shared_preload_libraries = 'neon'\n",
                 f"neon.timeline_id = '{self.timeline_id.hex}'\n",
                 f"neon.tenant_id = '{self.tenant_id.hex}'\n",
-                f"neon.pageserver_connstring = ''\n",
+                "neon.pageserver_connstring = ''\n",
                 f"neon.safekeepers = '{safekeepers}'\n",
                 f"listen_addresses = '{self.listen_addr}'\n",
                 f"port = '{self.port}'\n",
