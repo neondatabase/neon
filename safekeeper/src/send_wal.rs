@@ -170,6 +170,7 @@ impl ReplicationConn {
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(spg.timeline.get());
         let bg_stream_in = self.stream_in.take().unwrap();
+        let bg_timeline_id = spg.ztimelineid.unwrap();
 
         let state = ReplicaState::new();
         // This replica_id is used below to check if it's time to stop replication.
@@ -188,6 +189,8 @@ impl ReplicationConn {
         let _ = thread::Builder::new()
             .name("HotStandbyFeedback thread".into())
             .spawn(move || {
+                let _enter =
+                    info_span!("HotStandbyFeedback thread", timeline = %bg_timeline_id).entered();
                 if let Err(err) = Self::background_thread(bg_stream_in, bg_replica_guard) {
                     error!("Replication background thread failed: {}", err);
                 }
@@ -198,13 +201,12 @@ impl ReplicationConn {
             .build()?;
 
         runtime.block_on(async move {
-            let (_, persisted_state) = spg.timeline.get().get_state();
+            let (inmem_state, persisted_state) = spg.timeline.get().get_state();
             // add persisted_state.timeline_start_lsn == Lsn(0) check
             if persisted_state.server.wal_seg_size == 0 {
                 bail!("Cannot start replication before connecting to walproposer");
             }
 
-            let wal_end = spg.timeline.get().get_end_of_wal();
             // Walproposer gets special handling: safekeeper must give proposer all
             // local WAL till the end, whether committed or not (walproposer will
             // hang otherwise). That's because walproposer runs the consensus and
@@ -214,8 +216,8 @@ impl ReplicationConn {
             // another compute rises which collects majority and starts fixing log
             // on this safekeeper itself. That's ok as (old) proposer will never be
             // able to commit such WAL.
-            let stop_pos: Option<Lsn> = if spg.appname == Some("wal_proposer_recovery".to_string())
-            {
+            let stop_pos: Option<Lsn> = if spg.is_walproposer_recovery() {
+                let wal_end = spg.timeline.get().get_end_of_wal();
                 Some(wal_end)
             } else {
                 None
@@ -226,7 +228,7 @@ impl ReplicationConn {
             // switch to copy
             pgb.write_message(&BeMessage::CopyBothResponse)?;
 
-            let mut end_pos = Lsn(0);
+            let mut end_pos = stop_pos.unwrap_or(inmem_state.commit_lsn);
 
             let mut wal_reader = WalReader::new(
                 spg.conf.timeline_dir(&spg.timeline.get().zttid),

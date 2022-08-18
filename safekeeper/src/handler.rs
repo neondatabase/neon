@@ -90,7 +90,10 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
     fn process_query(&mut self, pgb: &mut PostgresBackend, query_string: &str) -> Result<()> {
         let cmd = parse_cmd(query_string)?;
 
-        info!("got query {:?}", query_string);
+        info!(
+            "got query {:?} in timeline {:?}",
+            query_string, self.ztimelineid
+        );
 
         let create = !(matches!(cmd, SafekeeperPostgresCommand::StartReplication { .. })
             || matches!(cmd, SafekeeperPostgresCommand::IdentifySystem));
@@ -106,23 +109,17 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         }
 
         match cmd {
-            SafekeeperPostgresCommand::StartWalPush => {
-                ReceiveWalConn::new(pgb)
-                    .run(self)
-                    .context("failed to run ReceiveWalConn")?;
-            }
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                ReplicationConn::new(pgb)
-                    .run(self, pgb, start_lsn)
-                    .context("failed to run ReplicationConn")?;
-            }
-            SafekeeperPostgresCommand::IdentifySystem => {
-                self.handle_identify_system(pgb)?;
-            }
-            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
-                handle_json_ctrl(self, pgb, cmd)?;
-            }
+            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb)
+                .run(self)
+                .context("failed to run ReceiveWalConn"),
+            SafekeeperPostgresCommand::StartReplication { start_lsn } => ReplicationConn::new(pgb)
+                .run(self, pgb, start_lsn)
+                .context("failed to run ReplicationConn"),
+            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
+            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
         }
+        .context(format!("timeline {timelineid}"))?;
+
         Ok(())
     }
 }
@@ -153,8 +150,15 @@ impl SafekeeperPostgresHandler {
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<()> {
-        let start_pos = self.timeline.get().get_end_of_wal();
-        let lsn = start_pos.to_string();
+        let lsn = if self.is_walproposer_recovery() {
+            // walproposer should get all local WAL until flush_lsn
+            self.timeline.get().get_end_of_wal()
+        } else {
+            // other clients shouldn't get any uncommitted WAL
+            self.timeline.get().get_state().0.commit_lsn
+        }
+        .to_string();
+
         let sysid = self
             .timeline
             .get()
@@ -202,5 +206,12 @@ impl SafekeeperPostgresHandler {
         ]))?
         .write_message(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
         Ok(())
+    }
+
+    /// Returns true if current connection is a replication connection, originating
+    /// from a walproposer recovery function. This connection gets a special handling:
+    /// safekeeper must stream all local WAL till the flush_lsn, whether committed or not.
+    pub fn is_walproposer_recovery(&self) -> bool {
+        self.appname == Some("wal_proposer_recovery".to_string())
     }
 }

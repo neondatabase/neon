@@ -96,6 +96,8 @@ async fn connection_manager_loop_step(
     info!("Subscribed for etcd timeline changes, waiting for new etcd data");
 
     loop {
+        let time_until_next_retry = walreceiver_state.time_until_next_retry();
+
         select! {
             broker_connection_result = &mut broker_subscription.watcher_handle => {
                 cleanup_broker_connection(broker_connection_result, walreceiver_state);
@@ -110,27 +112,23 @@ async fn connection_manager_loop_step(
             } => {
                 let wal_connection = walreceiver_state.wal_connection.as_mut().expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Started => {
-                        *walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(0) += 1;
-                    },
+                    TaskEvent::Started => {},
                     TaskEvent::NewEvent(status) => {
-                        if status.has_received_wal {
-                            // Reset connection attempts here only, we know that safekeeper is healthy
-                            // because it can send us a WAL update.
-                            walreceiver_state.wal_connection_attempts.remove(&wal_connection.sk_id);
+                        if status.has_processed_wal {
+                            // We have advanced last_record_lsn by processing the WAL received
+                            // from this safekeeper. This is good enough to clean unsuccessful
+                            // retries history and allow reconnecting to this safekeeper without
+                            // sleeping for a long time.
+                            walreceiver_state.wal_connection_retries.remove(&wal_connection.sk_id);
                         }
                         wal_connection.status = status;
                     },
                     TaskEvent::End(end_result) => {
                         match end_result {
                             Ok(()) => debug!("WAL receiving task finished"),
-                            Err(e) => {
-                                warn!("WAL receiving task failed: {e}");
-                                // If the task failed, set the connection attempts to at least 1, to try other safekeepers.
-                                let _ = *walreceiver_state.wal_connection_attempts.entry(wal_connection.sk_id).or_insert(1);
-                            }
+                            Err(e) => warn!("WAL receiving task failed: {e}"),
                         };
-                        walreceiver_state.wal_connection = None;
+                        walreceiver_state.drop_old_connection(false).await;
                     },
                 }
             },
@@ -154,6 +152,8 @@ async fn connection_manager_loop_step(
                     }
                 }
             },
+
+            _ = async { tokio::time::sleep(time_until_next_retry.unwrap()).await }, if time_until_next_retry.is_some() => {}
         }
 
         // Fetch more etcd timeline updates, but limit ourselves since they may arrive quickly.
@@ -234,6 +234,10 @@ async fn subscribe_for_timeline_updates(
     }
 }
 
+const WALCONNECTION_RETRY_MIN_BACKOFF_SECONDS: f64 = 0.1;
+const WALCONNECTION_RETRY_MAX_BACKOFF_SECONDS: f64 = 15.0;
+const WALCONNECTION_RETRY_BACKOFF_MULTIPLIER: f64 = 1.5;
+
 /// All data that's needed to run endless broker loop and keep the WAL streaming connection alive, if possible.
 struct WalreceiverState {
     id: ZTenantTimelineId,
@@ -247,7 +251,8 @@ struct WalreceiverState {
     max_lsn_wal_lag: NonZeroU64,
     /// Current connection to safekeeper for WAL streaming.
     wal_connection: Option<WalConnection>,
-    wal_connection_attempts: HashMap<NodeId, u32>,
+    /// Info about retries and unsuccessful attempts to connect to safekeepers.
+    wal_connection_retries: HashMap<NodeId, RetryInfo>,
     /// Data about all timelines, available for connection, fetched from etcd, grouped by their corresponding safekeeper node id.
     wal_stream_candidates: HashMap<NodeId, EtcdSkTimeline>,
 }
@@ -255,6 +260,8 @@ struct WalreceiverState {
 /// Current connection data.
 #[derive(Debug)]
 struct WalConnection {
+    /// Time when the connection was initiated.
+    started_at: NaiveDateTime,
     /// Current safekeeper pageserver is connected to for WAL streaming.
     sk_id: NodeId,
     /// Status of the connection.
@@ -272,6 +279,12 @@ struct NewCommittedWAL {
     lsn: Lsn,
     /// When we discovered that the new committed WAL exists on other safekeeper.
     discovered_at: NaiveDateTime,
+}
+
+#[derive(Debug)]
+struct RetryInfo {
+    next_retry_at: Option<NaiveDateTime>,
+    retry_duration_seconds: f64,
 }
 
 /// Data about the timeline to connect to, received from etcd.
@@ -300,31 +313,18 @@ impl WalreceiverState {
             max_lsn_wal_lag,
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
-            wal_connection_attempts: HashMap::new(),
+            wal_connection_retries: HashMap::new(),
         }
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
-        if let Some(old_connection) = self.wal_connection.take() {
-            old_connection.connection_task.shutdown().await
-        }
+        self.drop_old_connection(true).await;
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
-        let connection_attempt = self
-            .wal_connection_attempts
-            .get(&new_sk_id)
-            .copied()
-            .unwrap_or(0);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
-                exponential_backoff(
-                    connection_attempt,
-                    DEFAULT_BASE_BACKOFF_SECONDS,
-                    DEFAULT_MAX_BACKOFF_SECONDS,
-                )
-                .await;
                 super::walreceiver_connection::handle_walreceiver_connection(
                     id,
                     &new_wal_source_connstr,
@@ -340,10 +340,11 @@ impl WalreceiverState {
 
         let now = Utc::now().naive_utc();
         self.wal_connection = Some(WalConnection {
+            started_at: now,
             sk_id: new_sk_id,
             status: WalConnectionStatus {
                 is_connected: false,
-                has_received_wal: false,
+                has_processed_wal: false,
                 latest_connection_update: now,
                 latest_wal_update: now,
                 streaming_lsn: None,
@@ -352,6 +353,71 @@ impl WalreceiverState {
             connection_task: connection_handle,
             discovered_new_wal: None,
         });
+    }
+
+    /// Drops the current connection (if any) and updates retry timeout for the next
+    /// connection attempt to the same safekeeper.
+    async fn drop_old_connection(&mut self, needs_shutdown: bool) {
+        let wal_connection = match self.wal_connection.take() {
+            Some(wal_connection) => wal_connection,
+            None => return,
+        };
+
+        if needs_shutdown {
+            wal_connection.connection_task.shutdown().await;
+        }
+
+        let retry = self
+            .wal_connection_retries
+            .entry(wal_connection.sk_id)
+            .or_insert(RetryInfo {
+                next_retry_at: None,
+                retry_duration_seconds: WALCONNECTION_RETRY_MIN_BACKOFF_SECONDS,
+            });
+
+        let now = Utc::now().naive_utc();
+
+        // Schedule the next retry attempt. We want to have exponential backoff for connection attempts,
+        // and we add backoff to the time when we started the connection attempt. If the connection
+        // was active for a long time, then next_retry_at will be in the past.
+        retry.next_retry_at =
+            wal_connection
+                .started_at
+                .checked_add_signed(chrono::Duration::milliseconds(
+                    (retry.retry_duration_seconds * 1000.0) as i64,
+                ));
+
+        if let Some(next) = &retry.next_retry_at {
+            if next > &now {
+                info!(
+                    "Next connection retry to {:?} is at {}",
+                    wal_connection.sk_id, next
+                );
+            }
+        }
+
+        let next_retry_duration =
+            retry.retry_duration_seconds * WALCONNECTION_RETRY_BACKOFF_MULTIPLIER;
+        // Clamp the next retry duration to the maximum allowed.
+        let next_retry_duration = next_retry_duration.min(WALCONNECTION_RETRY_MAX_BACKOFF_SECONDS);
+        // Clamp the next retry duration to the minimum allowed.
+        let next_retry_duration = next_retry_duration.max(WALCONNECTION_RETRY_MIN_BACKOFF_SECONDS);
+
+        retry.retry_duration_seconds = next_retry_duration;
+    }
+
+    /// Returns time needed to wait to have a new candidate for WAL streaming.
+    fn time_until_next_retry(&self) -> Option<Duration> {
+        let now = Utc::now().naive_utc();
+
+        let next_retry_at = self
+            .wal_connection_retries
+            .values()
+            .filter_map(|retry| retry.next_retry_at)
+            .filter(|next_retry_at| next_retry_at > &now)
+            .min();
+
+        next_retry_at.and_then(|next_retry_at| (next_retry_at - now).to_std().ok())
     }
 
     /// Adds another etcd timeline into the state, if its more recent than the one already added there for the same key.
@@ -547,52 +613,37 @@ impl WalreceiverState {
     /// Optionally, omits the given node, to support gracefully switching from a healthy safekeeper to another.
     ///
     /// The candidate that is chosen:
-    /// * has fewest connection attempts from pageserver to safekeeper node (reset every time we receive a WAL message from the node)
-    /// * has greatest data Lsn among the ones that are left
-    ///
-    /// NOTE:
-    /// We evict timeline data received from etcd based on time passed since it was registered, along with its connection attempts values, but
-    /// otherwise to reset the connection attempts, a successful connection to that node is needed.
-    /// That won't happen now, before all nodes with less connection attempts are connected to first, which might leave the sk node with more advanced state to be ignored.
+    /// * has no pending retry cooldown
+    /// * has greatest commit_lsn among the ones that are left
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
     ) -> Option<(NodeId, &SkTimelineInfo, String)> {
-        let all_candidates = self
-            .applicable_connection_candidates()
+        self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
-            .collect::<Vec<_>>();
-
-        let smallest_attempts_allowed = all_candidates
-            .iter()
-            .map(|(sk_id, _, _)| {
-                self.wal_connection_attempts
-                    .get(sk_id)
-                    .copied()
-                    .unwrap_or(0)
-            })
-            .min()?;
-
-        all_candidates
-            .into_iter()
-            .filter(|(sk_id, _, _)| {
-                smallest_attempts_allowed
-                    >= self
-                        .wal_connection_attempts
-                        .get(sk_id)
-                        .copied()
-                        .unwrap_or(0)
-            })
             .max_by_key(|(_, info, _)| info.commit_lsn)
     }
 
     /// Returns a list of safekeepers that have valid info and ready for connection.
+    /// Some safekeepers are filtered by the retry cooldown.
     fn applicable_connection_candidates(
         &self,
     ) -> impl Iterator<Item = (NodeId, &SkTimelineInfo, String)> {
+        let now = Utc::now().naive_utc();
+
         self.wal_stream_candidates
             .iter()
             .filter(|(_, info)| info.timeline.commit_lsn.is_some())
+            .filter(move |(sk_id, _)| {
+                let next_retry_at = self
+                    .wal_connection_retries
+                    .get(sk_id)
+                    .and_then(|retry_info| {
+                        retry_info.next_retry_at
+                    });
+
+                next_retry_at.is_none() || next_retry_at.unwrap() <= now
+            })
             .filter_map(|(sk_id, etcd_info)| {
                 let info = &etcd_info.timeline;
                 match wal_stream_connection_string(
@@ -627,7 +678,7 @@ impl WalreceiverState {
         });
 
         for node_id in node_ids_to_remove {
-            self.wal_connection_attempts.remove(&node_id);
+            self.wal_connection_retries.remove(&node_id);
         }
     }
 }
@@ -684,7 +735,6 @@ fn wal_stream_connection_string(
 
 #[cfg(test)]
 mod tests {
-
     use crate::repository::{
         repo_harness::{RepoHarness, TIMELINE_ID},
         Repository,
@@ -789,7 +839,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            has_received_wal: true,
+            has_processed_wal: true,
             latest_connection_update: now,
             latest_wal_update: now,
             commit_lsn: Some(Lsn(current_lsn)),
@@ -798,6 +848,7 @@ mod tests {
 
         state.max_lsn_wal_lag = NonZeroU64::new(100).unwrap();
         state.wal_connection = Some(WalConnection {
+            started_at: now,
             sk_id: connected_sk_id,
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
@@ -1017,7 +1068,13 @@ mod tests {
                 },
             ),
         ]);
-        state.wal_connection_attempts = HashMap::from([(NodeId(0), 1), (NodeId(1), 0)]);
+        state.wal_connection_retries = HashMap::from([(
+            NodeId(0),
+            RetryInfo {
+                next_retry_at: now.checked_add_signed(chrono::Duration::hours(1)),
+                retry_duration_seconds: WALCONNECTION_RETRY_MAX_BACKOFF_SECONDS,
+            },
+        )]);
 
         let candidate_with_less_errors = state
             .next_connection_candidate()
@@ -1025,7 +1082,7 @@ mod tests {
         assert_eq!(
             candidate_with_less_errors.safekeeper_id,
             NodeId(1),
-            "Should select the node with less connection errors"
+            "Should select the node with no pending retry cooldown"
         );
 
         Ok(())
@@ -1043,7 +1100,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            has_received_wal: true,
+            has_processed_wal: true,
             latest_connection_update: now,
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
@@ -1051,6 +1108,7 @@ mod tests {
         };
 
         state.wal_connection = Some(WalConnection {
+            started_at: now,
             sk_id: connected_sk_id,
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
@@ -1130,7 +1188,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            has_received_wal: true,
+            has_processed_wal: true,
             latest_connection_update: time_over_threshold,
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
@@ -1138,6 +1196,7 @@ mod tests {
         };
 
         state.wal_connection = Some(WalConnection {
+            started_at: now,
             sk_id: NodeId(1),
             status: connection_status.clone(),
             connection_task: TaskHandle::spawn(move |sender, _| async move {
@@ -1202,7 +1261,7 @@ mod tests {
 
         let connection_status = WalConnectionStatus {
             is_connected: true,
-            has_received_wal: true,
+            has_processed_wal: true,
             latest_connection_update: now,
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
@@ -1210,6 +1269,7 @@ mod tests {
         };
 
         state.wal_connection = Some(WalConnection {
+            started_at: now,
             sk_id: NodeId(1),
             status: connection_status,
             connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
@@ -1281,7 +1341,7 @@ mod tests {
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
-            wal_connection_attempts: HashMap::new(),
+            wal_connection_retries: HashMap::new(),
         }
     }
 }
