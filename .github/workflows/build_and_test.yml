@@ -415,30 +415,8 @@ jobs:
               }
             }"
 
-  dockerfile-check:
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
-    outputs:
-      value: ${{ steps.dockerfile-check.outputs.any_changed }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Get specific changed files
-        id: dockerfile-check
-        uses: tj-actions/changed-files@802732316a11c01531ea72773ec7998155238e31 # v25
-        with:
-          files: |
-            Dockerfile
-            Dockerfile.compute-tools
-            ./vendor/postgres/Dockerfile
-
   neon-image:
-    # force building for all 3 images
-    if: needs.dockerfile-check.outputs.value == 'true'
     runs-on: dev
-    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
@@ -455,9 +433,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:$GITHUB_RUN_ID
 
   compute-tools-image:
-    if: needs.dockerfile-check.outputs.value == 'true'
     runs-on: dev
-    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
@@ -471,9 +447,7 @@ jobs:
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
   compute-node-image:
-    if: needs.dockerfile-check.outputs.value == 'true'
     runs-on: dev
-    needs: [ dockerfile-check ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
