@@ -3,8 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
-use crate::layered_repository::{load_metadata, LayeredRepository, Timeline};
-use crate::repository::Repository;
+use crate::layered_repository::{load_metadata, Repository, Timeline};
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
@@ -94,7 +93,7 @@ mod tenants_state {
 struct Tenant {
     state: TenantState,
     /// Contains in-memory state, including the timeline that might not yet flushed on disk or loaded form disk.
-    repo: Arc<LayeredRepository>,
+    repo: Arc<Repository>,
     /// Timelines, located locally in the pageserver's datadir.
     /// Timelines can entirely be removed entirely by the `detach` operation only.
     ///
@@ -365,7 +364,7 @@ pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow:
     Ok(())
 }
 
-pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<LayeredRepository>> {
+pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
@@ -484,7 +483,7 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
 }
 
 fn load_local_timeline(
-    repo: &LayeredRepository,
+    repo: &Repository,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<Timeline>> {
     let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
@@ -588,7 +587,7 @@ fn init_local_repository(
 }
 
 fn attach_downloaded_tenant(
-    repo: &LayeredRepository,
+    repo: &Repository,
     downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
     let mut registration_queue = Vec::with_capacity(downloaded_timelines.len());
@@ -630,14 +629,14 @@ fn load_local_repo(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
-) -> anyhow::Result<Arc<LayeredRepository>> {
+) -> anyhow::Result<Arc<Repository>> {
     let mut m = tenants_state::write_tenants();
     let tenant = m.entry(tenant_id).or_insert_with(|| {
         // Set up a WAL redo manager, for applying WAL records.
         let walredo_mgr = PostgresRedoManager::new(conf, tenant_id);
 
         // Set up an object repository, for actual data storage.
-        let repo: Arc<LayeredRepository> = Arc::new(LayeredRepository::new(
+        let repo: Arc<Repository> = Arc::new(Repository::new(
             conf,
             TenantConfOpt::default(),
             Arc::new(walredo_mgr),
@@ -653,7 +652,7 @@ fn load_local_repo(
     });
 
     // Restore tenant config
-    let tenant_conf = LayeredRepository::load_tenant_config(conf, tenant_id)?;
+    let tenant_conf = Repository::load_tenant_config(conf, tenant_id)?;
     tenant.repo.update_tenant_config(tenant_conf)?;
 
     Ok(Arc::clone(&tenant.repo))

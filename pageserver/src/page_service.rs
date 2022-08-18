@@ -34,7 +34,6 @@ use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
-use crate::repository::Repository;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;

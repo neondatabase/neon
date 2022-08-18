@@ -12,7 +12,6 @@ use super::models::{
     TimelineCreateRequest,
 };
 use crate::layered_repository::{metadata::TimelineMetadata, Timeline};
-use crate::repository::Repository;
 use crate::repository::{LocalTimelineState, RepositoryTimeline};
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};

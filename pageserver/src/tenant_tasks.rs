@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use crate::repository::Repository;
 use crate::tenant_mgr::TenantState;
 use crate::thread_mgr::ThreadKind;
 use crate::{tenant_mgr, thread_mgr};

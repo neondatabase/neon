@@ -1,6 +1,4 @@
 use crate::layered_repository::metadata::TimelineMetadata;
-use crate::layered_repository::Timeline;
-use crate::storage_sync::index::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
@@ -10,7 +8,7 @@ use std::fmt;
 use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 use std::time::Duration;
-use utils::{lsn::Lsn, zid::ZTimelineId};
+use utils::lsn::Lsn;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
@@ -178,76 +176,6 @@ impl Value {
     }
 }
 
-///
-/// A repository corresponds to one .neon directory. One repository holds multiple
-/// timelines, forked off from the same initial call to 'initdb'.
-pub trait Repository: Send + Sync {
-    /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
-    /// See [`crate::remote_storage`] for more details about the synchronization.
-    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
-
-    /// Get Timeline handle for given zenith timeline ID.
-    /// This function is idempotent. It doesn't change internal state in any way.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Timeline>>;
-
-    /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
-    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Timeline>>;
-
-    /// Lists timelines the repository contains.
-    /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
-    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Timeline>)>;
-
-    /// Create a new, empty timeline. The caller is responsible for loading data into it
-    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
-    fn create_empty_timeline(
-        &self,
-        timeline_id: ZTimelineId,
-        initdb_lsn: Lsn,
-    ) -> Result<Arc<Timeline>>;
-
-    /// Branch a timeline
-    fn branch_timeline(
-        &self,
-        src: ZTimelineId,
-        dst: ZTimelineId,
-        start_lsn: Option<Lsn>,
-    ) -> Result<()>;
-
-    /// Flush all data to disk.
-    ///
-    /// this is used at graceful shutdown.
-    fn checkpoint(&self) -> Result<()>;
-
-    /// perform one garbage collection iteration, removing old data files from disk.
-    /// this function is periodically called by gc thread.
-    /// also it can be explicitly requested through page server api 'do_gc' command.
-    ///
-    /// 'timelineid' specifies the timeline to GC, or None for all.
-    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
-    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
-    /// to make tests more deterministic.
-    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
-    fn gc_iteration(
-        &self,
-        timelineid: Option<ZTimelineId>,
-        horizon: u64,
-        pitr: Duration,
-        checkpoint_before_gc: bool,
-    ) -> Result<GcResult>;
-
-    /// Perform one compaction iteration.
-    /// This function is periodically called by compactor thread.
-    /// Also it can be explicitly requested per timeline through page server
-    /// api's 'compact' command.
-    fn compaction_iteration(&self) -> Result<()>;
-
-    /// removes timeline-related in-memory data
-    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()>;
-
-    /// Allows to retrieve remote timeline index from the repo. Used in walreceiver to grab remote consistent lsn.
-    fn get_remote_index(&self) -> &RemoteIndex;
-}
-
 /// A timeline, that belongs to the current repository.
 pub enum RepositoryTimeline<T> {
     /// Timeline, with its files present locally in pageserver's working directory.
@@ -332,16 +260,17 @@ pub mod repo_harness {
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
+    use crate::storage_sync::index::RemoteIndex;
     use crate::{
         config::PageServerConf,
-        layered_repository::LayeredRepository,
+        layered_repository::Repository,
         walredo::{WalRedoError, WalRedoManager},
     };
 
     use super::*;
     use crate::tenant_config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::zid::ZTenantId;
+    use utils::zid::{ZTenantId, ZTimelineId};
 
     pub const TIMELINE_ID: ZTimelineId =
         ZTimelineId::from_array(hex!("11223344556677881122334455667788"));
@@ -427,14 +356,14 @@ pub mod repo_harness {
             })
         }
 
-        pub fn load(&self) -> LayeredRepository {
+        pub fn load(&self) -> Repository {
             self.try_load().expect("failed to load test repo")
         }
 
-        pub fn try_load(&self) -> Result<LayeredRepository> {
+        pub fn try_load(&self) -> Result<Repository> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            let repo = LayeredRepository::new(
+            let repo = Repository::new(
                 self.conf,
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,

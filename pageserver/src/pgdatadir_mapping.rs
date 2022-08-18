@@ -1390,8 +1390,8 @@ fn is_slru_block_key(key: Key) -> bool {
 //
 
 #[cfg(test)]
-pub fn create_test_timeline<R: Repository>(
-    repo: R,
+pub fn create_test_timeline(
+    repo: crate::layered_repository::Repository,
     timeline_id: utils::zid::ZTimelineId,
 ) -> Result<std::sync::Arc<Timeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
