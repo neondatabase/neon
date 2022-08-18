@@ -30,7 +30,7 @@ pytest-order = "^1.0.1"
 allure-pytest = "^2.9.45"
 
 [tool.poetry.dev-dependencies]
-flake8 = "^3.9.2"
+flake8 = "^5.0.4"
 mypy = "==0.971"
 black = "^22.6.0"
 isort = "^5.10.1"

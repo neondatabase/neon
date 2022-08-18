@@ -134,5 +134,8 @@ jobs:
       - name: Run black to ensure code format
         run: poetry run black --diff --check .
 
+      - name: Run flake8 to ensure code format
+        run: poetry run flake8 .
+
       - name: Run mypy to check types
         run: poetry run mypy .

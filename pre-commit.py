@@ -50,6 +50,10 @@ def isort(fix_inplace: bool) -> str:
     return cmd
 
 
+def flake8() -> str:
+    return "poetry run flake8"
+
+
 def mypy() -> str:
     return "poetry run mypy"
 
@@ -119,6 +123,13 @@ if __name__ == "__main__":
         name="black",
         suffix=".py",
         cmd=black(fix_inplace=args.fix_inplace),
+        changed_files=files,
+        no_color=args.no_color,
+    )
+    check(
+        name="flake8",
+        suffix=".py",
+        cmd=flake8(),
         changed_files=files,
         no_color=args.no_color,
     )
