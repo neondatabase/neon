@@ -118,6 +118,7 @@ Run the following commands in the repository's root (next to `pyproject.toml`):
 ```bash
 poetry run isort .  # Imports are reformatted
 poetry run black .  # All code is reformatted
+poetry run flake8 .  # Python linter
 poetry run mypy .  # Ensure there are no typing errors
 ```
 
@@ -126,7 +127,7 @@ Otherwise it will not find its configuration.
 
 Also consider:
 
-* Running `flake8` (or a linter of your choice, e.g. `pycodestyle`) and fixing possible defects, if any.
+* Running `pycodestyle` (or a linter of your choice) and fixing possible defects, if any.
 * Adding more type hints to your code to avoid `Any`.
 
 ### Changing dependencies
