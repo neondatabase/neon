@@ -1834,6 +1834,20 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
+    """
+    pg_password = "password"
+    pg_user = "proxy"
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user '"+pg_user+"' with login superuser password '"+pg_password+"'")
+
+    port = vanilla_pg.default_options['port']
+    host = vanilla_pg.default_options['host']
+    dbname = vanilla_pg.default_options['dbname']
+    auth_endpoint = f'postgres://{pg_user}:{pg_password}@{host}:{port}/{dbname}'
+
+    """
+
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
