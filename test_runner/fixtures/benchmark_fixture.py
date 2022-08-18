@@ -10,12 +10,14 @@ import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
 # Type-related stuff
 from typing import Iterator, Optional
 
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
+
 """
 This file contains fixtures for micro-benchmarks.
 
@@ -112,8 +114,10 @@ class PgBenchRunResult:
             # pgbench v14:
             # initial connection time = 3.858 ms
             # tps = 309.281539 (without initial connection time)
-            if (line.startswith("tps = ") and ("(excluding connections establishing)" in line
-                                               or "(without initial connection time)")):
+            if line.startswith("tps = ") and (
+                "(excluding connections establishing)" in line
+                or "(without initial connection time)"
+            ):
                 tps = float(line.split()[2])
 
         return cls(
@@ -154,17 +158,21 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        regex = re.compile(r"done in (\d+\.\d+) s "
-                           r"\("
-                           r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
-                           r"(?:create tables (\d+\.\d+) s)?(?:, )?"
-                           r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
-                           r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
-                           r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
-                           r"\)\.")
+        regex = re.compile(
+            r"done in (\d+\.\d+) s "
+            r"\("
+            r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
+            r"(?:create tables (\d+\.\d+) s)?(?:, )?"
+            r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
+            r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
+            r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
+            r"\)\."
+        )
 
         if (m := regex.match(last_line)) is not None:
-            total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [float(v) for v in m.groups() if v is not None]
+            total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [
+                float(v) for v in m.groups() if v is not None
+            ]
         else:
             raise RuntimeError(f"can't parse pgbench initialize results from `{last_line}`")
 
@@ -185,11 +193,11 @@ class PgBenchInitResult:
 class MetricReport(str, enum.Enum):  # str is a hack to make it json serializable
     # this means that this is a constant test parameter
     # like number of transactions, or number of clients
-    TEST_PARAM = 'test_param'
+    TEST_PARAM = "test_param"
     # reporter can use it to mark test runs with higher values as improvements
-    HIGHER_IS_BETTER = 'higher_is_better'
+    HIGHER_IS_BETTER = "higher_is_better"
     # the same but for lower values
-    LOWER_IS_BETTER = 'lower_is_better'
+    LOWER_IS_BETTER = "lower_is_better"
 
 
 class NeonBenchmarker:
@@ -197,6 +205,7 @@ class NeonBenchmarker:
     An object for recording benchmark results. This is created for each test
     function by the zenbenchmark fixture
     """
+
     def __init__(self, property_recorder):
         # property recorder here is a pytest fixture provided by junitxml module
         # https://docs.pytest.org/en/6.2.x/reference.html#pytest.junitxml.record_property
@@ -244,43 +253,57 @@ class NeonBenchmarker:
         )
 
     def record_pg_bench_result(self, prefix: str, pg_bench_result: PgBenchRunResult):
-        self.record(f"{prefix}.number_of_clients",
-                    pg_bench_result.number_of_clients,
-                    '',
-                    MetricReport.TEST_PARAM)
-        self.record(f"{prefix}.number_of_threads",
-                    pg_bench_result.number_of_threads,
-                    '',
-                    MetricReport.TEST_PARAM)
+        self.record(
+            f"{prefix}.number_of_clients",
+            pg_bench_result.number_of_clients,
+            "",
+            MetricReport.TEST_PARAM,
+        )
+        self.record(
+            f"{prefix}.number_of_threads",
+            pg_bench_result.number_of_threads,
+            "",
+            MetricReport.TEST_PARAM,
+        )
         self.record(
             f"{prefix}.number_of_transactions_actually_processed",
             pg_bench_result.number_of_transactions_actually_processed,
-            '',
+            "",
             # that's because this is predefined by test matrix and doesn't change across runs
             report=MetricReport.TEST_PARAM,
         )
-        self.record(f"{prefix}.latency_average",
-                    pg_bench_result.latency_average,
-                    unit="ms",
-                    report=MetricReport.LOWER_IS_BETTER)
+        self.record(
+            f"{prefix}.latency_average",
+            pg_bench_result.latency_average,
+            unit="ms",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
         if pg_bench_result.latency_stddev is not None:
-            self.record(f"{prefix}.latency_stddev",
-                        pg_bench_result.latency_stddev,
-                        unit="ms",
-                        report=MetricReport.LOWER_IS_BETTER)
-        self.record(f"{prefix}.tps", pg_bench_result.tps, '', report=MetricReport.HIGHER_IS_BETTER)
-        self.record(f"{prefix}.run_duration",
-                    pg_bench_result.run_duration,
-                    unit="s",
-                    report=MetricReport.LOWER_IS_BETTER)
-        self.record(f"{prefix}.run_start_timestamp",
-                    pg_bench_result.run_start_timestamp,
-                    '',
-                    MetricReport.TEST_PARAM)
-        self.record(f"{prefix}.run_end_timestamp",
-                    pg_bench_result.run_end_timestamp,
-                    '',
-                    MetricReport.TEST_PARAM)
+            self.record(
+                f"{prefix}.latency_stddev",
+                pg_bench_result.latency_stddev,
+                unit="ms",
+                report=MetricReport.LOWER_IS_BETTER,
+            )
+        self.record(f"{prefix}.tps", pg_bench_result.tps, "", report=MetricReport.HIGHER_IS_BETTER)
+        self.record(
+            f"{prefix}.run_duration",
+            pg_bench_result.run_duration,
+            unit="s",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
+        self.record(
+            f"{prefix}.run_start_timestamp",
+            pg_bench_result.run_start_timestamp,
+            "",
+            MetricReport.TEST_PARAM,
+        )
+        self.record(
+            f"{prefix}.run_end_timestamp",
+            pg_bench_result.run_end_timestamp,
+            "",
+            MetricReport.TEST_PARAM,
+        )
 
     def record_pg_bench_init_result(self, prefix: str, result: PgBenchInitResult):
         test_params = [
@@ -288,10 +311,9 @@ class NeonBenchmarker:
             "end_timestamp",
         ]
         for test_param in test_params:
-            self.record(f"{prefix}.{test_param}",
-                        getattr(result, test_param),
-                        '',
-                        MetricReport.TEST_PARAM)
+            self.record(
+                f"{prefix}.{test_param}", getattr(result, test_param), "", MetricReport.TEST_PARAM
+            )
 
         metrics = [
             "duration",
@@ -303,10 +325,9 @@ class NeonBenchmarker:
         ]
         for metric in metrics:
             if (value := getattr(result, metric)) is not None:
-                self.record(f"{prefix}.{metric}",
-                            value,
-                            unit="s",
-                            report=MetricReport.LOWER_IS_BETTER)
+                self.record(
+                    f"{prefix}.{metric}", value, unit="s", report=MetricReport.LOWER_IS_BETTER
+                )
 
     def get_io_writes(self, pageserver) -> int:
         """
@@ -319,7 +340,7 @@ class NeonBenchmarker:
         """
         Fetch the "maxrss" metric from the pageserver
         """
-        metric_name = r'libmetrics_maxrss_kb'
+        metric_name = r"libmetrics_maxrss_kb"
         return self.get_int_counter_value(pageserver, metric_name)
 
     def get_int_counter_value(self, pageserver, metric_name) -> int:
@@ -332,7 +353,7 @@ class NeonBenchmarker:
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
         all_metrics = pageserver.http_client().get_metrics()
-        matches = re.search(fr'^{metric_name} (\S+)$', all_metrics, re.MULTILINE)
+        matches = re.search(rf"^{metric_name} (\S+)$", all_metrics, re.MULTILINE)
         assert matches
         return int(round(float(matches.group(1))))
 
@@ -358,10 +379,12 @@ class NeonBenchmarker:
         yield
         after = self.get_io_writes(pageserver)
 
-        self.record(metric_name,
-                    round((after - before) / (1024 * 1024)),
-                    "MB",
-                    report=MetricReport.LOWER_IS_BETTER)
+        self.record(
+            metric_name,
+            round((after - before) / (1024 * 1024)),
+            "MB",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
 
 
 @pytest.fixture(scope="function")
@@ -410,8 +433,9 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int,
         result_entry = []
 
         for _, recorded_property in test_report.user_properties:
-            terminalreporter.write("{}.{}: ".format(test_report.head_line,
-                                                    recorded_property["name"]))
+            terminalreporter.write(
+                "{}.{}: ".format(test_report.head_line, recorded_property["name"])
+            )
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":
@@ -426,11 +450,13 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int,
 
             result_entry.append(recorded_property)
 
-        result.append({
-            "suit": test_report.nodeid,
-            "total_duration": test_report.duration,
-            "data": result_entry,
-        })
+        result.append(
+            {
+                "suit": test_report.nodeid,
+                "total_duration": test_report.duration,
+                "data": result_entry,
+            }
+        )
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
@@ -442,6 +468,5 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int,
         return
 
     get_out_path(Path(out_dir), revision=revision).write_text(
-        json.dumps({
-            "revision": revision, "platform": platform, "result": result
-        }, indent=4))
+        json.dumps({"revision": revision, "platform": platform, "result": result}, indent=4)
+    )

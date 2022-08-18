@@ -34,12 +34,14 @@ def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
 
 
 @contextmanager
-def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
-                          pageserver_bin: pathlib.Path,
-                          remote_storage_mock_path: pathlib.Path,
-                          pg_port: int,
-                          http_port: int,
-                          broker: Optional[Etcd]):
+def new_pageserver_helper(
+    new_pageserver_dir: pathlib.Path,
+    pageserver_bin: pathlib.Path,
+    remote_storage_mock_path: pathlib.Path,
+    pg_port: int,
+    http_port: int,
+    broker: Optional[Etcd],
+):
     """
     cannot use NeonPageserver yet because it depends on neon cli
     which currently lacks support for multiple pageservers
@@ -47,10 +49,10 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
     # actually run new pageserver
     cmd = [
         str(pageserver_bin),
-        '--workdir',
+        "--workdir",
         str(new_pageserver_dir),
-        '--daemonize',
-        '--update-config',
+        "--daemonize",
+        "--update-config",
         f"-c listen_pg_addr='localhost:{pg_port}'",
         f"-c listen_http_addr='localhost:{http_port}'",
         f"-c pg_distrib_dir='{pg_distrib_dir}'",
@@ -58,7 +60,9 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
     if broker is not None:
-        cmd.append(f"-c broker_endpoints=['{broker.client_url()}']", )
+        cmd.append(
+            f"-c broker_endpoints=['{broker.client_url()}']",
+        )
 
     log.info("starting new pageserver %s", cmd)
     out = subprocess.check_output(cmd, text=True)
@@ -67,7 +71,7 @@ def new_pageserver_helper(new_pageserver_dir: pathlib.Path,
         yield
     finally:
         log.info("stopping new pageserver")
-        pid = int((new_pageserver_dir / 'pageserver.pid').read_text())
+        pid = int((new_pageserver_dir / "pageserver.pid").read_text())
         os.kill(pid, signal.SIGQUIT)
 
 
@@ -105,7 +109,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
                     log.info("successfully recovered %s", inserted_ctr)
                     failed = False
                     load_ok_event.set()
-    log.info('load thread stopped')
+    log.info("load thread stopped")
 
 
 def populate_branch(
@@ -123,8 +127,10 @@ def populate_branch(
 
         cur.execute("SELECT pg_current_wal_flush_lsn()")
         log.info("pg_current_wal_flush_lsn() %s", lsn_from_hex(cur.fetchone()[0]))
-        log.info("timeline detail %s",
-                 ps_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id))
+        log.info(
+            "timeline detail %s",
+            ps_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id),
+        )
 
         # we rely upon autocommit after each statement
         # as waiting for acceptors happens there
@@ -133,7 +139,7 @@ def populate_branch(
         cur.execute("INSERT INTO t SELECT generate_series(1,1000), 'some payload'")
         if expected_sum is not None:
             cur.execute("SELECT sum(key) FROM t")
-            assert cur.fetchone() == (expected_sum, )
+            assert cur.fetchone() == (expected_sum,)
         cur.execute("SELECT pg_current_wal_flush_lsn()")
 
         current_lsn = lsn_from_hex(cur.fetchone()[0])
@@ -166,34 +172,41 @@ def check_timeline_attached(
 
     # when load is active these checks can break because lsns are not static
     # so lets check with some margin
-    assert_abs_margin_ratio(lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
-                            lsn_from_hex(old_timeline_detail['local']['disk_consistent_lsn']),
-                            0.03)
+    assert_abs_margin_ratio(
+        lsn_from_hex(new_timeline_detail["local"]["disk_consistent_lsn"]),
+        lsn_from_hex(old_timeline_detail["local"]["disk_consistent_lsn"]),
+        0.03,
+    )
 
-    assert_abs_margin_ratio(lsn_from_hex(new_timeline_detail['local']['disk_consistent_lsn']),
-                            old_current_lsn,
-                            0.03)
+    assert_abs_margin_ratio(
+        lsn_from_hex(new_timeline_detail["local"]["disk_consistent_lsn"]), old_current_lsn, 0.03
+    )
 
 
-def switch_pg_to_new_pageserver(env: NeonEnv,
-                                pg: Postgres,
-                                new_pageserver_port: int,
-                                tenant_id: UUID,
-                                timeline_id: UUID) -> pathlib.Path:
+def switch_pg_to_new_pageserver(
+    env: NeonEnv, pg: Postgres, new_pageserver_port: int, tenant_id: UUID, timeline_id: UUID
+) -> pathlib.Path:
     pg.stop()
 
     pg_config_file_path = pathlib.Path(pg.config_file_path())
-    pg_config_file_path.open('a').write(
-        f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'")
+    pg_config_file_path.open("a").write(
+        f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
+    )
 
     pg.start()
 
-    timeline_to_detach_local_path = env.repo_dir / 'tenants' / tenant_id.hex / 'timelines' / timeline_id.hex
+    timeline_to_detach_local_path = (
+        env.repo_dir / "tenants" / tenant_id.hex / "timelines" / timeline_id.hex
+    )
     files_before_detach = os.listdir(timeline_to_detach_local_path)
-    assert 'metadata' in files_before_detach, f'Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
-            but got: {files_before_detach}'
-    assert len(files_before_detach) >= 2, f'Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
-            but got {files_before_detach}'
+    assert (
+        "metadata" in files_before_detach
+    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
+            but got: {files_before_detach}"
+    assert (
+        len(files_before_detach) >= 2
+    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
+            but got {files_before_detach}"
 
     return timeline_to_detach_local_path
 
@@ -202,39 +215,44 @@ def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path
     with pg_cur(pg) as cur:
         # check that data is still there
         cur.execute("SELECT sum(key) FROM t")
-        assert cur.fetchone() == (sum_before_migration, )
+        assert cur.fetchone() == (sum_before_migration,)
         # check that we can write new data
         cur.execute("INSERT INTO t SELECT generate_series(1001,2000), 'some payload'")
         cur.execute("SELECT sum(key) FROM t")
-        assert cur.fetchone() == (sum_before_migration + 1500500, )
+        assert cur.fetchone() == (sum_before_migration + 1500500,)
 
-    assert not os.path.exists(old_local_path), f'After detach, local timeline dir {old_local_path} should be removed'
+    assert not os.path.exists(
+        old_local_path
+    ), f"After detach, local timeline dir {old_local_path} should be removed"
 
 
 @pytest.mark.parametrize(
-    'method',
+    "method",
     [
         # A minor migration involves no storage breaking changes.
         # It is done by attaching the tenant to a new pageserver.
-        'minor',
+        "minor",
         # A major migration involves exporting a postgres datadir
         # basebackup and importing it into the new pageserver.
         # This kind of migration can tolerate breaking changes
         # to storage format
-        'major',
-    ])
-@pytest.mark.parametrize('with_load', ['with_load', 'without_load'])
-def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
-                           port_distributor: PortDistributor,
-                           test_output_dir,
-                           method: str,
-                           with_load: str):
+        "major",
+    ],
+)
+@pytest.mark.parametrize("with_load", ["with_load", "without_load"])
+def test_tenant_relocation(
+    neon_env_builder: NeonEnvBuilder,
+    port_distributor: PortDistributor,
+    test_output_dir,
+    method: str,
+    with_load: str,
+):
     neon_env_builder.enable_local_fs_remote_storage()
 
     env = neon_env_builder.init_start()
 
     # create folder for remote storage mock
-    remote_storage_mock_path = env.repo_dir / 'local_fs_remote_storage'
+    remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
 
     # we use two branches to check that they are both relocated
     # first branch is used for load, compute for second one is used to
@@ -242,12 +260,15 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, initial_timeline_id = env.neon_cli.create_tenant(UUID("74ee8b079a0e437eb0afea7d26a07209"))
+    tenant_id, initial_timeline_id = env.neon_cli.create_tenant(
+        UUID("74ee8b079a0e437eb0afea7d26a07209")
+    )
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 
     env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
-    pg_main = env.postgres.create_start(branch_name='test_tenant_relocation_main',
-                                        tenant_id=tenant_id)
+    pg_main = env.postgres.create_start(
+        branch_name="test_tenant_relocation_main", tenant_id=tenant_id
+    )
 
     timeline_id_main, current_lsn_main = populate_branch(
         pg_main,
@@ -263,8 +284,9 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
         ancestor_start_lsn=lsn_to_hex(current_lsn_main),
         tenant_id=tenant_id,
     )
-    pg_second = env.postgres.create_start(branch_name='test_tenant_relocation_second',
-                                          tenant_id=tenant_id)
+    pg_second = env.postgres.create_start(
+        branch_name="test_tenant_relocation_second", tenant_id=tenant_id
+    )
 
     timeline_id_second, current_lsn_second = populate_branch(
         pg_second,
@@ -281,7 +303,7 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_second, current_lsn_second)
     timeline_detail_second = assert_timeline_local(pageserver_http, tenant_id, timeline_id_second)
 
-    if with_load == 'with_load':
+    if with_load == "with_load":
         # create load table
         with pg_cur(pg_main) as cur:
             cur.execute("CREATE TABLE load(value text)")
@@ -317,22 +339,24 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
     log.info("inititalizing new pageserver")
     # bootstrap second pageserver
-    new_pageserver_dir = env.repo_dir / 'new_pageserver'
+    new_pageserver_dir = env.repo_dir / "new_pageserver"
     new_pageserver_dir.mkdir()
 
     new_pageserver_pg_port = port_distributor.get_port()
     new_pageserver_http_port = port_distributor.get_port()
     log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = pathlib.Path(neon_binpath) / 'pageserver'
+    pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
 
     new_pageserver_http = NeonPageserverHttpClient(port=new_pageserver_http_port, auth_token=None)
 
-    with new_pageserver_helper(new_pageserver_dir,
-                               pageserver_bin,
-                               remote_storage_mock_path,
-                               new_pageserver_pg_port,
-                               new_pageserver_http_port,
-                               neon_env_builder.broker):
+    with new_pageserver_helper(
+        new_pageserver_dir,
+        pageserver_bin,
+        remote_storage_mock_path,
+        new_pageserver_pg_port,
+        new_pageserver_http_port,
+        neon_env_builder.broker,
+    ):
 
         # Migrate either by attaching from s3 or import/export basebackup
         if method == "major":
@@ -367,13 +391,16 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
             # check that it shows that download is in progress
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status.get('has_in_progress_downloads'), tenant_status
+            assert tenant_status.get("has_in_progress_downloads"), tenant_status
 
             # wait until tenant is downloaded
-            wait_until(number_of_iterations=10,
-                       interval=1,
-                       func=lambda: assert_no_in_progress_downloads_for_tenant(
-                           new_pageserver_http, tenant_id))
+            wait_until(
+                number_of_iterations=10,
+                interval=1,
+                func=lambda: assert_no_in_progress_downloads_for_tenant(
+                    new_pageserver_http, tenant_id
+                ),
+            )
 
             check_timeline_attached(
                 new_pageserver_http,
@@ -392,10 +419,10 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
             )
 
         # rewrite neon cli config to use new pageserver for basebackup to start new compute
-        cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
+        cli_config_lines = (env.repo_dir / "config").read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
         cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
-        (env.repo_dir / 'config').write_text('\n'.join(cli_config_lines))
+        (env.repo_dir / "config").write_text("\n".join(cli_config_lines))
 
         old_local_path_main = switch_pg_to_new_pageserver(
             env,
@@ -423,7 +450,8 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
 
         # ensure that we can successfully read all relations on the new pageserver
         with pg_cur(pg_second) as cur:
-            cur.execute('''
+            cur.execute(
+                """
                 DO $$
                 DECLARE
                 r RECORD;
@@ -435,18 +463,19 @@ def test_tenant_relocation(neon_env_builder: NeonEnvBuilder,
                     EXECUTE 'SELECT count(*) FROM quote_ident($1)' USING r.relname;
                 END LOOP;
                 END$$;
-                ''')
+                """
+            )
 
-        if with_load == 'with_load':
+        if with_load == "with_load":
             assert load_ok_event.wait(3)
-            log.info('stopping load thread')
+            log.info("stopping load thread")
             load_stop_event.set()
             load_thread.join(timeout=10)
-            log.info('load thread stopped')
+            log.info("load thread stopped")
 
         # bring old pageserver back for clean shutdown via neon cli
         # new pageserver will be shut down by the context manager
-        cli_config_lines = (env.repo_dir / 'config').read_text().splitlines()
+        cli_config_lines = (env.repo_dir / "config").read_text().splitlines()
         cli_config_lines[-2] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"
         cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{env.pageserver.service_port.pg}'"
-        (env.repo_dir / 'config').write_text('\n'.join(cli_config_lines))
+        (env.repo_dir / "config").write_text("\n".join(cli_config_lines))

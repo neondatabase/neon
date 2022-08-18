@@ -1,7 +1,7 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.log_helper import log
-from fixtures.utils import print_gc_result, query_scalar
 import psycopg2.extras
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.utils import print_gc_result, query_scalar
 
 
 #
@@ -19,8 +19,8 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_old_request_lsn", "main")
-    pg = env.postgres.create_start('test_old_request_lsn')
-    log.info('postgres is running on test_old_request_lsn branch')
+    pg = env.postgres.create_start("test_old_request_lsn")
+    log.info("postgres is running on test_old_request_lsn branch")
 
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
@@ -33,25 +33,29 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers.
-    cur.execute('CREATE TABLE foo (id int4 PRIMARY KEY, val int, t text)')
-    cur.execute('''
+    cur.execute("CREATE TABLE foo (id int4 PRIMARY KEY, val int, t text)")
+    cur.execute(
+        """
         INSERT INTO foo
             SELECT g, 1, 'long string to consume some space' || g
             FROM generate_series(1, 100000) g
-    ''')
+    """
+    )
 
     # Verify that the table is larger than shared_buffers, so that the SELECT below
     # will cause GetPage requests.
-    cur.execute('''
+    cur.execute(
+        """
         select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_ize
         from pg_settings where name = 'shared_buffers'
-    ''')
+    """
+    )
     row = cur.fetchone()
     assert row is not None
-    log.info(f'shared_buffers is {row[0]}, table size {row[1]}')
+    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
-    cur.execute('VACUUM foo')
+    cur.execute("VACUUM foo")
 
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
@@ -61,7 +65,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
         print_gc_result(row)
 
         for j in range(100):
-            cur.execute('UPDATE foo SET val = val + 1 WHERE id = 1;')
+            cur.execute("UPDATE foo SET val = val + 1 WHERE id = 1;")
 
     # All (or at least most of) the updates should've been on the same page, so
     # that we haven't had to evict any dirty pages for a long time. Now run

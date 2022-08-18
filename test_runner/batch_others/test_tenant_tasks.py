@@ -1,6 +1,7 @@
-from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
-from uuid import UUID
 import time
+from uuid import UUID
+
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
 
 
 def get_only_element(l):
@@ -47,7 +48,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     tenant, _ = env.neon_cli.create_tenant()
     timeline = env.neon_cli.create_timeline(name, tenant_id=tenant)
     pg = env.postgres.create_start(name, tenant_id=tenant)
-    assert (get_state(tenant) == "Active")
+    assert get_state(tenant) == "Active"
 
     # Stop compute
     pg.stop()

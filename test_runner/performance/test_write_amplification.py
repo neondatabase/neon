@@ -12,10 +12,11 @@
 # Amplification problem at its finest.
 import os
 from contextlib import closing
+
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.neon_fixtures import NeonEnv
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
+from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv
 
 
 def test_write_amplification(neon_with_baseline: PgCompare):
@@ -23,18 +24,20 @@ def test_write_amplification(neon_with_baseline: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
-            with env.record_pageserver_writes('pageserver_writes'):
-                with env.record_duration('run'):
+            with env.record_pageserver_writes("pageserver_writes"):
+                with env.record_duration("run"):
 
                     # NOTE: Because each iteration updates every table already created,
                     # the runtime and write amplification is O(n^2), where n is the
                     # number of iterations.
                     for i in range(25):
-                        cur.execute(f'''
+                        cur.execute(
+                            f"""
                         CREATE TABLE tbl{i} AS
                             SELECT g as i, 'long string to consume some space' || g as t
                             FROM generate_series(1, 100000) g
-                        ''')
+                        """
+                        )
                         cur.execute(f"create index on tbl{i} (i);")
                         for j in range(1, i):
                             cur.execute(f"delete from tbl{j} where i = {i}")

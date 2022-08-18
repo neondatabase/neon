@@ -1,12 +1,12 @@
+import concurrent.futures
+import os
+from contextlib import closing
 from typing import List, Tuple
 from uuid import UUID
-import pytest
-import concurrent.futures
-from contextlib import closing
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres
-from fixtures.log_helper import log
-import os
 
+import pytest
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.utils import query_scalar
 
 
@@ -24,7 +24,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         tenant_id = tenant_id_uuid.hex
         timeline_id = timeline_id_uuid.hex
 
-        pg = env.postgres.create_start(f'main', tenant_id=tenant_id_uuid)
+        pg = env.postgres.create_start(f"main", tenant_id=tenant_id_uuid)
         with pg.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
@@ -42,7 +42,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # Corrupt metadata file on timeline 1
     (tenant1, timeline1, pg1) = tenant_timelines[1]
     metadata_path = "{}/tenants/{}/timelines/{}/metadata".format(env.repo_dir, tenant1, timeline1)
-    print(f'overwriting metadata file at {metadata_path}')
+    print(f"overwriting metadata file at {metadata_path}")
     f = open(metadata_path, "w")
     f.write("overwritten with garbage!")
     f.close()
@@ -52,17 +52,17 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     (tenant2, timeline2, pg2) = tenant_timelines[2]
     timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant2, timeline2)
     for filename in os.listdir(timeline_path):
-        if filename.startswith('00000'):
+        if filename.startswith("00000"):
             # Looks like a layer file. Remove it
-            os.remove(f'{timeline_path}/{filename}')
+            os.remove(f"{timeline_path}/{filename}")
 
     # Corrupt layer files file on timeline 3
     (tenant3, timeline3, pg3) = tenant_timelines[3]
     timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant3, timeline3)
     for filename in os.listdir(timeline_path):
-        if filename.startswith('00000'):
+        if filename.startswith("00000"):
             # Looks like a layer file. Corrupt it
-            f = open(f'{timeline_path}/{filename}', "w")
+            f = open(f"{timeline_path}/{filename}", "w")
             f.write("overwritten with garbage!")
             f.close()
 
@@ -77,7 +77,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         (tenant, timeline, pg) = tenant_timelines[n]
         with pytest.raises(Exception, match="Cannot load local timeline") as err:
             pg.start()
-        log.info(f'compute startup failed as expected: {err}')
+        log.info(f"compute startup failed as expected: {err}")
 
 
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
@@ -87,9 +87,10 @@ def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(env.neon_cli.create_timeline,
-                            f"test-create-multiple-timelines-{i}",
-                            tenant_id) for i in range(4)
+            executor.submit(
+                env.neon_cli.create_timeline, f"test-create-multiple-timelines-{i}", tenant_id
+            )
+            for i in range(4)
         ]
         for future in futures:
             future.result()
