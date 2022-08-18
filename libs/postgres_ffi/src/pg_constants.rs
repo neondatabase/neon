@@ -7,7 +7,8 @@
 //! comments on them.
 //!
 
-use crate::PageHeaderData;
+use super::bindings::PageHeaderData;
+use crate::BLCKSZ;
 
 //
 // From pg_tablespace_d.h
@@ -30,11 +31,6 @@ pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 pub const SMGR_TRUNCATE_VM: u32 = 0x0002;
 pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
-
-// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
-// --with-segsize=SEGSIZE, but assume the defaults for now.
-pub const BLCKSZ: u16 = 8192;
-pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 
 //
 // From bufpage.h
@@ -213,7 +209,6 @@ pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 /* FIXME: pageserver should request wal_seg_size from compute node */
 pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 
-pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;

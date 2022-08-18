@@ -7,22 +7,24 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
-use crate::pg_constants;
-use crate::CheckPoint;
-use crate::FullTransactionId;
-use crate::XLogLongPageHeaderData;
-use crate::XLogPageHeaderData;
-use crate::XLogRecord;
-use crate::XLOG_PAGE_MAGIC;
+use crc32c::crc32c_append;
 
-use crate::pg_constants::WAL_SEGMENT_SIZE;
-use crate::waldecoder::WalStreamDecoder;
+use super::bindings::{
+    CheckPoint, FullTransactionId, XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord,
+    XLOG_PAGE_MAGIC,
+};
+use super::pg_constants;
+use super::pg_constants::WAL_SEGMENT_SIZE;
+use crate::v14::waldecoder::WalStreamDecoder;
+use crate::PG_TLI;
+use crate::{uint32, uint64, Oid};
 
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
 
 use log::*;
 
+use serde::Serialize;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
@@ -46,9 +48,6 @@ pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHe
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
-
-// PG timeline is always 1, changing it doesn't have useful meaning in Zenith.
-pub const PG_TLI: u32 = 1;
 
 pub type XLogRecPtr = u64;
 pub type TimeLineID = u32;
@@ -346,6 +345,85 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
     Ok(seg_buf.freeze())
 }
 
+#[repr(C)]
+#[derive(Serialize)]
+struct XlLogicalMessage {
+    db_id: Oid,
+    transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
+    prefix_size: uint64,
+    message_size: uint64,
+}
+
+impl XlLogicalMessage {
+    pub fn encode(&self) -> Bytes {
+        use utils::bin_ser::LeSer;
+        self.ser().unwrap().into()
+    }
+}
+
+/// Create new WAL record for non-transactional logical message.
+/// Used for creating artificial WAL for tests, as LogicalMessage
+/// record is basically no-op.
+///
+/// NOTE: This leaves the xl_prev field zero. The safekeeper and
+/// pageserver tolerate that, but PostgreSQL does not.
+pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
+    let mut prefix_bytes: Vec<u8> = Vec::with_capacity(prefix.len() + 1);
+    prefix_bytes.write_all(prefix.as_bytes()).unwrap();
+    prefix_bytes.push(0);
+
+    let message_bytes = message.as_bytes();
+
+    let logical_message = XlLogicalMessage {
+        db_id: 0,
+        transactional: 0,
+        prefix_size: prefix_bytes.len() as u64,
+        message_size: message_bytes.len() as u64,
+    };
+
+    let mainrdata = logical_message.encode();
+    let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message_bytes.len();
+    // only short mainrdata is supported for now
+    assert!(mainrdata_len <= 255);
+    let mainrdata_len = mainrdata_len as u8;
+
+    let mut data: Vec<u8> = vec![pg_constants::XLR_BLOCK_ID_DATA_SHORT, mainrdata_len];
+    data.extend_from_slice(&mainrdata);
+    data.extend_from_slice(&prefix_bytes);
+    data.extend_from_slice(message_bytes);
+
+    let total_len = XLOG_SIZE_OF_XLOG_RECORD + data.len();
+
+    let mut header = XLogRecord {
+        xl_tot_len: total_len as u32,
+        xl_xid: 0,
+        xl_prev: 0,
+        xl_info: 0,
+        xl_rmid: 21,
+        __bindgen_padding_0: [0u8; 2usize],
+        xl_crc: 0, // crc will be calculated later
+    };
+
+    let header_bytes = header.encode().expect("failed to encode header");
+    let crc = crc32c_append(0, &data);
+    let crc = crc32c_append(crc, &header_bytes[0..XLOG_RECORD_CRC_OFFS]);
+    header.xl_crc = crc;
+
+    let mut wal: Vec<u8> = Vec::new();
+    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
+    wal.extend_from_slice(&data);
+
+    // WAL start position must be aligned at 8 bytes,
+    // this will add padding for the next WAL record.
+    const PADDING: usize = 8;
+    let padding_rem = wal.len() % PADDING;
+    if padding_rem != 0 {
+        wal.resize(wal.len() + PADDING - padding_rem, 0);
+    }
+
+    wal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +624,16 @@ mod tests {
         // XID_CHECKPOINT_INTERVAL boundary.
         checkpoint.update_next_xid(1024);
         assert_eq!(checkpoint.nextXid.value, 2048);
+    }
+
+    #[test]
+    pub fn test_encode_logical_message() {
+        let expected = [
+            64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 170, 34, 166, 227, 255,
+            38, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114,
+            101, 102, 105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
+        ];
+        let actual = encode_logical_message("prefix", "message");
+        assert_eq!(expected, actual[..]);
     }
 }

@@ -15,12 +15,23 @@ use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
-use postgres_ffi::relfile_utils::*;
-use postgres_ffi::waldecoder::*;
-use postgres_ffi::xlog_utils::*;
+use postgres_ffi::v14::relfile_utils::*;
+use postgres_ffi::v14::waldecoder::*;
+use postgres_ffi::v14::xlog_utils::*;
+use postgres_ffi::v14::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
 use postgres_ffi::Oid;
-use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
+use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
+
+// Returns checkpoint LSN from controlfile
+pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+    // Read control file to extract the LSN
+    let controlfile_path = path.join("global").join("pg_control");
+    let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
+    let lsn = controlfile.checkPoint;
+
+    Ok(Lsn(lsn))
+}
 
 ///
 /// Import all relation data pages from local disk into the repository.
@@ -110,8 +121,8 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
 
     let mut buf: [u8; 8192] = [0u8; 8192];
 
-    ensure!(len % pg_constants::BLCKSZ as usize == 0);
-    let nblocks = len / pg_constants::BLCKSZ as usize;
+    ensure!(len % BLCKSZ as usize == 0);
+    let nblocks = len / BLCKSZ as usize;
 
     let rel = RelTag {
         spcnode: spcoid,
@@ -120,7 +131,7 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
         forknum,
     };
 
-    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / BLCKSZ as u32);
 
     // Call put_rel_creation for every segment of the relation,
     // because there is no guarantee about the order in which we are processing segments.
@@ -144,8 +155,7 @@ fn import_rel<T: DatadirTimeline, Reader: Read>(
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
-                    let relative_blknum =
-                        blknum - segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+                    let relative_blknum = blknum - segno * (1024 * 1024 * 1024 / BLCKSZ as u32);
                     ensure!(relative_blknum == nblocks as u32, "unexpected EOF");
                     break;
                 }
@@ -184,8 +194,8 @@ fn import_slru<T: DatadirTimeline, Reader: Read>(
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
-    ensure!(len % pg_constants::BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
-    let nblocks = len / pg_constants::BLCKSZ as usize;
+    ensure!(len % BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
+    let nblocks = len / BLCKSZ as usize;
 
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 

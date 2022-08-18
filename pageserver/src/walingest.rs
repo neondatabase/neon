@@ -22,8 +22,8 @@
 //! bespoken Rust code.
 
 use anyhow::Context;
-use postgres_ffi::nonrelfile_utils::clogpage_precedes;
-use postgres_ffi::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
+use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{page_is_new, page_set_lsn};
 
 use anyhow::Result;
@@ -33,10 +33,12 @@ use tracing::*;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
 use crate::walrecord::*;
-use postgres_ffi::nonrelfile_utils::mx_offset_to_member_segment;
-use postgres_ffi::xlog_utils::*;
+use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::*;
+use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
-use postgres_ffi::{pg_constants, CheckPoint};
+use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; 8192]);
@@ -293,7 +295,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
             let img_offs = blk.bimg_offset as usize;
-            let mut image = BytesMut::with_capacity(pg_constants::BLCKSZ as usize);
+            let mut image = BytesMut::with_capacity(BLCKSZ as usize);
             image.extend_from_slice(&decoded.record[img_offs..img_offs + img_len]);
 
             if blk.hole_length != 0 {
@@ -309,7 +311,7 @@ impl<'a, T: DatadirTimeline> WalIngest<'a, T> {
             if !page_is_new(&image) {
                 page_set_lsn(&mut image, lsn)
             }
-            assert_eq!(image.len(), pg_constants::BLCKSZ as usize);
+            assert_eq!(image.len(), BLCKSZ as usize);
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze())?;
         } else {
             let rec = ZenithWalRecord::Postgres {
@@ -1033,7 +1035,8 @@ mod tests {
     use crate::pgdatadir_mapping::create_test_timeline;
     use crate::repository::repo_harness::*;
     use crate::repository::Timeline;
-    use postgres_ffi::pg_constants;
+    use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
+    use postgres_ffi::RELSEG_SIZE;
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
@@ -1322,7 +1325,7 @@ mod tests {
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
-        for blknum in 0..pg_constants::RELSEG_SIZE + 1 {
+        for blknum in 0..RELSEG_SIZE + 1 {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
             let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
@@ -1332,31 +1335,22 @@ mod tests {
 
         assert_current_logical_size(&*tline, Lsn(lsn));
 
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE + 1
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE + 1);
 
         // Truncate one block
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
-        walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE)?;
+        walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE)?;
         m.commit()?;
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE);
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate another block
         lsn += 0x10;
         let mut m = tline.begin_modification(Lsn(lsn));
-        walingest.put_rel_truncation(&mut m, TESTREL_A, pg_constants::RELSEG_SIZE - 1)?;
+        walingest.put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1)?;
         m.commit()?;
-        assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn))?,
-            pg_constants::RELSEG_SIZE - 1
-        );
+        assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(lsn))?, RELSEG_SIZE - 1);
         assert_current_logical_size(&*tline, Lsn(lsn));
 
         // Truncate to 1500, and then truncate all the way down to 0, one block at a time

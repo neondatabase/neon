@@ -51,7 +51,7 @@ impl ResponseErrorMessageExt for Response {
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
                 Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {url}.", status.as_u16()),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             },
         ))
     }

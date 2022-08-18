@@ -10,10 +10,7 @@
 //!
 use super::pg_constants;
 use super::xlog_utils::*;
-use super::XLogLongPageHeaderData;
-use super::XLogPageHeaderData;
-use super::XLogRecord;
-use super::XLOG_PAGE_MAGIC;
+use super::bindings::{XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord, XLOG_PAGE_MAGIC};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
 use log::*;

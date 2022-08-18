@@ -1,7 +1,11 @@
 from typing import Optional
 from uuid import uuid4, UUID
 import pytest
+import pathlib
+import os
+import subprocess
 from fixtures.utils import lsn_from_hex
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
@@ -9,16 +13,43 @@ from fixtures.neon_fixtures import (
     NeonPageserverHttpClient,
     NeonPageserverApiException,
     wait_until,
+    neon_binpath,
+    pg_distrib_dir,
 )
 
 
-# test that we cannot override node id
-def test_pageserver_init_node_id(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init()
-    with pytest.raises(
-            Exception,
-            match="node id can only be set during pageserver init and cannot be overridden"):
-        env.pageserver.start(overrides=['--pageserver-config-override=id=10'])
+# test that we cannot override node id after init
+def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
+    repo_dir = neon_simple_env.repo_dir
+    pageserver_config = repo_dir / 'pageserver.toml'
+    pageserver_bin = pathlib.Path(neon_binpath) / 'pageserver'
+    run_pageserver = lambda args: subprocess.run([str(pageserver_bin), '-D', str(repo_dir), *args],
+                                                 check=False,
+                                                 universal_newlines=True,
+                                                 stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE)
+
+    # remove initial config
+    pageserver_config.unlink()
+
+    bad_init = run_pageserver(['--init', '-c', f'pg_distrib_dir="{pg_distrib_dir}"'])
+    assert bad_init.returncode == 1, 'pageserver should not be able to init new config without the node id'
+    assert "missing id" in bad_init.stderr
+    assert not pageserver_config.exists(), 'config file should not be created after init error'
+
+    completed_init = run_pageserver(
+        ['--init', '-c', 'id = 12345', '-c', f'pg_distrib_dir="{pg_distrib_dir}"'])
+    assert completed_init.returncode == 0, 'pageserver should be able to create a new config with the node id given'
+    assert pageserver_config.exists(), 'config file should be created successfully'
+
+    bad_reinit = run_pageserver(
+        ['--init', '-c', 'id = 12345', '-c', f'pg_distrib_dir="{pg_distrib_dir}"'])
+    assert bad_reinit.returncode == 1, 'pageserver should not be able to init new config without the node id'
+    assert "already exists, cannot init it" in bad_reinit.stderr
+
+    bad_update = run_pageserver(['--update-config', '-c', 'id = 3'])
+    assert bad_update.returncode == 1, 'pageserver should not allow updating node id'
+    assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
 def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):

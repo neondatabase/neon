@@ -7,7 +7,7 @@ use metrics::{
     proto::MetricFamily,
     Gauge, IntGaugeVec,
 };
-use postgres_ffi::xlog_utils::XLogSegNo;
+use postgres_ffi::v14::xlog_utils::XLogSegNo;
 use utils::{lsn::Lsn, zid::ZTenantTimelineId};
 
 use crate::{

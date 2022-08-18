@@ -45,7 +45,7 @@ use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
 use crate::DatadirTimeline;
 
-use postgres_ffi::xlog_utils::to_pg_timestamp;
+use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
