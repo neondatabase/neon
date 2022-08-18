@@ -11,7 +11,6 @@
 
 use std::{
     collections::{hash_map, HashMap},
-    future::pending,
     num::NonZeroU64,
     sync::Arc,
     time::Duration,
@@ -129,7 +128,7 @@ async fn connection_manager_loop_step(
                             Ok(()) => debug!("WAL receiving task finished"),
                             Err(e) => warn!("WAL receiving task failed: {e}"),
                         };
-                        walreceiver_state.drop_old_connection(false).await;
+                        walreceiver_state.drop_old_connection().await;
                     },
                 }
             },
@@ -154,13 +153,7 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            _ = async {
-                if let Some(time_until_next_retry) = time_until_next_retry {
-                    tokio::time::sleep(time_until_next_retry).await
-                } else {
-                    pending().await
-                }
-            } => {}
+            _ = tokio::time::sleep(time_until_next_retry.unwrap()), if time_until_next_retry.is_some() => {}
         }
 
         // Fetch more etcd timeline updates, but limit ourselves since they may arrive quickly.
@@ -326,7 +319,7 @@ impl WalreceiverState {
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
-        self.drop_old_connection(true).await;
+        self.drop_old_connection().await;
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
@@ -364,15 +357,13 @@ impl WalreceiverState {
 
     /// Drops the current connection (if any) and updates retry timeout for the next
     /// connection attempt to the same safekeeper.
-    async fn drop_old_connection(&mut self, needs_shutdown: bool) {
+    async fn drop_old_connection(&mut self) {
         let wal_connection = match self.wal_connection.take() {
             Some(wal_connection) => wal_connection,
             None => return,
         };
 
-        if needs_shutdown {
-            wal_connection.connection_task.shutdown().await;
-        }
+        wal_connection.connection_task.shutdown().await;
 
         let retry = self
             .wal_connection_retries
@@ -621,12 +612,7 @@ impl WalreceiverState {
     ///
     /// The candidate that is chosen:
     /// * has no pending retry cooldown
-    /// * has greatest data Lsn among the ones that are left
-    ///
-    /// NOTE:
-    /// We evict timeline data received from etcd based on time passed since it was registered, along with its connection attempts values, but
-    /// otherwise to reset the connection attempts, a successful connection to that node is needed.
-    /// That won't happen now, before all nodes with less connection attempts are connected to first, which might leave the sk node with more advanced state to be ignored.
+    /// * has greatest commit_lsn among the ones that are left
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
