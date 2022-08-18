@@ -51,7 +51,7 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::repository::{GcResult, RepositoryTimeline, TimelineWriter};
+use crate::repository::{GcResult, RepositoryTimeline};
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
@@ -597,12 +597,11 @@ impl Timeline {
     /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
     /// is a generic type in this trait. But that doesn't currently work in
     /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
-    /// TODO kb replace with the concrete type
-    pub fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
-        Box::new(LayeredTimelineWriter {
+    pub fn writer(&self) -> TimelineWriter<'_> {
+        TimelineWriter {
             tl: self,
             _write_guard: self.write_lock.lock().unwrap(),
-        })
+        }
     }
 }
 
@@ -2204,12 +2203,16 @@ fn layer_traversal_error(
     Err(msg_iter.fold(err, |err, msg| err.context(msg)))
 }
 
-struct LayeredTimelineWriter<'a> {
+/// Various functions to mutate the timeline.
+// TODO Currently, Deref is used to allow easy access to read methods from this trait.
+// This is probably considered a bad practice in Rust and should be fixed eventually,
+// but will cause large code changes.
+pub struct TimelineWriter<'a> {
     tl: &'a Timeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
-impl Deref for LayeredTimelineWriter<'_> {
+impl Deref for TimelineWriter<'_> {
     type Target = Timeline;
 
     fn deref(&self) -> &Self::Target {
@@ -2217,23 +2220,32 @@ impl Deref for LayeredTimelineWriter<'_> {
     }
 }
 
-impl<'a> TimelineWriter<'_> for LayeredTimelineWriter<'a> {
-    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
+impl<'a> TimelineWriter<'a> {
+    /// Put a new page version that can be constructed from a WAL record
+    ///
+    /// This will implicitly extend the relation, if the page is beyond the
+    /// current end-of-file.
+    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
-    fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
         self.tl.put_tombstone(key_range, lsn)
     }
 
-    ///
+    /// Track the end of the latest digested WAL record.
     /// Remember the (end of) last valid WAL record remembered in the timeline.
     ///
-    fn finish_write(&self, new_lsn: Lsn) {
+    /// Call this after you have finished writing all the WAL up to 'lsn'.
+    ///
+    /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
+    /// the 'lsn' or anything older. The previous last record LSN is stored alongside
+    /// the latest and can be read.
+    pub fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
     }
 
-    fn update_current_logical_size(&self, delta: isize) {
+    pub fn update_current_logical_size(&self, delta: isize) {
         self.tl
             .current_logical_size
             .fetch_add(delta, AtomicOrdering::SeqCst);

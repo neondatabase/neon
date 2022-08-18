@@ -8,7 +8,6 @@ use std::fmt;
 use std::ops::{AddAssign, Range};
 use std::sync::Arc;
 use std::time::Duration;
-use utils::lsn::Lsn;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
@@ -228,37 +227,13 @@ impl AddAssign for GcResult {
     }
 }
 
-/// Various functions to mutate the timeline.
-// TODO Currently, Deref is used to allow easy access to read methods from this trait.
-// This is probably considered a bad practice in Rust and should be fixed eventually,
-// but will cause large code changes.
-pub trait TimelineWriter<'a> {
-    /// Put a new page version that can be constructed from a WAL record
-    ///
-    /// This will implicitly extend the relation, if the page is beyond the
-    /// current end-of-file.
-    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()>;
-
-    fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()>;
-
-    /// Track the end of the latest digested WAL record.
-    ///
-    /// Call this after you have finished writing all the WAL up to 'lsn'.
-    ///
-    /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
-    /// the 'lsn' or anything older. The previous last record LSN is stored alongside
-    /// the latest and can be read.
-    fn finish_write(&self, lsn: Lsn);
-
-    fn update_current_logical_size(&self, delta: isize);
-}
-
 #[cfg(test)]
 pub mod repo_harness {
     use bytes::BytesMut;
     use once_cell::sync::Lazy;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
+    use utils::lsn::Lsn;
 
     use crate::storage_sync::index::RemoteIndex;
     use crate::{
@@ -440,6 +415,7 @@ mod tests {
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
+    use utils::lsn::Lsn;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
