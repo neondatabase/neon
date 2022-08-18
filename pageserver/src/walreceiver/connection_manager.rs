@@ -153,7 +153,7 @@ async fn connection_manager_loop_step(
                 }
             },
 
-            _ = tokio::time::sleep(time_until_next_retry.unwrap()), if time_until_next_retry.is_some() => {}
+            _ = async { tokio::time::sleep(time_until_next_retry.unwrap()).await }, if time_until_next_retry.is_some() => {}
         }
 
         // Fetch more etcd timeline updates, but limit ourselves since they may arrive quickly.
