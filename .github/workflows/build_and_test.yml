@@ -567,7 +567,7 @@ jobs:
     #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, other-tests, pg_regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -622,7 +622,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, other-tests, pg_regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
