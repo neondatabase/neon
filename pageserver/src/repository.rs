@@ -1,19 +1,16 @@
 use crate::layered_repository::metadata::TimelineMetadata;
+use crate::layered_repository::Timeline;
 use crate::storage_sync::index::RemoteIndex;
 use crate::walrecord::ZenithWalRecord;
-use crate::CheckpointConfig;
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{AddAssign, Range};
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::Arc;
 use std::time::Duration;
-use utils::{
-    lsn::{Lsn, RecordLsn},
-    zid::ZTimelineId,
-};
+use utils::{lsn::Lsn, zid::ZTimelineId};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
@@ -185,22 +182,20 @@ impl Value {
 /// A repository corresponds to one .neon directory. One repository holds multiple
 /// timelines, forked off from the same initial call to 'initdb'.
 pub trait Repository: Send + Sync {
-    type Timeline: crate::DatadirTimeline;
-
     /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
     /// See [`crate::remote_storage`] for more details about the synchronization.
     fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()>;
 
     /// Get Timeline handle for given zenith timeline ID.
     /// This function is idempotent. It doesn't change internal state in any way.
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>>;
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Timeline>>;
 
     /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
-    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Self::Timeline>>;
+    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Timeline>>;
 
     /// Lists timelines the repository contains.
     /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
-    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Self::Timeline>)>;
+    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Timeline>)>;
 
     /// Create a new, empty timeline. The caller is responsible for loading data into it
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
@@ -208,7 +203,7 @@ pub trait Repository: Send + Sync {
         &self,
         timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<Self::Timeline>>;
+    ) -> Result<Arc<Timeline>>;
 
     /// Branch a timeline
     fn branch_timeline(
@@ -303,81 +298,6 @@ impl AddAssign for GcResult {
 
         self.elapsed += other.elapsed;
     }
-}
-
-pub trait Timeline: Send + Sync {
-    //------------------------------------------------------------------------------
-    // Public GET functions
-    //------------------------------------------------------------------------------
-
-    ///
-    /// Wait until WAL has been received and processed up to this LSN.
-    ///
-    /// You should call this before any of the other get_* or list_* functions. Calling
-    /// those functions with an LSN that has been processed yet is an error.
-    ///
-    fn wait_lsn(&self, lsn: Lsn) -> Result<()>;
-
-    /// Lock and get timeline's GC cuttof
-    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn>;
-
-    /// Look up given page version.
-    ///
-    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
-    /// above this needs to store suitable metadata to track what data exists with
-    /// what keys, in separate metadata entries. If a non-existent key is requested,
-    /// the Repository implementation may incorrectly return a value from an ancestor
-    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
-    ///
-    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes>;
-
-    /// Get the ancestor's timeline id
-    fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId>;
-
-    /// Get the LSN where this branch was created
-    fn get_ancestor_lsn(&self) -> Lsn;
-
-    //------------------------------------------------------------------------------
-    // Public PUT functions, to update the repository with new page versions.
-    //
-    // These are called by the WAL receiver to digest WAL records.
-    //------------------------------------------------------------------------------
-    /// Atomically get both last and prev.
-    fn get_last_record_rlsn(&self) -> RecordLsn;
-
-    /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
-    fn get_last_record_lsn(&self) -> Lsn;
-
-    fn get_prev_record_lsn(&self) -> Lsn;
-
-    fn get_disk_consistent_lsn(&self) -> Lsn;
-
-    /// Mutate the timeline with a [`TimelineWriter`].
-    ///
-    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
-    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
-    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a>;
-
-    ///
-    /// Flush to disk all data that was written with the put_* functions
-    ///
-    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
-    /// know anything about them here in the repository.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> Result<()>;
-
-    ///
-    /// Check that it is valid to request operations with that lsn.
-    fn check_lsn_is_in_scope(
-        &self,
-        lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
-    ) -> Result<()>;
-
-    /// Get the physical size of the timeline at the latest LSN
-    fn get_physical_size(&self) -> u64;
-    /// Get the physical size of the timeline at the latest LSN non incrementally
-    fn get_physical_size_non_incremental(&self) -> Result<u64>;
 }
 
 /// Various functions to mutate the timeline.
@@ -581,6 +501,9 @@ pub mod repo_harness {
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
+    use crate::layered_repository::Timeline;
+    use crate::CheckpointConfig;
+
     use super::repo_harness::*;
     use super::*;
     //use postgres_ffi::{pg_constants, xlog_utils::SIZEOF_CHECKPOINT};
@@ -689,7 +612,7 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers<T: Timeline>(tline: &T, start_lsn: Lsn) -> Result<()> {
+    fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {

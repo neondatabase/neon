@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{GcResult, Repository, RepositoryTimeline, Timeline};
+use crate::repository::{GcResult, Repository, RepositoryTimeline};
 use crate::thread_mgr;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
@@ -61,7 +61,7 @@ mod timeline;
 use storage_layer::Layer;
 use timeline::LayeredTimelineEntry;
 
-pub use timeline::LayeredTimeline;
+pub use timeline::Timeline;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -121,15 +121,13 @@ pub struct LayeredRepository {
 
 /// Public interface
 impl Repository for LayeredRepository {
-    type Timeline = LayeredTimeline;
-
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>> {
+    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Timeline>> {
         let timelines = self.timelines.lock().unwrap();
         self.get_timeline_internal(timelineid, &timelines)
             .map(RepositoryTimeline::from)
     }
 
-    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         match self.get_timeline_load_internal(timelineid, &mut timelines)? {
             Some(local_loaded_timeline) => Ok(local_loaded_timeline),
@@ -140,7 +138,7 @@ impl Repository for LayeredRepository {
         }
     }
 
-    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Self::Timeline>)> {
+    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Timeline>)> {
         self.timelines
             .lock()
             .unwrap()
@@ -158,7 +156,7 @@ impl Repository for LayeredRepository {
         &self,
         timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<LayeredTimeline>> {
+    ) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         let vacant_timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(_) => bail!("Timeline already exists"),
@@ -176,7 +174,7 @@ impl Repository for LayeredRepository {
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
         timeline::save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
@@ -539,7 +537,7 @@ impl LayeredRepository {
         &self,
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
-    ) -> anyhow::Result<Option<Arc<LayeredTimeline>>> {
+    ) -> anyhow::Result<Option<Arc<Timeline>>> {
         match timelines.get(&timelineid) {
             Some(entry) => match entry {
                 LayeredTimelineEntry::Loaded(local_timeline) => {
@@ -574,7 +572,7 @@ impl LayeredRepository {
         &self,
         timeline_id: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
-    ) -> anyhow::Result<Arc<LayeredTimeline>> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -591,7 +589,7 @@ impl LayeredRepository {
             .map(LayeredTimelineEntry::Loaded);
         let _enter = info_span!("loading local timeline").entered();
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,

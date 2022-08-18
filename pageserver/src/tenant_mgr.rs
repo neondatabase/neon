@@ -3,7 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
-use crate::layered_repository::{load_metadata, LayeredRepository, LayeredTimeline};
+use crate::layered_repository::{load_metadata, LayeredRepository, Timeline};
 use crate::repository::Repository;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
@@ -100,7 +100,7 @@ struct Tenant {
     ///
     /// Local timelines have more metadata that's loaded into memory,
     /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
-    local_timelines: HashMap<ZTimelineId, Arc<LayeredTimeline>>,
+    local_timelines: HashMap<ZTimelineId, Arc<Timeline>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +177,7 @@ pub enum LocalTimelineUpdate {
     },
     Attach {
         id: ZTenantTimelineId,
-        datadir: Arc<LayeredTimeline>,
+        datadir: Arc<Timeline>,
     },
 }
 
@@ -379,7 +379,7 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Lay
 pub fn get_local_timeline_with_load(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<LayeredTimeline>> {
+) -> anyhow::Result<Arc<Timeline>> {
     let mut m = tenants_state::write_tenants();
     let tenant = m
         .get_mut(&tenant_id)
@@ -486,7 +486,7 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
 fn load_local_timeline(
     repo: &LayeredRepository,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<LayeredTimeline>> {
+) -> anyhow::Result<Arc<Timeline>> {
     let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;

@@ -7,8 +7,8 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::Timeline;
 use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, ensure, Result};
@@ -18,7 +18,7 @@ use postgres_ffi::v14::xlog_utils::TimestampTz;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::Range;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -35,23 +35,13 @@ pub enum LsnForTimestamp {
 }
 
 ///
-/// This trait provides all the functionality to store PostgreSQL relations, SLRUs,
+/// This impl provides all the functionality to store PostgreSQL relations, SLRUs,
 /// and other special kinds of files, in a versioned key-value store. The
-/// Timeline trait provides the key-value store.
+/// Timeline struct provides the key-value store.
 ///
-/// This is a trait, so that we can easily include all these functions in a Timeline
-/// implementation. You're not expected to have different implementations of this trait,
-/// rather, this provides an interface and implementation, over Timeline.
-///
-/// If you wanted to store other kinds of data in the Neon repository, e.g.
-/// flat files or MySQL, you would create a new trait like this, with all the
-/// functions that make sense for the kind of data you're storing. For flat files,
-/// for example, you might have a function like "fn read(path, offset, size)".
-/// We might also have that situation in the future, to support multiple PostgreSQL
-/// versions, if there are big changes in how the data is organized in the data
-/// directory, or if new special files are introduced.
-///
-pub trait DatadirTimeline: Timeline {
+/// This is a separate impl, so that we can easily include all these functions in a Timeline
+/// implementation, and might be moved into a separate struct later.
+impl Timeline {
     /// Start ingesting a WAL record, or other atomic modification of
     /// the timeline.
     ///
@@ -75,7 +65,7 @@ pub trait DatadirTimeline: Timeline {
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    fn begin_modification(&self, lsn: Lsn) -> DatadirModification<Self>
+    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification
     where
         Self: Sized,
     {
@@ -93,7 +83,7 @@ pub trait DatadirTimeline: Timeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         let nblocks = self.get_rel_size(tag, lsn)?;
@@ -110,7 +100,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     // Get size of a database in blocks
-    fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
         let mut total_blocks = 0;
 
         let rels = self.list_rels(spcnode, dbnode, lsn)?;
@@ -123,7 +113,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get size of a relation file
-    fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
+    pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -151,7 +141,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Does relation exist?
-    fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
+    pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
         ensure!(tag.relnode != 0, "invalid relnode");
 
         // first try to lookup relation in cache
@@ -169,7 +159,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    pub fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = self.get(key, lsn)?;
@@ -187,7 +177,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Look up given SLRU page version.
-    fn get_slru_page_at_lsn(
+    pub fn get_slru_page_at_lsn(
         &self,
         kind: SlruKind,
         segno: u32,
@@ -199,14 +189,19 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get size of an SLRU segment
-    fn get_slru_segment_size(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<BlockNumber> {
+    pub fn get_slru_segment_size(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+    ) -> Result<BlockNumber> {
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = self.get(key, lsn)?;
         Ok(buf.get_u32_le())
     }
 
     /// Get size of an SLRU segment
-    fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
+    pub fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
         let buf = self.get(key, lsn)?;
@@ -223,7 +218,7 @@ pub trait DatadirTimeline: Timeline {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
-    fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
+    pub fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         let min_lsn = *gc_cutoff_lsn_guard;
         let max_lsn = self.get_last_record_lsn();
@@ -286,7 +281,7 @@ pub trait DatadirTimeline: Timeline {
     /// Additionally, sets 'found_smaller'/'found_Larger, if encounters any commits
     /// with a smaller/larger timestamp.
     ///
-    fn is_latest_commit_timestamp_ge_than(
+    pub fn is_latest_commit_timestamp_ge_than(
         &self,
         search_timestamp: TimestampTz,
         probe_lsn: Lsn,
@@ -317,7 +312,7 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get a list of SLRU segments
-    fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
+    pub fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
@@ -327,14 +322,14 @@ pub trait DatadirTimeline: Timeline {
         Ok(dir.segments)
     }
 
-    fn get_relmap_file(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_relmap_file(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<Bytes> {
         let key = relmap_file_key(spcnode, dbnode);
 
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
+    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn)?;
         let dir = DbDirectory::des(&buf)?;
@@ -342,13 +337,13 @@ pub trait DatadirTimeline: Timeline {
         Ok(dir.dbdirs)
     }
 
-    fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
         let key = twophase_file_key(xid);
         let buf = self.get(key, lsn)?;
         Ok(buf)
     }
 
-    fn list_twophase_files(&self, lsn: Lsn) -> Result<HashSet<TransactionId>> {
+    pub fn list_twophase_files(&self, lsn: Lsn) -> Result<HashSet<TransactionId>> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn)?;
         let dir = TwoPhaseDirectory::des(&buf)?;
@@ -356,11 +351,11 @@ pub trait DatadirTimeline: Timeline {
         Ok(dir.xids)
     }
 
-    fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
         self.get(CONTROLFILE_KEY, lsn)
     }
 
-    fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
+    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
         self.get(CHECKPOINT_KEY, lsn)
     }
 
@@ -369,7 +364,7 @@ pub trait DatadirTimeline: Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
+    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn)?;
         let dbdir = DbDirectory::des(&buf)?;
@@ -391,7 +386,7 @@ pub trait DatadirTimeline: Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
+    pub fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -465,27 +460,54 @@ pub trait DatadirTimeline: Timeline {
     }
 
     /// Get cached size of relation if it not updated after specified LSN
-    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber>;
+    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+        let rel_size_cache = self.rel_size_cache.read().unwrap();
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+            if lsn >= *cached_lsn {
+                return Some(*nblocks);
+            }
+        }
+        None
+    }
 
     /// Update cached relation size if there is no more recent update
-    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+    pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        match rel_size_cache.entry(tag) {
+            hash_map::Entry::Occupied(mut entry) => {
+                let cached_lsn = entry.get_mut();
+                if lsn >= cached_lsn.0 {
+                    *cached_lsn = (lsn, nblocks);
+                }
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert((lsn, nblocks));
+            }
+        }
+    }
 
     /// Store cached relation size
-    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber);
+    pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.insert(tag, (lsn, nblocks));
+    }
 
     /// Remove cached relation size
-    fn remove_cached_rel_size(&self, tag: &RelTag);
+    pub fn remove_cached_rel_size(&self, tag: &RelTag) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.remove(tag);
+    }
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
 /// updates to the repository. It is created by the 'begin_record'
 /// function. It is called for each WAL record, so that all the modifications
 /// by a one WAL record appear atomic.
-pub struct DatadirModification<'a, T: DatadirTimeline> {
+pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
     /// in the state in 'tline' yet.
-    pub tline: &'a T,
+    pub tline: &'a Timeline,
 
     /// Lsn assigned by begin_modification
     pub lsn: Lsn,
@@ -498,7 +520,7 @@ pub struct DatadirModification<'a, T: DatadirTimeline> {
     pending_nblocks: isize,
 }
 
-impl<'a, T: DatadirTimeline> DatadirModification<'a, T> {
+impl<'a> DatadirModification<'a> {
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -1371,7 +1393,7 @@ fn is_slru_block_key(key: Key) -> bool {
 pub fn create_test_timeline<R: Repository>(
     repo: R,
     timeline_id: utils::zid::ZTimelineId,
-) -> Result<std::sync::Arc<R::Timeline>> {
+) -> Result<std::sync::Arc<Timeline>> {
     let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;

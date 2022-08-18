@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -43,7 +43,6 @@ use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
-use crate::DatadirTimeline;
 
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
@@ -52,7 +51,7 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::repository::{GcResult, RepositoryTimeline, Timeline, TimelineWriter};
+use crate::repository::{GcResult, RepositoryTimeline, TimelineWriter};
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
@@ -160,7 +159,7 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
 
 #[derive(Clone)]
 pub enum LayeredTimelineEntry {
-    Loaded(Arc<LayeredTimeline>),
+    Loaded(Arc<Timeline>),
     Unloaded {
         id: ZTimelineId,
         metadata: TimelineMetadata,
@@ -191,7 +190,7 @@ impl LayeredTimelineEntry {
         }
     }
 
-    fn ensure_loaded(&self) -> anyhow::Result<&Arc<LayeredTimeline>> {
+    fn ensure_loaded(&self) -> anyhow::Result<&Arc<Timeline>> {
         match self {
             LayeredTimelineEntry::Loaded(timeline) => Ok(timeline),
             LayeredTimelineEntry::Unloaded { .. } => {
@@ -213,7 +212,7 @@ impl LayeredTimelineEntry {
     }
 }
 
-impl From<LayeredTimelineEntry> for RepositoryTimeline<LayeredTimeline> {
+impl From<LayeredTimelineEntry> for RepositoryTimeline<Timeline> {
     fn from(entry: LayeredTimelineEntry) -> Self {
         match entry {
             LayeredTimelineEntry::Loaded(timeline) => RepositoryTimeline::Loaded(timeline as _),
@@ -288,7 +287,7 @@ impl TimelineMetrics {
     }
 }
 
-pub struct LayeredTimeline {
+pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
@@ -385,53 +384,13 @@ pub struct LayeredTimeline {
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
 
     /// Relation size cache
-    rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
 }
 
 pub struct WalReceiverInfo {
     pub wal_source_connstr: String,
     pub last_received_msg_lsn: Lsn,
     pub last_received_msg_ts: u128,
-}
-
-/// Inherit all the functions from DatadirTimeline, to provide the
-/// functionality to store PostgreSQL relations, SLRUs, etc. in a
-/// LayeredTimeline.
-impl DatadirTimeline for LayeredTimeline {
-    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
-        let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
-            if lsn >= *cached_lsn {
-                return Some(*nblocks);
-            }
-        }
-        None
-    }
-
-    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        match rel_size_cache.entry(tag) {
-            Entry::Occupied(mut entry) => {
-                let cached_lsn = entry.get_mut();
-                if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
-            }
-        }
-    }
-
-    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.insert(tag, (lsn, nblocks));
-    }
-
-    fn remove_cached_rel_size(&self, tag: &RelTag) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.remove(tag);
-    }
 }
 
 ///
@@ -464,45 +423,37 @@ pub struct GcInfo {
 }
 
 /// Public interface functions
-impl Timeline for LayeredTimeline {
-    fn get_ancestor_lsn(&self) -> Lsn {
+impl Timeline {
+    //------------------------------------------------------------------------------
+    // Public GET functions
+    //------------------------------------------------------------------------------
+
+    /// Get the LSN where this branch was created
+    pub fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
     }
 
-    fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
+    /// Get the ancestor's timeline id
+    pub fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
         self.ancestor_timeline
             .as_ref()
             .map(LayeredTimelineEntry::timeline_id)
     }
 
-    /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
-        // This should never be called from the WAL receiver thread, because that could lead
-        // to a deadlock.
-        ensure!(
-            !IS_WAL_RECEIVER.with(|c| c.get()),
-            "wait_lsn called by WAL receiver thread"
-        );
-
-        self.metrics.wait_lsn_time_histo.observe_closure_duration(
-            || self.last_record_lsn
-                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-                .with_context(|| {
-                    format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                    )
-                }))?;
-
-        Ok(())
-    }
-
-    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
+    /// Lock and get timeline's GC cuttof
+    pub fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read().unwrap()
     }
 
-    /// Look up the value with the given a key
-    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
+    /// Look up given page version.
+    ///
+    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
+    /// above this needs to store suitable metadata to track what data exists with
+    /// what keys, in separate metadata entries. If a non-existent key is requested,
+    /// the Repository implementation may incorrectly return a value from an ancestor
+    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
+    ///
+    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -531,68 +482,31 @@ impl Timeline for LayeredTimeline {
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
-    /// Public entry point for checkpoint(). All the logic is in the private
-    /// checkpoint_internal function, this public facade just wraps it for
-    /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
-        match cconf {
-            CheckpointConfig::Flush => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)
-            }
-            CheckpointConfig::Forced => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)?;
-                self.compact()
-            }
-        }
-    }
-
-    ///
-    /// Validate lsn against initdb_lsn and latest_gc_cutoff_lsn.
-    ///
-    fn check_lsn_is_in_scope(
-        &self,
-        lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
-    ) -> Result<()> {
-        ensure!(
-            lsn >= **latest_gc_cutoff_lsn,
-            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
-            lsn,
-            **latest_gc_cutoff_lsn,
-        );
-        Ok(())
-    }
-
-    fn get_last_record_lsn(&self) -> Lsn {
+    /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
+    pub fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
     }
 
-    fn get_prev_record_lsn(&self) -> Lsn {
+    pub fn get_prev_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().prev
     }
 
-    fn get_last_record_rlsn(&self) -> RecordLsn {
+    /// Atomically get both last and prev.
+    pub fn get_last_record_rlsn(&self) -> RecordLsn {
         self.last_record_lsn.load()
     }
 
-    fn get_disk_consistent_lsn(&self) -> Lsn {
+    pub fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
     }
 
-    fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
-        Box::new(LayeredTimelineWriter {
-            tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
-        })
-    }
-
-    fn get_physical_size(&self) -> u64 {
+    /// Get the physical size of the timeline at the latest LSN
+    pub fn get_physical_size(&self) -> u64 {
         self.metrics.current_physical_size_gauge.get()
     }
 
-    fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
+    /// Get the physical size of the timeline at the latest LSN non incrementally
+    pub fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
@@ -611,9 +525,89 @@ impl Timeline for LayeredTimeline {
 
         Ok(total_physical_size)
     }
+
+    ///
+    /// Wait until WAL has been received and processed up to this LSN.
+    ///
+    /// You should call this before any of the other get_* or list_* functions. Calling
+    /// those functions with an LSN that has been processed yet is an error.
+    ///
+    pub fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+        // This should never be called from the WAL receiver thread, because that could lead
+        // to a deadlock.
+        ensure!(
+            !IS_WAL_RECEIVER.with(|c| c.get()),
+            "wait_lsn called by WAL receiver thread"
+        );
+
+        self.metrics.wait_lsn_time_histo.observe_closure_duration(
+            || self.last_record_lsn
+                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
+                .with_context(|| {
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                    )
+                }))?;
+
+        Ok(())
+    }
+
+    /// Check that it is valid to request operations with that lsn.
+    pub fn check_lsn_is_in_scope(
+        &self,
+        lsn: Lsn,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<()> {
+        ensure!(
+            lsn >= **latest_gc_cutoff_lsn,
+            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            lsn,
+            **latest_gc_cutoff_lsn,
+        );
+        Ok(())
+    }
+
+    //------------------------------------------------------------------------------
+    // Public PUT functions, to update the repository with new page versions.
+    //
+    // These are called by the WAL receiver to digest WAL records.
+    //------------------------------------------------------------------------------
+
+    /// Flush to disk all data that was written with the put_* functions
+    ///
+    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
+    /// know anything about them here in the repository.
+    pub fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
+        match cconf {
+            CheckpointConfig::Flush => {
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)
+            }
+            CheckpointConfig::Forced => {
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)?;
+                self.compact()
+            }
+        }
+    }
+
+    /// Mutate the timeline with a [`TimelineWriter`].
+    ///
+    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
+    /// is a generic type in this trait. But that doesn't currently work in
+    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
+    /// TODO kb replace with the concrete type
+    pub fn writer<'a>(&'a self) -> Box<dyn TimelineWriter + 'a> {
+        Box::new(LayeredTimelineWriter {
+            tl: self,
+            _write_guard: self.write_lock.lock().unwrap(),
+        })
+    }
 }
 
-impl LayeredTimeline {
+// Private functions
+impl Timeline {
     fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -662,8 +656,8 @@ impl LayeredTimeline {
         tenant_id: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
-    ) -> LayeredTimeline {
-        let mut result = LayeredTimeline {
+    ) -> Timeline {
+        let mut result = Timeline {
             conf,
             tenant_conf,
             timeline_id,
@@ -1014,7 +1008,7 @@ impl LayeredTimeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
+    fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
         let ancestor = self
             .ancestor_timeline
             .as_ref()
@@ -1135,7 +1129,7 @@ impl LayeredTimeline {
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
     ///
-    pub fn check_checkpoint_distance(self: &Arc<LayeredTimeline>) -> Result<()> {
+    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap();
         if let Some(open_layer) = &layers.open_layer {
@@ -2211,12 +2205,12 @@ fn layer_traversal_error(
 }
 
 struct LayeredTimelineWriter<'a> {
-    tl: &'a LayeredTimeline,
+    tl: &'a Timeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
 impl Deref for LayeredTimelineWriter<'_> {
-    type Target = dyn Timeline;
+    type Target = Timeline;
 
     fn deref(&self) -> &Self::Target {
         self.tl

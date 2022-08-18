@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{layered_repository::LayeredTimeline, repository::Timeline};
+use crate::layered_repository::Timeline;
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use etcd_broker::{
@@ -39,7 +39,7 @@ pub(super) fn spawn_connection_manager_task(
     id: ZTenantTimelineId,
     broker_loop_prefix: String,
     mut client: Client,
-    local_timeline: Arc<LayeredTimeline>,
+    local_timeline: Arc<Timeline>,
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
@@ -242,7 +242,7 @@ const WALCONNECTION_RETRY_BACKOFF_MULTIPLIER: f64 = 1.5;
 struct WalreceiverState {
     id: ZTenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
-    local_timeline: Arc<LayeredTimeline>,
+    local_timeline: Arc<Timeline>,
     /// The timeout on the connection to safekeeper for WAL streaming.
     wal_connect_timeout: Duration,
     /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
@@ -300,7 +300,7 @@ struct EtcdSkTimeline {
 impl WalreceiverState {
     fn new(
         id: ZTenantTimelineId,
-        local_timeline: Arc<LayeredTimeline>,
+        local_timeline: Arc<Timeline>,
         wal_connect_timeout: Duration,
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,

@@ -20,15 +20,15 @@ use utils::{
 
 use crate::import_datadir;
 use crate::tenant_mgr;
+use crate::CheckpointConfig;
 use crate::{
     config::PageServerConf, repository::Repository, storage_sync::index::RemoteIndex,
     tenant_config::TenantConfOpt,
 };
 use crate::{
-    layered_repository::{LayeredRepository, LayeredTimeline},
+    layered_repository::{LayeredRepository, Timeline},
     walredo::WalRedoManager,
 };
-use crate::{repository::Timeline, CheckpointConfig};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
@@ -160,7 +160,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<(ZTimelineId, Arc<LayeredTimeline>)>> {
+) -> Result<Option<(ZTimelineId, Arc<Timeline>)>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
