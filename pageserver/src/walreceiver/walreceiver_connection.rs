@@ -21,8 +21,10 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use super::TaskEvent;
 use crate::{
     layered_repository::{LayeredTimeline, WalReceiverInfo},
-    pgdatadir_mapping::DatadirTimeline, repository::Timeline,
-    walingest::WalIngest, walrecord::DecodedWALRecord,
+    pgdatadir_mapping::DatadirTimeline,
+    repository::Timeline,
+    walingest::WalIngest,
+    walrecord::DecodedWALRecord,
 };
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
@@ -246,8 +248,12 @@ pub async fn handle_walreceiver_connection(
             _ => None,
         };
 
-        timeline.check_checkpoint_distance()
-            .with_context(|| format!("Failed to check checkpoint distance for timeline {}", timeline.timeline_id))?;
+        timeline.check_checkpoint_distance().with_context(|| {
+            format!(
+                "Failed to check checkpoint distance for timeline {}",
+                timeline.timeline_id
+            )
+        })?;
 
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn =

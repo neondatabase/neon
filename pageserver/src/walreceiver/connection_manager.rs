@@ -27,9 +27,8 @@ use tokio::select;
 use tracing::*;
 
 use crate::{
-    exponential_backoff,
-    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
-    walreceiver::get_etcd_client,
+    exponential_backoff, walreceiver::get_etcd_client, DEFAULT_BASE_BACKOFF_SECONDS,
+    DEFAULT_MAX_BACKOFF_SECONDS,
 };
 use utils::{
     lsn::Lsn,

@@ -226,7 +226,12 @@ fn import_slru<Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(walpath: &Path, tline: &LayeredTimeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
+fn import_wal(
+    walpath: &Path,
+    tline: &LayeredTimeline,
+    startpoint: Lsn,
+    endpoint: Lsn,
+) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
