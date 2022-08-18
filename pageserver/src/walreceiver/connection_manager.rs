@@ -128,7 +128,7 @@ async fn connection_manager_loop_step(
                             Ok(()) => debug!("WAL receiving task finished"),
                             Err(e) => warn!("WAL receiving task failed: {e}"),
                         };
-                        walreceiver_state.drop_old_connection().await;
+                        walreceiver_state.drop_old_connection(false).await;
                     },
                 }
             },
@@ -319,7 +319,7 @@ impl WalreceiverState {
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk_id: NodeId, new_wal_source_connstr: String) {
-        self.drop_old_connection().await;
+        self.drop_old_connection(true).await;
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
@@ -357,13 +357,15 @@ impl WalreceiverState {
 
     /// Drops the current connection (if any) and updates retry timeout for the next
     /// connection attempt to the same safekeeper.
-    async fn drop_old_connection(&mut self) {
+    async fn drop_old_connection(&mut self, needs_shutdown: bool) {
         let wal_connection = match self.wal_connection.take() {
             Some(wal_connection) => wal_connection,
             None => return,
         };
 
-        wal_connection.connection_task.shutdown().await;
+        if needs_shutdown {
+            wal_connection.connection_task.shutdown().await;
+        }
 
         let retry = self
             .wal_connection_retries
