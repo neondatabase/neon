@@ -1,9 +1,9 @@
+import uuid
 from threading import Thread
 from uuid import uuid4
-import uuid
+
 import psycopg2
 import pytest
-
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
 
@@ -11,7 +11,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiExc
 def do_gc_target(env: NeonEnv, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
-        env.pageserver.safe_psql(f'do_gc {tenant_id.hex} {timeline_id.hex} 0')
+        env.pageserver.safe_psql(f"do_gc {tenant_id.hex} {timeline_id.hex} 0")
     except Exception as e:
         log.error("do_gc failed: %s", e)
 
@@ -22,8 +22,10 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # first check for non existing tenant
     tenant_id = uuid4()
-    with pytest.raises(expected_exception=NeonPageserverApiException,
-                       match=f'Tenant not found for id {tenant_id.hex}'):
+    with pytest.raises(
+        expected_exception=NeonPageserverApiException,
+        match=f"Tenant not found for id {tenant_id.hex}",
+    ):
         pageserver_http.tenant_detach(tenant_id)
 
     # create new nenant
@@ -32,17 +34,20 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / tenant_id.hex).exists()
 
-    pg = env.postgres.create_start('main', tenant_id=tenant_id)
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
-    pg.safe_psql_many(queries=[
-        'CREATE TABLE t(key int primary key, value text)',
-        'INSERT INTO t SELECT generate_series(1,100000), \'payload\'',
-    ])
+    pg.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
 
     # gc should not try to even start
-    with pytest.raises(expected_exception=psycopg2.DatabaseError,
-                       match='gc target timeline does not exist'):
-        env.pageserver.safe_psql(f'do_gc {tenant_id.hex} {uuid4().hex} 0')
+    with pytest.raises(
+        expected_exception=psycopg2.DatabaseError, match="gc target timeline does not exist"
+    ):
+        env.pageserver.safe_psql(f"do_gc {tenant_id.hex} {uuid4().hex} 0")
 
     # try to concurrently run gc and detach
     gc_thread = Thread(target=lambda: do_gc_target(env, tenant_id, timeline_id))
@@ -67,6 +72,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / tenant_id.hex).exists()
 
-    with pytest.raises(expected_exception=psycopg2.DatabaseError,
-                       match=f'Tenant {tenant_id.hex} not found'):
-        env.pageserver.safe_psql(f'do_gc {tenant_id.hex} {timeline_id.hex} 0')
+    with pytest.raises(
+        expected_exception=psycopg2.DatabaseError, match=f"Tenant {tenant_id.hex} not found"
+    ):
+        env.pageserver.safe_psql(f"do_gc {tenant_id.hex} {timeline_id.hex} 0")

@@ -1,8 +1,8 @@
 import asyncio
 import random
 
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
 from fixtures.utils import query_scalar
 
 # Test configuration
@@ -24,7 +24,7 @@ async def update_table(pg: Postgres):
     while updates_performed < updates_to_perform:
         updates_performed += 1
         id = random.randrange(1, num_rows)
-        row = await pg_conn.fetchrow(f'UPDATE foo SET counter = counter + 1 WHERE id = {id}')
+        row = await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
 
 
 # Perform aggressive GC with 0 horizon
@@ -57,24 +57,26 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_gc_aggressive", "main")
-    pg = env.postgres.create_start('test_gc_aggressive')
-    log.info('postgres is running on test_gc_aggressive branch')
+    pg = env.postgres.create_start("test_gc_aggressive")
+    log.info("postgres is running on test_gc_aggressive branch")
 
     with pg.cursor() as cur:
         timeline = query_scalar(cur, "SHOW neon.timeline_id")
 
         # Create table, and insert the first 100 rows
-        cur.execute('CREATE TABLE foo (id int, counter int, t text)')
-        cur.execute(f'''
+        cur.execute("CREATE TABLE foo (id int, counter int, t text)")
+        cur.execute(
+            f"""
             INSERT INTO foo
                 SELECT g, 0, 'long string to consume some space' || g
                 FROM generate_series(1, {num_rows}) g
-        ''')
-        cur.execute('CREATE INDEX ON foo(id)')
+        """
+        )
+        cur.execute("CREATE INDEX ON foo(id)")
 
         asyncio.run(update_and_gc(env, pg, timeline))
 
-        cur.execute('SELECT COUNT(*), SUM(counter) FROM foo')
+        cur.execute("SELECT COUNT(*), SUM(counter) FROM foo")
         r = cur.fetchone()
         assert r is not None
         assert r == (num_rows, updates_to_perform)

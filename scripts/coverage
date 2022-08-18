@@ -9,13 +9,6 @@
 #  * https://github.com/taiki-e/cargo-llvm-cov
 #  * https://github.com/llvm/llvm-project/tree/main/llvm/test/tools/llvm-cov
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from textwrap import dedent
-from typing import Any, Dict, Iterator, Iterable, List, Optional
-
 import argparse
 import hashlib
 import json
@@ -24,6 +17,12 @@ import shutil
 import socket
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from textwrap import dedent
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
 def file_mtime_or_zero(path: Path) -> int:

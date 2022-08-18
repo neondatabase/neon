@@ -1,15 +1,15 @@
+import os
 from contextlib import closing
 from datetime import datetime
-import os
-import pytest
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import lsn_to_hex
 
 
-@pytest.mark.parametrize('with_safekeepers', [False, True])
+@pytest.mark.parametrize("with_safekeepers", [False, True])
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers: bool):
     if with_safekeepers:
         neon_env_builder.num_safekeepers = 3
@@ -19,17 +19,19 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers:
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
-    env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                 tenant_id=tenant_1)
-    env.neon_cli.create_timeline(f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
-                                 tenant_id=tenant_2)
+    env.neon_cli.create_timeline(
+        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_1
+    )
+    env.neon_cli.create_timeline(
+        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}", tenant_id=tenant_2
+    )
 
     pg_tenant1 = env.postgres.create_start(
-        f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
+        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
         tenant_id=tenant_1,
     )
     pg_tenant2 = env.postgres.create_start(
-        f'test_tenants_normal_work_with_safekeepers{with_safekeepers}',
+        f"test_tenants_normal_work_with_safekeepers{with_safekeepers}",
         tenant_id=tenant_2,
     )
 
@@ -41,7 +43,7 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder, with_safekeepers:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
-                assert cur.fetchone() == (5000050000, )
+                assert cur.fetchone() == (5000050000,)
 
 
 def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
@@ -51,11 +53,11 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
-    timeline_1 = env.neon_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_1)
-    timeline_2 = env.neon_cli.create_timeline('test_metrics_normal_work', tenant_id=tenant_2)
+    timeline_1 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
+    timeline_2 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start('test_metrics_normal_work', tenant_id=tenant_1)
-    pg_tenant2 = env.postgres.create_start('test_metrics_normal_work', tenant_id=tenant_2)
+    pg_tenant1 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_1)
+    pg_tenant2 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_2)
 
     for pg in [pg_tenant1, pg_tenant2]:
         with closing(pg.connect()) as conn:
@@ -63,29 +65,28 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
-                assert cur.fetchone() == (5000050000, )
+                assert cur.fetchone() == (5000050000,)
 
     collected_metrics = {
         "pageserver": env.pageserver.http_client().get_metrics(),
     }
     for sk in env.safekeepers:
-        collected_metrics[f'safekeeper{sk.id}'] = sk.http_client().get_metrics_str()
+        collected_metrics[f"safekeeper{sk.id}"] = sk.http_client().get_metrics_str()
 
     for name in collected_metrics:
-        basepath = os.path.join(neon_env_builder.repo_dir, f'{name}.metrics')
+        basepath = os.path.join(neon_env_builder.repo_dir, f"{name}.metrics")
 
-        with open(basepath, 'w') as stdout_f:
+        with open(basepath, "w") as stdout_f:
             print(collected_metrics[name], file=stdout_f, flush=True)
 
     all_metrics = [parse_metrics(m, name) for name, m in collected_metrics.items()]
     ps_metrics = all_metrics[0]
     sk_metrics = all_metrics[1:]
 
-    ttids = [{
-        'tenant_id': tenant_1.hex, 'timeline_id': timeline_1.hex
-    }, {
-        'tenant_id': tenant_2.hex, 'timeline_id': timeline_2.hex
-    }]
+    ttids = [
+        {"tenant_id": tenant_1.hex, "timeline_id": timeline_1.hex},
+        {"tenant_id": tenant_2.hex, "timeline_id": timeline_2.hex},
+    ]
 
     # Test metrics per timeline
     for tt in ttids:
@@ -105,7 +106,8 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         log.info(f"Checking common metrics for {metrics.name}")
 
         log.info(
-            f"process_cpu_seconds_total: {metrics.query_one('process_cpu_seconds_total').value}")
+            f"process_cpu_seconds_total: {metrics.query_one('process_cpu_seconds_total').value}"
+        )
         log.info(f"process_threads: {int(metrics.query_one('process_threads').value)}")
         log.info(
             f"process_resident_memory_bytes (MB): {metrics.query_one('process_resident_memory_bytes').value / 1024 / 1024}"

@@ -1,14 +1,24 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
-import shutil, os
-from pathlib import Path
+import os
+import shutil
 import time
+from pathlib import Path
 from uuid import UUID
-from fixtures.neon_fixtures import NeonEnvBuilder, RemoteStorageKind, assert_timeline_local, available_remote_storages, wait_until, wait_for_last_record_lsn, wait_for_upload
-from fixtures.log_helper import log
-from fixtures.utils import lsn_from_hex, query_scalar
+
 import pytest
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    RemoteStorageKind,
+    assert_timeline_local,
+    available_remote_storages,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+    wait_until,
+)
+from fixtures.utils import lsn_from_hex, query_scalar
 
 
 #
@@ -28,7 +38,7 @@ import pytest
 #   * queries the specific data, ensuring that it matches the one stored before
 #
 # The tests are done for all types of remote storage pageserver supports.
-@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
 def test_remote_storage_backup_and_restore(
     neon_env_builder: NeonEnvBuilder,
     remote_storatge_kind: RemoteStorageKind,
@@ -39,15 +49,15 @@ def test_remote_storage_backup_and_restore(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storatge_kind,
-        test_name='test_remote_storage_backup_and_restore',
+        test_name="test_remote_storage_backup_and_restore",
     )
 
     data_id = 1
-    data_secret = 'very secret secret'
+    data_secret = "very secret secret"
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
-    pg = env.postgres.create_start('main')
+    pg = env.postgres.create_start("main")
 
     client = env.pageserver.http_client()
 
@@ -58,10 +68,12 @@ def test_remote_storage_backup_and_restore(
 
     for checkpoint_number in checkpoint_numbers:
         with pg.cursor() as cur:
-            cur.execute(f'''
+            cur.execute(
+                f"""
                 CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
                 INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
-            ''')
+            """
+            )
             current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
@@ -70,16 +82,16 @@ def test_remote_storage_backup_and_restore(
         # run checkpoint manually to be sure that data landed in remote storage
         env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
 
-        log.info(f'waiting for checkpoint {checkpoint_number} upload')
+        log.info(f"waiting for checkpoint {checkpoint_number} upload")
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         wait_for_upload(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
-        log.info(f'upload of checkpoint {checkpoint_number} is done')
+        log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / 'tenants'
+    dir_to_clear = Path(env.repo_dir) / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -100,8 +112,8 @@ def test_remote_storage_backup_and_restore(
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail with active failpoint: %s", detail)
-    assert detail['local'] is None
-    assert detail['remote']['awaits_download']
+    assert detail["local"] is None
+    assert detail["remote"]["awaits_download"]
 
     # trigger temporary download files removal
     env.pageserver.stop()
@@ -110,19 +122,24 @@ def test_remote_storage_backup_and_restore(
     client.tenant_attach(UUID(tenant_id))
 
     log.info("waiting for timeline redownload")
-    wait_until(number_of_iterations=20,
-               interval=1,
-               func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)))
+    wait_until(
+        number_of_iterations=20,
+        interval=1,
+        func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)),
+    )
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
-    assert detail['local'] is not None
+    assert detail["local"] is not None
     log.info("Timeline detail after attach completed: %s", detail)
-    assert lsn_from_hex(detail['local']['last_record_lsn']) >= current_lsn, 'current db Lsn should should not be less than the one stored on remote storage'
-    assert not detail['remote']['awaits_download']
+    assert (
+        lsn_from_hex(detail["local"]["last_record_lsn"]) >= current_lsn
+    ), "current db Lsn should should not be less than the one stored on remote storage"
+    assert not detail["remote"]["awaits_download"]
 
-    pg = env.postgres.create_start('main')
+    pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
-            assert query_scalar(cur,
-                                f'SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};'
-                                ) == f'{data_secret}|{checkpoint_number}'
+            assert (
+                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data_secret}|{checkpoint_number}"
+            )

@@ -20,20 +20,21 @@
 # For more context on how to use this, see:
 # https://github.com/neondatabase/cloud/wiki/Storage-format-migration
 
-import os
-from os import path
-import shutil
-from pathlib import Path
-import tempfile
-from contextlib import closing
-import psycopg2
-import subprocess
 import argparse
+import os
+import shutil
+import subprocess
+import tempfile
 import time
-import requests
 import uuid
+from contextlib import closing
+from os import path
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
+
+import psycopg2
+import requests
 from psycopg2.extensions import connection as PgConnection
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 
 ###############################################
 ### client-side utils copied from test fixtures
@@ -45,7 +46,7 @@ _global_counter = 0
 
 
 def global_counter() -> int:
-    """ A really dumb global counter.
+    """A really dumb global counter.
     This is useful for giving output files a unique number, so if we run the
     same command multiple times we can keep their output separate.
     """
@@ -55,7 +56,7 @@ def global_counter() -> int:
 
 
 def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
-    """ Run a process and capture its output
+    """Run a process and capture its output
     Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
     where "cmd" is the name of the program and NNN is an incrementing
     counter.
@@ -63,13 +64,13 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     Returns basepath for files with captured output.
     """
     assert type(cmd) is list
-    base = os.path.basename(cmd[0]) + '_{}'.format(global_counter())
+    base = os.path.basename(cmd[0]) + "_{}".format(global_counter())
     basepath = os.path.join(capture_dir, base)
-    stdout_filename = basepath + '.stdout'
-    stderr_filename = basepath + '.stderr'
+    stdout_filename = basepath + ".stdout"
+    stderr_filename = basepath + ".stderr"
 
-    with open(stdout_filename, 'w') as stdout_f:
-        with open(stderr_filename, 'w') as stderr_f:
+    with open(stdout_filename, "w") as stdout_f:
+        with open(stderr_filename, "w") as stderr_f:
             print('(capturing output to "{}.stdout")'.format(base))
             subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
 
@@ -77,15 +78,16 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
 
 
 class PgBin:
-    """ A helper class for executing postgres binaries """
+    """A helper class for executing postgres binaries"""
+
     def __init__(self, log_dir: Path, pg_distrib_dir):
         self.log_dir = log_dir
-        self.pg_bin_path = os.path.join(str(pg_distrib_dir), 'bin')
+        self.pg_bin_path = os.path.join(str(pg_distrib_dir), "bin")
         self.env = os.environ.copy()
-        self.env['LD_LIBRARY_PATH'] = os.path.join(str(pg_distrib_dir), 'lib')
+        self.env["LD_LIBRARY_PATH"] = os.path.join(str(pg_distrib_dir), "lib")
 
     def _fixpath(self, command: List[str]):
-        if '/' not in command[0]:
+        if "/" not in command[0]:
             command[0] = os.path.join(self.pg_bin_path, command[0])
 
     def _build_env(self, env_add: Optional[Env]) -> Env:
@@ -106,15 +108,17 @@ class PgBin:
         """
 
         self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
+        print('Running command "{}"'.format(" ".join(command)))
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
-    def run_capture(self,
-                    command: List[str],
-                    env: Optional[Env] = None,
-                    cwd: Optional[str] = None,
-                    **kwargs: Any) -> str:
+    def run_capture(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
         This is just like `run`, but for chatty programs. Returns basepath for files
@@ -122,35 +126,33 @@ class PgBin:
         """
 
         self._fixpath(command)
-        print('Running command "{}"'.format(' '.join(command)))
+        print('Running command "{}"'.format(" ".join(command)))
         env = self._build_env(env)
-        return subprocess_capture(str(self.log_dir),
-                                  command,
-                                  env=env,
-                                  cwd=cwd,
-                                  check=True,
-                                  **kwargs)
+        return subprocess_capture(
+            str(self.log_dir), command, env=env, cwd=cwd, check=True, **kwargs
+        )
 
 
 class PgProtocol:
-    """ Reusable connection logic """
+    """Reusable connection logic"""
+
     def __init__(self, **kwargs):
         self.default_options = kwargs
 
     def conn_options(self, **kwargs):
         conn_options = self.default_options.copy()
-        if 'dsn' in kwargs:
-            conn_options.update(parse_dsn(kwargs['dsn']))
+        if "dsn" in kwargs:
+            conn_options.update(parse_dsn(kwargs["dsn"]))
         conn_options.update(kwargs)
 
         # Individual statement timeout in seconds. 2 minutes should be
         # enough for our tests, but if you need a longer, you can
         # change it by calling "SET statement_timeout" after
         # connecting.
-        if 'options' in conn_options:
-            conn_options['options'] = f"-cstatement_timeout=120s " + conn_options['options']
+        if "options" in conn_options:
+            conn_options["options"] = f"-cstatement_timeout=120s " + conn_options["options"]
         else:
-            conn_options['options'] = "-cstatement_timeout=120s"
+            conn_options["options"] = "-cstatement_timeout=120s"
         return conn_options
 
     # autocommit=True here by default because that's what we need most of the time
@@ -194,18 +196,18 @@ class PgProtocol:
 
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init=True):
-        super().__init__(host='localhost', port=port, dbname='postgres')
+        super().__init__(host="localhost", port=port, dbname="postgres")
         self.pgdatadir = pgdatadir
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(['initdb', '-D', str(pgdatadir)])
+            self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
-        with open(os.path.join(self.pgdatadir, 'postgresql.conf'), 'a') as conf_file:
+        with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
 
     def start(self, log_path: Optional[str] = None):
@@ -216,12 +218,13 @@ class VanillaPostgres(PgProtocol):
             log_path = os.path.join(self.pgdatadir, "pg.log")
 
         self.pg_bin.run_capture(
-            ['pg_ctl', '-w', '-D', str(self.pgdatadir), '-l', log_path, 'start'])
+            ["pg_ctl", "-w", "-D", str(self.pgdatadir), "-l", log_path, "start"]
+        )
 
     def stop(self):
         assert self.running
         self.running = False
-        self.pg_bin.run_capture(['pg_ctl', '-w', '-D', str(self.pgdatadir), 'stop'])
+        self.pg_bin.run_capture(["pg_ctl", "-w", "-D", str(self.pgdatadir), "stop"])
 
     def __enter__(self):
         return self
@@ -246,9 +249,9 @@ class NeonPageserverHttpClient(requests.Session):
             res.raise_for_status()
         except requests.RequestException as e:
             try:
-                msg = res.json()['msg']
+                msg = res.json()["msg"]
             except:
-                msg = ''
+                msg = ""
             raise NeonPageserverApiException(msg) from e
 
     def check_status(self):
@@ -265,17 +268,17 @@ class NeonPageserverHttpClient(requests.Session):
         res = self.post(
             f"http://{self.host}:{self.port}/v1/tenant",
             json={
-                'new_tenant_id': new_tenant_id.hex,
+                "new_tenant_id": new_tenant_id.hex,
             },
         )
 
         if res.status_code == 409:
             if ok_if_exists:
-                print(f'could not create tenant: already exists for id {new_tenant_id}')
+                print(f"could not create tenant: already exists for id {new_tenant_id}")
             else:
                 res.raise_for_status()
         elif res.status_code == 201:
-            print(f'created tenant {new_tenant_id}')
+            print(f"created tenant {new_tenant_id}")
         else:
             self.verbose_error(res)
 
@@ -299,47 +302,55 @@ class NeonPageserverHttpClient(requests.Session):
 
 
 def lsn_to_hex(num: int) -> str:
-    """ Convert lsn from int to standard hex notation. """
-    return "{:X}/{:X}".format(num >> 32, num & 0xffffffff)
+    """Convert lsn from int to standard hex notation."""
+    return "{:X}/{:X}".format(num >> 32, num & 0xFFFFFFFF)
 
 
 def lsn_from_hex(lsn_hex: str) -> int:
-    """ Convert lsn from hex notation to int. """
-    l, r = lsn_hex.split('/')
+    """Convert lsn from hex notation to int."""
+    l, r = lsn_hex.split("/")
     return (int(l, 16) << 32) + int(r, 16)
 
 
-def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
-                          tenant: uuid.UUID,
-                          timeline: uuid.UUID) -> int:
+def remote_consistent_lsn(
+    pageserver_http_client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
+) -> int:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
-    if detail['remote'] is None:
+    if detail["remote"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
         return 0
     else:
-        lsn_str = detail['remote']['remote_consistent_lsn']
+        lsn_str = detail["remote"]["remote_consistent_lsn"]
         assert isinstance(lsn_str, str)
         return lsn_from_hex(lsn_str)
 
 
-def wait_for_upload(pageserver_http_client: NeonPageserverHttpClient,
-                    tenant: uuid.UUID,
-                    timeline: uuid.UUID,
-                    lsn: int):
+def wait_for_upload(
+    pageserver_http_client: NeonPageserverHttpClient,
+    tenant: uuid.UUID,
+    timeline: uuid.UUID,
+    lsn: int,
+):
     """waits for local timeline upload up to specified lsn"""
     for i in range(10):
         current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
         if current_lsn >= lsn:
             return
-        print("waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
-            lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1))
+        print(
+            "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
+                lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1
+            )
+        )
         time.sleep(1)
 
-    raise Exception("timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-        lsn_to_hex(lsn), lsn_to_hex(current_lsn)))
+    raise Exception(
+        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
+            lsn_to_hex(lsn), lsn_to_hex(current_lsn)
+        )
+    )
 
 
 ##############
@@ -399,7 +410,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar):
                             # Add all template0copy paths to template0
                             prefix = f"base/{oid}/"
                             if filepath.startswith(prefix):
-                                suffix = filepath[len(prefix):]
+                                suffix = filepath[len(prefix) :]
                                 yield f"base/{template0_oid}/{suffix}"
                             elif filepath.startswith("global"):
                                 print(f"skipping {database} global file {filepath}")
@@ -451,15 +462,17 @@ def get_rlsn(pageserver_connstr, tenant_id, timeline_id):
     return last_lsn, prev_lsn
 
 
-def import_timeline(args,
-                    psql_path,
-                    pageserver_connstr,
-                    pageserver_http,
-                    tenant_id,
-                    timeline_id,
-                    last_lsn,
-                    prev_lsn,
-                    tar_filename):
+def import_timeline(
+    args,
+    psql_path,
+    pageserver_connstr,
+    pageserver_http,
+    tenant_id,
+    timeline_id,
+    last_lsn,
+    prev_lsn,
+    tar_filename,
+):
     # Import timelines to new pageserver
     import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
     full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
@@ -469,34 +482,30 @@ def import_timeline(args,
 
     print(f"Running: {full_cmd}")
 
-    with open(stdout_filename, 'w') as stdout_f:
-        with open(stderr_filename2, 'w') as stderr_f:
+    with open(stdout_filename, "w") as stdout_f:
+        with open(stderr_filename2, "w") as stderr_f:
             print(f"(capturing output to {stdout_filename})")
             pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
-            subprocess.run(full_cmd,
-                           stdout=stdout_f,
-                           stderr=stderr_f,
-                           env=pg_bin._build_env(None),
-                           shell=True,
-                           check=True)
+            subprocess.run(
+                full_cmd,
+                stdout=stdout_f,
+                stderr=stderr_f,
+                env=pg_bin._build_env(None),
+                shell=True,
+                check=True,
+            )
 
             print(f"Done import")
 
     # Wait until pageserver persists the files
-    wait_for_upload(pageserver_http,
-                    uuid.UUID(tenant_id),
-                    uuid.UUID(timeline_id),
-                    lsn_from_hex(last_lsn))
+    wait_for_upload(
+        pageserver_http, uuid.UUID(tenant_id), uuid.UUID(timeline_id), lsn_from_hex(last_lsn)
+    )
 
 
-def export_timeline(args,
-                    psql_path,
-                    pageserver_connstr,
-                    tenant_id,
-                    timeline_id,
-                    last_lsn,
-                    prev_lsn,
-                    tar_filename):
+def export_timeline(
+    args, psql_path, pageserver_connstr, tenant_id, timeline_id, last_lsn, prev_lsn, tar_filename
+):
     # Choose filenames
     incomplete_filename = tar_filename + ".incomplete"
     stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
@@ -507,15 +516,13 @@ def export_timeline(args,
 
     # Run export command
     print(f"Running: {cmd}")
-    with open(incomplete_filename, 'w') as stdout_f:
-        with open(stderr_filename, 'w') as stderr_f:
+    with open(incomplete_filename, "w") as stdout_f:
+        with open(stderr_filename, "w") as stderr_f:
             print(f"(capturing output to {incomplete_filename})")
             pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
-            subprocess.run(cmd,
-                           stdout=stdout_f,
-                           stderr=stderr_f,
-                           env=pg_bin._build_env(None),
-                           check=True)
+            subprocess.run(
+                cmd, stdout=stdout_f, stderr=stderr_f, env=pg_bin._build_env(None), check=True
+            )
 
     # Add missing rels
     pg_bin = PgBin(args.work_dir, args.pg_distrib_dir)
@@ -551,27 +558,28 @@ def main(args: argparse.Namespace):
 
         for timeline in timelines:
             # Skip timelines we don't need to export
-            if args.timelines and timeline['timeline_id'] not in args.timelines:
+            if args.timelines and timeline["timeline_id"] not in args.timelines:
                 print(f"Skipping timeline {timeline['timeline_id']}")
                 continue
 
             # Choose filenames
-            tar_filename = path.join(args.work_dir,
-                                     f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar")
+            tar_filename = path.join(
+                args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar"
+            )
 
             # Export timeline from old pageserver
             if args.only_import is False:
                 last_lsn, prev_lsn = get_rlsn(
                     old_pageserver_connstr,
-                    timeline['tenant_id'],
-                    timeline['timeline_id'],
+                    timeline["tenant_id"],
+                    timeline["timeline_id"],
                 )
                 export_timeline(
                     args,
                     psql_path,
                     old_pageserver_connstr,
-                    timeline['tenant_id'],
-                    timeline['timeline_id'],
+                    timeline["tenant_id"],
+                    timeline["timeline_id"],
                     last_lsn,
                     prev_lsn,
                     tar_filename,
@@ -583,8 +591,8 @@ def main(args: argparse.Namespace):
                 psql_path,
                 new_pageserver_connstr,
                 new_http_client,
-                timeline['tenant_id'],
-                timeline['timeline_id'],
+                timeline["tenant_id"],
+                timeline["timeline_id"],
                 last_lsn,
                 prev_lsn,
                 tar_filename,
@@ -592,117 +600,118 @@ def main(args: argparse.Namespace):
 
             # Re-export and compare
             re_export_filename = tar_filename + ".reexport"
-            export_timeline(args,
-                            psql_path,
-                            new_pageserver_connstr,
-                            timeline['tenant_id'],
-                            timeline['timeline_id'],
-                            last_lsn,
-                            prev_lsn,
-                            re_export_filename)
+            export_timeline(
+                args,
+                psql_path,
+                new_pageserver_connstr,
+                timeline["tenant_id"],
+                timeline["timeline_id"],
+                last_lsn,
+                prev_lsn,
+                re_export_filename,
+            )
 
             # Check the size is the same
-            old_size = os.path.getsize(tar_filename),
-            new_size = os.path.getsize(re_export_filename),
+            old_size = (os.path.getsize(tar_filename),)
+            new_size = (os.path.getsize(re_export_filename),)
             if old_size != new_size:
                 raise AssertionError(f"Sizes don't match old: {old_size} new: {new_size}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--tenant-id',
-        dest='tenants',
+        "--tenant-id",
+        dest="tenants",
         required=True,
-        nargs='+',
-        help='Id of the tenant to migrate. You can pass multiple arguments',
+        nargs="+",
+        help="Id of the tenant to migrate. You can pass multiple arguments",
     )
     parser.add_argument(
-        '--timeline-id',
-        dest='timelines',
+        "--timeline-id",
+        dest="timelines",
         required=False,
-        nargs='+',
-        help='Id of the timeline to migrate. You can pass multiple arguments',
+        nargs="+",
+        help="Id of the timeline to migrate. You can pass multiple arguments",
     )
     parser.add_argument(
-        '--from-host',
-        dest='old_pageserver_host',
+        "--from-host",
+        dest="old_pageserver_host",
         required=True,
-        help='Host of the pageserver to migrate data from',
+        help="Host of the pageserver to migrate data from",
     )
     parser.add_argument(
-        '--from-http-port',
-        dest='old_pageserver_http_port',
+        "--from-http-port",
+        dest="old_pageserver_http_port",
         required=False,
         type=int,
         default=9898,
-        help='HTTP port of the pageserver to migrate data from. Default: 9898',
+        help="HTTP port of the pageserver to migrate data from. Default: 9898",
     )
     parser.add_argument(
-        '--from-pg-port',
-        dest='old_pageserver_pg_port',
+        "--from-pg-port",
+        dest="old_pageserver_pg_port",
         required=False,
         type=int,
         default=6400,
-        help='pg port of the pageserver to migrate data from. Default: 6400',
+        help="pg port of the pageserver to migrate data from. Default: 6400",
     )
     parser.add_argument(
-        '--to-host',
-        dest='new_pageserver_host',
+        "--to-host",
+        dest="new_pageserver_host",
         required=True,
-        help='Host of the pageserver to migrate data to',
+        help="Host of the pageserver to migrate data to",
     )
     parser.add_argument(
-        '--to-http-port',
-        dest='new_pageserver_http_port',
+        "--to-http-port",
+        dest="new_pageserver_http_port",
         required=False,
         default=9898,
         type=int,
-        help='HTTP port of the pageserver to migrate data to. Default: 9898',
+        help="HTTP port of the pageserver to migrate data to. Default: 9898",
     )
     parser.add_argument(
-        '--to-pg-port',
-        dest='new_pageserver_pg_port',
+        "--to-pg-port",
+        dest="new_pageserver_pg_port",
         required=False,
         default=6400,
         type=int,
-        help='pg port of the pageserver to migrate data to. Default: 6400',
+        help="pg port of the pageserver to migrate data to. Default: 6400",
     )
     parser.add_argument(
-        '--ignore-tenant-exists',
-        dest='ok_if_exists',
+        "--ignore-tenant-exists",
+        dest="ok_if_exists",
         required=False,
-        help=
-        'Ignore error if we are trying to create the tenant that already exists. It can be dangerous if existing tenant already contains some data.',
+        help="Ignore error if we are trying to create the tenant that already exists. It can be dangerous if existing tenant already contains some data.",
     )
     parser.add_argument(
-        '--pg-distrib-dir',
-        dest='pg_distrib_dir',
+        "--pg-distrib-dir",
+        dest="pg_distrib_dir",
         required=False,
-        default='/usr/local/',
-        help='Path where postgres binaries are installed. Default: /usr/local/',
+        default="/usr/local/",
+        help="Path where postgres binaries are installed. Default: /usr/local/",
     )
     parser.add_argument(
-        '--psql-path',
-        dest='psql_path',
+        "--psql-path",
+        dest="psql_path",
         required=False,
-        default='/usr/local/bin/psql',
-        help='Path to the psql binary. Default: /usr/local/bin/psql',
+        default="/usr/local/bin/psql",
+        help="Path to the psql binary. Default: /usr/local/bin/psql",
     )
     parser.add_argument(
-        '--only-import',
-        dest='only_import',
+        "--only-import",
+        dest="only_import",
         required=False,
         default=False,
-        action='store_true',
-        help='Skip export and tenant creation part',
+        action="store_true",
+        help="Skip export and tenant creation part",
     )
     parser.add_argument(
-        '--work-dir',
-        dest='work_dir',
+        "--work-dir",
+        dest="work_dir",
         required=True,
         default=False,
-        help='directory where temporary tar files are stored',
+        help="directory where temporary tar files are stored",
     )
     args = parser.parse_args()
     main(args)

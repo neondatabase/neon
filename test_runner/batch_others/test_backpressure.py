@@ -1,13 +1,13 @@
+import threading
+import time
 from contextlib import closing, contextmanager
+
 import psycopg2.extras
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
-import time
-from fixtures.neon_fixtures import Postgres
-import threading
+from fixtures.neon_fixtures import NeonEnvBuilder, Postgres
 
-pytest_plugins = ("fixtures.neon_fixtures")
+pytest_plugins = "fixtures.neon_fixtures"
 
 
 @contextmanager
@@ -44,7 +44,8 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
     with pg_cur(pg) as cur:
         while not stop_event.is_set():
             try:
-                cur.execute('''
+                cur.execute(
+                    """
                 select pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn) as received_lsn_lag,
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(),disk_consistent_lsn) as disk_consistent_lsn_lag,
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(),remote_consistent_lsn) as remote_consistent_lsn_lag,
@@ -52,16 +53,19 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
                 pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_flush_lsn(),disk_consistent_lsn)),
                 pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_flush_lsn(),remote_consistent_lsn))
                 from backpressure_lsns();
-                ''')
+                """
+                )
 
                 res = cur.fetchone()
                 received_lsn_lag = res[0]
                 disk_consistent_lsn_lag = res[1]
                 remote_consistent_lsn_lag = res[2]
 
-                log.info(f"received_lsn_lag = {received_lsn_lag} ({res[3]}), "
-                         f"disk_consistent_lsn_lag = {disk_consistent_lsn_lag} ({res[4]}), "
-                         f"remote_consistent_lsn_lag = {remote_consistent_lsn_lag} ({res[5]})")
+                log.info(
+                    f"received_lsn_lag = {received_lsn_lag} ({res[3]}), "
+                    f"disk_consistent_lsn_lag = {disk_consistent_lsn_lag} ({res[4]}), "
+                    f"remote_consistent_lsn_lag = {remote_consistent_lsn_lag} ({res[5]})"
+                )
 
                 # Since feedback from pageserver is not immediate, we should allow some lag overflow
                 lag_overflow = 5 * 1024 * 1024  # 5MB
@@ -71,7 +75,9 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
                 if max_replication_flush_lag_bytes > 0:
                     assert disk_consistent_lsn_lag < max_replication_flush_lag_bytes + lag_overflow
                 if max_replication_apply_lag_bytes > 0:
-                    assert remote_consistent_lsn_lag < max_replication_apply_lag_bytes + lag_overflow
+                    assert (
+                        remote_consistent_lsn_lag < max_replication_apply_lag_bytes + lag_overflow
+                    )
 
                 time.sleep(polling_interval)
 
@@ -79,7 +85,7 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
                 log.info(f"backpressure check query failed: {e}")
                 stop_event.set()
 
-    log.info('check thread stopped')
+    log.info("check thread stopped")
 
 
 # This test illustrates how to tune backpressure to control the lag
@@ -94,10 +100,11 @@ def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interv
 def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     # Create a branch for us
-    env.neon_cli.create_branch('test_backpressure')
+    env.neon_cli.create_branch("test_backpressure")
 
-    pg = env.postgres.create_start('test_backpressure',
-                                   config_lines=['max_replication_write_lag=30MB'])
+    pg = env.postgres.create_start(
+        "test_backpressure", config_lines=["max_replication_write_lag=30MB"]
+    )
     log.info("postgres is running on 'test_backpressure' branch")
 
     # setup check thread
@@ -131,23 +138,29 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
                 rows_inserted += 100000
             except Exception as e:
                 if check_thread.is_alive():
-                    log.info('stopping check thread')
+                    log.info("stopping check thread")
                     check_stop_event.set()
                     check_thread.join()
-                    assert False, f"Exception {e} while inserting rows, but WAL lag is within configured threshold. That means backpressure is not tuned properly"
+                    assert (
+                        False
+                    ), f"Exception {e} while inserting rows, but WAL lag is within configured threshold. That means backpressure is not tuned properly"
                 else:
-                    assert False, f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
+                    assert (
+                        False
+                    ), f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
 
         log.info(f"inserted {rows_inserted} rows")
 
     if check_thread.is_alive():
-        log.info('stopping check thread')
+        log.info("stopping check thread")
         check_stop_event.set()
         check_thread.join()
-        log.info('check thread stopped')
+        log.info("check thread stopped")
     else:
-        assert False, "WAL lag overflowed configured threshold. That means backpressure doesn't work."
+        assert (
+            False
+        ), "WAL lag overflowed configured threshold. That means backpressure doesn't work."
 
 
-#TODO test_backpressure_disk_consistent_lsn_lag. Play with pageserver's checkpoint settings
-#TODO test_backpressure_remote_consistent_lsn_lag
+# TODO test_backpressure_disk_consistent_lsn_lag. Play with pageserver's checkpoint settings
+# TODO test_backpressure_remote_consistent_lsn_lag

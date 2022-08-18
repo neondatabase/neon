@@ -1,22 +1,28 @@
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
-from fixtures.neon_fixtures import pg_distrib_dir
 import os
+
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PgBin,
+    PortDistributor,
+    VanillaPostgres,
+    pg_distrib_dir,
+)
 from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000
 
 
 # Ensure that regular postgres can start from fullbackup
-def test_fullbackup(neon_env_builder: NeonEnvBuilder,
-                    pg_bin: PgBin,
-                    port_distributor: PortDistributor):
+def test_fullbackup(
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
+):
 
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch('test_fullbackup')
-    pgmain = env.postgres.create_start('test_fullbackup')
+    env.neon_cli.create_branch("test_fullbackup")
+    pgmain = env.postgres.create_start("test_fullbackup")
     log.info("postgres is running on 'test_fullbackup' branch")
 
     with pgmain.cursor() as cur:
@@ -24,16 +30,18 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
 
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
-        cur.execute(f'''CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
-                    from generate_series(1,{num_rows}) g''')
+        cur.execute(
+            f"""CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
+                    from generate_series(1,{num_rows}) g"""
+        )
         cur.execute("CHECKPOINT")
 
-        lsn = query_scalar(cur, 'SELECT pg_current_wal_insert_lsn()')
+        lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
         log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {'LD_LIBRARY_PATH': os.path.join(str(pg_distrib_dir), 'lib')}
+    psql_env = {"LD_LIBRARY_PATH": os.path.join(str(pg_distrib_dir), "lib")}
 
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"
@@ -42,13 +50,14 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
-    subprocess_capture(str(env.repo_dir),
-                       ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)])
+    subprocess_capture(
+        str(env.repo_dir), ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)]
+    )
 
     # HACK
     # fullbackup returns neon specific pg_control and first WAL segment
     # use resetwal to overwrite it
-    pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, 'pg_resetwal')
+    pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
     cmd = [pg_resetwal_path, "-D", str(restored_dir_path)]
     pg_bin.run_capture(cmd, env=psql_env)
 
@@ -56,9 +65,11 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder,
     port = port_distributor.get_port()
     with VanillaPostgres(restored_dir_path, pg_bin, port, init=False) as vanilla_pg:
         # TODO make port an optional argument
-        vanilla_pg.configure([
-            f"port={port}",
-        ])
+        vanilla_pg.configure(
+            [
+                f"port={port}",
+            ]
+        )
         vanilla_pg.start()
-        num_rows_found = vanilla_pg.safe_psql('select count(*) from tbl;', user="cloud_admin")[0][0]
+        num_rows_found = vanilla_pg.safe_psql("select count(*) from tbl;", user="cloud_admin")[0][0]
         assert num_rows == num_rows_found

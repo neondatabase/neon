@@ -8,15 +8,15 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 def test_next_xid(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    pg = env.postgres.create_start('main')
+    pg = env.postgres.create_start("main")
 
     conn = pg.connect()
     cur = conn.cursor()
-    cur.execute('CREATE TABLE t(x integer)')
+    cur.execute("CREATE TABLE t(x integer)")
 
     iterations = 32
     for i in range(1, iterations + 1):
-        print(f'iteration {i} / {iterations}')
+        print(f"iteration {i} / {iterations}")
 
         # Kill and restart the pageserver.
         pg.stop()
@@ -38,10 +38,10 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
                 # It's normal that it takes some time for the pageserver to
                 # restart, and for the connection to fail until it does. It
                 # should eventually recover, so retry until it succeeds.
-                print(f'failed: {error}')
+                print(f"failed: {error}")
                 if retries < max_retries:
                     retries += 1
-                    print(f'retry {retries} / {max_retries}')
+                    print(f"retry {retries} / {max_retries}")
                     time.sleep(retry_sleep)
                     continue
                 else:
@@ -51,4 +51,4 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
     conn = pg.connect()
     cur = conn.cursor()
     cur.execute("SELECT count(*) FROM t")
-    assert cur.fetchone() == (iterations, )
+    assert cur.fetchone() == (iterations,)

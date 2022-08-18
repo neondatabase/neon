@@ -1,8 +1,9 @@
 from contextlib import closing
-from fixtures.neon_fixtures import NeonEnv
-from fixtures.log_helper import log
+
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
+from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv
 
 
 #
@@ -23,8 +24,8 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             cur.execute("create table huge (i int, j int);")
 
             # Run INSERT, recording the time and I/O it takes
-            with env.record_pageserver_writes('pageserver_writes'):
-                with env.record_duration('insert'):
+            with env.record_pageserver_writes("pageserver_writes"):
+                with env.record_duration("insert"):
                     cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
                     env.flush()
 

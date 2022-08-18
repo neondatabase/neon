@@ -1,10 +1,11 @@
-from io import BytesIO
 import asyncio
+from io import BytesIO
+
 import asyncpg
-from fixtures.neon_fixtures import NeonEnv, Postgres, PgProtocol
-from fixtures.log_helper import log
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
+from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, PgProtocol, Postgres
 
 
 async def repeat_bytes(buf, repetitions: int):
@@ -16,7 +17,8 @@ async def copy_test_data_to_table(pg: PgProtocol, worker_id: int, table_name: st
     buf = BytesIO()
     for i in range(1000):
         buf.write(
-            f"{i}\tLoaded by worker {worker_id}. Long string to consume some space.\n".encode())
+            f"{i}\tLoaded by worker {worker_id}. Long string to consume some space.\n".encode()
+        )
     buf.seek(0)
 
     copy_input = repeat_bytes(buf.read(), 5000)
@@ -28,7 +30,7 @@ async def copy_test_data_to_table(pg: PgProtocol, worker_id: int, table_name: st
 async def parallel_load_different_tables(pg: PgProtocol, n_parallel: int):
     workers = []
     for worker_id in range(n_parallel):
-        worker = copy_test_data_to_table(pg, worker_id, f'copytest_{worker_id}')
+        worker = copy_test_data_to_table(pg, worker_id, f"copytest_{worker_id}")
         workers.append(asyncio.create_task(worker))
 
     # await all workers
@@ -43,10 +45,10 @@ def test_parallel_copy_different_tables(neon_with_baseline: PgCompare, n_paralle
     cur = conn.cursor()
 
     for worker_id in range(n_parallel):
-        cur.execute(f'CREATE TABLE copytest_{worker_id} (i int, t text)')
+        cur.execute(f"CREATE TABLE copytest_{worker_id} (i int, t text)")
 
-    with env.record_pageserver_writes('pageserver_writes'):
-        with env.record_duration('load'):
+    with env.record_pageserver_writes("pageserver_writes"):
+        with env.record_duration("load"):
             asyncio.run(parallel_load_different_tables(env.pg, n_parallel))
             env.flush()
 
@@ -57,7 +59,7 @@ def test_parallel_copy_different_tables(neon_with_baseline: PgCompare, n_paralle
 async def parallel_load_same_table(pg: PgProtocol, n_parallel: int):
     workers = []
     for worker_id in range(n_parallel):
-        worker = copy_test_data_to_table(pg, worker_id, f'copytest')
+        worker = copy_test_data_to_table(pg, worker_id, f"copytest")
         workers.append(asyncio.create_task(worker))
 
     # await all workers
@@ -70,10 +72,10 @@ def test_parallel_copy_same_table(neon_with_baseline: PgCompare, n_parallel=5):
     conn = env.pg.connect()
     cur = conn.cursor()
 
-    cur.execute(f'CREATE TABLE copytest (i int, t text)')
+    cur.execute(f"CREATE TABLE copytest (i int, t text)")
 
-    with env.record_pageserver_writes('pageserver_writes'):
-        with env.record_duration('load'):
+    with env.record_pageserver_writes("pageserver_writes"):
+        with env.record_duration("load"):
             asyncio.run(parallel_load_same_table(env.pg, n_parallel))
             env.flush()
 

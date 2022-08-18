@@ -12,8 +12,15 @@ from typing import List, Tuple
 from uuid import UUID
 
 import pytest
-
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonEnv, Postgres, RemoteStorageKind, available_remote_storages, wait_for_last_record_lsn, wait_for_upload
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    Postgres,
+    RemoteStorageKind,
+    available_remote_storages,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.utils import lsn_from_hex
 
 
@@ -28,7 +35,8 @@ async def tenant_workload(env: NeonEnv, pg: Postgres):
     await pg_conn.execute("CREATE TABLE t(key int primary key, value text)")
     for i in range(1, 100):
         await pg_conn.execute(
-            f"INSERT INTO t SELECT {i}*1000 + g, 'payload' from generate_series(1,1000) g")
+            f"INSERT INTO t SELECT {i}*1000 + g, 'payload' from generate_series(1,1000) g"
+        )
 
         # we rely upon autocommit after each statement
         # as waiting for acceptors happens there
@@ -46,11 +54,11 @@ async def all_tenants_workload(env: NeonEnv, tenants_pgs):
     await asyncio.gather(*workers)
 
 
-@pytest.mark.parametrize('remote_storatge_kind', available_remote_storages())
+@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
 def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storatge_kind,
-        test_name='test_tenants_many',
+        test_name="test_tenants_many",
     )
 
     env = neon_env_builder.init_start()
@@ -61,12 +69,13 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: Re
         # Use a tiny checkpoint distance, to create a lot of layers quickly
         tenant, _ = env.neon_cli.create_tenant(
             conf={
-                'checkpoint_distance': '5000000',
-                })
-        env.neon_cli.create_timeline(f'test_tenants_many', tenant_id=tenant)
+                "checkpoint_distance": "5000000",
+            }
+        )
+        env.neon_cli.create_timeline(f"test_tenants_many", tenant_id=tenant)
 
         pg = env.postgres.create_start(
-            f'test_tenants_many',
+            f"test_tenants_many",
             tenant_id=tenant,
         )
         tenants_pgs.append((tenant, pg))
@@ -77,7 +86,8 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: Re
     pageserver_http = env.pageserver.http_client()
     for tenant, pg in tenants_pgs:
         res = pg.safe_psql_many(
-            ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"])
+            ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"]
+        )
         tenant_id = res[0][0][0]
         timeline_id = res[1][0][0]
         current_lsn = lsn_from_hex(res[2][0][0])

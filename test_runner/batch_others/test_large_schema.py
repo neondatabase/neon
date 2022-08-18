@@ -1,7 +1,8 @@
-import time
 import os
-from fixtures.neon_fixtures import NeonEnvBuilder
+import time
+
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # This test creates large number of tables which cause large catalog.
@@ -14,7 +15,7 @@ from fixtures.log_helper import log
 def test_large_schema(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    pg = env.postgres.create_start('main')
+    pg = env.postgres.create_start("main")
 
     conn = pg.connect()
     cur = conn.cursor()
@@ -22,7 +23,7 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     tables = 2  # 10 is too much for debug build
     partitions = 1000
     for i in range(1, tables + 1):
-        print(f'iteration {i} / {tables}')
+        print(f"iteration {i} / {tables}")
 
         # Restart compute. Restart is actually not strictly needed.
         # It is done mostly because this test originally tries to model the problem reported by Ketteq.
@@ -52,10 +53,10 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
                 # It's normal that it takes some time for the pageserver to
                 # restart, and for the connection to fail until it does. It
                 # should eventually recover, so retry until it succeeds.
-                print(f'failed: {error}')
+                print(f"failed: {error}")
                 if retries < max_retries:
                     retries += 1
-                    print(f'retry {retries} / {max_retries}')
+                    print(f"retry {retries} / {max_retries}")
                     time.sleep(retry_sleep)
                     continue
                 else:
@@ -67,7 +68,7 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
 
     for i in range(1, tables + 1):
         cur.execute(f"SELECT count(*) FROM t_{i}")
-        assert cur.fetchone() == (partitions, )
+        assert cur.fetchone() == (partitions,)
 
     cur.execute("set enable_sort=off")
     cur.execute("select * from pg_depend order by refclassid, refobjid, refobjsubid")
@@ -77,6 +78,6 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
     timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant_id, timeline_id)
     for filename in os.listdir(timeline_path):
-        if filename.startswith('00000'):
-            log.info(f'layer {filename} size is {os.path.getsize(timeline_path + filename)}')
+        if filename.startswith("00000"):
+            log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
             assert os.path.getsize(timeline_path + filename) < 512_000_000

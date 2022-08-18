@@ -18,10 +18,12 @@ from fixtures.utils import subprocess_capture
         "python/asyncpg",
         pytest.param(
             "python/pg8000",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r912264281
-            marks=pytest.mark.xfail(reason="Handles SSL in incompatible with Neon way")),
+            marks=pytest.mark.xfail(reason="Handles SSL in incompatible with Neon way"),
+        ),
         pytest.param(
             "swift/PostgresClientKit",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
-            marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported")),
+            marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported"),
+        ),
         "typescript/postgresql-client",
     ],
 )
@@ -31,12 +33,14 @@ def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: st
     env_file = None
     with NamedTemporaryFile(mode="w", delete=False) as f:
         env_file = f.name
-        f.write(f"""
+        f.write(
+            f"""
             NEON_HOST={conn_options["host"]}
             NEON_DATABASE={conn_options["dbname"]}
             NEON_USER={conn_options["user"]}
             NEON_PASSWORD={conn_options["password"]}
-        """)
+        """
+        )
 
     image_tag = client.lower()
     docker_bin = shutil.which("docker")
