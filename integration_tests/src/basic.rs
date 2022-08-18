@@ -4,7 +4,6 @@ mod tests {
 
     use tokio_postgres::NoTls;
     use pg_bin::LocalPostgres;
-    use pg_bin::PgProtocol;
 
     #[tokio::test]
     async fn test_postgres_select_1() -> anyhow::Result<()> {
@@ -15,7 +14,7 @@ mod tests {
         // Get a postgres
         let mut postgres = LocalPostgres::new(pg_datadir, pg_prefix);
         postgres.start();
-        let config = postgres.conn_info();
+        let config = postgres.admin_conn_info();
 
         if let Err(e) = config.connect(NoTls).await {
             eprintln!("error error {:?}", e);

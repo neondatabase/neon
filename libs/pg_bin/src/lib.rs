@@ -2,16 +2,11 @@
 use std::{fs::{File, remove_dir_all}, path::PathBuf, process::{Child, Command, Stdio}, time::Duration};
 use std::io::Write;
 
-// TODO put these in a different mod
-type Port = u16;
-pub trait PgProtocol {
-    fn conn_info(&self) -> tokio_postgres::Config;
-}
 
 pub struct LocalPostgres {
     datadir: PathBuf,
     pg_prefix: PathBuf,
-    port: Port,
+    port: u16,
     running: Option<Child>,
 }
 
@@ -56,18 +51,8 @@ impl LocalPostgres {
 
         std::thread::sleep(Duration::from_millis(300));
     }
-}
 
-impl Drop for LocalPostgres {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.running.take() {
-            child.kill().expect("failed to kill child");
-        }
-    }
-}
-
-impl PgProtocol for LocalPostgres {
-    fn conn_info(&self) -> tokio_postgres::Config {
+    pub fn admin_conn_info(&self) -> tokio_postgres::Config {
         // I don't like this, but idk what else to do
         let whoami = Command::new("whoami").output().unwrap().stdout;
         let user = String::from_utf8_lossy(&whoami);
@@ -80,5 +65,13 @@ impl PgProtocol for LocalPostgres {
             .dbname("postgres")
             .user(&user);
         config
+    }
+}
+
+impl Drop for LocalPostgres {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.running.take() {
+            child.kill().expect("failed to kill child");
+        }
     }
 }
