@@ -15,7 +15,6 @@ log = getLogger('root.safekeeper_async')
 
 
 class BankClient(object):
-
     def __init__(self, conn: asyncpg.Connection, n_accounts, init_amount):
         self.conn: asyncpg.Connection = conn
         self.n_accounts = n_accounts
@@ -64,7 +63,6 @@ async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
 
 
 class WorkerStats(object):
-
     def __init__(self, n_workers):
         self.counters = [0] * n_workers
         self.running = True
@@ -527,7 +525,6 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
 # Check that pageserver can select safekeeper with largest commit_lsn
 # and switch if LSN is not updated for some time (NoWalTimeout).
 async def run_wal_lagging(env: NeonEnv, pg: Postgres):
-
     def safekeepers_guc(env: NeonEnv, active_sk: List[bool]) -> str:
         # use ports 10, 11 and 12 to simulate unavailable safekeepers
         return ','.join([
