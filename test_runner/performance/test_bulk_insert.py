@@ -1,9 +1,6 @@
 from contextlib import closing
 
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.compare_fixtures import PgCompare
 
 
 #

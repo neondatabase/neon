@@ -838,7 +838,7 @@ class NeonEnv:
             )
             if config.auth_enabled:
                 toml += textwrap.dedent(
-                    f"""
+                    """
                 auth_enabled = true
                 """
                 )
@@ -985,7 +985,7 @@ class NeonPageserverHttpClient(requests.Session):
         except requests.RequestException as e:
             try:
                 msg = res.json()["msg"]
-            except:
+            except:  # noqa: E722
                 msg = ""
             raise NeonPageserverApiException(msg) from e
 
@@ -1065,19 +1065,15 @@ class NeonPageserverHttpClient(requests.Session):
         include_non_incremental_logical_size: bool = False,
         include_non_incremental_physical_size: bool = False,
     ) -> Dict[Any, Any]:
-
-        include_non_incremental_logical_size_str = "0"
+        params = {}
         if include_non_incremental_logical_size:
-            include_non_incremental_logical_size_str = "1"
-
-        include_non_incremental_physical_size_str = "0"
+            params["include-non-incremental-logical-size"] = "yes"
         if include_non_incremental_physical_size:
-            include_non_incremental_physical_size_str = "1"
+            params["include-non-incremental-physical-size"] = "yes"
 
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}"
-            + "?include-non-incremental-logical-size={include_non_incremental_logical_size_str}"
-            + "&include-non-incremental-physical-size={include_non_incremental_physical_size_str}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}",
+            params=params,
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -1532,7 +1528,7 @@ class NeonPageserver(PgProtocol):
         `overrides` allows to add some config to this pageserver start.
         Returns self.
         """
-        assert self.running == False
+        assert self.running is False
 
         self.env.neon_cli.pageserver_start(overrides=overrides)
         self.running = True
@@ -1867,9 +1863,7 @@ class Postgres(PgProtocol):
 
         log.info(f"Starting postgres node {self.node_name}")
 
-        run_result = self.env.neon_cli.pg_start(
-            self.node_name, tenant_id=self.tenant_id, port=self.port
-        )
+        self.env.neon_cli.pg_start(self.node_name, tenant_id=self.tenant_id, port=self.port)
         self.running = True
 
         return self
@@ -2078,7 +2072,7 @@ class Safekeeper:
     running: bool = False
 
     def start(self) -> "Safekeeper":
-        assert self.running == False
+        assert self.running is False
         self.env.neon_cli.safekeeper_start(self.id)
         self.running = True
         # wait for wal acceptor start by checking its status
@@ -2270,7 +2264,7 @@ class Etcd:
                 # Set --quota-backend-bytes to keep the etcd virtual memory
                 # size smaller. Our test etcd clusters are very small.
                 # See https://github.com/etcd-io/etcd/issues/7910
-                f"--quota-backend-bytes=100000000",
+                "--quota-backend-bytes=100000000",
             ]
             self.handle = subprocess.Popen(args, stdout=log_file, stderr=log_file)
 
@@ -2395,7 +2389,7 @@ def should_skip_file(filename: str) -> bool:
 
     try:
         list(map(int, tmp_name))
-    except:
+    except:  # noqa: E722
         return False
     return True
 
@@ -2508,7 +2502,12 @@ def wait_until(number_of_iterations: int, interval: float, func):
 def assert_timeline_local(
     pageserver_http_client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
 ):
-    timeline_detail = pageserver_http_client.timeline_detail(tenant, timeline)
+    timeline_detail = pageserver_http_client.timeline_detail(
+        tenant,
+        timeline,
+        include_non_incremental_logical_size=True,
+        include_non_incremental_physical_size=True,
+    )
     assert timeline_detail.get("local", {}).get("disk_consistent_lsn"), timeline_detail
     return timeline_detail
 

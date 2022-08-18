@@ -1,13 +1,11 @@
 # Test sequential scan speed
 #
 from contextlib import closing
-from dataclasses import dataclass
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
 
 
 @pytest.mark.parametrize(

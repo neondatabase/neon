@@ -99,7 +99,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    env.pageserver.safe_psql(f"failpoints remote-storage-download-pre-rename=return")
+    env.pageserver.safe_psql("failpoints remote-storage-download-pre-rename=return")
 
     client.tenant_attach(UUID(tenant_id))
 

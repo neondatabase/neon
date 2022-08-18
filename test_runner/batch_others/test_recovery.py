@@ -1,7 +1,4 @@
-import json
-import os
 import time
-from ast import Assert
 from contextlib import closing
 
 import psycopg2.extras
@@ -32,8 +29,6 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     pg = env.postgres.create_start("test_pageserver_recovery")
     log.info("postgres is running on 'test_pageserver_recovery' branch")
-
-    connstr = pg.connstr()
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:

@@ -46,7 +46,7 @@ $$;
 
             # Write 3-4 MB to evict t from compute cache
             cur.execute("create table f (i integer);")
-            cur.execute(f"insert into f values (generate_series(1,100000));")
+            cur.execute("insert into f values (generate_series(1,100000));")
 
             # Read
             with env.record_duration("read"):

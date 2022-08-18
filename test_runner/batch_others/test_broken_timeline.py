@@ -1,8 +1,6 @@
 import concurrent.futures
 import os
-from contextlib import closing
 from typing import List, Tuple
-from uuid import UUID
 
 import pytest
 from fixtures.log_helper import log
@@ -24,7 +22,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         tenant_id = tenant_id_uuid.hex
         timeline_id = timeline_id_uuid.hex
 
-        pg = env.postgres.create_start(f"main", tenant_id=tenant_id_uuid)
+        pg = env.postgres.create_start("main", tenant_id=tenant_id_uuid)
         with pg.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
@@ -102,7 +100,7 @@ def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
     tenant_id, _ = env.neon_cli.create_tenant()
 
     # Introduce failpoint when creating a new timeline
-    env.pageserver.safe_psql(f"failpoints before-checkpoint-new-timeline=return")
+    env.pageserver.safe_psql("failpoints before-checkpoint-new-timeline=return")
     with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
         _ = env.neon_cli.create_timeline("test_fix_broken_timelines", tenant_id)
 

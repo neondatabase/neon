@@ -10,13 +10,9 @@
 # in LSN order, writing the oldest layer first. That creates a new 10 MB image
 # layer to be created for each of those small updates.  This is the Write
 # Amplification problem at its finest.
-import os
 from contextlib import closing
 
-from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.compare_fixtures import PgCompare
 
 
 def test_write_amplification(neon_with_baseline: PgCompare):

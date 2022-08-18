@@ -7,7 +7,6 @@
 #
 
 import asyncio
-from contextlib import closing
 from typing import List, Tuple
 from uuid import UUID
 
@@ -25,12 +24,12 @@ from fixtures.utils import lsn_from_hex
 
 
 async def tenant_workload(env: NeonEnv, pg: Postgres):
-    pageserver_conn = await env.pageserver.connect_async()
+    await env.pageserver.connect_async()
 
     pg_conn = await pg.connect_async()
 
-    tenant_id = await pg_conn.fetchval("show neon.tenant_id")
-    timeline_id = await pg_conn.fetchval("show neon.timeline_id")
+    await pg_conn.fetchval("show neon.tenant_id")
+    await pg_conn.fetchval("show neon.timeline_id")
 
     await pg_conn.execute("CREATE TABLE t(key int primary key, value text)")
     for i in range(1, 100):
@@ -72,10 +71,10 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: Re
                 "checkpoint_distance": "5000000",
             }
         )
-        env.neon_cli.create_timeline(f"test_tenants_many", tenant_id=tenant)
+        env.neon_cli.create_timeline("test_tenants_many", tenant_id=tenant)
 
         pg = env.postgres.create_start(
-            f"test_tenants_many",
+            "test_tenants_many",
             tenant_id=tenant,
         )
         tenants_pgs.append((tenant, pg))

@@ -1,16 +1,12 @@
-import os
 import pathlib
 import subprocess
 from typing import Optional
 from uuid import UUID, uuid4
 
-import pytest
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserverApiException,
     NeonPageserverHttpClient,
     neon_binpath,
     pg_distrib_dir,
@@ -24,13 +20,15 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
     repo_dir = neon_simple_env.repo_dir
     pageserver_config = repo_dir / "pageserver.toml"
     pageserver_bin = pathlib.Path(neon_binpath) / "pageserver"
-    run_pageserver = lambda args: subprocess.run(
-        [str(pageserver_bin), "-D", str(repo_dir), *args],
-        check=False,
-        universal_newlines=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+
+    def run_pageserver(args):
+        return subprocess.run(
+            [str(pageserver_bin), "-D", str(repo_dir), *args],
+            check=False,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
     # remove initial config
     pageserver_config.unlink()
