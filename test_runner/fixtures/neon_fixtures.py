@@ -328,7 +328,7 @@ class PgProtocol:
         with closing(self.connect(autocommit=autocommit, **kwargs)) as conn:
             yield conn.cursor()
 
-    async def connect_async_prepare_connection_options(self, **kwargs) -> asyncpg.Connection:
+    def connect_async_prepare_connection_options(self, **kwargs) -> asyncpg.Connection:
         """
         Connect to the node from async python.
         Returns asyncpg's connection object.
@@ -367,8 +367,11 @@ class PgProtocol:
                     else:
                         conn_options['server_settings'] = {key: val}
                 else:
-                    # invalid options
-                    assert False
+                    match_is_empty = len(match) == 0
+                    if not match_is_empty:
+                        # invalid options
+                        log.info("ASSERT match_is_emptygit d: invalid option: match = |" + match + "|; options = |" + options + "|; options.split = |" + str(options.split(" ")) + "|")
+                    assert match_is_empty
         return conn_options
 
     async def connect_async(self, callback=None, **kwargs) -> asyncpg.Connection:
