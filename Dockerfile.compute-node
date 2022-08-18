@@ -43,7 +43,7 @@ RUN cd compute_tools && cargo build --release
 # Put it all together into the final image
 FROM debian:bullseye-slim
 RUN apt update &&  \
-    apt install -y libreadline-dev libossp-uuid-dev
+    apt install -y libreadline-dev libossp-uuid-dev gdal-bin libgdal-dev libprotobuf-c-dev
 
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
@@ -51,9 +51,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
     chown -R postgres:postgres /var/db/postgres && \
     chmod 0750 /var/db/postgres/compute && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
     echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
+ENV PATH=/usr/local/pgsql/bin:$PATH
 #COPY --from=pg-build /usr/local/pgsql /usr/local/pgsq
 # TODO: Implement better approach to only copy the added files for each extension
 COPY --from=postgis-build /usr/local/pgsql /usr/local/pgsql
