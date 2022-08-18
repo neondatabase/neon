@@ -2117,7 +2117,7 @@ impl LayeredTimeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
-    ) -> Result<Bytes> {
+    ) -> anyhow::Result<Bytes> {
         // Perform WAL redo if needed
         data.records.reverse();
 
@@ -2167,13 +2167,15 @@ impl LayeredTimeline {
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
-                    cache.memorize_materialized_page(
-                        self.tenant_id,
-                        self.timeline_id,
-                        key,
-                        last_rec_lsn,
-                        &img,
-                    );
+                    cache
+                        .memorize_materialized_page(
+                            self.tenant_id,
+                            self.timeline_id,
+                            key,
+                            last_rec_lsn,
+                            &img,
+                        )
+                        .context("Materialized page memoization failed")?;
                 }
 
                 Ok(img)
