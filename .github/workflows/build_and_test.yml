@@ -469,6 +469,20 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
+  compute-node-image-ext:
+    runs-on: dev
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build compute tools
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID-ext
+
   compute-node-image:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
