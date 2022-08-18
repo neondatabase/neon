@@ -20,7 +20,7 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    layered_repository::WalReceiverInfo, repository::Repository, tenant_mgr, walingest::WalIngest,
+    layered_repository::WalReceiverInfo, tenant_mgr, walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
 use postgres_ffi::v14::waldecoder::WalStreamDecoder;

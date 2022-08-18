@@ -735,10 +735,7 @@ fn wal_stream_connection_string(
 
 #[cfg(test)]
 mod tests {
-    use crate::repository::{
-        repo_harness::{RepoHarness, TIMELINE_ID},
-        Repository,
-    };
+    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     use super::*;
 
