@@ -370,7 +370,9 @@ class PgProtocol:
                     match_is_empty = len(match) == 0
                     if not match_is_empty:
                         # invalid options
-                        log.info("ASSERT match_is_emptygit d: invalid option: match = |" + match + "|; options = |" + options + "|; options.split = |" + str(options.split(" ")) + "|")
+                        log.info("ASSERT match_is_emptygit d: invalid option: match = |" + match +
+                                 "|; options = |" + options + "|; options.split = |" +
+                                 str(options.split(" ")) + "|")
                     assert match_is_empty
         return conn_options
 
@@ -1836,7 +1838,6 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
-
     """
     pg_password = "password"
     pg_user = "proxy"
