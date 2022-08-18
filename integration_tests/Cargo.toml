@@ -1,0 +1,12 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+utils = { path = "../libs/utils" }
+tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+tokio = { version = "1.17", features = ["macros", "rt", "rt-multi-thread"] }
+anyhow = "1.0.62"

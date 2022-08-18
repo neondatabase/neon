@@ -7,6 +7,7 @@ members = [
     "safekeeper",
     "workspace_hack",
     "neon_local",
+    "integration_tests",
     "libs/*",
 ]
 
