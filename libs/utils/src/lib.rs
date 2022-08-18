@@ -54,6 +54,9 @@ pub mod nonblock;
 // Default signal handling
 pub mod signals;
 
+// Helpers for running commands
+pub mod command_extensions;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:

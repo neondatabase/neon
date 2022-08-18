@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
+utils = { path = "../utils" }

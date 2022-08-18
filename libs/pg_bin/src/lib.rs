@@ -1,57 +1,81 @@
 //! Utils for runnig postgres binaries as subprocesses.
-use std::{fs::{File, remove_dir_all}, path::PathBuf, process::{Child, Command, Stdio}, time::Duration};
+use std::{fs::{File, remove_dir_all}, path::PathBuf, process::{Child, Command}, time::Duration};
 use std::io::Write;
 
+use utils::command_extensions::NeonCommandExtensions;
 
-pub struct LocalPostgres {
-    datadir: PathBuf,
-    pg_prefix: PathBuf,
-    port: u16,
-    running: Option<Child>,
+
+pub struct PgDatadir {
+    path: PathBuf
 }
 
-impl LocalPostgres {
-    pub fn new(datadir: PathBuf, pg_prefix: PathBuf) -> Self {
-        LocalPostgres {
-            datadir,
-            pg_prefix,
-            port: 54729,
-            running: None,
+impl PgDatadir {
+    pub fn new_initdb(
+        path: PathBuf,
+        pg_prefix: &PathBuf,
+        command_output_dir: &PathBuf,
+        remove_if_exists: bool
+    ) -> Self {
+        if remove_if_exists {
+            remove_dir_all(path.clone()).ok();
         }
-    }
 
-    // TODO is this the right interface? Why not start it?
-    pub fn start(&mut self) {
-        remove_dir_all(self.datadir.as_os_str()).ok();
-
-        let status = Command::new(self.pg_prefix.join("initdb"))
+        let status = Command::new(pg_prefix.join("initdb"))
             .arg("-D")
-            .arg(self.datadir.as_os_str())
-            .stdout(Stdio::null())  // TODO to file instead
-            .stderr(Stdio::null())  // TODO to file instead
+            .arg(path.clone())
+            .capture_to_files(command_output_dir.clone(), "initdb")
             .status()
             .expect("failed to get status");
         assert!(status.success());
 
-        // Write conf
-        let mut conf = File::create(self.datadir.join("postgresql.conf"))
-            .expect("failed to create file");
-        writeln!(&mut conf, "port = {}", self.port)
-            .expect("failed to write conf");
-
-        // TODO check if already running
-        let out_file = File::create(self.datadir.join("pg.log")).expect("can't make file");
-        let err_file = File::create(self.datadir.join("pg.err")).expect("can't make file");
-        self.running.replace(Command::new(self.pg_prefix.join("postgres"))
-            .env("PGDATA", self.datadir.as_os_str())
-            .stdout(Stdio::from(out_file))
-            .stderr(Stdio::from(err_file))
-            .spawn()
-            .expect("postgres failed to spawn"));
-
-        std::thread::sleep(Duration::from_millis(300));
+        Self {
+            path
+        }
     }
 
+    pub fn load_existing(path: PathBuf) -> Self{
+        Self {
+            path
+        }
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    pub fn spawn_postgres(self, pg_prefix: PathBuf, command_output_dir: PathBuf) -> LocalPostgres {
+        let port = 54729;
+
+        // Write conf
+        // TODO don't override existing conf
+        // - instead infer port from conf
+        let mut conf = File::create(self.path().join("postgresql.conf")).expect("failed to create file");
+        writeln!(&mut conf, "port = {}", port).expect("failed to write conf");
+
+        let process = Command::new(pg_prefix.join("postgres"))
+            .env("PGDATA", self.path())
+            .capture_to_files(command_output_dir, "pg")
+            .spawn()
+            .expect("postgres failed to spawn");
+
+        // Wait until ready. TODO improve this
+        std::thread::sleep(Duration::from_millis(300));
+
+        LocalPostgres {
+            datadir: self,
+            port: 54729,
+            process,
+        }
+    }
+}
+
+pub struct LocalPostgres {
+    datadir: PgDatadir,
+    port: u16,
+    process: Child,
+}
+
+impl LocalPostgres {
     pub fn admin_conn_info(&self) -> tokio_postgres::Config {
         // I don't like this, but idk what else to do
         let whoami = Command::new("whoami").output().unwrap().stdout;
@@ -66,12 +90,17 @@ impl LocalPostgres {
             .user(&user);
         config
     }
+
+    pub fn stop(mut self) -> PgDatadir {
+        self.process.kill().expect("failed to kill child");
+        PgDatadir {
+            path: self.datadir.path.clone()
+        }
+    }
 }
 
 impl Drop for LocalPostgres {
     fn drop(&mut self) {
-        if let Some(mut child) = self.running.take() {
-            child.kill().expect("failed to kill child");
-        }
+        self.process.kill().expect("failed to kill child");
     }
 }

@@ -1994,6 +1994,7 @@ name = "pg_bin"
 version = "0.1.0"
 dependencies = [
  "tokio-postgres",
+ "utils",
 ]
 
 [[package]]

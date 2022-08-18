@@ -1,26 +1,25 @@
 #[cfg(test)]
 mod tests {
-    use pg_bin::LocalPostgres;
+    use pg_bin::PgDatadir;
     use std::path::PathBuf;
     use tokio_postgres::NoTls;
 
     #[tokio::test]
     async fn test_postgres_select_1() -> anyhow::Result<()> {
         // Test setup
-        let pg_datadir = PathBuf::from("/home/bojan/tmp/t1/");
+        let output = PathBuf::from("/home/bojan/tmp/");
         let pg_prefix = PathBuf::from("/home/bojan/src/neondatabase/neon/tmp_install/bin/");
 
-        // Get a postgres
-        let mut postgres = LocalPostgres::new(pg_datadir, pg_prefix);
-        postgres.start();
-        let config = postgres.admin_conn_info();
+        // Init datadir
+        let pg_datadir_path = PathBuf::from("/home/bojan/tmp/t1/");
+        let pg_datadir = PgDatadir::new_initdb(pg_datadir_path, &pg_prefix, &output, true);
 
-        if let Err(e) = config.connect(NoTls).await {
-            eprintln!("error error {:?}", e);
-        }
+        // Get a postgres
+        let postgres = pg_datadir.spawn_postgres(pg_prefix, output);
+        let conn_info = postgres.admin_conn_info();
 
         // Get client, run connection
-        let (client, connection) = config.connect(NoTls).await?;
+        let (client, connection) = conn_info.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("connection error: {}", e);
