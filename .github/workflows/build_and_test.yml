@@ -446,17 +446,6 @@ jobs:
       - name: Kaniko build compute tools
         run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:$GITHUB_RUN_ID
 
-#  promote-image-compute-tools:
-#    runs-on: dev
-#    needs: [ compute-tools-image ]
-#    if: github.event_name != 'workflow_dispatch'
-#    container: amazon/aws-cli
-#
-#    steps:
-#      - name: Promote image to latest
-#        run:
-#          MANIFEST=$(aws ecr batch-get-image --repository-name compute-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name compute-tools --image-tag latest --image-manifest "$MANIFEST"
-
   compute-node-image:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
@@ -481,7 +470,7 @@ jobs:
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-node-image ]
+    needs: [ neon-image, compute-node-image, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
@@ -505,18 +494,6 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
           
-#      - name: Get build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
-#            echo "::set-output name=tag::$GITHUB_RUN_ID"
-#          fi
-#        id: build-tag
-
       - name: Configure ECR login
         run: |
           mkdir /github/home/.docker/
