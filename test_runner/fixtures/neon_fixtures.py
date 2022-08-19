@@ -1751,7 +1751,7 @@ class PSQL:
     def __init__(
         self,
         path: str = "psql",
-        host: str = "localhost",
+        host: str = "127.0.0.1",
         port: int = 5432,
     ):
         assert shutil.which(path)
@@ -1844,28 +1844,17 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
-    """
-    pg_password = "password"
+    # """
     pg_user = "proxy"
+    pg_password = "password"
 
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user '"+pg_user+"' with login superuser password '"+pg_password+"'")
+    vanilla_pg.safe_psql("create user "+pg_user+" with login superuser password '"+pg_password+"'")
 
     port = vanilla_pg.default_options['port']
     host = vanilla_pg.default_options['host']
     dbname = vanilla_pg.default_options['dbname']
     auth_endpoint = f'postgres://{pg_user}:{pg_password}@{host}:{port}/{dbname}'
-
-    """
-
-    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
-
-    port = vanilla_pg.default_options['port']
-    host = vanilla_pg.default_options['host']
-    dbname = vanilla_pg.default_options['dbname']
-    auth_endpoint = f'postgres://proxy:password@{host}:{port}/{dbname}'
 
     proxy_port = port_distributor.get_port()
     http_port = port_distributor.get_port()

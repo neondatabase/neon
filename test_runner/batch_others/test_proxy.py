@@ -84,39 +84,39 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     # make a db and send to proxy.
     # greate a postgres instance and give the proxy the info to send queries to it.
 
-    # pg_password = "password"
-    # pg_user = "proxy"
-    #
-    # vanilla_pg.start()
-    # vanilla_pg.safe_psql("create user '"+pg_user+"' with login superuser password '"+pg_password+"'")
-    #
-    # port = vanilla_pg.default_options['port']
-    # host = vanilla_pg.default_options['host']
-    # dbname = vanilla_pg.default_options['dbname']
-    #
-    # cmd_line_args__to__mgmt = [
-    #     "psql",
-    #     "-h",
-    #     "127.0.0.1",
-    #     "-p",
-    #     "7000",
-    #     '-c',
-    #     '{"session_id": "' + str(psql_session_id) + '"'+
-    #     ',"result":{"Success":{"host":"'+host+'","port":'+str(port)+
-    #     ',"dbname":"'+dbname+'"'+
-    #     ',"user":"'+pg_password+'"'+
-    #     ',"password":"'+pg_user+'"}}}'
-    # ]
-    #
-    # for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
-    #     log.info(f"arg_id={arg_id}: {arg}")
-    #
-    # log.info(f"running cmd line: {cmd_line_args__to__mgmt}")
-    # p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
-    # out, err = p.communicate()
-    # log.info(f"output of running cmd line: out={out}; err={err}")
-    #
-    # link_proxy.safe_psql('select 1', options='project=generic-project-name')
+    pg_user = "proxy"
+    pg_password = "password"
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user "+pg_user+" with login superuser password '"+pg_password+"'")
+
+    port = vanilla_pg.default_options['port']
+    host = vanilla_pg.default_options['host']
+    dbname = vanilla_pg.default_options['dbname']
+
+    cmd_line_args__to__mgmt = [
+        "psql",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "7000",
+        '-c',
+        '{"session_id": "' + str(psql_session_id) + '"'+
+        ',"result":{"Success":{"host":"'+host+'","port":'+str(port)+
+        ',"dbname":"'+dbname+'"'+
+        ',"user":"'+pg_user+'"'+
+        ',"password":"'+pg_password+'"}}}'
+    ]
+
+    for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
+        log.info(f"arg_id={arg_id}: {arg}")
+
+    log.info(f"running cmd line: {cmd_line_args__to__mgmt}")
+    p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
+    out, err = p.communicate()
+    log.info(f"output of running cmd line: out={out}; err={err}")
+
+    link_proxy.safe_psql('select 1', options='project=generic-project-name')
 
 
 # Pass extra options to the server.
