@@ -466,7 +466,7 @@ jobs:
 
       - name: Kaniko build compute node
         working-directory: ./vendor/postgres/
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg=COMPUTE_TOOLS_TAG=$GITHUB_RUN_ID --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg=TAG=$GITHUB_RUN_ID --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
