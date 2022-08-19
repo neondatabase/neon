@@ -26,21 +26,7 @@ def test_password_hack(static_proxy):
         static_proxy.safe_psql('select 1', sslsni=0, user=user, password=magic)
 
 
-@pytest.mark.asyncio
-async def test_psql_session_id(vanilla_pg, link_proxy):
-    """
-    Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
-    This is only one half of the test: the half that establishes connection to the proxy and retrieves the session_id
-    The second half of the test required more heavy machinery to be ported from the cloud codebase
-        (such as: project_state(..), and psql_project_connect)
-    to connect to postgres and make sure the end-to-end behavior is satisfied.
-    """
-    psql = PSQL(
-        host=link_proxy.host,
-        port=link_proxy.proxy_port,
-    )
-    proc = await psql.run()
-
+async def get_session_id_from_welcome_message(local_link_proxy, proc):
     # Read line by line output of psql.
     # We expect to see result in first 3 lines. [this is flexible, change if need be]
     # Expected output:
@@ -55,10 +41,10 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     #      http://dummy-uri/<psql_session_id>
     #   "
 
-    max_num_lines_of_welcome_message = 15
-    attempt = 0
     psql_session_id = None
 
+    max_num_lines_of_welcome_message = 15
+    attempt = 0
     log.info(f"Neon Welcome Message:")
     for attempt in range(max_num_lines_of_welcome_message):
         raw_line = await proc.stderr.readline()
@@ -67,12 +53,13 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
             break
         log.info(f"{raw_line}")
         line = raw_line.decode("utf-8").strip()
+        # todo: refactor using Stas's recommendation
         if line.startswith("http"):
             line_parts = line.split("/")
             psql_session_id = line_parts[-1]
             link_auth_uri = '/'.join(line_parts[:-1])
-            assert link_auth_uri == link_proxy.link_auth_uri, \
-                f"Line='{line}' should contain a http auth link of form '{link_proxy.link_auth_uri}/<psql_session_id>'."
+            assert link_auth_uri == local_link_proxy.link_auth_uri, \
+                f"Line='{line}' should contain a http auth link of form '{local_link_proxy.link_auth_uri}/<psql_session_id>'."
             break
         log.debug("line %d does not contain expected result: %s", attempt, line)
 
@@ -81,41 +68,80 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     log.debug(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
     log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
 
-    # make a db and send to proxy.
-    # greate a postgres instance and give the proxy the info to send queries to it.
+    return psql_session_id
 
+
+def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
     pg_user = "proxy"
     pg_password = "password"
 
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user " + pg_user + " with login superuser password '" +
-                         pg_password + "'")
+    local_vanilla_pg.start()
+    query = "create user " + pg_user + " with login superuser password '" + pg_password + "'"
+    local_vanilla_pg.safe_psql(query)
 
-    port = vanilla_pg.default_options['port']
-    host = vanilla_pg.default_options['host']
-    dbname = vanilla_pg.default_options['dbname']
+    port = local_vanilla_pg.default_options['port']
+    host = local_vanilla_pg.default_options['host']
+    dbname = local_vanilla_pg.default_options['dbname']
 
     cmd_line_args__to__mgmt = [
         "psql",
         "-h",
-        "127.0.0.1",
+        "127.0.0.1",  # localhost
         "-p",
-        "7000",
+        "7000",  # mgmt port
         '-c',
         '{"session_id": "' + str(psql_session_id) + '"' + ',"result":{"Success":{"host":"' + host +
         '","port":' + str(port) + ',"dbname":"' + dbname + '"' + ',"user":"' + pg_user + '"' +
         ',"password":"' + pg_password + '"}}}'
     ]
 
-    for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
-        log.info(f"arg_id={arg_id}: {arg}")
-
-    log.info(f"running cmd line: {cmd_line_args__to__mgmt}")
+    log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
     p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
-    out, err = p.communicate()
-    log.info(f"output of running cmd line: out={out}; err={err}")
 
-    # link_proxy.safe_psql('select 1', options='project=generic-project-name')
+    out, err = p.communicate()
+    log.info(f"output of sending info: out={out}; err={err}")
+
+    assert "ok" in str(out)
+
+
+@pytest.mark.asyncio
+async def test_psql_session_id(vanilla_pg, link_proxy):
+    """
+    Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
+     Step 1. establish connection to the proxy
+     Step 2. retrieves session_id
+     Step 3. create a vanilla_pg and send user and db info via command line (using Popen) a psql query via mgmt port to proxy.
+     Step 4. assert that select 1 has been executed correctly.
+    """
+
+    # Step 1.
+    psql = PSQL(
+        host=link_proxy.host,
+        port=link_proxy.proxy_port,
+    )
+    proc = await psql.run("select 1")
+
+    # Step 2.
+    psql_session_id = await get_session_id_from_welcome_message(link_proxy, proc)
+
+    # Step 3.
+    create_and_send_db_inf(vanilla_pg, psql_session_id)
+
+    # Step 4.
+    log.info("Proxy output:")
+    # Expecting::
+    # b' ?column? \n'
+    # b'----------\n'
+    # b'        1\n'
+    # b'(1 row)\n'
+    max_num_output_lines = 4
+    str_sum = ""
+    for i in range(max_num_output_lines):
+        raw_line = await proc.stdout.readline()
+        log.info(f"{raw_line}")
+        str_sum += str(raw_line)
+
+    assert str_sum == "b' ?column? \\n'b'----------\\n'b'        1\\n'b'(1 row)\\n'"
 
 
 # Pass extra options to the server.

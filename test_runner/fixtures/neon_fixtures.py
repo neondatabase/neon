@@ -1838,12 +1838,13 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
 @pytest.fixture(scope='function')
 def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
-    # """
+
     pg_user = "proxy"
     pg_password = "password"
 
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user "+pg_user+" with login superuser password '"+pg_password+"'")
+    query = "create user " + pg_user + " with login superuser password '" + pg_password + "'"
+    vanilla_pg.safe_psql(query)
 
     port = vanilla_pg.default_options['port']
     host = vanilla_pg.default_options['host']
