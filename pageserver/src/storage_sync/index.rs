@@ -341,7 +341,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     #[test]
     fn index_part_conversion() {

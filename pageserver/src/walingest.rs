@@ -1029,9 +1029,9 @@ impl<'a> WalIngest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layered_repository::repo_harness::*;
     use crate::layered_repository::Timeline;
     use crate::pgdatadir_mapping::create_test_timeline;
-    use crate::repository::repo_harness::*;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
