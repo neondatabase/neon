@@ -1794,8 +1794,9 @@ class NeonProxy(PgProtocol):
 @pytest.fixture(scope='function')
 def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
-    port = port_distributor.get_port()
-    with NeonProxy(port, 15000, None) as proxy:
+    http_port = port_distributor.get_port()
+    proxy_port = port_distributor.get_port()
+    with NeonProxy(proxy_port, http_port, None) as proxy:
         proxy.start_with_link_auth()
         yield proxy
 
