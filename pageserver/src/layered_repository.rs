@@ -205,7 +205,7 @@ impl Repository {
 
         crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
             id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
-            datadir: Arc::clone(&timeline),
+            timeline: Arc::clone(&timeline),
         });
 
         Ok(timeline)
@@ -572,8 +572,7 @@ impl Repository {
             }
         };
         debug!(
-            "timeline {} found on a local disk, but not loaded into the memory, loading",
-            &timeline_id
+            "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
         );
         let timeline = self.load_local_timeline(timeline_id, timelines)?;
         let was_loaded = timelines.insert(
@@ -585,10 +584,6 @@ impl Repository {
                 || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
             "assertion failure, inserted wrong timeline in an incorrect state"
         );
-        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-            id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
-            datadir: Arc::clone(&timeline),
-        });
         Ok(Some(timeline))
     }
 
@@ -627,7 +622,14 @@ impl Repository {
             .load_layer_map(disk_consistent_lsn)
             .context("failed to load layermap")?;
 
-        Ok(Arc::new(timeline))
+        let timeline = Arc::new(timeline);
+
+        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
+            id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
+            timeline: Arc::clone(&timeline),
+        });
+
+        Ok(timeline)
     }
 
     pub fn new(
