@@ -269,7 +269,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                     }
                 }
                 // Timeline got attached, retrieve all necessary information to start its broker loop and maintain this loop endlessly.
-                LocalTimelineUpdate::Attach { id, datadir } => {
+                LocalTimelineUpdate::Attach { id, timeline } => {
                     let timeline_connection_managers = local_timeline_wal_receivers
                         .entry(id.tenant_id)
                         .or_default();
@@ -305,7 +305,7 @@ async fn wal_receiver_main_thread_loop_step<'a>(
                             id,
                             broker_prefix.to_owned(),
                             etcd_client.clone(),
-                            datadir,
+                            timeline,
                             wal_connect_timeout,
                             lagging_wal_timeout,
                             max_lsn_wal_lag,

@@ -172,15 +172,15 @@ pub enum LocalTimelineUpdate {
     },
     Attach {
         id: ZTenantTimelineId,
-        datadir: Arc<Timeline>,
+        timeline: Arc<Timeline>,
     },
 }
 
 impl std::fmt::Debug for LocalTimelineUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Detach { id, .. } => f.debug_tuple("Remove").field(id).finish(),
-            Self::Attach { id, .. } => f.debug_tuple("Add").field(id).finish(),
+            Self::Detach { id, .. } => f.debug_tuple("Detach").field(id).finish(),
+            Self::Attach { id, .. } => f.debug_tuple("Attach").field(id).finish(),
         }
     }
 }
@@ -376,7 +376,10 @@ pub fn get_local_timeline_with_load(
 ) -> anyhow::Result<Arc<Timeline>> {
     let repository = get_repository_for_tenant(tenant_id)?;
     match repository.get_timeline(timeline_id) {
-        Some(RepositoryTimeline::Loaded(loaded_timeline)) => Ok(loaded_timeline),
+        Some(RepositoryTimeline::Loaded(loaded_timeline)) => {
+            loaded_timeline.init_logical_size()?;
+            Ok(loaded_timeline)
+        }
         _ => load_local_timeline(&repository, timeline_id)
             .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}")),
     }
@@ -435,12 +438,16 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
 
     // wait for wal receivers to stop without holding the lock, because walreceiver
     // will attempt to change tenant state which is protected by the same global tenants lock.
+    // TODO do we need a timeout here? how to handle it?
     // recv_timeout is broken: https://github.com/rust-lang/rust/issues/94518#issuecomment-1057440631
+    // need to use crossbeam-channel
     for (timeline_id, join_handle) in walreceiver_join_handles {
         info!("waiting for wal receiver to shutdown timeline_id {timeline_id}");
         join_handle.recv().context("failed to join walreceiver")?;
         info!("wal receiver shutdown confirmed timeline_id {timeline_id}");
     }
+
+    tenants_state::write_tenants().remove(&tenant_id);
 
     // If removal fails there will be no way to successfully retry detach,
     // because tenant no longer exists in in memory map. And it needs to be removed from it
@@ -561,12 +568,15 @@ fn attach_downloaded_tenant(
     repo: &Repository,
     downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
-    for timeline_id in downloaded_timelines {
-        // first, register timeline metadata
+    // first, register timeline metadata to ensure ancestors will be found later during layer load
+    for &timeline_id in &downloaded_timelines {
         repo.attach_timeline(timeline_id).with_context(|| {
             format!("Failed to load timeline {timeline_id} into in-memory repository")
         })?;
-        // and then load its layers in memory
+    }
+
+    // and then load its layers in memory
+    for timeline_id in downloaded_timelines {
         let _ = load_local_timeline(repo, timeline_id).with_context(|| {
             format!(
                 "Failed to register add local timeline for tenant {}",
