@@ -83,6 +83,13 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
     host = local_vanilla_pg.default_options['host']
     dbname = local_vanilla_pg.default_options['dbname']
 
+    db_info =  \
+        '{"session_id": "' + str(psql_session_id) + '"' + ',' + \
+        '"result":{''"Success":{ ' + \
+        '"host":"' + host + '","port":' + str(port) + ',' + \
+        '"dbname":"' + dbname + '","user":"' + pg_user + '",' + \
+        '"password":"' + pg_password + '"}}}'
+
     cmd_line_args__to__mgmt = [
         "psql",
         "-h",
@@ -90,9 +97,7 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
         "-p",
         "7000",  # mgmt port
         '-c',
-        '{"session_id": "' + str(psql_session_id) + '"' + ',"result":{"Success":{"host":"' + host +
-        '","port":' + str(port) + ',"dbname":"' + dbname + '"' + ',"user":"' + pg_user + '"' +
-        ',"password":"' + pg_password + '"}}}'
+        db_info
     ]
 
     log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
