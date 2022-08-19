@@ -92,6 +92,7 @@ The layer map tracks what layers exist in a timeline.
 ### Layered repository
 
 Neon repository implementation that keeps data in layers.
+
 ### LSN
 
 The Log Sequence Number (LSN) is a unique identifier of the WAL record[] in the WAL log.
@@ -125,6 +126,26 @@ TODO: use this name consistently in remote storage code. Now `disk_consistent_ls
 * `ancestor_lsn` - LSN of the branch point (the LSN at which this branch was created)
 
 TODO: add table that describes mapping between PostgreSQL (compute), safekeeper and pageserver LSNs.
+
+### Logical size
+
+The pageserver tracks the "logical size" of a timeline. It is the
+total size of all relations in all Postgres databases on the
+timeline. It includes all user and system tables, including their FSM
+and VM forks. But it does not include SLRUs, twophase files or any
+other such data or metadata that lives outside relations.
+
+The logical size is calculated by the pageserver, and is sent to
+PostgreSQL via feedback messages to the safekeepers. PostgreSQL uses
+the logical size to enforce the size limit in the free tier. The
+logical size is also shown to users in the web console.
+
+The logical size is not affected by branches or the physical layout of
+layer files in the pageserver. If you have a database with 1 GB
+logical size and you create a branch of it, both branches will have 1
+GB logical size, even though the branch is copy-on-write and won't
+consume any extra physical disk space until you make changes to it.
+
 ### Page (block)
 
 The basic structure used to store relation data. All pages are of the same size.
