@@ -88,7 +88,8 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     pg_password = "password"
 
     vanilla_pg.start()
-    vanilla_pg.safe_psql("create user "+pg_user+" with login superuser password '"+pg_password+"'")
+    vanilla_pg.safe_psql("create user " + pg_user + " with login superuser password '" +
+                         pg_password + "'")
 
     port = vanilla_pg.default_options['port']
     host = vanilla_pg.default_options['host']
@@ -101,11 +102,9 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
         "-p",
         "7000",
         '-c',
-        '{"session_id": "' + str(psql_session_id) + '"'+
-        ',"result":{"Success":{"host":"'+host+'","port":'+str(port)+
-        ',"dbname":"'+dbname+'"'+
-        ',"user":"'+pg_user+'"'+
-        ',"password":"'+pg_password+'"}}}'
+        '{"session_id": "' + str(psql_session_id) + '"' + ',"result":{"Success":{"host":"' + host +
+        '","port":' + str(port) + ',"dbname":"' + dbname + '"' + ',"user":"' + pg_user + '"' +
+        ',"password":"' + pg_password + '"}}}'
     ]
 
     for arg_id, arg in enumerate(cmd_line_args__to__mgmt):
