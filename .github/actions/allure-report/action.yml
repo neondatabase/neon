@@ -131,6 +131,7 @@ runs:
 
     - name: Generate and publish final Allure report
       if: ${{ inputs.action == 'generate' }}
+      id: generate-report
       env:
         REPORT_PREFIX: reports/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
         RAW_PREFIX: reports-raw/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
@@ -168,18 +169,20 @@ runs:
         aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
         aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
 
+        REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
+
         # Generate redirect
         cat <<EOF > ./index.html
           <!DOCTYPE html>
 
           <meta charset="utf-8">
-          <title>Redirecting to https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html</title>
-          <meta http-equiv="refresh" content="0; URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html">
+          <title>Redirecting to ${REPORT_URL}</title>
+          <meta http-equiv="refresh" content="0; URL=${REPORT_URL}">
         EOF
         aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
-        # Ref https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary
-        echo "[Allure Report](https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html)" >> ${GITHUB_STEP_SUMMARY}
+        echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
+        echo "::set-output name=REPORT_URL::${REPORT_URL}"
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}
@@ -193,3 +196,24 @@ runs:
         if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" ]; then
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
+
+    - uses: actions/github-script@v6
+      if: ${{ inputs.action == 'generate' && always() }}
+      env:
+        REPORT_URL: ${{ steps.generate-report.outputs.REPORT_URL }}
+        BUILD_TYPE: ${{ inputs.build_type }}
+        SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      with:
+        script: |
+          const { REPORT_URL, BUILD_TYPE, SHA } = process.env
+
+          result = await github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: `${SHA}`,
+            state: 'success',
+            target_url: `${REPORT_URL}`,
+            context: `Allure report / ${BUILD_TYPE}`,
+          })
+
+          console.log(result);
