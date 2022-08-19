@@ -364,22 +364,22 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
+    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<u64> {
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn)?;
         let dbdir = DbDirectory::des(&buf)?;
 
-        let mut total_size: usize = 0;
+        let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self.get(relsize_key, lsn)?;
                 let relsize = buf.get_u32_le();
 
-                total_size += relsize as usize;
+                total_size += relsize as u64;
             }
         }
-        Ok(total_size * BLCKSZ as usize)
+        Ok(total_size * BLCKSZ as u64)
     }
 
     ///
@@ -517,7 +517,7 @@ pub struct DatadirModification<'a> {
     // underlying key-value store by the 'finish' function.
     pending_updates: HashMap<Key, Value>,
     pending_deletions: Vec<Range<Key>>,
-    pending_nblocks: isize,
+    pending_nblocks: i64,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -676,7 +676,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         // Update logical database size.
-        self.pending_nblocks -= total_blocks as isize;
+        self.pending_nblocks -= total_blocks as i64;
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
@@ -719,7 +719,7 @@ impl<'a> DatadirModification<'a> {
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        self.pending_nblocks += nblocks as isize;
+        self.pending_nblocks += nblocks as i64;
 
         // Update relation size cache
         self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
@@ -749,7 +749,7 @@ impl<'a> DatadirModification<'a> {
             self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
             // Update logical database size.
-            self.pending_nblocks -= old_size as isize - nblocks as isize;
+            self.pending_nblocks -= old_size as i64 - nblocks as i64;
         }
         Ok(())
     }
@@ -771,7 +771,7 @@ impl<'a> DatadirModification<'a> {
             // Update relation size cache
             self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
-            self.pending_nblocks += nblocks as isize - old_size as isize;
+            self.pending_nblocks += nblocks as i64 - old_size as i64;
         }
         Ok(())
     }
@@ -794,7 +794,7 @@ impl<'a> DatadirModification<'a> {
         // update logical size
         let size_key = rel_size_to_key(rel);
         let old_size = self.get(size_key)?.get_u32_le();
-        self.pending_nblocks -= old_size as isize;
+        self.pending_nblocks -= old_size as i64;
 
         // Remove enty from relation size cache
         self.tline.remove_cached_rel_size(&rel);
@@ -936,7 +936,7 @@ impl<'a> DatadirModification<'a> {
         result?;
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as isize);
+            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
             self.pending_nblocks = 0;
         }
 
@@ -964,7 +964,7 @@ impl<'a> DatadirModification<'a> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as isize);
+            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
         }
 
         Ok(())
