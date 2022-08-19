@@ -349,17 +349,11 @@ class PgProtocol:
             for match in options.split(" "):
                 print("match", match)
                 if "-c" in match:
-                    assert match[0:2] == "-c"
-                    assert '=' in match
-                    parts = match[2:].split("=")[0]
-                    assert len(parts) == 2
-                    key = parts[0]
-                    val = parts[1]
-                    # matches = [x for x in re.finditer('-c(\w*)=(\w*)', match)]
-                    # assert len(matches) == 1
-                    # match = matches[0]
-                    # key = match.group(1)
-                    # val = match.group(2)
+                    matches = [x for x in re.finditer('-c(\w*)=(\w*)', match)]
+                    assert len(matches) == 1
+                    match = matches[0]
+                    key = match.group(1)
+                    val = match.group(2)
                     if 'server_settings' in conn_options:
                         conn_options['server_settings'].update({key: val})
                     else:
