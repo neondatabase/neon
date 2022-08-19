@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -83,12 +84,20 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
     host = local_vanilla_pg.default_options['host']
     dbname = local_vanilla_pg.default_options['dbname']
 
-    db_info =  \
-        '{"session_id": "' + str(psql_session_id) + '"' + ',' + \
-        '"result":{''"Success":{ ' + \
-        '"host":"' + host + '","port":' + str(port) + ',' + \
-        '"dbname":"' + dbname + '","user":"' + pg_user + '",' + \
-        '"password":"' + pg_password + '"}}}'
+    db_info_dict = {
+        "session_id": psql_session_id,
+        "result": {
+            "Success": {
+                "host": host,
+                "port": port,
+                "dbname": dbname,
+                "user": pg_user,
+                "password": pg_password
+            }
+        }
+    }
+
+    db_info = json.dumps(db_info_dict)
 
     cmd_line_args__to__mgmt = [
         "psql",
