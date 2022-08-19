@@ -116,7 +116,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     out, err = p.communicate()
     log.info(f"output of running cmd line: out={out}; err={err}")
 
-    link_proxy.safe_psql('select 1', options='project=generic-project-name')
+    # link_proxy.safe_psql('select 1', options='project=generic-project-name')
 
 
 # Pass extra options to the server.
