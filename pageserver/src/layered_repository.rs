@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{GcResult, Repository, RepositoryTimeline, Timeline};
+use crate::repository::{GcResult, RepositoryTimeline};
 use crate::thread_mgr;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
@@ -61,7 +61,7 @@ mod timeline;
 use storage_layer::Layer;
 use timeline::LayeredTimelineEntry;
 
-pub use timeline::LayeredTimeline;
+pub use timeline::Timeline;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -78,7 +78,7 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
-pub struct LayeredRepository {
+pub struct Repository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
@@ -119,17 +119,19 @@ pub struct LayeredRepository {
     upload_layers: bool,
 }
 
-/// Public interface
-impl Repository for LayeredRepository {
-    type Timeline = LayeredTimeline;
-
-    fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Self::Timeline>> {
+/// A repository corresponds to one .neon directory. One repository holds multiple
+/// timelines, forked off from the same initial call to 'initdb'.
+impl Repository {
+    /// Get Timeline handle for given zenith timeline ID.
+    /// This function is idempotent. It doesn't change internal state in any way.
+    pub fn get_timeline(&self, timelineid: ZTimelineId) -> Option<RepositoryTimeline<Timeline>> {
         let timelines = self.timelines.lock().unwrap();
         self.get_timeline_internal(timelineid, &timelines)
             .map(RepositoryTimeline::from)
     }
 
-    fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+    /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
+    pub fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         match self.get_timeline_load_internal(timelineid, &mut timelines)? {
             Some(local_loaded_timeline) => Ok(local_loaded_timeline),
@@ -140,7 +142,9 @@ impl Repository for LayeredRepository {
         }
     }
 
-    fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Self::Timeline>)> {
+    /// Lists timelines the repository contains.
+    /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
+    pub fn list_timelines(&self) -> Vec<(ZTimelineId, RepositoryTimeline<Timeline>)> {
         self.timelines
             .lock()
             .unwrap()
@@ -154,11 +158,13 @@ impl Repository for LayeredRepository {
             .collect()
     }
 
-    fn create_empty_timeline(
+    /// Create a new, empty timeline. The caller is responsible for loading data into it
+    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    pub fn create_empty_timeline(
         &self,
         timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<LayeredTimeline>> {
+    ) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         let vacant_timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(_) => bail!("Timeline already exists"),
@@ -176,7 +182,7 @@ impl Repository for LayeredRepository {
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
         timeline::save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
@@ -196,7 +202,7 @@ impl Repository for LayeredRepository {
     }
 
     /// Branch a timeline
-    fn branch_timeline(
+    pub fn branch_timeline(
         &self,
         src: ZTimelineId,
         dst: ZTimelineId,
@@ -286,10 +292,16 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    /// Public entry point to GC. All the logic is in the private
-    /// gc_iteration_internal function, this public facade just wraps it for
-    /// metrics collection.
-    fn gc_iteration(
+    /// perform one garbage collection iteration, removing old data files from disk.
+    /// this function is periodically called by gc thread.
+    /// also it can be explicitly requested through page server api 'do_gc' command.
+    ///
+    /// 'timelineid' specifies the timeline to GC, or None for all.
+    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
+    /// to make tests more deterministic.
+    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
+    pub fn gc_iteration(
         &self,
         target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
@@ -307,7 +319,11 @@ impl Repository for LayeredRepository {
             })
     }
 
-    fn compaction_iteration(&self) -> Result<()> {
+    /// Perform one compaction iteration.
+    /// This function is periodically called by compactor thread.
+    /// Also it can be explicitly requested per timeline through page server
+    /// api's 'compact' command.
+    pub fn compaction_iteration(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -335,12 +351,11 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    ///
     /// Flush all in-memory data to disk.
     ///
-    /// Used at shutdown.
+    /// Used at graceful shutdown.
     ///
-    fn checkpoint(&self) -> Result<()> {
+    pub fn checkpoint(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // checkpoints. We don't want to block everything else while the
@@ -370,7 +385,8 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    /// Removes timeline-related in-memory data
+    pub fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
         // in order to be retriable detach needs to be idempotent
         // (or at least to a point that each time the detach is called it can make progress)
         let mut timelines = self.timelines.lock().unwrap();
@@ -407,7 +423,9 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
+    /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
+    /// See [`crate::remote_storage`] for more details about the synchronization.
+    pub fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
         debug!("attach timeline_id: {}", timeline_id,);
         match self.timelines.lock().unwrap().entry(timeline_id) {
             Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
@@ -421,13 +439,14 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    fn get_remote_index(&self) -> &RemoteIndex {
+    /// Allows to retrieve remote timeline index from the tenant. Used in walreceiver to grab remote consistent lsn.
+    pub fn get_remote_index(&self) -> &RemoteIndex {
         &self.remote_index
     }
 }
 
 /// Private functions
-impl LayeredRepository {
+impl Repository {
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -517,7 +536,7 @@ impl LayeredRepository {
 
         tenant_conf.update(&new_tenant_conf);
 
-        LayeredRepository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
+        Repository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
         Ok(())
     }
 
@@ -539,7 +558,7 @@ impl LayeredRepository {
         &self,
         timelineid: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
-    ) -> anyhow::Result<Option<Arc<LayeredTimeline>>> {
+    ) -> anyhow::Result<Option<Arc<Timeline>>> {
         match timelines.get(&timelineid) {
             Some(entry) => match entry {
                 LayeredTimelineEntry::Loaded(local_timeline) => {
@@ -574,7 +593,7 @@ impl LayeredRepository {
         &self,
         timeline_id: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
-    ) -> anyhow::Result<Arc<LayeredTimeline>> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -591,7 +610,7 @@ impl LayeredRepository {
             .map(LayeredTimelineEntry::Loaded);
         let _enter = info_span!("loading local timeline").entered();
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             metadata,
@@ -615,8 +634,8 @@ impl LayeredRepository {
         tenant_id: ZTenantId,
         remote_index: RemoteIndex,
         upload_layers: bool,
-    ) -> LayeredRepository {
-        LayeredRepository {
+    ) -> Repository {
+        Repository {
             tenant_id,
             file_lock: RwLock::new(()),
             conf,

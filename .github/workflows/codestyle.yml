@@ -65,7 +65,7 @@ jobs:
 
       - name: Cache postgres build
         id: cache_pg
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             tmp_install/
@@ -94,14 +94,14 @@ jobs:
 
       - name: Cache cargo deps
         id: cache_cargo
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
             !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: v2-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
+          key: v3-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-rust-${{ matrix.rust_toolchain }}
 
       - name: Run cargo clippy
         run: ./run_clippy.sh

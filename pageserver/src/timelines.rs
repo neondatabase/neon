@@ -20,15 +20,14 @@ use utils::{
 
 use crate::import_datadir;
 use crate::tenant_mgr;
+use crate::CheckpointConfig;
 use crate::{
-    config::PageServerConf, repository::Repository, storage_sync::index::RemoteIndex,
-    tenant_config::TenantConfOpt,
+    config::PageServerConf, storage_sync::index::RemoteIndex, tenant_config::TenantConfOpt,
 };
 use crate::{
-    layered_repository::{LayeredRepository, LayeredTimeline},
+    layered_repository::{Repository, Timeline},
     walredo::WalRedoManager,
 };
-use crate::{repository::Timeline, CheckpointConfig};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
@@ -42,7 +41,7 @@ pub fn create_repo(
     tenant_id: ZTenantId,
     wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
     remote_index: RemoteIndex,
-) -> Result<Arc<LayeredRepository>> {
+) -> Result<Arc<Repository>> {
     let repo_dir = conf.tenant_path(&tenant_id);
     ensure!(
         !repo_dir.exists(),
@@ -57,9 +56,9 @@ pub fn create_repo(
     info!("created directory structure in {}", repo_dir.display());
 
     // Save tenant's config
-    LayeredRepository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+    Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
 
-    Ok(Arc::new(LayeredRepository::new(
+    Ok(Arc::new(Repository::new(
         conf,
         tenant_conf,
         wal_redo_manager,
@@ -104,11 +103,11 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
 //
-fn bootstrap_timeline<R: Repository>(
+fn bootstrap_timeline(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
-    repo: &R,
+    repo: &Repository,
 ) -> Result<()> {
     let initdb_path = conf
         .tenant_path(&tenantid)
@@ -160,7 +159,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<(ZTimelineId, Arc<LayeredTimeline>)>> {
+) -> Result<Option<(ZTimelineId, Arc<Timeline>)>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
