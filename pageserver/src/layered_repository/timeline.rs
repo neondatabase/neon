@@ -9,13 +9,14 @@ use once_cell::sync::Lazy;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -40,13 +41,12 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::pgdatadir_mapping::{BlockNumber, DatadirTimeline, LsnForTimestamp};
+use crate::pgdatadir_mapping::{BlockNumber, LsnForTimestamp};
 use crate::reltag::RelTag;
-use crate::repository::TimelineWriter;
 use crate::storage_sync::{index::IndexPart, RemoteTimelineClient};
 use crate::tenant_config::TenantConfOpt;
 
-use postgres_ffi::xlog_utils::to_pg_timestamp;
+use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
@@ -54,8 +54,7 @@ use utils::{
 };
 
 use crate::page_cache;
-use crate::repository::{GcResult, PageReconstructError, Timeline};
-use crate::repository::{Key, Value};
+use crate::repository::{GcResult, Key, Value};
 use crate::thread_mgr;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::spawn_connection_manager_task;
@@ -143,6 +142,15 @@ static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static CURRENT_LOGICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_current_logical_size",
+        "Current logical size grouped by timeline",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
 static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
@@ -172,6 +180,8 @@ struct TimelineMetrics {
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub current_physical_size_gauge: UIntGauge,
+    /// copy of LayeredTimeline.current_logical_size
+    pub current_logical_size_gauge: IntGauge,
 }
 
 impl TimelineMetrics {
@@ -209,6 +219,9 @@ impl TimelineMetrics {
         let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             reconstruct_time_histo,
@@ -221,15 +234,16 @@ impl TimelineMetrics {
             last_record_gauge,
             wait_lsn_time_histo,
             current_physical_size_gauge,
+            current_logical_size_gauge,
         }
     }
 }
 
-pub struct LayeredTimeline {
+pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    myself: std::sync::Weak<LayeredTimeline>,
+    myself: std::sync::Weak<Timeline>,
 
     pub tenant_id: ZTenantId,
     pub timeline_id: ZTimelineId,
@@ -279,7 +293,7 @@ pub struct LayeredTimeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<LayeredTimeline>>,
+    ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -323,7 +337,27 @@ pub struct LayeredTimeline {
     repartition_threshold: u64,
 
     /// Current logical size of the "datadir", at the last LSN.
-    current_logical_size: AtomicIsize,
+    ///
+    /// Size shouldn't ever be negative, but this is signed for two reasons:
+    ///
+    /// 1. If we initialized the "baseline" size lazily, while we already
+    /// process incoming WAL, the incoming WAL records could decrement the
+    /// variable and temporarily make it negative. (This is just future-proofing;
+    /// the initialization is currently not done lazily.)
+    ///
+    /// 2. If there is a bug and we e.g. forget to increment it in some cases
+    /// when size grows, but remember to decrement it when it shrinks again, the
+    /// variable could go negative. In that case, it seems better to at least
+    /// try to keep tracking it, rather than clamp or overflow it. Note that
+    /// get_current_logical_size() will clamp the returned value to zero if it's
+    /// negative, and log an error. Could set it permanently to zero or some
+    /// special value to indicate "broken" instead, but this will do for now.
+    ///
+    /// Note that we also expose a copy of this value as a prometheus metric,
+    /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
+    /// and `set_current_logical_size` functions to modify this, they will
+    /// also keep the prometheus metric in sync.
+    current_logical_size: AtomicI64,
 
     /// Information about the last processed message by the WAL receiver,
     /// or None if WAL receiver has not received anything for this timeline
@@ -331,53 +365,13 @@ pub struct LayeredTimeline {
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
 
     /// Relation size cache
-    rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
 }
 
 pub struct WalReceiverInfo {
     pub wal_source_connstr: String,
     pub last_received_msg_lsn: Lsn,
     pub last_received_msg_ts: u128,
-}
-
-/// Inherit all the functions from DatadirTimeline, to provide the
-/// functionality to store PostgreSQL relations, SLRUs, etc. in a
-/// LayeredTimeline.
-impl DatadirTimeline for LayeredTimeline {
-    fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
-        let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
-            if lsn >= *cached_lsn {
-                return Some(*nblocks);
-            }
-        }
-        None
-    }
-
-    fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        match rel_size_cache.entry(tag) {
-            Entry::Occupied(mut entry) => {
-                let cached_lsn = entry.get_mut();
-                if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
-            }
-        }
-    }
-
-    fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.insert(tag, (lsn, nblocks));
-    }
-
-    fn remove_cached_rel_size(&self, tag: &RelTag) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.remove(tag);
-    }
 }
 
 ///
@@ -410,45 +404,37 @@ pub struct GcInfo {
 }
 
 /// Public interface functions
-impl Timeline for LayeredTimeline {
-    fn get_ancestor_lsn(&self) -> Lsn {
+impl Timeline {
+    //------------------------------------------------------------------------------
+    // Public GET functions
+    //------------------------------------------------------------------------------
+
+    /// Get the LSN where this branch was created
+    pub fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_lsn
     }
 
-    fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
+    /// Get the ancestor's timeline id
+    pub fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
     }
 
-    /// Wait until WAL has been received up to the given LSN.
-    fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
-        // This should never be called from the WAL receiver thread, because that could lead
-        // to a deadlock.
-        ensure!(
-            !IS_WAL_RECEIVER.with(|c| c.get()),
-            "wait_lsn called by WAL receiver thread"
-        );
-
-        self.metrics.wait_lsn_time_histo.observe_closure_duration(
-            || self.last_record_lsn
-                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-                .with_context(|| {
-                    format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                    )
-                }))?;
-
-        Ok(())
-    }
-
-    fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
+    /// Lock and get timeline's GC cuttof
+    pub fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read().unwrap()
     }
 
-    /// Look up the value with the given a key
-    fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
+    /// Look up given page version.
+    ///
+    /// NOTE: It is considered an error to 'get' a key that doesn't exist. The abstraction
+    /// above this needs to store suitable metadata to track what data exists with
+    /// what keys, in separate metadata entries. If a non-existent key is requested,
+    /// the Repository implementation may incorrectly return a value from an ancestor
+    /// branch, for example, or waste a lot of cycles chasing the non-existing key.
+    ///
+    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes, PageReconstructError> {
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -477,57 +463,25 @@ impl Timeline for LayeredTimeline {
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
-    /// Public entry point for checkpoint(). All the logic is in the private
-    /// checkpoint_internal function, this public facade just wraps it for
-    /// metrics collection.
-    fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
-        match cconf {
-            CheckpointConfig::Flush => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)
-            }
-            CheckpointConfig::Forced => {
-                self.freeze_inmem_layer(false);
-                self.flush_frozen_layers(true)?;
-                self.compact()
-            }
-        }
-    }
-
-    ///
-    /// Validate lsn against initdb_lsn and latest_gc_cutoff_lsn.
-    ///
-    fn check_lsn_is_in_scope(
-        &self,
-        lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
-    ) -> Result<()> {
-        ensure!(
-            lsn >= **latest_gc_cutoff_lsn,
-            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
-            lsn,
-            **latest_gc_cutoff_lsn,
-        );
-        Ok(())
-    }
-
-    fn get_last_record_lsn(&self) -> Lsn {
+    /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
+    pub fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
     }
 
-    fn get_prev_record_lsn(&self) -> Lsn {
+    pub fn get_prev_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().prev
     }
 
-    fn get_last_record_rlsn(&self) -> RecordLsn {
+    /// Atomically get both last and prev.
+    pub fn get_last_record_rlsn(&self) -> RecordLsn {
         self.last_record_lsn.load()
     }
 
-    fn get_disk_consistent_lsn(&self) -> Lsn {
+    pub fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
     }
 
-    fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+    pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
             remote_client.last_uploaded_consistent_lsn()
         } else {
@@ -535,11 +489,13 @@ impl Timeline for LayeredTimeline {
         }
     }
 
-    fn get_physical_size(&self) -> u64 {
+    /// Get the physical size of the timeline at the latest LSN
+    pub fn get_physical_size(&self) -> u64 {
         self.metrics.current_physical_size_gauge.get()
     }
 
-    fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
+    /// Get the physical size of the timeline at the latest LSN non incrementally
+    pub fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
@@ -558,9 +514,88 @@ impl Timeline for LayeredTimeline {
 
         Ok(total_physical_size)
     }
+
+    ///
+    /// Wait until WAL has been received and processed up to this LSN.
+    ///
+    /// You should call this before any of the other get_* or list_* functions. Calling
+    /// those functions with an LSN that has been processed yet is an error.
+    ///
+    pub fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+        // This should never be called from the WAL receiver thread, because that could lead
+        // to a deadlock.
+        ensure!(
+            !IS_WAL_RECEIVER.with(|c| c.get()),
+            "wait_lsn called by WAL receiver thread"
+        );
+
+        self.metrics.wait_lsn_time_histo.observe_closure_duration(
+            || self.last_record_lsn
+                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
+                .with_context(|| {
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                    )
+                }))?;
+
+        Ok(())
+    }
+
+    /// Check that it is valid to request operations with that lsn.
+    pub fn check_lsn_is_in_scope(
+        &self,
+        lsn: Lsn,
+        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+    ) -> Result<()> {
+        ensure!(
+            lsn >= **latest_gc_cutoff_lsn,
+            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            lsn,
+            **latest_gc_cutoff_lsn,
+        );
+        Ok(())
+    }
+
+    //------------------------------------------------------------------------------
+    // Public PUT functions, to update the repository with new page versions.
+    //
+    // These are called by the WAL receiver to digest WAL records.
+    //------------------------------------------------------------------------------
+
+    /// Flush to disk all data that was written with the put_* functions
+    ///
+    /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
+    /// know anything about them here in the repository.
+    pub fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
+        match cconf {
+            CheckpointConfig::Flush => {
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)
+            }
+            CheckpointConfig::Forced => {
+                self.freeze_inmem_layer(false);
+                self.flush_frozen_layers(true)?;
+                self.compact()
+            }
+        }
+    }
+
+    /// Mutate the timeline with a [`TimelineWriter`].
+    ///
+    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
+    /// is a generic type in this trait. But that doesn't currently work in
+    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
+    pub fn writer(&self) -> TimelineWriter<'_> {
+        TimelineWriter {
+            tl: self,
+            _write_guard: self.write_lock.lock().unwrap(),
+        }
+    }
 }
 
-impl LayeredTimeline {
+// Private functions
+impl Timeline {
     fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -608,13 +643,13 @@ impl LayeredTimeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: &TimelineMetadata,
-        ancestor: Option<Arc<LayeredTimeline>>,
+        ancestor: Option<Arc<Timeline>>,
         timeline_id: ZTimelineId,
         tenant_id: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         remote_client: Option<RemoteTimelineClient>,
-    ) -> Arc<LayeredTimeline> {
-        let mut result = LayeredTimeline {
+    ) -> Arc<Timeline> {
+        let mut result = Timeline {
             conf,
             tenant_conf,
             myself: std::sync::Weak::new(),
@@ -654,7 +689,7 @@ impl LayeredTimeline {
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
 
-            current_logical_size: AtomicIsize::new(0),
+            current_logical_size: AtomicI64::new(0),
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
 
@@ -815,8 +850,7 @@ impl LayeredTimeline {
             //
             // Logical size 0 means that it was not initialized, so don't believe that.
             if ancestor_logical_size != 0 && ancestor.get_last_record_lsn() == self.ancestor_lsn {
-                self.current_logical_size
-                    .store(ancestor_logical_size as isize, AtomicOrdering::SeqCst);
+                self.set_current_logical_size(ancestor_logical_size);
                 debug!(
                     "logical size copied from ancestor: {}",
                     ancestor_logical_size
@@ -830,8 +864,7 @@ impl LayeredTimeline {
         // Have to calculate it the hard way
         let last_lsn = self.get_last_record_lsn();
         let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
-        self.current_logical_size
-            .store(logical_size as isize, AtomicOrdering::SeqCst);
+        self.set_current_logical_size(logical_size);
         debug!("calculated logical size the hard way: {}", logical_size);
 
         timer.stop_and_record();
@@ -840,10 +873,10 @@ impl LayeredTimeline {
 
     /// Retrieve current logical size of the timeline
     ///
-    /// NOTE: counted incrementally, includes ancestors,
-    pub fn get_current_logical_size(&self) -> usize {
+    /// NOTE: counted incrementally, includes ancestors.
+    pub fn get_current_logical_size(&self) -> u64 {
         let current_logical_size = self.current_logical_size.load(AtomicOrdering::Acquire);
-        match usize::try_from(current_logical_size) {
+        match u64::try_from(current_logical_size) {
             Ok(sz) => sz,
             Err(_) => {
                 error!(
@@ -853,6 +886,34 @@ impl LayeredTimeline {
                 0
             }
         }
+    }
+
+    /// Update current logical size, adding `delta' to the old value.
+    fn update_current_logical_size(&self, delta: i64) {
+        let new_size = self
+            .current_logical_size
+            .fetch_add(delta, AtomicOrdering::SeqCst);
+
+        // Also set the value in the prometheus gauge. Note that
+        // there is a race condition here: if this is is called by two
+        // threads concurrently, the prometheus gauge might be set to
+        // one value while current_logical_size is set to the
+        // other. Currently, only initialization and the WAL receiver
+        // updates the logical size, and they don't run concurrently,
+        // so it cannot happen. And even if it did, it wouldn't be
+        // very serious, the metrics would just be slightly off until
+        // the next update.
+        self.metrics.current_logical_size_gauge.set(new_size);
+    }
+
+    /// Set current logical size.
+    fn set_current_logical_size(&self, new_size: u64) {
+        self.current_logical_size
+            .store(new_size as i64, AtomicOrdering::SeqCst);
+
+        // Also set the value in the prometheus gauge. Same race condition
+        // here as in `update_current_logical_size`.
+        self.metrics.current_logical_size_gauge.set(new_size as i64);
     }
 
     ///
@@ -1187,7 +1248,7 @@ impl LayeredTimeline {
         Some((lsn, img))
     }
 
-    fn get_ancestor_timeline(&self) -> Result<Arc<LayeredTimeline>> {
+    fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -1242,13 +1303,6 @@ impl LayeredTimeline {
             layer = layer_rc;
         }
         Ok(layer)
-    }
-
-    pub fn writer(&self) -> LayeredTimelineWriter {
-        LayeredTimelineWriter {
-            tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
-        }
     }
 
     fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
@@ -2324,13 +2378,15 @@ impl LayeredTimeline {
 
                 if img.len() == page_cache::PAGE_SZ {
                     let cache = page_cache::get();
-                    cache.memorize_materialized_page(
-                        self.tenant_id,
-                        self.timeline_id,
-                        key,
-                        last_rec_lsn,
-                        &img,
-                    );
+                    cache
+                        .memorize_materialized_page(
+                            self.tenant_id,
+                            self.timeline_id,
+                            key,
+                            last_rec_lsn,
+                            &img,
+                        )
+                        .context("Materialized page memoization failed")?;
                 }
 
                 Ok(img)
@@ -2401,6 +2457,56 @@ impl LayeredTimeline {
     }
 }
 
+/// An error happened in a get() operation.
+#[derive(thiserror::Error)]
+pub enum PageReconstructError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+
+    #[error(transparent)]
+    WalRedo(#[from] crate::walredo::WalRedoError),
+
+    /// A layer file is missing locally. You can call the returned Future to
+    /// download the missing layer, and after that finishes, the operation will
+    /// probably succeed if you retry it. (It can return NeedDownload again, if
+    /// another layer needs to be downloaded.).
+    #[error("layer file needs to be downloaded")]
+    NeedDownload(std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + Sync>>),
+}
+
+impl std::fmt::Debug for PageReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            PageReconstructError::Other(err) => err.fmt(f),
+            PageReconstructError::WalRedo(err) => err.fmt(f),
+            // TODO: print more info about the missing layer
+            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
+        }
+    }
+}
+
+///
+/// Run a function that can return PageReconstructError, downloading the missing
+/// file and retrying if needed.
+///
+pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    loop {
+        let result = f();
+        let future = match result {
+            Err(PageReconstructError::NeedDownload(future)) => {
+                tracing::error!("RETRYING");
+                future
+            }
+            _ => return Ok(result?),
+        };
+        future.await?;
+    }
+}
+
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
@@ -2428,39 +2534,50 @@ fn layer_traversal_error(
     Err(PageReconstructError::Other(msg))
 }
 
-pub struct LayeredTimelineWriter<'a> {
-    tl: &'a LayeredTimeline,
+/// Various functions to mutate the timeline.
+// TODO Currently, Deref is used to allow easy access to read methods from this trait.
+// This is probably considered a bad practice in Rust and should be fixed eventually,
+// but will cause large code changes.
+pub struct TimelineWriter<'a> {
+    tl: &'a Timeline,
     _write_guard: MutexGuard<'a, ()>,
 }
 
-impl Deref for LayeredTimelineWriter<'_> {
-    type Target = LayeredTimeline;
+impl Deref for TimelineWriter<'_> {
+    type Target = Timeline;
 
     fn deref(&self) -> &Self::Target {
         self.tl
     }
 }
 
-impl<'a> TimelineWriter for LayeredTimelineWriter<'a> {
-    fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
+impl<'a> TimelineWriter<'a> {
+    /// Put a new page version that can be constructed from a WAL record
+    ///
+    /// This will implicitly extend the relation, if the page is beyond the
+    /// current end-of-file.
+    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> Result<()> {
         self.tl.put_value(key, lsn, value)
     }
 
-    fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
+    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> Result<()> {
         self.tl.put_tombstone(key_range, lsn)
     }
 
-    ///
+    /// Track the end of the latest digested WAL record.
     /// Remember the (end of) last valid WAL record remembered in the timeline.
     ///
-    fn finish_write(&self, new_lsn: Lsn) {
+    /// Call this after you have finished writing all the WAL up to 'lsn'.
+    ///
+    /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
+    /// the 'lsn' or anything older. The previous last record LSN is stored alongside
+    /// the latest and can be read.
+    pub fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
     }
 
-    fn update_current_logical_size(&self, delta: isize) {
-        self.tl
-            .current_logical_size
-            .fetch_add(delta, AtomicOrdering::SeqCst);
+    pub fn update_current_logical_size(&self, delta: i64) {
+        self.tl.update_current_logical_size(delta)
     }
 }
 

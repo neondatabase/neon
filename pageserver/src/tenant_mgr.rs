@@ -2,8 +2,7 @@
 //! page server.
 
 use crate::config::PageServerConf;
-use crate::layered_repository::{LayeredRepository, TenantState};
-use crate::repository::Repository;
+use crate::layered_repository::{Repository, TenantState};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -17,15 +16,15 @@ use tracing::*;
 
 use utils::zid::ZTenantId;
 
-static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Arc<LayeredRepository>>>> =
+static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Arc<Repository>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
-fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Arc<LayeredRepository>>> {
+fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Arc<Repository>>> {
     TENANTS
         .read()
         .expect("Failed to read() tenants lock, it got poisoned")
 }
-fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<LayeredRepository>>> {
+fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Repository>>> {
     TENANTS
         .write()
         .expect("Failed to write() tenants lock, it got poisoned")
@@ -62,7 +61,7 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
 
                 // Start loading the tenant into memory. It will initially be in Loading
                 // state.
-                let (repo, handle) = LayeredRepository::spawn_load(conf, tenant_id)?;
+                let (repo, handle) = Repository::spawn_load(conf, tenant_id)?;
                 handles.push(handle);
                 write_tenants().insert(tenant_id, repo);
             }
@@ -157,7 +156,7 @@ pub fn create_tenant(
         }
         Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            let repo = LayeredRepository::create(conf, tenant_conf, tenant_id, wal_redo_manager)?;
+            let repo = Repository::create(conf, tenant_conf, tenant_id, wal_redo_manager)?;
             v.insert(Arc::new(repo));
             Ok(Some(tenant_id))
         }
@@ -175,7 +174,7 @@ pub fn update_tenant_config(
     Ok(())
 }
 
-pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<LayeredRepository>> {
+pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
     let m = read_tenants();
     let tenant = m
         .get(&tenant_id)
@@ -190,7 +189,7 @@ pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<LayeredRepository>
 /// with a 30 s timeout. Returns an error if the tenant does not
 /// exist, or it's not active yet and the wait times out,
 ///
-pub fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<LayeredRepository>> {
+pub fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
     let tenant = get_tenant(tenant_id)?;
 
     tokio::runtime::Handle::current().block_on(async {
@@ -259,7 +258,7 @@ pub fn attach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> Res
             }
         }
         Entry::Vacant(v) => {
-            let repo = LayeredRepository::spawn_attach(conf, tenant_id)?;
+            let repo = Repository::spawn_attach(conf, tenant_id)?;
             v.insert(repo);
             Ok(())
         }

@@ -28,8 +28,6 @@ use tracing::info;
 use crate::thread_mgr::ThreadKind;
 use metrics::{register_int_gauge_vec, IntGaugeVec};
 
-use pgdatadir_mapping::DatadirTimeline;
-
 /// Current storage format version
 ///
 /// This is embedded in the metadata file, and also in the header of all the

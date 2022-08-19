@@ -11,18 +11,28 @@ use bytes::Bytes;
 use tracing::*;
 use walkdir::WalkDir;
 
-use crate::layered_repository::LayeredTimeline;
+use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
-use crate::repository::TimelineWriter;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
-use postgres_ffi::relfile_utils::*;
-use postgres_ffi::waldecoder::*;
-use postgres_ffi::xlog_utils::*;
+use postgres_ffi::v14::relfile_utils::*;
+use postgres_ffi::v14::waldecoder::*;
+use postgres_ffi::v14::xlog_utils::*;
+use postgres_ffi::v14::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
 use postgres_ffi::Oid;
-use postgres_ffi::{pg_constants, ControlFileData, DBState_DB_SHUTDOWNED};
+use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
+
+// Returns checkpoint LSN from controlfile
+pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+    // Read control file to extract the LSN
+    let controlfile_path = path.join("global").join("pg_control");
+    let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
+    let lsn = controlfile.checkPoint;
+
+    Ok(Lsn(lsn))
+}
 
 ///
 /// Import all relation data pages from local disk into the repository.
@@ -32,7 +42,7 @@ use utils::lsn::Lsn;
 /// cluster was not shut down cleanly.
 pub fn import_timeline_from_postgres_datadir(
     path: &Path,
-    tline: &LayeredTimeline,
+    tline: &Timeline,
     lsn: Lsn,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
@@ -91,7 +101,7 @@ pub fn import_timeline_from_postgres_datadir(
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 fn import_rel<Reader: Read>(
-    modification: &mut DatadirModification<LayeredTimeline>,
+    modification: &mut DatadirModification,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
@@ -112,8 +122,8 @@ fn import_rel<Reader: Read>(
 
     let mut buf: [u8; 8192] = [0u8; 8192];
 
-    ensure!(len % pg_constants::BLCKSZ as usize == 0);
-    let nblocks = len / pg_constants::BLCKSZ as usize;
+    ensure!(len % BLCKSZ as usize == 0);
+    let nblocks = len / BLCKSZ as usize;
 
     let rel = RelTag {
         spcnode: spcoid,
@@ -122,7 +132,7 @@ fn import_rel<Reader: Read>(
         forknum,
     };
 
-    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+    let mut blknum: u32 = segno * (1024 * 1024 * 1024 / BLCKSZ as u32);
 
     // Call put_rel_creation for every segment of the relation,
     // because there is no guarantee about the order in which we are processing segments.
@@ -146,8 +156,7 @@ fn import_rel<Reader: Read>(
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => {
                     // reached EOF. That's expected.
-                    let relative_blknum =
-                        blknum - segno * (1024 * 1024 * 1024 / pg_constants::BLCKSZ as u32);
+                    let relative_blknum = blknum - segno * (1024 * 1024 * 1024 / BLCKSZ as u32);
                     ensure!(relative_blknum == nblocks as u32, "unexpected EOF");
                     break;
                 }
@@ -171,7 +180,7 @@ fn import_rel<Reader: Read>(
 /// Import an SLRU segment file
 ///
 fn import_slru<Reader: Read>(
-    modification: &mut DatadirModification<LayeredTimeline>,
+    modification: &mut DatadirModification,
     slru: SlruKind,
     path: &Path,
     mut reader: Reader,
@@ -186,8 +195,8 @@ fn import_slru<Reader: Read>(
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
-    ensure!(len % pg_constants::BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
-    let nblocks = len / pg_constants::BLCKSZ as usize;
+    ensure!(len % BLCKSZ as usize == 0); // we assume SLRU block size is the same as BLCKSZ
+    let nblocks = len / BLCKSZ as usize;
 
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 
@@ -226,12 +235,7 @@ fn import_slru<Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(
-    walpath: &Path,
-    tline: &LayeredTimeline,
-    startpoint: Lsn,
-    endpoint: Lsn,
-) -> Result<()> {
+fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint);
 
     let mut segno = startpoint.segment_number(pg_constants::WAL_SEGMENT_SIZE);
@@ -298,11 +302,11 @@ fn import_wal(
 }
 
 pub fn import_basebackup_from_tar<Reader: Read>(
-    tline: &LayeredTimeline,
+    tline: &Timeline,
     reader: Reader,
     base_lsn: Lsn,
 ) -> Result<()> {
-    info!("importing base at {}", base_lsn);
+    info!("importing base at {base_lsn}");
     let mut modification = tline.begin_modification(base_lsn);
     modification.init_empty()?;
 
@@ -340,7 +344,7 @@ pub fn import_basebackup_from_tar<Reader: Read>(
 }
 
 pub fn import_wal_from_tar<Reader: Read>(
-    tline: &LayeredTimeline,
+    tline: &Timeline,
     reader: Reader,
     start_lsn: Lsn,
     end_lsn: Lsn,
@@ -421,7 +425,7 @@ pub fn import_wal_from_tar<Reader: Read>(
 }
 
 pub fn import_file<Reader: Read>(
-    modification: &mut DatadirModification<LayeredTimeline>,
+    modification: &mut DatadirModification,
     file_path: &Path,
     reader: Reader,
     len: usize,

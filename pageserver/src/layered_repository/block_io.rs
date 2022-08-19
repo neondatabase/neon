@@ -157,7 +157,14 @@ where
         // Look up the right page
         let cache = page_cache::get();
         loop {
-            match cache.read_immutable_buf(self.file_id, blknum) {
+            match cache
+                .read_immutable_buf(self.file_id, blknum)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to read immutable buf: {e:#}"),
+                    )
+                })? {
                 ReadBufResult::Found(guard) => break Ok(guard),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer

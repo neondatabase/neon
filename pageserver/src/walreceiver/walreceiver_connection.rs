@@ -20,13 +20,11 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    layered_repository::{LayeredTimeline, WalReceiverInfo},
-    pgdatadir_mapping::DatadirTimeline,
-    repository::Timeline,
+    layered_repository::{Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
-use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::v14::waldecoder::WalStreamDecoder;
 use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 
 /// Status of the connection.
@@ -34,8 +32,9 @@ use utils::{lsn::Lsn, pq_proto::ReplicationFeedback};
 pub struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
-    /// Defines a healthy connection as one on which we have received at least some WAL bytes.
-    pub has_received_wal: bool,
+    /// Defines a healthy connection as one on which pageserver received WAL from safekeeper
+    /// and is able to process it in walingest without errors.
+    pub has_processed_wal: bool,
     /// Connection establishment time or the timestamp of a latest connection message received.
     pub latest_connection_update: NaiveDateTime,
     /// Time of the latest WAL message received.
@@ -49,7 +48,7 @@ pub struct WalConnectionStatus {
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub async fn handle_walreceiver_connection(
-    timeline: Arc<LayeredTimeline>,
+    timeline: Arc<Timeline>,
     wal_source_connstr: &str,
     events_sender: &watch::Sender<TaskEvent<WalConnectionStatus>>,
     mut cancellation: watch::Receiver<()>,
@@ -70,7 +69,7 @@ pub async fn handle_walreceiver_connection(
     info!("connected!");
     let mut connection_status = WalConnectionStatus {
         is_connected: true,
-        has_received_wal: false,
+        has_processed_wal: false,
         latest_connection_update: Utc::now().naive_utc(),
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
@@ -116,13 +115,6 @@ pub async fn handle_walreceiver_connection(
     let identify = identify_system(&mut replication_client).await?;
     info!("{identify:?}");
 
-    connection_status.latest_connection_update = Utc::now().naive_utc();
-    if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
-        warn!("Wal connection event listener dropped after IDENTIFY_SYSTEM, aborting the connection: {e}");
-        return Ok(());
-    }
-
-    // NB: this is a flush_lsn, not a commit_lsn.
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;
 
@@ -164,6 +156,7 @@ pub async fn handle_walreceiver_connection(
     } {
         let replication_message = replication_message?;
         let now = Utc::now().naive_utc();
+        let last_rec_lsn_before_msg = last_rec_lsn;
 
         // Update the connection status before processing the message. If the message processing
         // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
@@ -176,7 +169,6 @@ pub async fn handle_walreceiver_connection(
                 ));
                 if !xlog_data.data().is_empty() {
                     connection_status.latest_wal_update = now;
-                    connection_status.has_received_wal = true;
                 }
             }
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
@@ -247,6 +239,15 @@ pub async fn handle_walreceiver_connection(
 
             _ => None,
         };
+
+        if !connection_status.has_processed_wal && last_rec_lsn > last_rec_lsn_before_msg {
+            // We have successfully processed at least one WAL record.
+            connection_status.has_processed_wal = true;
+            if let Err(e) = events_sender.send(TaskEvent::NewEvent(connection_status.clone())) {
+                warn!("Wal connection event listener dropped, aborting the connection: {e}");
+                return Ok(());
+            }
+        }
 
         timeline.check_checkpoint_distance().with_context(|| {
             format!(

@@ -62,9 +62,16 @@ impl GenericOption {
     /// Represent `GenericOption` as configuration option.
     pub fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
+            let name = match self.name.as_str() {
+                "safekeepers" => "neon.safekeepers",
+                "wal_acceptor_reconnect" => "neon.safekeeper_reconnect_timeout",
+                "wal_acceptor_connect_timeout" => "neon.safekeeper_connect_timeout",
+                it => it,
+            };
+
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", self.name, val),
-                _ => format!("{} = {}", self.name, val),
+                "string" => format!("{} = '{}'", name, val),
+                _ => format!("{} = {}", name, val),
             }
         } else {
             self.name.to_owned()

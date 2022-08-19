@@ -30,7 +30,7 @@ use self::metadata::TimelineMetadata;
 use crate::config::PageServerConf;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
-use crate::repository::{GcResult, Repository, Timeline};
+use crate::repository::GcResult;
 use crate::thread_mgr;
 use crate::walredo::{PostgresRedoManager, WalRedoManager};
 use crate::CheckpointConfig;
@@ -65,7 +65,8 @@ mod timeline;
 
 use storage_layer::Layer;
 
-pub use timeline::LayeredTimeline;
+pub use timeline::{Timeline, PageReconstructError};
+pub use timeline::retry_get;
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -180,7 +181,7 @@ impl std::fmt::Display for TenantState {
 ///
 /// Repository consists of multiple timelines. Keep them in a hash table.
 ///
-pub struct LayeredRepository {
+pub struct Repository {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
@@ -210,7 +211,7 @@ pub struct LayeredRepository {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: ZTenantId,
-    timelines: Mutex<HashMap<ZTimelineId, Arc<LayeredTimeline>>>,
+    timelines: Mutex<HashMap<ZTimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration (especially with enforced checkpoint)
@@ -224,16 +225,19 @@ pub struct LayeredRepository {
     upload_layers: bool,
 }
 
-/// Public interface
-impl Repository for LayeredRepository {
-    type Timeline = LayeredTimeline;
-
-    fn get_timeline(&self, timeline_id: ZTimelineId) -> Option<Arc<Self::Timeline>> {
+/// A repository corresponds to one .neon directory. One repository holds multiple
+/// timelines, forked off from the same initial call to 'initdb'.
+impl Repository {
+    /// Get Timeline handle for given zenith timeline ID.
+    /// This function is idempotent. It doesn't change internal state in any way.
+    pub fn get_timeline(&self, timeline_id: ZTimelineId) -> Option<Arc<Timeline>> {
         let timelines = self.timelines.lock().unwrap();
         timelines.get(&timeline_id).map(Arc::clone)
     }
 
-    fn list_timelines(&self) -> Vec<Arc<Self::Timeline>> {
+    /// Lists timelines the repository contains.
+    /// Up to repository's implementation to omit certain timelines that ar not considered ready for use.
+    pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
             .unwrap()
@@ -250,11 +254,12 @@ impl Repository for LayeredRepository {
     /// NB: this doesn't launch the WAL receiver, because some callers don't want it.
     /// Call `timeline.launch_wal_receiver()` to launch it.
     ///
-    fn create_empty_timeline(
+    /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
+    pub fn create_empty_timeline(
         &self,
         timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
-    ) -> Result<Arc<LayeredTimeline>> {
+    ) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
         let vacant_timeline_entry = match timelines.entry(timeline_id) {
             Entry::Occupied(_) => bail!("Timeline already exists"),
@@ -281,7 +286,7 @@ impl Repository for LayeredRepository {
             None
         };
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             &metadata,
@@ -305,12 +310,12 @@ impl Repository for LayeredRepository {
     /// NB: this doesn't launch the WAL receiver, because some callers don't want it.
     /// Call `timeline.launch_wal_receiver()` to launch it.
     ///
-    fn branch_timeline(
+    pub fn branch_timeline(
         &self,
         src: ZTimelineId,
         dst: ZTimelineId,
         start_lsn: Option<Lsn>,
-    ) -> Result<Arc<LayeredTimeline>> {
+    ) -> Result<Arc<Timeline>> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -398,7 +403,7 @@ impl Repository for LayeredRepository {
             None
         };
 
-        let new_timeline = LayeredTimeline::new(
+        let new_timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             &metadata,
@@ -423,7 +428,7 @@ impl Repository for LayeredRepository {
         Ok(new_timeline)
     }
 
-    fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
+    pub fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
         // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
         // It is important that we do not take locks here, and do not check whether the timeline exists
         // because if we hold tenants_state::write_tenants() while awaiting for the threads to join
@@ -476,10 +481,16 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    /// Public entry point to GC. All the logic is in the private
-    /// gc_iteration_internal function, this public facade just wraps it for
-    /// metrics collection.
-    fn gc_iteration(
+    /// perform one garbage collection iteration, removing old data files from disk.
+    /// this function is periodically called by gc thread.
+    /// also it can be explicitly requested through page server api 'do_gc' command.
+    ///
+    /// 'timelineid' specifies the timeline to GC, or None for all.
+    /// `horizon` specifies delta from last lsn to preserve all object versions (pitr interval).
+    /// `checkpoint_before_gc` parameter is used to force compaction of storage before GC
+    /// to make tests more deterministic.
+    /// TODO Do we still need it or we can call checkpoint explicitly in tests where needed?
+    pub fn gc_iteration(
         &self,
         target_timeline_id: Option<ZTimelineId>,
         horizon: u64,
@@ -497,7 +508,11 @@ impl Repository for LayeredRepository {
             })
     }
 
-    fn compaction_iteration(&self) -> Result<()> {
+    /// Perform one compaction iteration.
+    /// This function is periodically called by compactor thread.
+    /// Also it can be explicitly requested per timeline through page server
+    /// api's 'compact' command.
+    pub fn compaction_iteration(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
@@ -518,12 +533,11 @@ impl Repository for LayeredRepository {
         Ok(())
     }
 
-    ///
     /// Flush all in-memory data to disk.
     ///
-    /// Used at shutdown.
+    /// Used at graceful shutdown.
     ///
-    fn checkpoint(&self) -> Result<()> {
+    pub fn checkpoint(&self) -> Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
         // checkpoints. We don't want to block everything else while the
@@ -532,7 +546,7 @@ impl Repository for LayeredRepository {
         let timelines_to_compact = timelines
             .iter()
             .map(|(&timeline_id, timeline)| (timeline_id, Arc::clone(timeline)))
-            .collect::<Vec<(ZTimelineId, Arc<LayeredTimeline>)>>();
+            .collect::<Vec<(ZTimelineId, Arc<Timeline>)>>();
         drop(timelines);
 
         for (timelineid, timeline) in &timelines_to_compact {
@@ -544,10 +558,7 @@ impl Repository for LayeredRepository {
 
         Ok(())
     }
-}
 
-/// Private functions
-impl LayeredRepository {
     ///
     /// Initialize a new tenant. The tenant ID better not be in use in
     /// the remote storage.
@@ -557,7 +568,7 @@ impl LayeredRepository {
         tenant_conf: TenantConfOpt,
         tenant_id: ZTenantId,
         wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    ) -> Result<LayeredRepository> {
+    ) -> Result<Repository> {
         let repo_dir = conf.tenant_path(&tenant_id);
         ensure!(
             !repo_dir.exists(),
@@ -572,12 +583,12 @@ impl LayeredRepository {
         info!("created directory structure in {}", repo_dir.display());
 
         // Save tenant's config
-        LayeredRepository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
+        Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
 
         // TODO: Should we upload something to remote storage? Otherwise there's no
         // trace of the new tenant in remote storage. The `tenant_conf` maybe?
 
-        Ok(LayeredRepository::new(
+        Ok(Repository::new(
             TenantState::Active,
             conf,
             tenant_conf,
@@ -586,12 +597,12 @@ impl LayeredRepository {
             conf.remote_storage_config.is_some(),
         ))
     }
-
+    
     ///
     /// Attach a tenant that's available in cloud storage.
     ///
     /// This returns quickly, after just creating the in-memory object
-    /// LayeredRepository struct and launching a background task to download
+    /// Repository struct and launching a background task to download
     /// the remote index files.  On return, the tenant is most likely still in
     /// Attaching state, and it will become Active once the background task
     /// finishes. You can use wait_until_active() to wait for the task to
@@ -600,13 +611,13 @@ impl LayeredRepository {
     pub fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: ZTenantId,
-    ) -> Result<Arc<LayeredRepository>> {
+    ) -> Result<Arc<Repository>> {
         // FIXME: where to get tenant config when attaching? This will just fill in
         // the defaults
         let tenant_conf = Self::load_tenant_config(conf, tenant_id)?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-        let repo = Arc::new(LayeredRepository::new(
+        let repo = Arc::new(Repository::new(
             TenantState::Attaching,
             conf,
             tenant_conf,
@@ -635,7 +646,7 @@ impl LayeredRepository {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
-    async fn attach_tenant(self: &Arc<LayeredRepository>) -> Result<()> {
+    async fn attach_tenant(self: &Arc<Repository>) -> Result<()> {
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!(
@@ -696,7 +707,7 @@ impl LayeredRepository {
                 None
             };
 
-            let timeline = LayeredTimeline::new(
+            let timeline = Timeline::new(
                 self.conf,
                 Arc::clone(&self.tenant_conf),
                 &remote_metadata,
@@ -719,7 +730,7 @@ impl LayeredRepository {
             // FIXME: This will retry the whole init_logical_size operation, if it needs
             // to download any layer files. Better to push this down into init_logical_size()
             // itself?
-            crate::repository::retry_get(|| timeline.init_logical_size()).await?;
+            crate::layered_repository::retry_get(|| timeline.init_logical_size()).await?;
 
             let mut timelines = self.timelines.lock().unwrap();
             timelines.insert(timeline_id, Arc::clone(&timeline));
@@ -754,18 +765,18 @@ impl LayeredRepository {
     /// but the index files already exist on local disk, as well as some layer
     /// files.
     ///
-    /// If the loading fails for some reason, the LayeredRepository will go into Broken
+    /// If the loading fails for some reason, the Repository will go into Broken
     /// state.
     ///
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: ZTenantId,
-    ) -> Result<(Arc<LayeredRepository>, JoinHandle<()>)> {
+    ) -> Result<(Arc<Repository>, JoinHandle<()>)> {
         // FIXME: also go into Broken state if this fails
         let tenant_conf = Self::load_tenant_config(conf, tenant_id)?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-        let repo = LayeredRepository::new(
+        let repo = Repository::new(
             TenantState::Loading,
             conf,
             tenant_conf,
@@ -796,7 +807,7 @@ impl LayeredRepository {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    async fn load_tenant(self: &Arc<LayeredRepository>) -> Result<()> {
+    async fn load_tenant(self: &Arc<Repository>) -> Result<()> {
         info!("loading tenant task {}", self.tenant_id);
 
         // Load in-memory state to reflect the local files on disk
@@ -836,7 +847,7 @@ impl LayeredRepository {
         // all its children.
         let sorted_timelines = tree_sort_timelines(&timelines_to_load)?;
 
-        let mut loaded_timelines: Vec<Arc<LayeredTimeline>> = Vec::new();
+        let mut loaded_timelines: Vec<Arc<Timeline>> = Vec::new();
         for &timeline_id in sorted_timelines.iter() {
             let timeline = self.load_timeline(timeline_id).await?;
 
@@ -873,7 +884,7 @@ impl LayeredRepository {
         Ok(())
     }
 
-    fn load_local_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+    fn load_local_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
         // FIXME
         //let _enter =
         //    info_span!("loading timeline state from disk", timeline = %timeline_id).entered();
@@ -902,7 +913,7 @@ impl LayeredRepository {
         // TODO: Launch background task to start uploading anything that's not present in
         // remote storage yet
 
-        let timeline = LayeredTimeline::new(
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             &metadata,
@@ -924,7 +935,7 @@ impl LayeredRepository {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    async fn load_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<LayeredTimeline>> {
+    async fn load_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
         let timeline = self.load_local_timeline(timeline_id)?;
 
         if self.upload_layers {
@@ -946,7 +957,7 @@ impl LayeredRepository {
     /// or to a different pageserver.
     ///
     /// Returns a JoinHandle that you can use to wait for the detach operation to finish.
-    pub fn spawn_detach(self: &Arc<LayeredRepository>) -> Result<JoinHandle<Result<()>>> {
+    pub fn spawn_detach(self: &Arc<Repository>) -> Result<JoinHandle<Result<()>>> {
         let old_state = self.state.send_replace(TenantState::Stopping);
         if old_state == TenantState::Stopping {
             bail!("already stopping");
@@ -969,7 +980,7 @@ impl LayeredRepository {
         // FIXME: does thread_mgr::shutdown_threads also shut down the WAL receiver?
         thread_mgr::shutdown_threads(None, Some(self.tenant_id), None);
 
-        let timelines: Vec<Arc<LayeredTimeline>> =
+        let timelines: Vec<Arc<Timeline>> =
             self.timelines.lock().unwrap().values().cloned().collect();
 
         for timeline in timelines.iter() {
@@ -1015,7 +1026,7 @@ impl LayeredRepository {
 
         // FIXME: does thread_mgr::shutdown_threads also shut down the WAL receiver?
 
-        let timelines: Vec<Arc<LayeredTimeline>> =
+        let timelines: Vec<Arc<Timeline>> =
             self.timelines.lock().unwrap().values().cloned().collect();
         for timeline in timelines.iter() {
             timeline.shutdown().await?;
@@ -1092,7 +1103,7 @@ impl LayeredRepository {
 
         tenant_conf.update(&new_tenant_conf);
 
-        LayeredRepository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
+        Repository::persist_tenant_config(self.conf, self.tenant_id, *tenant_conf)?;
         Ok(())
     }
 
@@ -1103,9 +1114,9 @@ impl LayeredRepository {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: ZTenantId,
         upload_layers: bool,
-    ) -> LayeredRepository {
+    ) -> Repository {
         let (watch_sender, _) = tokio::sync::watch::channel(state);
-        LayeredRepository {
+        Repository {
             state: watch_sender,
             tenant_id,
             file_lock: RwLock::new(()),
@@ -1306,7 +1317,7 @@ impl LayeredRepository {
         // compaction (both require `layer_removal_cs` lock),
         // but the GC iteration can run concurrently with branch creation.
         //
-        // See comments in [`LayeredRepository::branch_timeline`] for more information
+        // See comments in [`Repository::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if thread_mgr::is_shutdown_requested() {
@@ -1452,7 +1463,6 @@ pub mod repo_harness {
     use crate::walrecord::ZenithWalRecord;
     use crate::{
         config::PageServerConf,
-        layered_repository::LayeredRepository,
         walredo::{WalRedoError, WalRedoManager},
     };
 
@@ -1545,14 +1555,14 @@ pub mod repo_harness {
             })
         }
 
-        pub fn load(&self) -> LayeredRepository {
+        pub fn load(&self) -> Repository {
             self.try_load().expect("failed to load test repo")
         }
 
-        pub fn try_load(&self) -> Result<LayeredRepository> {
+        pub fn try_load(&self) -> Result<Repository> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
-            let repo = LayeredRepository::new(
+            let repo = Repository::new(
                 crate::layered_repository::TenantState::Active,
                 self.conf,
                 TenantConfOpt::from(self.tenant_conf),
@@ -1622,8 +1632,6 @@ mod tests {
     use super::repo_harness::*;
     use super::*;
     use crate::pgdatadir_mapping::create_test_timeline;
-    use crate::pgdatadir_mapping::DatadirTimeline;
-    use crate::repository::TimelineWriter;
     use crate::repository::{Key, Value};
     use bytes::BytesMut;
     use hex_literal::hex;
@@ -1636,7 +1644,7 @@ mod tests {
     use super::metadata::METADATA_FILE_NAME;
     use crate::keyspace::KeySpaceAccum;
 
-    pub fn assert_current_logical_size(timeline: &LayeredTimeline, lsn: Lsn) {
+    pub fn assert_current_logical_size(timeline: &Timeline, lsn: Lsn) {
         let incremental = timeline.get_current_logical_size();
         let non_incremental = timeline
             .get_current_logical_size_non_incremental(lsn)
@@ -1646,8 +1654,8 @@ mod tests {
 
     #[test]
     fn test_basic() -> Result<()> {
-        let mut repo = RepoHarness::create("test_basic")?.load();
-        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let repo = RepoHarness::create("test_basic")?.load();
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -1691,8 +1699,8 @@ mod tests {
     ///
     #[test]
     fn test_branch() -> Result<()> {
-        let mut repo = RepoHarness::create("test_branch")?.load();
-        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let repo = RepoHarness::create("test_branch")?.load();
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         let writer = tline.writer();
         tline.init_logical_size()?;
         use std::str::from_utf8;
@@ -1742,7 +1750,7 @@ mod tests {
         Ok(())
     }
 
-    fn make_some_layers(tline: &LayeredTimeline, start_lsn: Lsn) -> Result<()> {
+    fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -1858,9 +1866,9 @@ mod tests {
 
     #[test]
     fn test_retain_data_in_parent_which_is_needed_for_child() -> Result<()> {
-        let mut repo =
+        let repo =
             RepoHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?.load();
-        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
@@ -1875,9 +1883,9 @@ mod tests {
     }
     #[test]
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
-        let mut repo =
+        let repo =
             RepoHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
-        let tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 
         repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x40)))?;
@@ -2097,8 +2105,8 @@ mod tests {
 
     #[test]
     fn test_traverse_branches() -> Result<()> {
-        let mut repo = RepoHarness::create("test_traverse_branches")?.load();
-        let mut tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let repo = RepoHarness::create("test_traverse_branches")?.load();
+        let mut tline = create_test_timeline(&repo, TIMELINE_ID)?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -2174,8 +2182,8 @@ mod tests {
 
     #[test]
     fn test_traverse_ancestors() -> Result<()> {
-        let mut repo = RepoHarness::create("test_traverse_ancestors")?.load();
-        let mut tline = create_test_timeline(&mut repo, TIMELINE_ID)?;
+        let repo = RepoHarness::create("test_traverse_ancestors")?.load();
+        let mut tline = create_test_timeline(&repo, TIMELINE_ID)?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;

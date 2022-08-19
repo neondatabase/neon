@@ -1855,11 +1855,11 @@ class Postgres(PgProtocol):
                 # walproposer uses different application_name
                 if ("synchronous_standby_names" in cfg_line or
                         # don't repeat safekeepers/wal_acceptors multiple times
-                        "safekeepers" in cfg_line):
+                        "neon.safekeepers" in cfg_line):
                     continue
                 f.write(cfg_line)
             f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("safekeepers = '{}'\n".format(safekeepers))
+            f.write("neon.safekeepers = '{}'\n".format(safekeepers))
         return self
 
     def config(self, lines: List[str]) -> 'Postgres':

@@ -22,22 +22,26 @@ use std::time::SystemTime;
 use tar::{Builder, EntryType, Header};
 use tracing::*;
 
+use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
-use crate::DatadirTimeline;
-use postgres_ffi::xlog_utils::*;
-use postgres_ffi::*;
+
+use postgres_ffi::v14::pg_constants;
+use postgres_ffi::v14::xlog_utils::{generate_wal_segment, normalize_lsn, XLogFileName};
+use postgres_ffi::v14::{CheckPoint, ControlFileData};
+use postgres_ffi::TransactionId;
+use postgres_ffi::PG_TLI;
+use postgres_ffi::{BLCKSZ, RELSEG_SIZE};
 use utils::lsn::Lsn;
 
 /// This is short-living object only for the time of tarball creation,
 /// created mostly to avoid passing a lot of parameters between various functions
 /// used for constructing tarball.
-pub struct Basebackup<'a, W, T>
+pub struct Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     ar: Builder<AbortableWrite<W>>,
-    timeline: &'a Arc<T>,
+    timeline: &'a Arc<Timeline>,
     pub lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
@@ -52,18 +56,17 @@ where
 //  * When working without safekeepers. In this situation it is important to match the lsn
 //    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 //    to start the replication.
-impl<'a, W, T> Basebackup<'a, W, T>
+impl<'a, W> Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     pub fn new(
         write: W,
-        timeline: &'a Arc<T>,
+        timeline: &'a Arc<Timeline>,
         req_lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
-    ) -> Result<Basebackup<'a, W, T>> {
+    ) -> Result<Basebackup<'a, W>> {
         // Compute postgres doesn't have any previous WAL files, but the first
         // record that it's going to write needs to include the LSN of the
         // previous record (xl_prev). We include prev_record_lsn in the
@@ -200,7 +203,7 @@ where
         }
 
         // Add a file for each chunk of blocks (aka segment)
-        let chunks = (0..nblocks).chunks(pg_constants::RELSEG_SIZE as usize);
+        let chunks = (0..nblocks).chunks(RELSEG_SIZE as usize);
         for (seg, blocks) in chunks.into_iter().enumerate() {
             let mut segment_data: Vec<u8> = vec![];
             for blknum in blocks {
@@ -220,23 +223,19 @@ where
     fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self.timeline.get_slru_segment_size(slru, segno, self.lsn)?;
 
-        let mut slru_buf: Vec<u8> =
-            Vec::with_capacity(nblocks as usize * pg_constants::BLCKSZ as usize);
+        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
         for blknum in 0..nblocks {
             let img = self
                 .timeline
                 .get_slru_page_at_lsn(slru, segno, blknum, self.lsn)?;
 
             if slru == SlruKind::Clog {
-                ensure!(
-                    img.len() == pg_constants::BLCKSZ as usize
-                        || img.len() == pg_constants::BLCKSZ as usize + 8
-                );
+                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
             } else {
-                ensure!(img.len() == pg_constants::BLCKSZ as usize);
+                ensure!(img.len() == BLCKSZ as usize);
             }
 
-            slru_buf.extend_from_slice(&img[..pg_constants::BLCKSZ as usize]);
+            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
         }
 
         let segname = format!("{}/{:>04X}", slru.to_str(), segno);
@@ -403,10 +402,9 @@ where
     }
 }
 
-impl<'a, W, T> Drop for Basebackup<'a, W, T>
+impl<'a, W> Drop for Basebackup<'a, W>
 where
     W: Write,
-    T: DatadirTimeline,
 {
     /// If the basebackup was not finished, prevent the Archive::drop() from
     /// writing the end-of-archive marker.
