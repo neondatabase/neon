@@ -2,9 +2,12 @@
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
+ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG IMAGE=rust
+ARG TAG=pinned
 
 # Build Postgres
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS pg-build
+FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
 COPY vendor/postgres vendor/postgres
@@ -17,7 +20,7 @@ RUN set -e \
     && tar -C tmp_install -czf /home/nonroot/postgres_install.tar.gz .
 
 # Build zenith binaries
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS build
+FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 
