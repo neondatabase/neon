@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Error, ErrorKind};
+use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -51,7 +51,7 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenantid: ZTenantId,
         timelineid: ZTimelineId,
-    ) -> Result<EphemeralFile, std::io::Error> {
+    ) -> Result<EphemeralFile, io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
         let file_id = l.next_file_id;
         l.next_file_id += 1;
@@ -76,7 +76,7 @@ impl EphemeralFile {
         })
     }
 
-    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), Error> {
+    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), io::Error> {
         let mut off = 0;
         while off < PAGE_SZ {
             let n = self
@@ -96,10 +96,13 @@ impl EphemeralFile {
         Ok(())
     }
 
-    fn get_buf_for_write(&self, blkno: u32) -> Result<page_cache::PageWriteGuard, Error> {
+    fn get_buf_for_write(&self, blkno: u32) -> Result<page_cache::PageWriteGuard, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
-        let mut write_guard = match cache.write_ephemeral_buf(self.file_id, blkno) {
+        let mut write_guard = match cache
+            .write_ephemeral_buf(self.file_id, blkno)
+            .map_err(|e| to_io_error(e, "Failed to write ephemeral buf"))?
+        {
             WriteBufResult::Found(guard) => guard,
             WriteBufResult::NotFound(mut guard) => {
                 // Read the page from disk into the buffer
@@ -127,7 +130,7 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 }
 
 impl FileExt for EphemeralFile {
-    fn read_at(&self, dstbuf: &mut [u8], offset: u64) -> Result<usize, Error> {
+    fn read_at(&self, dstbuf: &mut [u8], offset: u64) -> Result<usize, io::Error> {
         // Look up the right page
         let blkno = (offset / PAGE_SZ as u64) as u32;
         let off = offset as usize % PAGE_SZ;
@@ -137,7 +140,10 @@ impl FileExt for EphemeralFile {
         let mut write_guard;
 
         let cache = page_cache::get();
-        let buf = match cache.read_ephemeral_buf(self.file_id, blkno) {
+        let buf = match cache
+            .read_ephemeral_buf(self.file_id, blkno)
+            .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
+        {
             ReadBufResult::Found(guard) => {
                 read_guard = guard;
                 read_guard.as_ref()
@@ -158,7 +164,7 @@ impl FileExt for EphemeralFile {
         Ok(len)
     }
 
-    fn write_at(&self, srcbuf: &[u8], offset: u64) -> Result<usize, Error> {
+    fn write_at(&self, srcbuf: &[u8], offset: u64) -> Result<usize, io::Error> {
         // Look up the right page
         let blkno = (offset / PAGE_SZ as u64) as u32;
         let off = offset as usize % PAGE_SZ;
@@ -166,7 +172,10 @@ impl FileExt for EphemeralFile {
 
         let mut write_guard;
         let cache = page_cache::get();
-        let buf = match cache.write_ephemeral_buf(self.file_id, blkno) {
+        let buf = match cache
+            .write_ephemeral_buf(self.file_id, blkno)
+            .map_err(|e| to_io_error(e, "Failed to write ephemeral buf"))?
+        {
             WriteBufResult::Found(guard) => {
                 write_guard = guard;
                 write_guard.deref_mut()
@@ -190,7 +199,7 @@ impl FileExt for EphemeralFile {
 }
 
 impl BlobWriter for EphemeralFile {
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         let pos = self.size;
 
         let mut blknum = (self.size / PAGE_SZ as u64) as u32;
@@ -268,11 +277,11 @@ impl Drop for EphemeralFile {
     }
 }
 
-pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Error> {
+pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),
-            Err(e) => Err(std::io::Error::new(
+            Err(e) => Err(io::Error::new(
                 ErrorKind::Other,
                 format!(
                     "failed to write back to ephemeral file at {} error: {}",
@@ -282,7 +291,7 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Er
             )),
         }
     } else {
-        Err(std::io::Error::new(
+        Err(io::Error::new(
             ErrorKind::Other,
             "could not write back page, not found in ephemeral files hash",
         ))
@@ -292,11 +301,14 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), std::io::Er
 impl BlockReader for EphemeralFile {
     type BlockLease = page_cache::PageReadGuard<'static>;
 
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
-            match cache.read_ephemeral_buf(self.file_id, blknum) {
+            match cache
+                .read_ephemeral_buf(self.file_id, blknum)
+                .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
+            {
                 ReadBufResult::Found(guard) => return Ok(guard),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
@@ -311,6 +323,10 @@ impl BlockReader for EphemeralFile {
     }
 }
 
+fn to_io_error(e: anyhow::Error, context: &str) -> io::Error {
+    io::Error::new(ErrorKind::Other, format!("{context}: {e:#}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +338,7 @@ mod tests {
 
     fn repo_harness(
         test_name: &str,
-    ) -> Result<(&'static PageServerConf, ZTenantId, ZTimelineId), Error> {
+    ) -> Result<(&'static PageServerConf, ZTenantId, ZTimelineId), io::Error> {
         let repo_dir = PageServerConf::test_repo_dir(test_name);
         let _ = fs::remove_dir_all(&repo_dir);
         let conf = PageServerConf::dummy_conf(repo_dir);
@@ -339,7 +355,7 @@ mod tests {
 
     // Helper function to slurp contents of a file, starting at the current position,
     // into a string
-    fn read_string(efile: &EphemeralFile, offset: u64, len: usize) -> Result<String, Error> {
+    fn read_string(efile: &EphemeralFile, offset: u64, len: usize) -> Result<String, io::Error> {
         let mut buf = Vec::new();
         buf.resize(len, 0u8);
 
@@ -351,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ephemeral_files() -> Result<(), Error> {
+    fn test_ephemeral_files() -> Result<(), io::Error> {
         let (conf, tenantid, timelineid) = repo_harness("ephemeral_files")?;
 
         let file_a = EphemeralFile::create(conf, tenantid, timelineid)?;
@@ -382,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ephemeral_blobs() -> Result<(), Error> {
+    fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenantid, timelineid) = repo_harness("ephemeral_blobs")?;
 
         let mut file = EphemeralFile::create(conf, tenantid, timelineid)?;
