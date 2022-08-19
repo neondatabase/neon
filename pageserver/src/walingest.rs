@@ -1083,7 +1083,7 @@ mod tests {
 
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, 1);
@@ -1154,7 +1154,7 @@ mod tests {
 
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), false)?;
+        walingest.put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"))?;
         m.commit()?;
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x70), false)?, 2);
         assert_eq!(
@@ -1194,7 +1194,7 @@ mod tests {
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
-        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), false)?;
+        walingest.put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"))?;
         m.commit()?;
 
         // Check that rel exists and size is correct
@@ -1244,7 +1244,7 @@ mod tests {
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x10), false)?, false);
-        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10)).is_err());
+        assert!(tline.get_rel_size(TESTREL_A, Lsn(0x10), false).is_err());
 
         assert_eq!(tline.get_rel_exists(TESTREL_A, Lsn(0x20), false)?, true);
         assert_eq!(tline.get_rel_size(TESTREL_A, Lsn(0x20), false)?, relsize);
@@ -1254,7 +1254,7 @@ mod tests {
             let lsn = Lsn(0x20);
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
-                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn)?,
+                tline.get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false)?,
                 TEST_IMG(&data)
             );
         }
