@@ -508,6 +508,9 @@ jobs:
       - name: Pull compute node image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest compute-node
 
+      - name: Pull rust image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
+
       - name: Configure docker login
         run: |
           # ECR Credential Helper & Docker Hub don't work together in config, hence reset
@@ -522,6 +525,9 @@ jobs:
 
       - name: Push compute node image to Docker Hub
         run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
+
+      - name: Push rust image to Docker Hub
+        run: crane push rust neondatabase/rust:pinned
 
       - name: Add latest tag to images
         if: |
