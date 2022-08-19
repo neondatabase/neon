@@ -139,6 +139,15 @@ static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static CURRENT_LOGICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_current_logical_size",
+        "Current logical size grouped by timeline",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
 static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
@@ -234,6 +243,8 @@ struct TimelineMetrics {
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub current_physical_size_gauge: UIntGauge,
+    /// copy of LayeredTimeline.current_logical_size
+    pub current_logical_size_gauge: IntGauge,
 }
 
 impl TimelineMetrics {
@@ -271,6 +282,9 @@ impl TimelineMetrics {
         let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             reconstruct_time_histo,
@@ -283,6 +297,7 @@ impl TimelineMetrics {
             last_record_gauge,
             wait_lsn_time_histo,
             current_physical_size_gauge,
+            current_logical_size_gauge,
         }
     }
 }
@@ -391,6 +406,11 @@ pub struct Timeline {
     /// get_current_logical_size() will clamp the returned value to zero if it's
     /// negative, and log an error. Could set it permanently to zero or some
     /// special value to indicate "broken" instead, but this will do for now.
+    ///
+    /// Note that we also expose a copy of this value as a prometheus metric,
+    /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
+    /// and `set_current_logical_size` functions to modify this, they will
+    /// also keep the prometheus metric in sync.
     current_logical_size: AtomicI64,
 
     /// Information about the last processed message by the WAL receiver,
@@ -827,8 +847,7 @@ impl Timeline {
             //
             // Logical size 0 means that it was not initialized, so don't believe that.
             if ancestor_logical_size != 0 && ancestor.get_last_record_lsn() == self.ancestor_lsn {
-                self.current_logical_size
-                    .store(ancestor_logical_size as i64, AtomicOrdering::SeqCst);
+                self.set_current_logical_size(ancestor_logical_size);
                 debug!(
                     "logical size copied from ancestor: {}",
                     ancestor_logical_size
@@ -842,8 +861,7 @@ impl Timeline {
         // Have to calculate it the hard way
         let last_lsn = self.get_last_record_lsn();
         let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
-        self.current_logical_size
-            .store(logical_size as i64, AtomicOrdering::SeqCst);
+        self.set_current_logical_size(logical_size);
         debug!("calculated logical size the hard way: {}", logical_size);
 
         timer.stop_and_record();
@@ -865,6 +883,34 @@ impl Timeline {
                 0
             }
         }
+    }
+
+    /// Update current logical size, adding `delta' to the old value.
+    fn update_current_logical_size(&self, delta: i64) {
+        let new_size = self
+            .current_logical_size
+            .fetch_add(delta, AtomicOrdering::SeqCst);
+
+        // Also set the value in the prometheus gauge. Note that
+        // there is a race condition here: if this is is called by two
+        // threads concurrently, the prometheus gauge might be set to
+        // one value while current_logical_size is set to the
+        // other. Currently, only initialization and the WAL receiver
+        // updates the logical size, and they don't run concurrently,
+        // so it cannot happen. And even if it did, it wouldn't be
+        // very serious, the metrics would just be slightly off until
+        // the next update.
+        self.metrics.current_logical_size_gauge.set(new_size);
+    }
+
+    /// Set current logical size.
+    fn set_current_logical_size(&self, new_size: u64) {
+        self.current_logical_size
+            .store(new_size as i64, AtomicOrdering::SeqCst);
+
+        // Also set the value in the prometheus gauge. Same race condition
+        // here as in `update_current_logical_size`.
+        self.metrics.current_logical_size_gauge.set(new_size as i64);
     }
 
     ///
@@ -2261,9 +2307,7 @@ impl<'a> TimelineWriter<'a> {
     }
 
     pub fn update_current_logical_size(&self, delta: i64) {
-        self.tl
-            .current_logical_size
-            .fetch_add(delta, AtomicOrdering::SeqCst);
+        self.tl.update_current_logical_size(delta)
     }
 }
 

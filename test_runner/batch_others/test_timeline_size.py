@@ -1,4 +1,5 @@
 from contextlib import closing
+import math
 import random
 from uuid import UUID
 import re
@@ -278,11 +279,13 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
 
-def test_timeline_physical_size_metric(neon_simple_env: NeonEnv):
+# The timeline logical and physical sizes are also exposed as prometheus metrics.
+# Test the metrics.
+def test_timeline_size_metrics(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    new_timeline_id = env.neon_cli.create_branch('test_timeline_physical_size_metric')
-    pg = env.postgres.create_start("test_timeline_physical_size_metric")
+    new_timeline_id = env.neon_cli.create_branch('test_timeline_size_metrics')
+    pg = env.postgres.create_start("test_timeline_size_metrics")
 
     pg.safe_psql_many([
         "CREATE TABLE foo (t text)",
@@ -301,11 +304,31 @@ def test_timeline_physical_size_metric(neon_simple_env: NeonEnv):
         metrics,
         re.MULTILINE)
     assert matches
-
-    # assert that the metric matches the actual physical size on disk
     tl_physical_size_metric = int(matches.group(1))
+
+    # assert that the physical size metric matches the actual physical size on disk
     timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
+
+    # Check that the logical size metric is sane, and matches
+    matches = re.search(
+        f'^pageserver_current_logical_size{{tenant_id="{env.initial_tenant.hex}",timeline_id="{new_timeline_id.hex}"}} (\\S+)$',
+        metrics,
+        re.MULTILINE)
+    assert matches
+    tl_logical_size_metric = int(matches.group(1))
+
+    # An empty database is around 8 MB. There at least 3 databases, 'postgres',
+    # 'template0', 'template1'. So the total size should be about 32 MB. This isn't
+    # very accurate and can change with different PostgreSQL versions, so allow a
+    # couple of MB of slack.
+    assert math.isclose(tl_logical_size_metric, 32 * 1024 * 1024, abs_tol=2 * 1024 * 1024)
+
+    # The sum of the sizes of all databases, as seen by pg_database_size(), should also
+    # be close. Again allow some slack, the logical size metric includes some things like
+    # the SLRUs that are not included in pg_database_size().
+    dbsize_sum = pg.safe_psql("select sum(pg_database_size(oid)) from pg_database")[0][0]
+    assert math.isclose(dbsize_sum, tl_logical_size_metric, abs_tol=2 * 1024 * 1024)
 
 
 def test_tenant_physical_size(neon_simple_env: NeonEnv):
