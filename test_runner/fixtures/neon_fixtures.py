@@ -328,15 +328,14 @@ class PgProtocol:
         with closing(self.connect(autocommit=autocommit, **kwargs)) as conn:
             yield conn.cursor()
 
-    def connect_async_prepare_connection_options(self, **kwargs) -> asyncpg.Connection:
+    async def connect_async(self, **kwargs) -> asyncpg.Connection:
         """
         Connect to the node from async python.
         Returns asyncpg's connection object.
         """
 
-        # asyncpg takes slightly different
-        # options than psycopg2.
-        # Try to convert the defaults from the psycopg2 format.
+        # asyncpg takes slightly different options than psycopg2. Try
+        # to convert the defaults from the psycopg2 format.
 
         # The psycopg2 option 'dbname' is called 'database' is asyncpg
         conn_options = self.conn_options(**kwargs)
@@ -346,48 +345,14 @@ class PgProtocol:
         # Convert options='-c<key>=<val>' to server_settings
         if 'options' in conn_options:
             options = conn_options.pop('options')
-            for match in options.split(" "):
-                print("match", match)
-                if "-c" in match:
-                    matches = [x for x in re.finditer('-c(\w*)=(\w*)', match)]
-                    assert len(matches) == 1
-                    match = matches[0]
-                    key = match.group(1)
-                    val = match.group(2)
-                    if 'server_settings' in conn_options:
-                        conn_options['server_settings'].update({key: val})
-                    else:
-                        conn_options['server_settings'] = {key: val}
-                elif "=" in match:
-                    parts = match.split("=")
-                    assert len(parts) == 2
-                    key, val = parts[0], parts[1]
-                    if 'server_settings' in conn_options:
-                        conn_options['server_settings'].update({key: val})
-                    else:
-                        conn_options['server_settings'] = {key: val}
+            for match in re.finditer(r'-c(\w*)=(\w*)', options):
+                key = match.group(1)
+                val = match.group(2)
+                if 'server_options' in conn_options:
+                    conn_options['server_settings'].update({key: val})
                 else:
-                    match_is_empty = len(match) == 0
-                    if not match_is_empty:
-                        # invalid options
-                        log.info("ASSERT match_is_emptygit d: invalid option: match = |" + match +
-                                 "|; options = |" + options + "|; options.split = |" +
-                                 str(options.split(" ")) + "|")
-                    assert match_is_empty
-        return conn_options
-
-    async def connect_async(self, callback=None, **kwargs) -> asyncpg.Connection:
-        """
-        Connect to the node from async python.
-        Returns asyncpg's connection object.
-        """
-
-        conn_options = self.connect_async_prepare_connection_options(**kwargs)
-
-        if callback is None:
-            return await asyncpg.connect(**conn_options)
-        else:
-            return (await asyncpg.connect(**conn_options)).add_log_listener(callback)
+                    conn_options['server_settings'] = {key: val}
+        return await asyncpg.connect(**conn_options)
 
     def safe_psql(self, query: str, **kwargs: Any) -> List[Tuple[Any, ...]]:
         """
