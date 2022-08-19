@@ -1,6 +1,10 @@
 # First transient image to build compute_tools binaries
 # NB: keep in sync with rust image version in .github/workflows/build_and_test.yml
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned AS rust-build
+ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG IMAGE=rust
+ARG TAG=pinned
+
+FROM $REPOSITORY/$IMAGE:$TAG AS rust-build
 WORKDIR /home/nonroot
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
