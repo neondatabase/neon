@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::*;
 use utils::lsn::Lsn;
 
+pub use tenants_state::try_send_timeline_update;
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
@@ -68,7 +69,7 @@ mod tenants_state {
         Ok(())
     }
 
-    pub(super) fn try_send_timeline_update(update: LocalTimelineUpdate) {
+    pub fn try_send_timeline_update(update: LocalTimelineUpdate) {
         match TIMELINE_UPDATE_SENDER
             .read()
             .expect("Failed to read() timeline_update_sender lock, it got poisoned")
@@ -466,12 +467,6 @@ fn load_local_timeline(
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;
     inmem_timeline.init_logical_size()?;
-
-    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
-        id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
-        datadir: Arc::clone(&inmem_timeline),
-    });
-
     Ok(inmem_timeline)
 }
 
