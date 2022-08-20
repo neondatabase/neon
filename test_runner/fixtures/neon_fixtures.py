@@ -1731,7 +1731,7 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, proxy_port: int, http_port: int, auth_endpoint, mgmt_port):
+    def __init__(self, proxy_port: int, http_port: int, auth_endpoint=None, mgmt_port=None):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = '127.0.0.1'
         self.http_port = http_port
@@ -1799,7 +1799,7 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
-    with NeonProxy(proxy_port, http_port, None, mgmt_port) as proxy:
+    with NeonProxy(proxy_port, http_port, mgmt_port=mgmt_port) as proxy:
         proxy.start_with_link_auth()
         yield proxy
 
@@ -1824,7 +1824,7 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     http_port = port_distributor.get_port()
 
     with NeonProxy(proxy_port=proxy_port, http_port=http_port,
-                   auth_endpoint=auth_endpoint, mgmt_port=None) as proxy:
+                   auth_endpoint=auth_endpoint) as proxy:
         proxy.start()
         yield proxy
 
@@ -2027,7 +2027,6 @@ class PostgresFactory:
                      tenant_id: Optional[uuid.UUID] = None,
                      lsn: Optional[str] = None,
                      config_lines: Optional[List[str]] = None) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -2049,7 +2048,6 @@ class PostgresFactory:
                tenant_id: Optional[uuid.UUID] = None,
                lsn: Optional[str] = None,
                config_lines: Optional[List[str]] = None) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -2444,7 +2442,6 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
     log.info(f'filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}')
 
     for f in mismatch:
-
         f1 = os.path.join(pg.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.filediff".format(f2)
