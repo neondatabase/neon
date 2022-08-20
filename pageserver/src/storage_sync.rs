@@ -1642,7 +1642,7 @@ fn register_sync_status(
 mod test_utils {
     use utils::lsn::Lsn;
 
-    use crate::repository::repo_harness::RepoHarness;
+    use crate::layered_repository::repo_harness::RepoHarness;
 
     use super::*;
 
@@ -1687,7 +1687,7 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::test_utils::dummy_metadata;
-    use crate::repository::repo_harness::TIMELINE_ID;
+    use crate::layered_repository::repo_harness::TIMELINE_ID;
     use hex_literal::hex;
     use utils::lsn::Lsn;
 

@@ -175,9 +175,8 @@ impl TimelineMetadata {
 
 #[cfg(test)]
 mod tests {
-    use crate::repository::repo_harness::TIMELINE_ID;
-
     use super::*;
+    use crate::layered_repository::repo_harness::TIMELINE_ID;
 
     #[test]
     fn metadata_serializes_correctly() {

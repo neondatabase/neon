@@ -111,7 +111,7 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        repository::repo_harness::{RepoHarness, TIMELINE_ID},
+        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::test_utils::{create_local_timeline, dummy_metadata},
     };
     use remote_storage::LocalFs;

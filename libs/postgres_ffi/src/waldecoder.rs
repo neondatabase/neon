@@ -8,9 +8,9 @@
 //! to look deeper into the WAL records to also understand which blocks they modify, the code
 //! for that is in pageserver/src/walrecord.rs
 //!
+use super::bindings::{XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord, XLOG_PAGE_MAGIC};
 use super::pg_constants;
 use super::xlog_utils::*;
-use super::bindings::{XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord, XLOG_PAGE_MAGIC};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
 use log::*;
