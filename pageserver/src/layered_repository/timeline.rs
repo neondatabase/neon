@@ -153,10 +153,20 @@ static CURRENT_LOGICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_created_persistent_files_total",
-        "Number of files created that are meant to be uploaded to cloud storage",
+static LAYERS_CREATED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_layers_created_total",
+        "Number of layer files created that are meant to be uploaded to cloud storage",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static LAYERS_DOWNLOADED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_layers_downloaded_total",
+        "Number of layers downloaded from cloud storage since restart",
+        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -182,6 +192,8 @@ struct TimelineMetrics {
     pub current_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: IntGauge,
+    pub layers_created_total: IntCounter,
+    pub layers_downloaded_total: IntCounter,
 }
 
 impl TimelineMetrics {
@@ -222,6 +234,12 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let layers_created_total = LAYERS_CREATED_TOTAL
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let layers_downloaded_total = LAYERS_DOWNLOADED_TOTAL
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             reconstruct_time_histo,
@@ -235,6 +253,8 @@ impl TimelineMetrics {
             wait_lsn_time_histo,
             current_physical_size_gauge,
             current_logical_size_gauge,
+            layers_created_total,
+            layers_downloaded_total,
         }
     }
 }
@@ -1126,7 +1146,7 @@ impl Timeline {
         }
 
         // Are we missing some files that are present in remote storage?
-        // Download them, and add to the layer map
+        // Create RemoteLayers to represent them, and add to the layer map
         //
         // TODO: do this in parallel
         for path in remote_filenames.difference(&local_filenames) {
@@ -1593,7 +1613,7 @@ impl Timeline {
         let sz = new_delta_path.metadata()?.len();
         self.metrics.current_physical_size_gauge.add(sz);
         // update metrics
-        NUM_PERSISTENT_FILES_CREATED.inc_by(1);
+        self.metrics.layers_created_total.inc_by(1);
         PERSISTENT_BYTES_WRITTEN.inc_by(sz);
 
         Ok(new_delta_path)
@@ -1758,6 +1778,7 @@ impl Timeline {
                 let image_layer = image_layer_writer.finish()?;
                 layer_paths_to_upload.insert(image_layer.path());
                 image_layers.push(image_layer);
+                self.metrics.layers_created_total.inc_by(1);
             }
         }
 
@@ -2426,6 +2447,7 @@ impl Timeline {
                 tokio::spawn(async move {
                     let remote_client = s.remote_client.as_ref().unwrap();
                     let result = remote_client.download_layer_file(&remote_layer.path).await;
+                    self.metrics.layers_downloaded_total.inc();
 
                     let new_layer = remote_layer.download_finished(self.conf);
 

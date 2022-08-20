@@ -1070,6 +1070,15 @@ class NeonPageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res.text
 
+    def get_metric_value(self, name, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> str:
+        metrics = self.get_metrics()
+
+        matches = re.search(
+            f'^{name}{{tenant_id="{tenant_id.hex}",timeline_id="{timeline_id.hex}"}} (\\S+)$',
+            metrics,
+        re.MULTILINE)
+        assert matches
+        return matches.group(1)
 
 @dataclass
 class PageserverPort:
@@ -2160,7 +2169,6 @@ class SafekeeperHttpClient(requests.Session):
                 re.MULTILINE):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
-
 
 @dataclass
 class Etcd:
