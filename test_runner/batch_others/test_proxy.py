@@ -5,6 +5,8 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PSQL
 import psycopg2
+from urllib.parse import urlparse
+from contextlib import closing
 
 
 def test_proxy_select_1(static_proxy):
@@ -54,11 +56,19 @@ async def get_session_id_from_welcome_message(local_link_proxy, proc):
             break
         log.info(f"{raw_line}")
         line = raw_line.decode("utf-8").strip()
-        # todo: refactor using Stas's recommendation
         if line.startswith("http"):
+            # poll: which code block is better? (both perform same function)
+
+            # using urlparse, 3 lines
+            url_parts = urlparse(line)
+            psql_session_id = url_parts.path[1:]
+            link_auth_uri = line[:-len(url_parts.path)]
+
+            # manual parsing, 3 lines
             line_parts = line.split("/")
             psql_session_id = line_parts[-1]
             link_auth_uri = '/'.join(line_parts[:-1])
+
             assert link_auth_uri == local_link_proxy.link_auth_uri, \
                 f"Line='{line}' should contain a http auth link of form '{local_link_proxy.link_auth_uri}/<psql_session_id>'."
             break
@@ -72,7 +82,7 @@ async def get_session_id_from_welcome_message(local_link_proxy, proc):
     return psql_session_id
 
 
-def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
+def create_and_send_db_inf(local_vanilla_pg, psql_session_id, mgmt_port):
     pg_user = "proxy"
     pg_password = "password"
 
@@ -96,17 +106,18 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
             }
         }
     }
+    db_info_str = json.dumps(db_info_dict)
 
-    db_info = json.dumps(db_info_dict)
+    mgmt_port_str = str(mgmt_port)  # hardcoded from proxy's backend I think
 
     cmd_line_args__to__mgmt = [
         "psql",
         "-h",
         "127.0.0.1",  # localhost
         "-p",
-        "7000",  # mgmt port
+        mgmt_port_str,  # mgmt port
         '-c',
-        db_info
+        db_info_str
     ]
 
     log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
@@ -116,6 +127,14 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id):
     log.info(f"output of sending info: out={out}; err={err}")
 
     assert "ok" in str(out)
+
+    # with closing(psycopg2.connect(port = mgmt_port, host = "127.0.0.1")) as conn:
+    #     with conn.cursor() as cur:
+    #         query = db_info_str
+    #         log.info(f"Executing query: {query}")
+    #         cur.execute(query)
+    #         assert cur.description is not None
+    #         assert "ok" in cur.fetchall()
 
 
 @pytest.mark.asyncio
@@ -139,7 +158,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     psql_session_id = await get_session_id_from_welcome_message(link_proxy, proc)
 
     # Step 3.
-    create_and_send_db_inf(vanilla_pg, psql_session_id)
+    create_and_send_db_inf(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
 
     # Step 4.
     log.info("Proxy output:")

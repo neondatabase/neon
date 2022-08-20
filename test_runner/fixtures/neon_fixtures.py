@@ -1731,11 +1731,12 @@ class PSQL:
 
 
 class NeonProxy(PgProtocol):
-    def __init__(self, proxy_port: int, http_port: int, auth_endpoint):
+    def __init__(self, proxy_port: int, http_port: int, auth_endpoint, mgmt_port):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = '127.0.0.1'
         self.http_port = http_port
         self.proxy_port = proxy_port
+        self.mgmt_port = mgmt_port
         self.auth_endpoint = auth_endpoint
         self._popen: Optional[subprocess.Popen[bytes]] = None
         self.link_auth_uri = "http://dummy-uri"
@@ -1770,11 +1771,12 @@ class NeonProxy(PgProtocol):
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
+        args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
         args.extend(["--auth-backend", "link"])
         args.extend(["--uri", self.link_auth_uri])
         arg_str = ' '.join(args)
         log.info(f"starting proxy with command line ::: {arg_str}")
-        self._popen = subprocess.Popen(args)
+        self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
         self._wait_until_ready()
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
@@ -1796,7 +1798,8 @@ def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
-    with NeonProxy(proxy_port, http_port, None) as proxy:
+    mgmt_port = port_distributor.get_port()
+    with NeonProxy(proxy_port, http_port, None, mgmt_port) as proxy:
         proxy.start_with_link_auth()
         yield proxy
 
@@ -1821,7 +1824,7 @@ def static_proxy(vanilla_pg, port_distributor) -> Iterator[NeonProxy]:
     http_port = port_distributor.get_port()
 
     with NeonProxy(proxy_port=proxy_port, http_port=http_port,
-                   auth_endpoint=auth_endpoint) as proxy:
+                   auth_endpoint=auth_endpoint, mgmt_port=None) as proxy:
         proxy.start()
         yield proxy
 
