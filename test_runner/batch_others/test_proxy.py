@@ -108,33 +108,36 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id, mgmt_port):
     }
     db_info_str = json.dumps(db_info_dict)
 
-    mgmt_port_str = str(mgmt_port)  # hardcoded from proxy's backend I think
+    # this code works, for now it's commented bc we are trying ro replace it with a psycopg2.connection
+    #
+    # mgmt_port_str = str(mgmt_port)  # hardcoded from proxy's backend I think
+    #
+    # cmd_line_args__to__mgmt = [
+    #     "psql",
+    #     "-h",
+    #     "127.0.0.1",  # localhost
+    #     "-p",
+    #     mgmt_port_str,  # mgmt port
+    #     '-c',
+    #     db_info_str
+    # ]
+    #
+    # log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
+    # p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
+    #
+    # out, err = p.communicate()
+    # log.info(f"output of sending info: out={out}; err={err}")
+    #
+    # assert "ok" in str(out)
 
-    cmd_line_args__to__mgmt = [
-        "psql",
-        "-h",
-        "127.0.0.1",  # localhost
-        "-p",
-        mgmt_port_str,  # mgmt port
-        '-c',
-        db_info_str
-    ]
-
-    log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
-    p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
-
-    out, err = p.communicate()
-    log.info(f"output of sending info: out={out}; err={err}")
-
-    assert "ok" in str(out)
-
-    # with closing(psycopg2.connect(port = mgmt_port, host = "127.0.0.1")) as conn:
-    #     with conn.cursor() as cur:
-    #         query = db_info_str
-    #         log.info(f"Executing query: {query}")
-    #         cur.execute(query)
-    #         assert cur.description is not None
-    #         assert "ok" in cur.fetchall()
+    # this code fails with E: psycopg2.DatabaseError: expected value at line 1 column 1s
+    with closing(psycopg2.connect(port=mgmt_port, host="127.0.0.1")) as conn:
+        with conn.cursor() as cur:
+            query = db_info_str
+            log.info(f"Executing query: {query}")
+            cur.execute(query)
+            assert cur.description is not None
+            assert "ok" in cur.fetchall()
 
 
 @pytest.mark.asyncio
