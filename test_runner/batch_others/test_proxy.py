@@ -16,8 +16,8 @@ def test_password_hack(static_proxy):
     user = "borat"
     password = "password"
     static_proxy.safe_psql(
-        f"create role {user} with login password '{password}'",
-        options="project=irrelevant")
+        f"create role {user} with login password '{password}'", options="project=irrelevant"
+    )
 
     # Note the format of `magic`!
     magic = f"project=irrelevant;{password}"
@@ -57,15 +57,19 @@ async def get_session_id_from_welcome_message(local_link_proxy, proc):
         if line.startswith("http"):
             url_parts = urlparse(line)
             psql_session_id = url_parts.path[1:]
-            link_auth_uri = line[:-len(url_parts.path)]
-            assert link_auth_uri == local_link_proxy.link_auth_uri, \
-                f"Line='{line}' should contain a http auth link of form '{local_link_proxy.link_auth_uri}/<psql_session_id>'."
+            link_auth_uri = line[: -len(url_parts.path)]
+            assert (
+                link_auth_uri == local_link_proxy.link_auth_uri
+            ), f"Line='{line}' should contain a http auth link of form '{local_link_proxy.link_auth_uri}/<psql_session_id>'."
             break
-        log.debug("line %d does not contain expected result: %s", line_id,
-                  line)
+        log.debug("line %d does not contain expected result: %s", line_id, line)
 
-    assert line_id <= max_num_lines_of_welcome_message, "exhausted given attempts, did not get the result"
-    assert psql_session_id is not None, "psql_session_id not found from output of proc.stderr.readline()"
+    assert (
+        line_id <= max_num_lines_of_welcome_message
+    ), "exhausted given attempts, did not get the result"
+    assert (
+        psql_session_id is not None
+    ), "psql_session_id not found from output of proc.stderr.readline()"
     log.info(f"Got psql_session_id={psql_session_id=}")
 
     return psql_session_id
@@ -79,9 +83,9 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
     query = "create user " + pg_user + " with login superuser password '" + pg_password + "'"
     local_vanilla_pg.safe_psql(query)
 
-    port = local_vanilla_pg.default_options['port']
-    host = local_vanilla_pg.default_options['host']
-    dbname = local_vanilla_pg.default_options['dbname']
+    port = local_vanilla_pg.default_options["port"]
+    host = local_vanilla_pg.default_options["host"]
+    dbname = local_vanilla_pg.default_options["dbname"]
 
     db_info_dict = {
         "session_id": psql_session_id,
@@ -91,9 +95,9 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
                 "port": port,
                 "dbname": dbname,
                 "user": pg_user,
-                "password": pg_password
+                "password": pg_password,
             }
-        }
+        },
     }
     db_info_str = json.dumps(db_info_dict)
     cmd_line_args__to__mgmt = [
@@ -102,12 +106,11 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
         "127.0.0.1",  # localhost
         "-p",
         f"{mgmt_port}",
-        '-c',
-        db_info_str
+        "-c",
+        db_info_str,
     ]
 
-    log.info(
-        f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
+    log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
     p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
     out, err = p.communicate()
     assert "ok" in str(out)
@@ -131,8 +134,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     proc = await psql.run("select 1")
 
     # Step 2.
-    psql_session_id = await get_session_id_from_welcome_message(
-        link_proxy, proc)
+    psql_session_id = await get_session_id_from_welcome_message(link_proxy, proc)
 
     # Step 3.
     create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)

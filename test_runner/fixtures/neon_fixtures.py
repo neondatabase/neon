@@ -1755,10 +1755,10 @@ class PSQL:
     database_url: str
 
     def __init__(
-            self,
-            path: str = "psql",
-            host: str = "127.0.0.1",
-            port: int = 5432,
+        self,
+        path: str = "psql",
+        host: str = "127.0.0.1",
+        port: int = 5432,
     ):
         assert shutil.which(path)
 
@@ -1767,20 +1767,20 @@ class PSQL:
 
     async def run(self, query=None) -> Union[tuple[int, str], Process]:
         run_args = [self.path, self.database_url]
-        run_args += (["--command", query] if query is not None else [])
+        run_args += ["--command", query] if query is not None else []
 
-        cmd_line = ' '.join(["'" + x + "'" if ' ' in x else x for x in run_args])
+        cmd_line = " ".join(["'" + x + "'" if " " in x else x for x in run_args])
         log.info(f"running psql with command line ::: {cmd_line}")
         log.debug(f"running psql with command line ::: {cmd_line}")
-        return await asyncio.create_subprocess_exec(*run_args,
-                                                    stdout=subprocess.PIPE,
-                                                    stderr=subprocess.PIPE)
+        return await asyncio.create_subprocess_exec(
+            *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
 
 
 class NeonProxy(PgProtocol):
     def __init__(self, proxy_port: int, http_port: int, auth_endpoint=None, mgmt_port=None):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
-        self.host = '127.0.0.1'
+        self.host = "127.0.0.1"
         self.http_port = http_port
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
@@ -1798,7 +1798,7 @@ class NeonProxy(PgProtocol):
 
         # Start proxy
         args = [
-            os.path.join(str(neon_binpath), 'proxy'),
+            os.path.join(str(neon_binpath), "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--auth-backend", "postgres"],
@@ -1814,14 +1814,14 @@ class NeonProxy(PgProtocol):
         assert self._popen is None
 
         # Start proxy
-        bin_proxy = os.path.join(str(neon_binpath), 'proxy')
+        bin_proxy = os.path.join(str(neon_binpath), "proxy")
         args = [bin_proxy]
         args.extend(["--http", f"{self.host}:{self.http_port}"])
         args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
         args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
         args.extend(["--auth-backend", "link"])
         args.extend(["--uri", self.link_auth_uri])
-        arg_str = ' '.join(args)
+        arg_str = " ".join(args)
         log.info(f"starting proxy with command line ::: {arg_str}")
         self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
         self._wait_until_ready()
@@ -1840,7 +1840,7 @@ class NeonProxy(PgProtocol):
             self._popen.kill()
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def link_proxy(port_distributor) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
     http_port = port_distributor.get_port()
