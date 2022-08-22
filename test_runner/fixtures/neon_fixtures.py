@@ -15,7 +15,6 @@ import tempfile
 import textwrap
 import time
 import uuid
-import warnings
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -68,15 +67,6 @@ BASE_PORT = 15000
 WORKER_PORT_NUM = 1000
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--skip-interfering-proc-check",
-        dest="skip_interfering_proc_check",
-        action="store_true",
-        help="skip check for interfering processes",
-    )
-
-
 # These are set in pytest_configure()
 base_dir = ""
 neon_binpath = ""
@@ -84,30 +74,11 @@ pg_distrib_dir = ""
 top_output_dir = ""
 
 
-def check_interferring_processes(config):
-    if config.getoption("skip_interfering_proc_check"):
-        warnings.warn("interfering process check is skipped")
-        return
-
-    # does not use -c as it is not supported on macOS
-    cmd = ["pgrep", "pageserver|postgres|safekeeper"]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
-    if result.returncode == 0:
-        # returncode of 0 means it found something.
-        # This is bad; we don't want any of those processes polluting the
-        # result of the test.
-        # NOTE this shows as an internal pytest error, there might be a better way
-        raise Exception(
-            "Found interfering processes running. Stop all Neon pageservers, nodes, safekeepers, as well as stand-alone Postgres."
-        )
-
-
 def pytest_configure(config):
     """
     Ensure that no unwanted daemons are running before we start testing.
     Check that we do not overflow available ports range.
     """
-    check_interferring_processes(config)
 
     numprocesses = config.getoption("numprocesses")
     if (
