@@ -65,8 +65,8 @@ mod timeline;
 
 use storage_layer::Layer;
 
-pub use timeline::{Timeline, PageReconstructError};
 pub use timeline::retry_get;
+pub use timeline::{PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -280,7 +280,7 @@ impl Repository {
         let remote_client = if self.upload_layers {
             let remote_client =
                 create_remote_timeline_client(self.conf, self.tenant_id, timeline_id)?;
-            remote_client.init_queue(&std::collections::HashSet::new(), Lsn(0));
+            remote_client.init_upload_queue(&std::collections::HashSet::new(), &metadata);
             Some(remote_client)
         } else {
             None
@@ -397,7 +397,7 @@ impl Repository {
 
         let remote_client = if self.upload_layers {
             let remote_client = create_remote_timeline_client(self.conf, self.tenant_id, dst)?;
-            remote_client.init_queue(&HashSet::new(), start_lsn);
+            remote_client.init_upload_queue(&HashSet::new(), &metadata);
             Some(remote_client)
         } else {
             None
@@ -597,7 +597,7 @@ impl Repository {
             conf.remote_storage_config.is_some(),
         ))
     }
-    
+
     ///
     /// Attach a tenant that's available in cloud storage.
     ///
@@ -1883,8 +1883,7 @@ mod tests {
     }
     #[test]
     fn test_parent_keeps_data_forever_after_branching() -> Result<()> {
-        let repo =
-            RepoHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
+        let repo = RepoHarness::create("test_parent_keeps_data_forever_after_branching")?.load();
         let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         make_some_layers(tline.as_ref(), Lsn(0x20))?;
 

@@ -30,11 +30,11 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
+use crate::layered_repository::retry_get;
 use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
-use crate::layered_repository::retry_get;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;

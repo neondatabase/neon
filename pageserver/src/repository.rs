@@ -173,7 +173,6 @@ impl Value {
     }
 }
 
-
 ///
 /// Result of performing GC
 ///

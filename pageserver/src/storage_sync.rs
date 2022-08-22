@@ -243,7 +243,7 @@ pub fn init_storage_sync(_conf: &'static PageServerConf) -> anyhow::Result<()> {
 pub struct RemoteTimelineClient {
     conf: &'static PageServerConf,
 
-    runtime: &'static Runtime,
+    pub runtime: &'static Runtime,
 
     // FIXME: need tenant_conf?
     // tenant_conf: TenantConf,
@@ -265,9 +265,13 @@ struct UploadQueue {
     /// in-progress and queued operations
     latest_files: HashSet<RelativePath>,
 
+    /// Copy of latest remote metadata file. None if the upload queue hasn't been initialized yet.
+    /// Can be ahead of what's actually stored in remote storage, if new index file upload
+    /// has been scheduled but not finished yet.
+    latest_metadata: Option<TimelineMetadata>,
+
     /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. This becomes the `remote_disk_consistent_lsn` of the timeline.
-    /// None if no metadata file has been uploaded yet.
+    /// uploaded. None if the upload queue hasn't been initialized yet.
     last_uploaded_consistent_lsn: Option<Lsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
@@ -315,10 +319,11 @@ enum UploadOp {
 }
 
 impl RemoteTimelineClient {
-    pub fn init_queue(&self, files: &HashSet<RelativePath>, last_uploaded_consistent_lsn: Lsn) {
+    pub fn init_upload_queue(&self, files: &HashSet<RelativePath>, metadata: &TimelineMetadata) {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.latest_files = files.clone();
-        upload_queue.last_uploaded_consistent_lsn = Some(last_uploaded_consistent_lsn);
+        upload_queue.latest_metadata = Some(metadata.clone());
+        upload_queue.last_uploaded_consistent_lsn = Some(metadata.disk_consistent_lsn());
     }
 
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
@@ -368,26 +373,36 @@ impl RemoteTimelineClient {
     /// upload operations have completed successfully.  This is to
     /// ensure that when the index file claims that layers X, Y and Z
     /// exist in remote storage, they really do.
-    pub fn schedule_index_upload(self: &Arc<Self>, metadata: &TimelineMetadata) -> Result<()> {
+    pub fn schedule_index_upload(
+        self: &Arc<Self>,
+        metadata: Option<&TimelineMetadata>,
+    ) -> Result<()> {
         // TODO: Construct IndexPart, attach the metadata to it
 
         let mut upload_queue = self.upload_queue.lock().unwrap();
         ensure!(
-            upload_queue.last_uploaded_consistent_lsn.is_some(),
+            upload_queue.latest_metadata.is_some(),
             "upload queue not initialized"
         );
 
+        if let Some(new_metadata) = metadata {
+            upload_queue.latest_metadata = Some(new_metadata.clone());
+        }
+
+        let disk_consistent_lsn = upload_queue
+            .latest_metadata
+            .as_ref()
+            .unwrap()
+            .disk_consistent_lsn();
+
         let index_part = IndexPart {
             timeline_layers: upload_queue.latest_files.clone(),
-            disk_consistent_lsn: metadata.disk_consistent_lsn(),
-            metadata_bytes: metadata.to_bytes()?,
+            disk_consistent_lsn,
+            metadata_bytes: upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
         };
         upload_queue
             .queued_operations
-            .push_back(UploadOp::UploadMetadata(
-                index_part,
-                metadata.disk_consistent_lsn(),
-            ));
+            .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
 
         info!(
             "scheduled metadata upload with {} files",
@@ -433,20 +448,45 @@ impl RemoteTimelineClient {
     ///
     /// The deletion won't actually be performed, until all preceding
     /// upload operations have completed succesfully.
-    pub fn schedule_layer_file_deletion(self: &Arc<Self>, path: &Path) -> Result<()> {
+    pub fn schedule_layer_file_deletion(self: &Arc<Self>, paths: &[PathBuf]) -> Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         ensure!(
-            upload_queue.last_uploaded_consistent_lsn.is_some(),
+            upload_queue.latest_metadata.is_some(),
             "upload queue not initialized"
         );
 
+        // Update the remote index file, removing the to-be-deleted files from the index,
+        // before deleting the actual files.
+        for path in paths {
+            let relative_path = RelativePath::from_local_path(
+                &self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
+                path,
+            )?;
+            upload_queue.latest_files.remove(&relative_path);
+        }
+        let disk_consistent_lsn = upload_queue
+            .latest_metadata
+            .as_ref()
+            .unwrap()
+            .disk_consistent_lsn();
+        let index_part = IndexPart {
+            timeline_layers: upload_queue.latest_files.clone(),
+            disk_consistent_lsn,
+            metadata_bytes: upload_queue.latest_metadata.as_ref().unwrap().to_bytes()?,
+        };
         upload_queue
             .queued_operations
-            .push_back(UploadOp::Delete(PathBuf::from(path)));
+            .push_back(UploadOp::UploadMetadata(index_part, disk_consistent_lsn));
 
-        info!("scheduled layer file deletion {}", path.display());
+        // schedule the actual deletions
+        for path in paths {
+            upload_queue
+                .queued_operations
+                .push_back(UploadOp::Delete(PathBuf::from(path)));
+            info!("scheduled layer file deletion {}", path.display());
+        }
 
-        // Launch the task immediately, if possible
+        // Launch the tasks immediately, if possible
         self.launch_queued_tasks(upload_queue);
         Ok(())
     }
@@ -461,7 +501,7 @@ impl RemoteTimelineClient {
         {
             let mut upload_queue = self.upload_queue.lock().unwrap();
             ensure!(
-                upload_queue.last_uploaded_consistent_lsn.is_some(),
+                upload_queue.latest_metadata.is_some(),
                 "upload queue not initialized"
             );
 
@@ -473,6 +513,11 @@ impl RemoteTimelineClient {
 
         receiver.changed().await?;
         Ok(())
+    }
+
+    pub fn wait_completion_sync(self: &Arc<Self>) -> Result<()> {
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(self.wait_completion())
     }
 
     ///
@@ -803,7 +848,8 @@ mod tests {
             remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir)?);
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
-        client.init_queue(&HashSet::new(), Lsn(0x10));
+        let metadata = dummy_metadata(Lsn(0x10));
+        client.init_upload_queue(&HashSet::new(), &metadata);
 
         // Create a couple of dummy files,  schedule upload for them
         std::fs::write(timeline_path.join("foo"), dummy_contents("foo"))?;
@@ -822,7 +868,7 @@ mod tests {
 
         // Schedule upload of index. Check that it is queued
         let metadata = dummy_metadata(Lsn(0x20));
-        client.schedule_index_upload(&metadata)?;
+        client.schedule_index_upload(Some(&metadata))?;
         {
             let upload_queue = client.upload_queue.lock().unwrap();
             assert!(upload_queue.queued_operations.len() == 1);
@@ -845,10 +891,11 @@ mod tests {
         // Schedule upload and then a deletion. Check that the deletion is queued
         std::fs::write(timeline_path.join("baz"), dummy_contents("baz"))?;
         client.schedule_layer_file_upload(&timeline_path.join("baz"))?;
-        client.schedule_layer_file_deletion(&timeline_path.join("foo"))?;
+        client.schedule_layer_file_deletion(&[timeline_path.join("foo")])?;
         {
             let upload_queue = client.upload_queue.lock().unwrap();
-            assert!(upload_queue.queued_operations.len() == 1);
+            // Deletion schedules upload of the index file, and the file deletion itself
+            assert!(upload_queue.queued_operations.len() == 2);
             assert!(upload_queue.inprogress_tasks.len() == 1);
             assert!(upload_queue.num_inprogress_layer_uploads == 1);
             assert!(upload_queue.num_inprogress_deletions == 0);

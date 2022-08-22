@@ -1151,10 +1151,7 @@ impl Timeline {
         // TODO: do this in parallel
         for path in remote_filenames.difference(&local_filenames) {
             let fname = path.to_str().unwrap();
-            info!(
-                "remote layer file {} does not exist locally, downloading",
-                fname
-            );
+            info!("remote layer file {fname} does not exist locally");
 
             if let Some(imgfilename) = ImageFileName::parse_str(fname) {
                 if imgfilename.lsn > remote_consistent_lsn {
@@ -1204,10 +1201,7 @@ impl Timeline {
         //self.current_physical_size_gauge
         //    .add(downloaded_physical_size);
 
-        remote_client.init_queue(
-            &index_part.timeline_layers,
-            remote_metadata.disk_consistent_lsn(),
-        );
+        remote_client.init_upload_queue(&index_part.timeline_layers, &remote_metadata);
 
         // Are there local files that don't exist remotely? Schedule uploads for them
         //
@@ -1575,7 +1569,7 @@ impl Timeline {
             for path in layer_paths_to_upload {
                 remote_client.schedule_layer_file_upload(&path)?;
             }
-            remote_client.schedule_index_upload(&metadata)?;
+            remote_client.schedule_index_upload(Some(&metadata))?;
         }
 
         // Also update the in-memory copy
@@ -2058,28 +2052,38 @@ impl Timeline {
             layers.insert_historic(Arc::new(l));
         }
 
+        if let Some(remote_client) = &self.remote_client {
+            // Schedule uploads of all the new files
+            for path in new_layer_paths {
+                remote_client.schedule_layer_file_upload(&path)?;
+            }
+
+            // FIXME: What if flush_frozen_layer() is doing this at the same time? Race
+            // condition, add a lock or something.
+            remote_client.schedule_index_upload(None)?;
+        }
+
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
-        let mut layer_paths_to_delete = HashSet::with_capacity(deltas_to_compact.len());
+        let mut layer_paths_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact.iter() {
             if let Some(path) = l.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_to_delete.insert(path);
+                layer_paths_to_delete.push(path);
             }
             l.delete()?;
             layers.remove_historic(l);
         }
         drop(layers);
 
+        // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            for path in new_layer_paths {
-                remote_client.schedule_layer_file_upload(&path)?;
-            }
-            for path in layer_paths_to_delete {
-                remote_client.schedule_layer_file_deletion(&path)?;
-            }
+            // FIXME: This also uploads new index file. If
+            // flush_frozen_layer() is doing this at the same time, do
+            // we have a problem?
+            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
         }
 
         Ok(())
@@ -2314,13 +2318,13 @@ impl Timeline {
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
         // while iterating it. BTreeMap::retain() would be another option)
-        let mut layer_paths_to_delete = HashSet::with_capacity(layers_to_remove.len());
+        let mut layer_paths_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
                 self.metrics
                     .current_physical_size_gauge
                     .sub(path.metadata()?.len());
-                layer_paths_to_delete.insert(path);
+                layer_paths_to_delete.push(path);
             }
             doomed_layer.delete()?;
             layers.remove_historic(&doomed_layer);
@@ -2328,9 +2332,7 @@ impl Timeline {
         }
 
         if let Some(remote_client) = &self.remote_client {
-            for path in layer_paths_to_delete {
-                remote_client.schedule_layer_file_deletion(&path)?;
-            }
+            remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
         }
 
         result.elapsed = now.elapsed()?;
@@ -2443,8 +2445,9 @@ impl Timeline {
                 // need to spawn, because the future returned by download_layer_file is not Sync
                 let remote_layer = Arc::clone(&remote_layer);
 
-                // FIXME: spawn in different runtime?
-                tokio::spawn(async move {
+                // Spawn it in the storage sync runtime
+                let remote_client = s.remote_client.as_ref().unwrap();
+                remote_client.runtime.spawn(async move {
                     let remote_client = s.remote_client.as_ref().unwrap();
                     let result = remote_client.download_layer_file(&remote_layer.path).await;
                     self.metrics.layers_downloaded_total.inc();
@@ -2466,6 +2469,10 @@ impl Timeline {
         };
 
         receiver.changed().await?;
+        info!(
+            "wakeup because download finished for {}",
+            remote_layer.filename().display()
+        );
 
         let x = receiver.borrow();
         match x.as_ref() {

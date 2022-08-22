@@ -7,7 +7,7 @@
 //! Clarify that)
 //!
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::layered_repository::{Timeline, PageReconstructError};
+use crate::layered_repository::{PageReconstructError, Timeline};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
