@@ -16,7 +16,6 @@ import tempfile
 import textwrap
 import time
 import uuid
-from asyncio.subprocess import Process
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -1738,11 +1737,11 @@ class PSQL:
         self.path = path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
-    async def run(self, query=None) -> Union[Tuple[int, str], Process]:
+    async def run(self, query=None):
         run_args = [self.path, self.database_url]
         run_args += ["--command", query] if query is not None else []
 
-        cmd_line = " ".join(["'" + x + "'" if " " in x else x for x in run_args])
+        cmd_line = subprocess.list2cmdline(run_args)
         log.info(f"Run psql: {cmd_line}")
         return await asyncio.create_subprocess_exec(
             *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE

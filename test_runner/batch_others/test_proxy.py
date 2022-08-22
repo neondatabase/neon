@@ -85,17 +85,13 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
 
 
 async def get_uri_line_from_process_welcome_notice(link_auth_uri_prefix, proc):
-    max_num_lines_of_welcome_message = 3
+    max_num_lines_of_welcome_message = 15
     for attempt in range(max_num_lines_of_welcome_message):
         raw_line = await proc.stderr.readline()
         line = raw_line.decode("utf-8").strip()
         if link_auth_uri_prefix in line:
             return line
-    assert False, "did not find line containing " + link_auth_uri_prefix
-
-
-async def read_process_bytes(proc):
-    return await proc.stdout.read()
+    assert False, f"did not find line containing '{link_auth_uri_prefix}'"
 
 
 @pytest.mark.asyncio
@@ -134,7 +130,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
     # b'----------\n'
     # b'        1\n'
     # b'(1 row)\n'
-    out_bytes = await read_process_bytes(proc)
+    out_bytes = await proc.stdout.read()
     expected_out_bytes = b" ?column? \n----------\n        1\n(1 row)\n\n"
     assert out_bytes == expected_out_bytes
 
