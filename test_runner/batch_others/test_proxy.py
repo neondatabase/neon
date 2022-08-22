@@ -18,8 +18,8 @@ def test_password_hack(static_proxy):
     user = "borat"
     password = "password"
     static_proxy.safe_psql(
-        f"create role {user} with login password '{password}'",
-        options="project=irrelevant")
+        f"create role {user} with login password '{password}'", options="project=irrelevant"
+    )
 
     # Note the format of `magic`!
     magic = f"project=irrelevant;{password}"
@@ -36,7 +36,7 @@ def get_session_id_from_uri_line(uri_prefix, uri_line):
 
     url_parts = urlparse(uri_line)
     psql_session_id = url_parts.path[1:]
-    link_auth_uri_prefix = uri_line[:-len(url_parts.path)]
+    link_auth_uri_prefix = uri_line[: -len(url_parts.path)]
     assert (
         link_auth_uri_prefix == uri_prefix
     ), f"Line='{uri_line}' should contain a http auth link of form '{uri_prefix}/<psql_session_id>'."
@@ -87,8 +87,7 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
 
 
 @pytest.mark.asyncio
-async def test_psql_session_id(vanilla_pg: VanillaPostgres,
-                               link_proxy: NeonProxy):
+async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
     """
     Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
      Step 1. establish connection to the proxy
@@ -115,8 +114,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres,
     # step 2.2
     uri_prefix = link_proxy.link_auth_uri_prefix
     psql_session_id = get_session_id_from_uri_line(uri_prefix, line_str)
-    log.info(f"Parsed psql_session_id='{psql_session_id}'" +
-             " from Neon welcome message.")
+    log.info(f"Parsed psql_session_id='{psql_session_id}'" + " from Neon welcome message.")
 
     # Step 3.
     create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
