@@ -1,6 +1,7 @@
 from contextlib import closing
 
 import psycopg2.extras
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -19,8 +20,8 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
         "gc_period": "30sec",
     })
 
-    env.neon_cli.create_timeline("test_tenant_conf", tenant_id=tenant)
-    env.postgres.create_start(
+    env.neon_cli.create_timeline(f"test_tenant_conf", tenant_id=tenant)
+    pg = env.postgres.create_start(
         "test_tenant_conf",
         "main",
         tenant,

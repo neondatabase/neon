@@ -1,7 +1,11 @@
 from contextlib import closing
 from io import BufferedReader, RawIOBase
+from itertools import repeat
 
-from fixtures.compare_fixtures import PgCompare
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv
 
 
 class CopyTestData(RawIOBase):
@@ -25,7 +29,7 @@ class CopyTestData(RawIOBase):
             self.rownum += 1
 
         # Number of bytes to read in this call
-        l = min(len(self.linebuf) - self.ptr, len(b))  # noqa: E741
+        l = min(len(self.linebuf) - self.ptr, len(b))
 
         b[:l] = self.linebuf[self.ptr:(self.ptr + l)]
         self.ptr += l

@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 import os
+import ssl
 
 import pg8000.dbapi
 

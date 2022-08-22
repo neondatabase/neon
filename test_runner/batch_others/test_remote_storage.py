@@ -68,24 +68,23 @@ def test_remote_storage_backup_and_restore(
 
     for checkpoint_number in checkpoint_numbers:
         with pg.cursor() as cur:
-            cur.execute(f"""
+            cur.execute(
+                f"""
                 CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
                 INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
-            """)
-            current_lsn = lsn_from_hex(
-                query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+            """
+            )
+            current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id),
-                                 current_lsn)
+        wait_for_last_record_lsn(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
         env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
 
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
         # wait until pageserver successfully uploaded a checkpoint to remote storage
-        wait_for_upload(client, UUID(tenant_id), UUID(timeline_id),
-                        current_lsn)
+        wait_for_upload(client, UUID(tenant_id), UUID(timeline_id), current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     ##### Stop the first pageserver instance, erase all its data
@@ -100,8 +99,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    env.pageserver.safe_psql(
-        "failpoints remote-storage-download-pre-rename=return")
+    env.pageserver.safe_psql("failpoints remote-storage-download-pre-rename=return")
 
     client.tenant_attach(UUID(tenant_id))
 
@@ -109,9 +107,7 @@ def test_remote_storage_backup_and_restore(
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    with pytest.raises(
-            Exception,
-            match="Conflict: Tenant download is already in progress"):
+    with pytest.raises(Exception, match="Conflict: Tenant download is already in progress"):
         client.tenant_attach(UUID(tenant_id))
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
@@ -129,8 +125,7 @@ def test_remote_storage_backup_and_restore(
     wait_until(
         number_of_iterations=20,
         interval=1,
-        func=lambda: assert_timeline_local(client, UUID(tenant_id),
-                                           UUID(timeline_id)),
+        func=lambda: assert_timeline_local(client, UUID(tenant_id), UUID(timeline_id)),
     )
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
@@ -144,7 +139,7 @@ def test_remote_storage_backup_and_restore(
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
-            assert (query_scalar(
-                cur,
-                f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};"
-            ) == f"{data_secret}|{checkpoint_number}")
+            assert (
+                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data_secret}|{checkpoint_number}"
+            )

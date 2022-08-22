@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserverHttpClient,
+    PageserverPort,
     PortDistributor,
     Postgres,
     assert_no_in_progress_downloads_for_tenant,
@@ -55,7 +56,7 @@ def new_pageserver_helper(
         f"-c listen_pg_addr='localhost:{pg_port}'",
         f"-c listen_http_addr='localhost:{http_port}'",
         f"-c pg_distrib_dir='{pg_distrib_dir}'",
-        "-c id=2",
+        f"-c id=2",
         f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
     ]
     if broker is not None:
@@ -90,7 +91,7 @@ def load(pg: Postgres, stop_event: threading.Event,
             with pg_cur(pg) as cur:
                 cur.execute("INSERT INTO load VALUES ('some payload')")
                 inserted_ctr += 1
-        except:  # noqa: E722
+        except:
             if not failed:
                 log.info("load failed")
             failed = True

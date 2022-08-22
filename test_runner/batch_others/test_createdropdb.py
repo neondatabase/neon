@@ -1,5 +1,6 @@
 import os
 import pathlib
+from contextlib import closing
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
@@ -94,14 +95,14 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     dbpath = pathlib.Path(pg_before.pgdata_dir) / "base" / str(dboid)
     log.info(dbpath)
 
-    assert os.path.isdir(dbpath) is True
+    assert os.path.isdir(dbpath) == True
 
     # Test that database subdir doesn't exist on the branch after drop
     assert pg_after.pgdata_dir
     dbpath = pathlib.Path(pg_after.pgdata_dir) / "base" / str(dboid)
     log.info(dbpath)
 
-    assert os.path.isdir(dbpath) is False
+    assert os.path.isdir(dbpath) == False
 
     # Check that we restore the content of the datadir correctly
     check_restored_datadir_content(test_output_dir, env, pg)

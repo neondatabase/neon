@@ -110,7 +110,7 @@ def get_dir_size(path: str) -> int:
         for name in files:
             try:
                 totalbytes += os.path.getsize(os.path.join(root, name))
-            except FileNotFoundError:
+            except FileNotFoundError as e:
                 pass  # file could be concurrently removed
 
     return totalbytes

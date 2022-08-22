@@ -24,8 +24,7 @@ async def update_table(pg: Postgres):
     while updates_performed < updates_to_perform:
         updates_performed += 1
         id = random.randrange(1, num_rows)
-        await pg_conn.fetchrow(
-            f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
+        await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
 
 
 # Perform aggressive GC with 0 horizon
@@ -66,11 +65,13 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 
         # Create table, and insert the first 100 rows
         cur.execute("CREATE TABLE foo (id int, counter int, t text)")
-        cur.execute(f"""
+        cur.execute(
+            f"""
             INSERT INTO foo
                 SELECT g, 0, 'long string to consume some space' || g
                 FROM generate_series(1, {num_rows}) g
-        """)
+        """
+        )
         cur.execute("CREATE INDEX ON foo(id)")
 
         asyncio.run(update_and_gc(env, pg, timeline))

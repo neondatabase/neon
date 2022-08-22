@@ -41,7 +41,6 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 
 from .utils import etcd_path, get_self_dir, lsn_from_hex, lsn_to_hex, subprocess_capture
-
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.

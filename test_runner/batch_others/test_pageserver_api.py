@@ -23,8 +23,7 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
 
     def run_pageserver(args):
         return subprocess.run(
-            [str(pageserver_bin), "-D",
-             str(repo_dir), *args],
+            [str(pageserver_bin), "-D", str(repo_dir), *args],
             check=False,
             universal_newlines=True,
             stdout=subprocess.PIPE,
@@ -34,29 +33,24 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
     # remove initial config
     pageserver_config.unlink()
 
-    bad_init = run_pageserver(
-        ["--init", "-c", f'pg_distrib_dir="{pg_distrib_dir}"'])
+    bad_init = run_pageserver(["--init", "-c", f'pg_distrib_dir="{pg_distrib_dir}"'])
     assert (
         bad_init.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
     assert "missing id" in bad_init.stderr
-    assert not pageserver_config.exists(
-    ), "config file should not be created after init error"
+    assert not pageserver_config.exists(), "config file should not be created after init error"
 
-    completed_init = run_pageserver([
-        "--init", "-c", "id = 12345", "-c",
-        f'pg_distrib_dir="{pg_distrib_dir}"'
-    ])
+    completed_init = run_pageserver(
+        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
+    )
     assert (
         completed_init.returncode == 0
     ), "pageserver should be able to create a new config with the node id given"
-    assert pageserver_config.exists(
-    ), "config file should be created successfully"
+    assert pageserver_config.exists(), "config file should be created successfully"
 
-    bad_reinit = run_pageserver([
-        "--init", "-c", "id = 12345", "-c",
-        f'pg_distrib_dir="{pg_distrib_dir}"'
-    ])
+    bad_reinit = run_pageserver(
+        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
+    )
     assert (
         bad_reinit.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
@@ -89,10 +83,7 @@ def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
     assert len(timelines) > 0
 
     # check it is there
-    assert timeline_id.hex in {
-        b["timeline_id"]
-        for b in client.timeline_list(tenant_id)
-    }
+    assert timeline_id.hex in {b["timeline_id"] for b in client.timeline_list(tenant_id)}
     for timeline in timelines:
         timeline_id_str = str(timeline["timeline_id"])
         timeline_details = client.timeline_detail(
@@ -115,9 +106,8 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
 
         timeline_details = client.timeline_detail(
-            tenant_id=tenant_id,
-            timeline_id=timeline_id,
-            include_non_incremental_logical_size=True)
+            tenant_id=tenant_id, timeline_id=timeline_id, include_non_incremental_logical_size=True
+        )
 
         assert (
             timeline_details.get("wal_source_connstr") is None
@@ -136,8 +126,7 @@ def expect_updated_msg_lsn(
     timeline_id: UUID,
     prev_msg_lsn: Optional[int],
 ) -> int:
-    timeline_details = client.timeline_detail(tenant_id,
-                                              timeline_id=timeline_id)
+    timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
     # a successful `timeline_details` response must contain the below fields
     local_timeline_details = timeline_details["local"]
@@ -145,11 +134,11 @@ def expect_updated_msg_lsn(
     assert "last_received_msg_lsn" in local_timeline_details.keys()
     assert "last_received_msg_ts" in local_timeline_details.keys()
 
-    assert (local_timeline_details["last_received_msg_lsn"]
-            is not None), "the last received message's LSN is empty"
+    assert (
+        local_timeline_details["last_received_msg_lsn"] is not None
+    ), "the last received message's LSN is empty"
 
-    last_msg_lsn = lsn_from_hex(
-        local_timeline_details["last_received_msg_lsn"])
+    last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
     assert (
         prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
     ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \
@@ -166,8 +155,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
         tenant_id, timeline_id = env.neon_cli.create_tenant()
-        pg = env.postgres.create_start(DEFAULT_BRANCH_NAME,
-                                       tenant_id=tenant_id)
+        pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
         # Wait to make sure that we get a latest WAL receiver data.
         # We need to wait here because it's possible that we don't have access to
@@ -176,8 +164,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         lsn = wait_until(
             number_of_iterations=5,
             interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id,
-                                                None),
+            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None),
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
@@ -185,8 +172,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         wait_until(
             number_of_iterations=5,
             interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id,
-                                                lsn),
+            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn),
         )
 
 
@@ -196,8 +182,7 @@ def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
         check_client(client, env.initial_tenant)
 
 
-def test_pageserver_http_api_client_auth_enabled(
-        neon_env_builder: NeonEnvBuilder):
+def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
