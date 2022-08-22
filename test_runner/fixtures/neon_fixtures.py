@@ -24,6 +24,7 @@ import subprocess
 import time
 import filecmp
 import tempfile
+import tarfile
 
 from contextlib import closing
 from pathlib import Path
@@ -35,6 +36,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast, Union, Tuple
 from typing_extensions import Literal
 
+import allure  # type: ignore
 import requests
 import backoff  # type: ignore
 
@@ -2237,6 +2239,14 @@ def get_test_output_dir(request: Any) -> pathlib.Path:
     return test_dir
 
 
+ATTACHMENT_SUFFIXES = frozenset((
+    '.log',
+    '.stderr',
+    '.stdout',
+    '.diffs',
+))
+
+
 # This is autouse, so the test output directory always gets created, even
 # if a test doesn't put anything there. It also solves a problem with the
 # neon_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
@@ -2247,7 +2257,7 @@ def get_test_output_dir(request: Any) -> pathlib.Path:
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope='function', autouse=True)
-def test_output_dir(request: Any) -> pathlib.Path:
+def test_output_dir(request: Any) -> Iterator[pathlib.Path]:
     """ Create the working directory for an individual test. """
 
     # one directory per test
@@ -2255,7 +2265,26 @@ def test_output_dir(request: Any) -> pathlib.Path:
     log.info(f'test_output_dir is {test_dir}')
     shutil.rmtree(test_dir, ignore_errors=True)
     test_dir.mkdir()
-    return test_dir
+
+    yield test_dir
+
+    for attachment in test_dir.glob('**/*'):
+        if attachment.suffix in ATTACHMENT_SUFFIXES:
+            source = str(attachment)
+            name = str(attachment.relative_to(test_dir))
+            attachment_type = 'text/plain'
+            extension = attachment.suffix.removeprefix('.')
+
+            # compress files larger than 1Mb, they're hardly readable in a browser
+            if attachment.stat().st_size > 1024 * 1024:
+                source = f'{attachment}.tar.gz'
+                with tarfile.open(source, 'w:gz') as tar:
+                    tar.add(attachment, arcname=attachment.name)
+                name = f'{name}.tar.gz'
+                attachment_type = 'application/gzip'
+                extension = 'tar.gz'
+
+            allure.attach.file(source, name, attachment_type, extension)
 
 
 SKIP_DIRS = frozenset(('pg_wal',

@@ -298,6 +298,29 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
+  merge-allure-report:
+    runs-on: dev
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+    needs: [ other-tests, pg_regress-tests ]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug, release ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+
+      - name: Merge and  Allure results
+        uses: ./.github/actions/allure-report
+        with:
+          action: generate
+          build_type: ${{ matrix.build_type }}
+
   coverage-report:
     runs-on: dev
     container:
