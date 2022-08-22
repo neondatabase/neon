@@ -1767,7 +1767,7 @@ class PSQL:
         self.path = path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
-    async def run(self, query=None) -> Union[tuple[int, str], Process]:
+    async def run(self, query=None) -> Union[Tuple[int, str], Process]:
         run_args = [self.path, self.database_url]
         run_args += ["--command", query] if query is not None else []
 
