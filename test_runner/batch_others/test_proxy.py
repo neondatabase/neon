@@ -54,7 +54,8 @@ async def get_session_id_from_welcome_message(local_link_proxy, proc):
             # output ended
             break
         line = raw_line.decode("utf-8").strip()
-        if line.startswith("http"):
+        # checks if the line contains the expected authentication link
+        if line.startswith(local_link_proxy.link_auth_uri):
             url_parts = urlparse(line)
             psql_session_id = url_parts.path[1:]
             link_auth_uri = line[: -len(url_parts.path)]
@@ -121,7 +122,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     """
     Test copied and modified from: test_project_psql_link_auth test from cloud/tests_e2e/tests/test_project.py
      Step 1. establish connection to the proxy
-     Step 2. retrieves session_id
+     Step 2. retrieve session_id
      Step 3. create a vanilla_pg and send user and db info via command line (using Popen) a psql query via mgmt port to proxy.
      Step 4. assert that select 1 has been executed correctly.
     """

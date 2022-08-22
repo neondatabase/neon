@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
 
 import allure  # type: ignore
+import asyncio
 import asyncpg
 import backoff  # type: ignore
 import boto3
