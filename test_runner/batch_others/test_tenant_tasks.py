@@ -1,9 +1,9 @@
-from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
 from uuid import UUID
-import time
+
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_until
 
 
-def get_only_element(l):
+def get_only_element(l):  # noqa: E741
     assert len(l) == 1
     return l[0]
 
@@ -28,7 +28,9 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     def get_metric_value(name):
         metrics = client.get_metrics()
-        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
+        relevant = [
+            line for line in metrics.splitlines() if line.startswith(name)
+        ]
         if len(relevant) == 0:
             return 0
         line = get_only_element(relevant)
@@ -36,7 +38,9 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         return int(value)
 
     def delete_all_timelines(tenant):
-        timelines = [UUID(t["timeline_id"]) for t in client.timeline_list(tenant)]
+        timelines = [
+            UUID(t["timeline_id"]) for t in client.timeline_list(tenant)
+        ]
         for t in timelines:
             client.timeline_delete(tenant, t)
 
@@ -45,9 +49,9 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
-    timeline = env.neon_cli.create_timeline(name, tenant_id=tenant)
+    env.neon_cli.create_timeline(name, tenant_id=tenant)
     pg = env.postgres.create_start(name, tenant_id=tenant)
-    assert (get_state(tenant) == "Active")
+    assert get_state(tenant) == "Active"
 
     # Stop compute
     pg.stop()
@@ -61,9 +65,12 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
 
     # Assert that all tasks finish quickly after tenants go idle
     def assert_tasks_finish():
-        tasks_started = get_metric_value('pageserver_tenant_task_events{event="start"}')
-        tasks_ended = get_metric_value('pageserver_tenant_task_events{event="stop"}')
-        tasks_panicked = get_metric_value('pageserver_tenant_task_events{event="panic"}')
+        tasks_started = get_metric_value(
+            'pageserver_tenant_task_events{event="start"}')
+        tasks_ended = get_metric_value(
+            'pageserver_tenant_task_events{event="stop"}')
+        tasks_panicked = get_metric_value(
+            'pageserver_tenant_task_events{event="panic"}')
         assert tasks_started == tasks_ended
         assert tasks_panicked == 0
 

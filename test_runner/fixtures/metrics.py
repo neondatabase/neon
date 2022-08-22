@@ -1,10 +1,8 @@
-from dataclasses import dataclass
+from collections import defaultdict
+from typing import Dict, List
+
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
-from typing import Dict, List
-from collections import defaultdict
-
-from fixtures.log_helper import log
 
 
 class Metrics:
@@ -24,7 +22,9 @@ class Metrics:
 
     def query_one(self, name: str, filter: Dict[str, str] = {}) -> Sample:
         res = self.query_all(name, filter)
-        assert len(res) == 1, f"expected single sample for {name} {filter}, found {res}"
+        assert len(
+            res
+        ) == 1, f"expected single sample for {name} {filter}, found {res}"
         return res[0]
 
 

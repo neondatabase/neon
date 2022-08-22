@@ -26,16 +26,16 @@ LOGGING = {
             "level": "INFO"
         },
         "root.safekeeper_async": {
-            "level": "INFO"  # a lot of logs on DEBUG level
-        }
-    }
+            "level": "INFO"
+        },  # a lot of logs on DEBUG level
+    },
 }
 
 
-def getLogger(name='root') -> logging.Logger:
+def getLogger(name="root") -> logging.Logger:
     """Method to get logger for tests.
 
-    Should be used to get correctly initialized logger. """
+    Should be used to get correctly initialized logger."""
     return logging.getLogger(name)
 
 

@@ -1,13 +1,13 @@
-import pytest
-from contextlib import contextmanager
 from abc import ABC, abstractmethod
-from fixtures.pg_stats import PgStatTable
-
-from fixtures.neon_fixtures import PgBin, PgProtocol, VanillaPostgres, RemotePostgres, NeonEnv
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from contextlib import contextmanager
 
 # Type-related stuff
 from typing import Dict, List
+
+import pytest
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.neon_fixtures import NeonEnv, PgBin, PgProtocol, RemotePostgres, VanillaPostgres
+from fixtures.pg_stats import PgStatTable
 
 
 class PgCompare(ABC):
@@ -61,9 +61,11 @@ class PgCompare(ABC):
         data = self._retrieve_pg_stats(pg_stats)
 
         for k in set(init_data) & set(data):
-            self.zenbenchmark.record(k, data[k] - init_data[k], '', MetricReport.HIGHER_IS_BETTER)
+            self.zenbenchmark.record(k, data[k] - init_data[k], "",
+                                     MetricReport.HIGHER_IS_BETTER)
 
-    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
+    def _retrieve_pg_stats(self,
+                           pg_stats: List[PgStatTable]) -> Dict[str, int]:
         results: Dict[str, int] = {}
 
         with self.pg.connect().cursor() as cur:
@@ -81,17 +83,14 @@ class PgCompare(ABC):
 
 class NeonCompare(PgCompare):
     """PgCompare interface for the neon stack."""
-    def __init__(self,
-                 zenbenchmark: NeonBenchmarker,
-                 neon_simple_env: NeonEnv,
-                 pg_bin: PgBin,
-                 branch_name):
+    def __init__(self, zenbenchmark: NeonBenchmarker, neon_simple_env: NeonEnv,
+                 pg_bin: PgBin, branch_name):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
 
         # We only use one branch and one timeline
-        self.env.neon_cli.create_branch(branch_name, 'empty')
+        self.env.neon_cli.create_branch(branch_name, "empty")
         self._pg = self.env.postgres.create_start(branch_name)
         self.timeline = self.pg.safe_psql("SHOW neon.timeline_id")[0][0]
 
@@ -112,24 +111,27 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
+        self.pscur.execute(
+            f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
 
     def compact(self):
-        self.pscur.execute(f"compact {self.env.initial_tenant.hex} {self.timeline}")
+        self.pscur.execute(
+            f"compact {self.env.initial_tenant.hex} {self.timeline}")
 
     def report_peak_memory_use(self) -> None:
-        self.zenbenchmark.record("peak_mem",
-                                 self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
-                                 'MB',
-                                 report=MetricReport.LOWER_IS_BETTER)
+        self.zenbenchmark.record(
+            "peak_mem",
+            self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
+            "MB",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
 
     def report_size(self) -> None:
-        timeline_size = self.zenbenchmark.get_timeline_size(self.env.repo_dir,
-                                                            self.env.initial_tenant,
-                                                            self.timeline)
-        self.zenbenchmark.record('size',
+        timeline_size = self.zenbenchmark.get_timeline_size(
+            self.env.repo_dir, self.env.initial_tenant, self.timeline)
+        self.zenbenchmark.record("size",
                                  timeline_size / (1024 * 1024),
-                                 'MB',
+                                 "MB",
                                  report=MetricReport.LOWER_IS_BETTER)
 
         total_files = self.zenbenchmark.get_int_counter_value(
@@ -146,7 +148,8 @@ class NeonCompare(PgCompare):
                                  report=MetricReport.LOWER_IS_BETTER)
 
     def record_pageserver_writes(self, out_name):
-        return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
+        return self.zenbenchmark.record_pageserver_writes(
+            self.env.pageserver, out_name)
 
     def record_duration(self, out_name):
         return self.zenbenchmark.record_duration(out_name)
@@ -158,8 +161,8 @@ class VanillaCompare(PgCompare):
         self._pg = vanilla_pg
         self._zenbenchmark = zenbenchmark
         vanilla_pg.configure([
-            'shared_buffers=1MB',
-            'synchronous_commit=off',
+            "shared_buffers=1MB",
+            "synchronous_commit=off",
         ])
         vanilla_pg.start()
 
@@ -186,15 +189,15 @@ class VanillaCompare(PgCompare):
         pass  # TODO find something
 
     def report_size(self) -> None:
-        data_size = self.pg.get_subdir_size('base')
-        self.zenbenchmark.record('data_size',
+        data_size = self.pg.get_subdir_size("base")
+        self.zenbenchmark.record("data_size",
                                  data_size / (1024 * 1024),
-                                 'MB',
+                                 "MB",
                                  report=MetricReport.LOWER_IS_BETTER)
-        wal_size = self.pg.get_subdir_size('pg_wal')
-        self.zenbenchmark.record('wal_size',
+        wal_size = self.pg.get_subdir_size("pg_wal")
+        self.zenbenchmark.record("wal_size",
                                  wal_size / (1024 * 1024),
-                                 'MB',
+                                 "MB",
                                  report=MetricReport.LOWER_IS_BETTER)
 
     @contextmanager
@@ -247,23 +250,25 @@ class RemoteCompare(PgCompare):
         return self.zenbenchmark.record_duration(out_name)
 
 
-@pytest.fixture(scope='function')
-def neon_compare(request, zenbenchmark, pg_bin, neon_simple_env) -> NeonCompare:
+@pytest.fixture(scope="function")
+def neon_compare(request, zenbenchmark, pg_bin,
+                 neon_simple_env) -> NeonCompare:
     branch_name = request.node.name
     return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def vanilla_compare(zenbenchmark, vanilla_pg) -> VanillaCompare:
     return VanillaCompare(zenbenchmark, vanilla_pg)
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def remote_compare(zenbenchmark, remote_pg) -> RemoteCompare:
     return RemoteCompare(zenbenchmark, remote_pg)
 
 
-@pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
+@pytest.fixture(params=["vanilla_compare", "neon_compare"],
+                ids=["vanilla", "neon"])
 def neon_with_baseline(request) -> PgCompare:
     """Parameterized fixture that helps compare neon against vanilla postgres.
 
@@ -289,4 +294,5 @@ def neon_with_baseline(request) -> PgCompare:
     if isinstance(fixture, PgCompare):
         return fixture
     else:
-        raise AssertionError(f"test error: fixture {request.param} is not PgCompare")
+        raise AssertionError(
+            f"test error: fixture {request.param} is not PgCompare")

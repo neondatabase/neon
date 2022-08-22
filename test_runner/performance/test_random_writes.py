@@ -1,14 +1,8 @@
-import os
-from contextlib import closing
-from fixtures.benchmark_fixture import MetricReport
-from fixtures.neon_fixtures import NeonEnv
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
-from fixtures.log_helper import log
-
-import psycopg2.extras
 import random
-import time
+from contextlib import closing
 
+from fixtures.benchmark_fixture import MetricReport
+from fixtures.compare_fixtures import PgCompare
 from fixtures.utils import query_scalar
 
 
@@ -43,7 +37,7 @@ def test_random_writes(neon_with_baseline: PgCompare):
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             # Create the test table
-            with env.record_duration('init'):
+            with env.record_duration("init"):
                 cur.execute("""
                     CREATE TABLE Big(
                         pk integer primary key,
@@ -57,12 +51,15 @@ def test_random_writes(neon_with_baseline: PgCompare):
                     rows_to_insert = min(1000 * 1000, n_rows - rows_inserted)
                     low = rows_inserted + 1
                     high = rows_inserted + rows_to_insert
-                    cur.execute(f"INSERT INTO Big (pk) values (generate_series({low},{high}))")
+                    cur.execute(
+                        f"INSERT INTO Big (pk) values (generate_series({low},{high}))"
+                    )
                     rows_inserted += rows_to_insert
 
             # Get table size (can't be predicted because padding and alignment)
             table_size = query_scalar(cur, "SELECT pg_relation_size('Big')")
-            env.zenbenchmark.record("table_size", table_size, 'bytes', MetricReport.TEST_PARAM)
+            env.zenbenchmark.record("table_size", table_size, "bytes",
+                                    MetricReport.TEST_PARAM)
 
             # Decide how much to write, based on knowledge of pageserver implementation.
             # Avoiding segment collisions maximizes (neon_runtime / vanilla_runtime).
@@ -72,15 +69,18 @@ def test_random_writes(neon_with_baseline: PgCompare):
 
             # The closer this is to 250 MB, the more realistic the test is.
             effective_checkpoint_distance = table_size * n_writes // n_rows
-            env.zenbenchmark.record("effective_checkpoint_distance",
-                                    effective_checkpoint_distance,
-                                    'bytes',
-                                    MetricReport.TEST_PARAM)
+            env.zenbenchmark.record(
+                "effective_checkpoint_distance",
+                effective_checkpoint_distance,
+                "bytes",
+                MetricReport.TEST_PARAM,
+            )
 
             # Update random keys
-            with env.record_duration('run'):
+            with env.record_duration("run"):
                 for it in range(n_iterations):
                     for i in range(n_writes):
                         key = random.randint(1, n_rows)
-                        cur.execute(f"update Big set count=count+1 where pk={key}")
+                        cur.execute(
+                            f"update Big set count=count+1 where pk={key}")
                     env.flush()

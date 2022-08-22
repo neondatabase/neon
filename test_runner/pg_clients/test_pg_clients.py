@@ -1,6 +1,4 @@
-import os
 import shutil
-import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -18,14 +16,19 @@ from fixtures.utils import subprocess_capture
         "python/asyncpg",
         pytest.param(
             "python/pg8000",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r912264281
-            marks=pytest.mark.xfail(reason="Handles SSL in incompatible with Neon way")),
+            marks=pytest.mark.xfail(
+                reason="Handles SSL in incompatible with Neon way"),
+        ),
         pytest.param(
             "swift/PostgresClientKit",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
-            marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported")),
+            marks=pytest.mark.xfail(
+                reason="Neither SNI nor parameters is supported"),
+        ),
         "typescript/postgresql-client",
     ],
 )
-def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: str):
+def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres,
+                    client: str):
     conn_options = remote_pg.conn_options()
 
     env_file = None
@@ -43,7 +46,10 @@ def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: st
     if docker_bin is None:
         raise RuntimeError("docker is required for running this test")
 
-    build_cmd = [docker_bin, "build", "--tag", image_tag, f"{Path(__file__).parent / client}"]
+    build_cmd = [
+        docker_bin, "build", "--tag", image_tag,
+        f"{Path(__file__).parent / client}"
+    ]
     subprocess_capture(str(test_output_dir), build_cmd, check=True)
 
     run_cmd = [docker_bin, "run", "--rm", "--env-file", env_file, image_tag]
