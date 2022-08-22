@@ -1772,8 +1772,7 @@ class PSQL:
         run_args += ["--command", query] if query is not None else []
 
         cmd_line = " ".join(["'" + x + "'" if " " in x else x for x in run_args])
-        log.info(f"running psql with command line ::: {cmd_line}")
-        log.debug(f"running psql with command line ::: {cmd_line}")
+        log.info(f"Run psql: {cmd_line}")
         return await asyncio.create_subprocess_exec(
             *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -1788,7 +1787,7 @@ class NeonProxy(PgProtocol):
         self.mgmt_port = mgmt_port
         self.auth_endpoint = auth_endpoint
         self._popen: Optional[subprocess.Popen[bytes]] = None
-        self.link_auth_uri = "http://dummy-uri"
+        self.link_auth_uri_prefix = "http://dummy-uri"
 
     def start(self) -> None:
         """
@@ -1822,7 +1821,7 @@ class NeonProxy(PgProtocol):
         args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
         args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
         args.extend(["--auth-backend", "link"])
-        args.extend(["--uri", self.link_auth_uri])
+        args.extend(["--uri", self.link_auth_uri_prefix])
         arg_str = " ".join(args)
         log.info(f"starting proxy with command line ::: {arg_str}")
         self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
