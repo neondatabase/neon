@@ -163,14 +163,9 @@ pub fn is_socket_read_timed_out(error: &anyhow::Error) -> bool {
     false
 }
 
-// Truncate 0 from C string in Bytes and stringify it (returns slice, no allocations)
-// PG protocol strings are always C strings.
-fn cstr_to_str(b: &Bytes) -> Result<&str> {
-    let without_null = if b.last() == Some(&0) {
-        &b[..b.len() - 1]
-    } else {
-        &b[..]
-    };
+// Cast a byte slice to a string slice, dropping null terminator if there's one.
+fn cstr_to_str(bytes: &[u8]) -> Result<&str> {
+    let without_null = bytes.strip_suffix(&[0]).unwrap_or(bytes);
     std::str::from_utf8(without_null).map_err(|e| e.into())
 }
 
@@ -423,9 +418,9 @@ impl PostgresBackend {
                 self.state = ProtoState::Established;
             }
 
-            FeMessage::Query(m) => {
+            FeMessage::Query(body) => {
                 // remove null terminator
-                let query_string = cstr_to_str(&m.body)?;
+                let query_string = cstr_to_str(&body)?;
 
                 trace!("got query {:?}", query_string);
                 // xxx distinguish fatal and recoverable errors?
