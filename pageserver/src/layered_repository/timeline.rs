@@ -412,6 +412,11 @@ pub struct Timeline {
     /// and `set_current_logical_size` functions to modify this, they will
     /// also keep the prometheus metric in sync.
     current_logical_size: AtomicI64,
+    // TODO we don't have a good, API to ensure on a compilation level
+    // that the timeline passes all initialization.
+    // Hence we ensure that we init at least once for every timeline
+    // and keep this flag to avoid potentually long recomputes.
+    logical_size_initialized: AtomicBool,
 
     /// Information about the last processed message by the WAL receiver,
     /// or None if WAL receiver has not received anything for this timeline
@@ -731,6 +736,7 @@ impl Timeline {
             initdb_lsn: metadata.initdb_lsn(),
 
             current_logical_size: AtomicI64::new(0),
+            logical_size_initialized: AtomicBool::new(false),
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
 
@@ -835,6 +841,10 @@ impl Timeline {
     ///
     /// This can be a slow operation.
     pub fn init_logical_size(&self) -> Result<()> {
+        if self.logical_size_initialized.load(AtomicOrdering::Acquire) {
+            return Ok(());
+        }
+
         // Try a fast-path first:
         // Copy logical size from ancestor timeline if there has been no changes on this
         // branch, and no changes on the ancestor branch since the branch point.
@@ -907,6 +917,8 @@ impl Timeline {
     fn set_current_logical_size(&self, new_size: u64) {
         self.current_logical_size
             .store(new_size as i64, AtomicOrdering::SeqCst);
+        self.logical_size_initialized
+            .store(true, AtomicOrdering::SeqCst);
 
         // Also set the value in the prometheus gauge. Same race condition
         // here as in `update_current_logical_size`.

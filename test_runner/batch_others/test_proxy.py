@@ -47,37 +47,25 @@ async def get_session_id_from_welcome_message(local_link_proxy, proc):
     psql_session_id = None
 
     max_num_lines_of_welcome_message = 15
-    attempt = 0
-    log.info(f"Neon Welcome Message:")
-    for attempt in range(max_num_lines_of_welcome_message):
+    line_id = 0
+    for line_id in range(max_num_lines_of_welcome_message):
         raw_line = await proc.stderr.readline()
         if not raw_line:
             # output ended
             break
-        log.info(f"{raw_line}")
         line = raw_line.decode("utf-8").strip()
         if line.startswith("http"):
-            # poll: which code block is better? (both perform same function)
-
-            # using urlparse, 3 lines
             url_parts = urlparse(line)
             psql_session_id = url_parts.path[1:]
             link_auth_uri = line[:-len(url_parts.path)]
-
-            # manual parsing, 3 lines
-            line_parts = line.split("/")
-            psql_session_id = line_parts[-1]
-            link_auth_uri = '/'.join(line_parts[:-1])
-
             assert link_auth_uri == local_link_proxy.link_auth_uri, \
                 f"Line='{line}' should contain a http auth link of form '{local_link_proxy.link_auth_uri}/<psql_session_id>'."
             break
-        log.debug("line %d does not contain expected result: %s", attempt, line)
+        log.debug("line %d does not contain expected result: %s", line_id, line)
 
-    assert attempt <= max_num_lines_of_welcome_message, "exhausted given attempts, did not get the result"
+    assert line_id <= max_num_lines_of_welcome_message, "exhausted given attempts, did not get the result"
     assert psql_session_id is not None, "psql_session_id not found from output of proc.stderr.readline()"
-    log.debug(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
-    log.info(f"proc.stderr.readline() #{attempt} has the result: {psql_session_id=}")
+    log.info(f"Got psql_session_id={psql_session_id=}")
 
     return psql_session_id
 
@@ -107,34 +95,20 @@ def create_and_send_db_inf(local_vanilla_pg, psql_session_id, mgmt_port):
         }
     }
     db_info_str = json.dumps(db_info_dict)
-
-    mgmt_port_str = str(mgmt_port)  # hardcoded from proxy's backend I think
-
     cmd_line_args__to__mgmt = [
         "psql",
         "-h",
         "127.0.0.1",  # localhost
         "-p",
-        mgmt_port_str,  # mgmt port
+        f"{mgmt_port}",
         '-c',
         db_info_str
     ]
 
     log.info(f"Sending to proxy the user and db info: {cmd_line_args__to__mgmt}")
     p = subprocess.Popen(cmd_line_args__to__mgmt, stdout=subprocess.PIPE)
-
     out, err = p.communicate()
-    log.info(f"output of sending info: out={out}; err={err}")
-
     assert "ok" in str(out)
-
-    # with closing(psycopg2.connect(port = mgmt_port, host = "127.0.0.1")) as conn:
-    #     with conn.cursor() as cur:
-    #         query = db_info_str
-    #         log.info(f"Executing query: {query}")
-    #         cur.execute(query)
-    #         assert cur.description is not None
-    #         assert "ok" in cur.fetchall()
 
 
 @pytest.mark.asyncio
@@ -161,8 +135,7 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     create_and_send_db_inf(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
 
     # Step 4.
-    log.info("Proxy output:")
-    # Expecting::
+    # Expecting proxy output::
     # b' ?column? \n'
     # b'----------\n'
     # b'        1\n'
@@ -170,10 +143,8 @@ async def test_psql_session_id(vanilla_pg, link_proxy):
     max_num_output_lines = 4
     str_sum = ""
     for i in range(max_num_output_lines):
-        raw_line = await proc.stdout.readline()
-        log.info(f"{raw_line}")
-        str_sum += str(raw_line)
-
+        raw_bytes_line = await proc.stdout.readline()
+        str_sum += str(raw_bytes_line)
     assert str_sum == "b' ?column? \\n'b'----------\\n'b'        1\\n'b'(1 row)\\n'"
 
 

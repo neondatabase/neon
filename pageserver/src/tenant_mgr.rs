@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
 use crate::layered_repository::{load_metadata, Repository, Timeline};
+use crate::repository::RepositoryTimeline;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::*;
 use utils::lsn::Lsn;
 
+pub use tenants_state::try_send_timeline_update;
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
 mod tenants_state {
@@ -67,7 +69,7 @@ mod tenants_state {
         Ok(())
     }
 
-    pub(super) fn try_send_timeline_update(update: LocalTimelineUpdate) {
+    pub fn try_send_timeline_update(update: LocalTimelineUpdate) {
         match TIMELINE_UPDATE_SENDER
             .read()
             .expect("Failed to read() timeline_update_sender lock, it got poisoned")
@@ -94,12 +96,6 @@ struct Tenant {
     state: TenantState,
     /// Contains in-memory state, including the timeline that might not yet flushed on disk or loaded form disk.
     repo: Arc<Repository>,
-    /// Timelines, located locally in the pageserver's datadir.
-    /// Timelines can entirely be removed entirely by the `detach` operation only.
-    ///
-    /// Local timelines have more metadata that's loaded into memory,
-    /// that is located in the `repo.timelines` field, [`crate::layered_repository::LayeredTimelineEntry`].
-    local_timelines: HashMap<ZTimelineId, Arc<Timeline>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -176,15 +172,15 @@ pub enum LocalTimelineUpdate {
     },
     Attach {
         id: ZTenantTimelineId,
-        datadir: Arc<Timeline>,
+        timeline: Arc<Timeline>,
     },
 }
 
 impl std::fmt::Debug for LocalTimelineUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Detach { id, .. } => f.debug_tuple("Remove").field(id).finish(),
-            Self::Attach { id, .. } => f.debug_tuple("Add").field(id).finish(),
+            Self::Detach { id, .. } => f.debug_tuple("Detach").field(id).finish(),
+            Self::Attach { id, .. } => f.debug_tuple("Attach").field(id).finish(),
         }
     }
 }
@@ -288,7 +284,6 @@ pub fn create_tenant_repository(
             v.insert(Tenant {
                 state: TenantState::Idle,
                 repo,
-                local_timelines: HashMap::new(),
             });
             Ok(Some(tenant_id))
         }
@@ -379,20 +374,14 @@ pub fn get_local_timeline_with_load(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<Timeline>> {
-    let mut m = tenants_state::write_tenants();
-    let tenant = m
-        .get_mut(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found"))?;
-
-    if let Some(page_tline) = tenant.local_timelines.get(&timeline_id) {
-        Ok(Arc::clone(page_tline))
-    } else {
-        let page_tline = load_local_timeline(&tenant.repo, timeline_id)
-            .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}"))?;
-        tenant
-            .local_timelines
-            .insert(timeline_id, Arc::clone(&page_tline));
-        Ok(page_tline)
+    let repository = get_repository_for_tenant(tenant_id)?;
+    match repository.get_timeline(timeline_id) {
+        Some(RepositoryTimeline::Loaded(loaded_timeline)) => {
+            loaded_timeline.init_logical_size()?;
+            Ok(loaded_timeline)
+        }
+        _ => load_local_timeline(&repository, timeline_id)
+            .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}")),
     }
 }
 
@@ -419,10 +408,7 @@ pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow
     thread_mgr::shutdown_threads(None, None, Some(timeline_id));
     debug!("thread shutdown completed");
     match tenants_state::write_tenants().get_mut(&tenant_id) {
-        Some(tenant) => {
-            tenant.repo.delete_timeline(timeline_id)?;
-            tenant.local_timelines.remove(&timeline_id);
-        }
+        Some(tenant) => tenant.repo.delete_timeline(timeline_id)?,
         None => anyhow::bail!("Tenant {tenant_id} not found in local tenant state"),
     }
 
@@ -434,23 +420,21 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
     // shutdown the tenant and timeline threads: gc, compaction, page service threads)
     thread_mgr::shutdown_threads(None, Some(tenant_id), None);
 
-    // FIXME should we protect somehow from starting new threads/walreceivers when tenant is in stopping state?
-    // send stop signal to wal receiver and collect join handles while holding the lock
-    let walreceiver_join_handles = {
-        let tenants = tenants_state::write_tenants();
-        let tenant = tenants.get(&tenant_id).context("tenant not found")?;
-        let mut walreceiver_join_handles = Vec::with_capacity(tenant.local_timelines.len());
-        for timeline_id in tenant.local_timelines.keys() {
+    let mut walreceiver_join_handles = Vec::new();
+    let removed_tenant = {
+        let mut tenants_accessor = tenants_state::write_tenants();
+        tenants_accessor.remove(&tenant_id)
+    };
+    if let Some(tenant) = removed_tenant {
+        for (timeline_id, _) in tenant.repo.list_timelines() {
             let (sender, receiver) = std::sync::mpsc::channel::<()>();
             tenants_state::try_send_timeline_update(LocalTimelineUpdate::Detach {
-                id: ZTenantTimelineId::new(tenant_id, *timeline_id),
+                id: ZTenantTimelineId::new(tenant_id, timeline_id),
                 join_confirmation_sender: sender,
             });
-            walreceiver_join_handles.push((*timeline_id, receiver));
+            walreceiver_join_handles.push((timeline_id, receiver));
         }
-        // drop the tenants lock
-        walreceiver_join_handles
-    };
+    }
 
     // wait for wal receivers to stop without holding the lock, because walreceiver
     // will attempt to change tenant state which is protected by the same global tenants lock.
@@ -490,12 +474,6 @@ fn load_local_timeline(
         format!("Inmem timeline {timeline_id} not found in tenant's repository")
     })?;
     inmem_timeline.init_logical_size()?;
-
-    tenants_state::try_send_timeline_update(LocalTimelineUpdate::Attach {
-        id: ZTenantTimelineId::new(repo.tenant_id(), timeline_id),
-        datadir: Arc::clone(&inmem_timeline),
-    });
-
     Ok(inmem_timeline)
 }
 
@@ -590,34 +568,21 @@ fn attach_downloaded_tenant(
     repo: &Repository,
     downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
-    let mut registration_queue = Vec::with_capacity(downloaded_timelines.len());
-
-    // first need to register the in-mem representations, to avoid missing ancestors during the local disk data registration
-    for timeline_id in downloaded_timelines {
+    // first, register timeline metadata to ensure ancestors will be found later during layer load
+    for &timeline_id in &downloaded_timelines {
         repo.attach_timeline(timeline_id).with_context(|| {
             format!("Failed to load timeline {timeline_id} into in-memory repository")
         })?;
-        registration_queue.push(timeline_id);
     }
 
-    for timeline_id in registration_queue {
-        let tenant_id = repo.tenant_id();
-        match tenants_state::write_tenants().get_mut(&tenant_id) {
-            Some(tenant) => match tenant.local_timelines.entry(timeline_id) {
-                Entry::Occupied(_) => {
-                    anyhow::bail!("Local timeline {timeline_id} already registered")
-                }
-                Entry::Vacant(v) => {
-                    v.insert(load_local_timeline(repo, timeline_id).with_context(|| {
-                        format!("Failed to register add local timeline for tenant {tenant_id}")
-                    })?);
-                }
-            },
-            None => anyhow::bail!(
-                "Tenant {} not found in local tenant state",
-                repo.tenant_id()
-            ),
-        }
+    // and then load its layers in memory
+    for timeline_id in downloaded_timelines {
+        let _ = load_local_timeline(repo, timeline_id).with_context(|| {
+            format!(
+                "Failed to register add local timeline for tenant {}",
+                repo.tenant_id(),
+            )
+        })?;
     }
 
     Ok(())
@@ -647,7 +612,6 @@ fn load_local_repo(
         Tenant {
             state: TenantState::Idle,
             repo,
-            local_timelines: HashMap::new(),
         }
     });
 
