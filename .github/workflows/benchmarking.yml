@@ -106,7 +106,7 @@ jobs:
         mkdir -p perf-report-staging
         # Set --sparse-ordering option of pytest-order plugin to ensure tests are running in order of appears in the file,
         # it's important for test_perf_pgbench.py::test_pgbench_remote_* tests
-        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --sparse-ordering --skip-interfering-proc-check --out-dir perf-report-staging --timeout 5400
+        ./scripts/pytest test_runner/performance/ -v -m "remote_cluster" --sparse-ordering --out-dir perf-report-staging --timeout 5400
 
     - name: Submit result
       env:
@@ -186,7 +186,7 @@ jobs:
         mkdir -p perf-report-captest
 
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_init -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_init -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark simple-update
       env:
@@ -194,7 +194,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
       run: |
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_simple_update -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_simple_update -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark select-only
       env:
@@ -202,7 +202,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
       run: |
         psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_select_only -v -m "remote_cluster" --skip-interfering-proc-check --out-dir perf-report-captest --timeout 21600
+        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_select_only -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
 
     - name: Submit result
       env:
