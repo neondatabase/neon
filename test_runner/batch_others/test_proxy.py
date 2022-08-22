@@ -5,9 +5,7 @@ from urllib.parse import urlparse
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import PSQL
-
-from test_runner.fixtures.neon_fixtures import NeonProxy, VanillaPostgres
+from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 
 def test_proxy_select_1(static_proxy):
@@ -86,6 +84,20 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
     assert "ok" in str(out)
 
 
+async def get_uri_line_from_process_welcome_notice(link_auth_uri_prefix, proc):
+    max_num_lines_of_welcome_message = 3
+    for attempt in range(max_num_lines_of_welcome_message):
+        raw_line = await proc.stderr.readline()
+        line = raw_line.decode("utf-8").strip()
+        if link_auth_uri_prefix in line:
+            return line
+    assert False, "did not find line containing " + link_auth_uri_prefix
+
+
+async def read_process_bytes(proc):
+    return await proc.stdout.read()
+
+
 @pytest.mark.asyncio
 async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
     """
@@ -106,13 +118,10 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
     proc = await psql.run("select 1")
 
     # Step 2.1
-    line_str = ""
-    while link_proxy.link_auth_uri_prefix not in line_str:
-        line_raw_bytes = await proc.stderr.readline()
-        line_str = line_raw_bytes.decode("utf-8").strip()
+    uri_prefix = link_proxy.link_auth_uri_prefix
+    line_str = await get_uri_line_from_process_welcome_notice(uri_prefix, proc)
 
     # step 2.2
-    uri_prefix = link_proxy.link_auth_uri_prefix
     psql_session_id = get_session_id_from_uri_line(uri_prefix, line_str)
     log.info(f"Parsed psql_session_id='{psql_session_id}'" + " from Neon welcome message.")
 
@@ -125,7 +134,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
     # b'----------\n'
     # b'        1\n'
     # b'(1 row)\n'
-    out_bytes = await proc.stdout.read()
+    out_bytes = await read_process_bytes(proc)
     expected_out_bytes = b" ?column? \n----------\n        1\n(1 row)\n\n"
     assert out_bytes == expected_out_bytes
 
