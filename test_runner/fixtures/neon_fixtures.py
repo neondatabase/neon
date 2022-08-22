@@ -2243,6 +2243,7 @@ ATTACHMENT_SUFFIXES = frozenset((
     '.log',
     '.stderr',
     '.stdout',
+    '.diffs',
 ))
 
 
