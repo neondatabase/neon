@@ -34,11 +34,14 @@ def get_session_id_from_uri_line(uri_prefix, uri_line):
 
     url_parts = urlparse(uri_line)
     psql_session_id = url_parts.path[1:]
+    assert psql_session_id.isalnum(), "session_id should only contain alphanumeric chars."
     link_auth_uri_prefix = uri_line[: -len(url_parts.path)]
+    # invariant: the prefix must match the uri_prefix.
     assert (
         link_auth_uri_prefix == uri_prefix
     ), f"Line='{uri_line}' should contain a http auth link of form '{uri_prefix}/<psql_session_id>'."
-    assert psql_session_id is not None, "did not find line containing " + uri_prefix
+    # invariant: the entire link_auth_uri should be on its own line, module spaces.
+    assert " ".join(uri_line.split(" ")) == f"{uri_prefix}/{psql_session_id}"
 
     return psql_session_id
 
@@ -85,6 +88,12 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
 
 
 async def get_uri_line_from_process_welcome_notice(link_auth_uri_prefix, proc):
+    """
+    Returns the line from the welcome notice from proc containing link_auth_uri_prefix.
+    :param link_auth_uri_prefix: the uri prefix used to indicate the line of interest
+    :param proc: the process to read the welcome message from.
+    :return: a line containing the full link authentication uri.
+    """
     max_num_lines_of_welcome_message = 15
     for attempt in range(max_num_lines_of_welcome_message):
         raw_line = await proc.stderr.readline()
