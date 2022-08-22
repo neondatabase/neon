@@ -104,7 +104,7 @@ runs:
           exit 1
         fi
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
-          EXTRA_PARAMS="-n4 $EXTRA_PARAMS"
+          EXTRA_PARAMS="-n$(nproc) $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.run_with_real_s3 }}" == "true" ]]; then
@@ -141,7 +141,7 @@ runs:
         # --verbose prints name of each test (helpful when there are
         # multiple tests in one file)
         # -rA prints summary in the end
-        # -n4 uses four processes to run tests via pytest-xdist
+        # -nX uses X processes to run tests via pytest-xdist
         # -s is not used to prevent pytest from capturing output, because tests are running
         # in parallel and logs are mixed between different tests
         mkdir -p $TEST_OUTPUT/allure/results
