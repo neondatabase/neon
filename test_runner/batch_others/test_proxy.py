@@ -48,7 +48,7 @@ def create_and_send_db_info(local_vanilla_pg, psql_session_id, mgmt_port):
     pg_password = "password"
 
     local_vanilla_pg.start()
-    query = "create user " + pg_user + " with login superuser password '" + pg_password + "'"
+    query = f"create user {pg_user} with login superuser password '{pg_password}'"
     local_vanilla_pg.safe_psql(query)
 
     port = local_vanilla_pg.default_options["port"]
