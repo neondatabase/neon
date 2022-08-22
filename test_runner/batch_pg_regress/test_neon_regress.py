@@ -5,8 +5,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, base_dir, check_restored_datadir_content, pg_distrib_dir
 
 
-def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin,
-                      capsys):
+def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin, capsys):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_neon_regress", "empty")
@@ -50,7 +49,7 @@ def test_neon_regress(neon_simple_env: NeonEnv, test_output_dir: Path, pg_bin,
 
         # checkpoint one more time to ensure that the lsn we get is the latest one
         pg.safe_psql("CHECKPOINT")
-        lsn = pg.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
+        pg.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
 
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, pg)

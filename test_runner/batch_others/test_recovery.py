@@ -1,7 +1,4 @@
-import json
-import os
 import time
-from ast import Assert
 from contextlib import closing
 
 import psycopg2.extras
@@ -33,17 +30,13 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     pg = env.postgres.create_start("test_pageserver_recovery")
     log.info("postgres is running on 'test_pageserver_recovery' branch")
 
-    connstr = pg.connstr()
-
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             with closing(env.pageserver.connect()) as psconn:
-                with psconn.cursor(
-                        cursor_factory=psycopg2.extras.DictCursor) as pscur:
+                with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
                     # Create and initialize test table
                     cur.execute("CREATE TABLE foo(x bigint)")
-                    cur.execute(
-                        "INSERT INTO foo VALUES (generate_series(1,100000))")
+                    cur.execute("INSERT INTO foo VALUES (generate_series(1,100000))")
 
                     # Sleep for some time to let checkpoint create image layers
                     time.sleep(2)
@@ -67,4 +60,4 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("select count(*) from foo")
-            assert cur.fetchone() == (100000, )
+            assert cur.fetchone() == (100000,)

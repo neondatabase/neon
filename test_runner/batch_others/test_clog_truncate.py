@@ -1,6 +1,5 @@
 import os
 import time
-from contextlib import closing
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
@@ -49,20 +48,19 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
 
     while os.path.isfile(pg_xact_0000_path):
-        log.info(f"file exists. wait for truncation. " "pg_xact_0000_path = {pg_xact_0000_path}")
+        log.info(f"file exists. wait for truncation: {pg_xact_0000_path=}")
         time.sleep(5)
 
     # checkpoint to advance latest lsn
     with pg.cursor() as cur:
         cur.execute("CHECKPOINT;")
-        lsn_after_truncation = query_scalar(
-            cur, "select pg_current_wal_insert_lsn()")
+        lsn_after_truncation = query_scalar(cur, "select pg_current_wal_insert_lsn()")
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f"create branch at lsn_after_truncation {lsn_after_truncation}")
-    env.neon_cli.create_branch("test_clog_truncate_new",
-                               "test_clog_truncate",
-                               ancestor_start_lsn=lsn_after_truncation)
+    env.neon_cli.create_branch(
+        "test_clog_truncate_new", "test_clog_truncate", ancestor_start_lsn=lsn_after_truncation
+    )
     pg2 = env.postgres.create_start("test_clog_truncate_new")
     log.info("postgres is running on test_clog_truncate_new branch")
 

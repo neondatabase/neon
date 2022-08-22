@@ -20,45 +20,32 @@ def pg_cur(pg):
 # Periodically check that all backpressure lags are below the configured threshold,
 # assert if they are not.
 # If the check query fails, stop the thread. Main thread should notice that and stop the test.
-def check_backpressure(pg: Postgres,
-                       stop_event: threading.Event,
-                       polling_interval=5):
+def check_backpressure(pg: Postgres, stop_event: threading.Event, polling_interval=5):
     log.info("checks started")
 
     with pg_cur(pg) as cur:
         cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
 
-        cur.execute(
-            "select pg_size_bytes(current_setting('max_replication_write_lag'))"
-        )
+        cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()
         max_replication_write_lag_bytes = res[0]
-        log.info(
-            f"max_replication_write_lag: {max_replication_write_lag_bytes} bytes"
-        )
+        log.info(f"max_replication_write_lag: {max_replication_write_lag_bytes} bytes")
 
-        cur.execute(
-            "select pg_size_bytes(current_setting('max_replication_flush_lag'))"
-        )
+        cur.execute("select pg_size_bytes(current_setting('max_replication_flush_lag'))")
         res = cur.fetchone()
         max_replication_flush_lag_bytes = res[0]
-        log.info(
-            f"max_replication_flush_lag: {max_replication_flush_lag_bytes} bytes"
-        )
+        log.info(f"max_replication_flush_lag: {max_replication_flush_lag_bytes} bytes")
 
-        cur.execute(
-            "select pg_size_bytes(current_setting('max_replication_apply_lag'))"
-        )
+        cur.execute("select pg_size_bytes(current_setting('max_replication_apply_lag'))")
         res = cur.fetchone()
         max_replication_apply_lag_bytes = res[0]
-        log.info(
-            f"max_replication_apply_lag: {max_replication_apply_lag_bytes} bytes"
-        )
+        log.info(f"max_replication_apply_lag: {max_replication_apply_lag_bytes} bytes")
 
     with pg_cur(pg) as cur:
         while not stop_event.is_set():
             try:
-                cur.execute("""
+                cur.execute(
+                    """
                 select pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn) as received_lsn_lag,
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(),disk_consistent_lsn) as disk_consistent_lsn_lag,
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(),remote_consistent_lsn) as remote_consistent_lsn_lag,
@@ -66,7 +53,8 @@ def check_backpressure(pg: Postgres,
                 pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_flush_lsn(),disk_consistent_lsn)),
                 pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_flush_lsn(),remote_consistent_lsn))
                 from backpressure_lsns();
-                """)
+                """
+                )
 
                 res = cur.fetchone()
                 received_lsn_lag = res[0]
@@ -87,8 +75,9 @@ def check_backpressure(pg: Postgres,
                 if max_replication_flush_lag_bytes > 0:
                     assert disk_consistent_lsn_lag < max_replication_flush_lag_bytes + lag_overflow
                 if max_replication_apply_lag_bytes > 0:
-                    assert (remote_consistent_lsn_lag <
-                            max_replication_apply_lag_bytes + lag_overflow)
+                    assert (
+                        remote_consistent_lsn_lag < max_replication_apply_lag_bytes + lag_overflow
+                    )
 
                 time.sleep(polling_interval)
 
@@ -114,13 +103,13 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch("test_backpressure")
 
     pg = env.postgres.create_start(
-        "test_backpressure", config_lines=["max_replication_write_lag=30MB"])
+        "test_backpressure", config_lines=["max_replication_write_lag=30MB"]
+    )
     log.info("postgres is running on 'test_backpressure' branch")
 
     # setup check thread
     check_stop_event = threading.Event()
-    check_thread = threading.Thread(target=check_backpressure,
-                                    args=(pg, check_stop_event))
+    check_thread = threading.Thread(target=check_backpressure, args=(pg, check_stop_event))
     check_thread.start()
 
     # Configure failpoint to slow down walreceiver ingest
@@ -145,8 +134,7 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
 
         while check_thread.is_alive() and rows_inserted < inserts_to_do:
             try:
-                cur.execute(
-                    "INSERT INTO foo select from generate_series(1, 100000)")
+                cur.execute("INSERT INTO foo select from generate_series(1, 100000)")
                 rows_inserted += 100000
             except Exception as e:
                 if check_thread.is_alive():

@@ -51,4 +51,4 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
     conn = pg.connect()
     cur = conn.cursor()
     cur.execute("SELECT count(*) FROM t")
-    assert cur.fetchone() == (iterations, )
+    assert cur.fetchone() == (iterations,)

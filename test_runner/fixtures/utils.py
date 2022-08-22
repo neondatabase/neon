@@ -34,9 +34,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     try:
         with open(stdout_filename, "w") as stdout_f:
             with open(stderr_filename, "w") as stderr_f:
-                log.info(
-                    f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"'
-                )
+                log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
                 subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
     finally:
         # Remove empty files if there is no output
@@ -76,8 +74,10 @@ def print_gc_result(row):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
         "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
-        " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}"
-        .format_map(row))
+        " needed_by_branches: {layers_needed_by_branches}, not_updated: {layers_not_updated}, removed: {layers_removed}".format_map(
+            row
+        )
+    )
 
 
 def etcd_path() -> Path:
@@ -110,7 +110,7 @@ def get_dir_size(path: str) -> int:
         for name in files:
             try:
                 totalbytes += os.path.getsize(os.path.join(root, name))
-            except FileNotFoundError as e:
+            except FileNotFoundError:
                 pass  # file could be concurrently removed
 
     return totalbytes

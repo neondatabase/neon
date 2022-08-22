@@ -27,14 +27,10 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
         pg = env.postgres.create_start("test_lsof_pageserver_pid")
         with closing(pg.connect()) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "CREATE TABLE foo as SELECT x FROM generate_series(1,100000) x"
-                )
+                cur.execute("CREATE TABLE foo as SELECT x FROM generate_series(1,100000) x")
                 cur.execute("update foo set x=x+1")
 
-    workload_thread = threading.Thread(target=start_workload,
-                                       args=(),
-                                       daemon=True)
+    workload_thread = threading.Thread(target=start_workload, args=(), daemon=True)
     workload_thread.start()
 
     path = os.path.join(env.repo_dir, "pageserver.pid")
@@ -49,9 +45,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
         )
 
         # parse the `lsof` command's output to get only the list of commands
-        commands = [
-            line.split(" ")[0] for line in res.stdout.strip().split("\n")[1:]
-        ]
+        commands = [line.split(" ")[0] for line in res.stdout.strip().split("\n")[1:]]
         if len(commands) > 0:
             log.info(f"lsof commands: {commands}")
             assert commands == ["pageserve"]

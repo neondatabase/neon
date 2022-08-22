@@ -28,13 +28,13 @@ import tempfile
 import time
 import uuid
 from contextlib import closing
-from os import path
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import psycopg2
 import requests
 from psycopg2.extensions import connection as PgConnection
+from psycopg2.extensions import parse_dsn
 
 ###############################################
 ### client-side utils copied from test fixtures
@@ -149,10 +149,8 @@ class PgProtocol:
         # enough for our tests, but if you need a longer, you can
         # change it by calling "SET statement_timeout" after
         # connecting.
-        if "options" in conn_options:
-            conn_options["options"] = f"-cstatement_timeout=120s " + conn_options["options"]
-        else:
-            conn_options["options"] = "-cstatement_timeout=120s"
+        conn_options["options"] = f"-cstatement_timeout=120s {conn_options.get('options', '')}"
+
         return conn_options
 
     # autocommit=True here by default because that's what we need most of the time
@@ -250,7 +248,7 @@ class NeonPageserverHttpClient(requests.Session):
         except requests.RequestException as e:
             try:
                 msg = res.json()["msg"]
-            except:
+            except:  # noqa: E722
                 msg = ""
             raise NeonPageserverApiException(msg) from e
 
@@ -477,8 +475,8 @@ def import_timeline(
     import_cmd = f"import basebackup {tenant_id} {timeline_id} {last_lsn} {last_lsn}"
     full_cmd = rf"""cat {tar_filename} | {psql_path} {pageserver_connstr} -c '{import_cmd}' """
 
-    stderr_filename2 = path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
-    stdout_filename = path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stdout")
+    stderr_filename2 = os.path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stderr")
+    stdout_filename = os.path.join(args.work_dir, f"import_{tenant_id}_{timeline_id}.stdout")
 
     print(f"Running: {full_cmd}")
 
@@ -495,7 +493,7 @@ def import_timeline(
                 check=True,
             )
 
-            print(f"Done import")
+            print("Done import")
 
     # Wait until pageserver persists the files
     wait_for_upload(
@@ -508,7 +506,7 @@ def export_timeline(
 ):
     # Choose filenames
     incomplete_filename = tar_filename + ".incomplete"
-    stderr_filename = path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
+    stderr_filename = os.path.join(args.work_dir, f"{tenant_id}_{timeline_id}.stderr")
 
     # Construct export command
     query = f"fullbackup {tenant_id} {timeline_id} {last_lsn} {prev_lsn}"
@@ -563,7 +561,7 @@ def main(args: argparse.Namespace):
                 continue
 
             # Choose filenames
-            tar_filename = path.join(
+            tar_filename = os.path.join(
                 args.work_dir, f"{timeline['tenant_id']}_{timeline['timeline_id']}.tar"
             )
 

@@ -23,10 +23,7 @@ def pg_stats_rw() -> List[PgStatTable]:
     return [
         PgStatTable(
             "pg_stat_database",
-            [
-                "tup_returned", "tup_fetched", "tup_inserted", "tup_updated",
-                "tup_deleted"
-            ],
+            ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
             "WHERE datname='postgres'",
         ),
     ]
@@ -35,8 +32,9 @@ def pg_stats_rw() -> List[PgStatTable]:
 @pytest.fixture(scope="function")
 def pg_stats_ro() -> List[PgStatTable]:
     return [
-        PgStatTable("pg_stat_database", ["tup_returned", "tup_fetched"],
-                    "WHERE datname='postgres'"),
+        PgStatTable(
+            "pg_stat_database", ["tup_returned", "tup_fetched"], "WHERE datname='postgres'"
+        ),
     ]
 
 
@@ -56,10 +54,7 @@ def pg_stats_wal() -> List[PgStatTable]:
     return [
         PgStatTable(
             "pg_stat_wal",
-            [
-                "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
-                "wal_write"
-            ],
+            ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
             "",
         )
     ]

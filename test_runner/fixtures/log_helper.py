@@ -23,12 +23,8 @@ https://docs.pytest.org/en/6.2.x/logging.html
 LOGGING = {
     "version": 1,
     "loggers": {
-        "root": {
-            "level": "INFO"
-        },
-        "root.safekeeper_async": {
-            "level": "INFO"
-        },  # a lot of logs on DEBUG level
+        "root": {"level": "INFO"},
+        "root.safekeeper_async": {"level": "INFO"},  # a lot of logs on DEBUG level
     },
 }
 

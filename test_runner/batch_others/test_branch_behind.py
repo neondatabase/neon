@@ -35,42 +35,48 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # keep some early lsn to test branch creation on out of date lsn
     gced_lsn = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
 
-    main_cur.execute("""
+    main_cur.execute(
+        """
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
             FROM generate_series(1, 100) g
-    """)
+    """
+    )
     lsn_a = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info(f"LSN after 100 rows: {lsn_a}")
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
-    main_cur.execute("""
+    main_cur.execute(
+        """
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
             FROM generate_series(1, 200000) g
-    """)
+    """
+    )
     lsn_b = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info(f"LSN after 200100 rows: {lsn_b}")
 
     # Branch at the point where only 100 rows were inserted
-    env.neon_cli.create_branch("test_branch_behind_hundred",
-                               "test_branch_behind",
-                               ancestor_start_lsn=lsn_a)
+    env.neon_cli.create_branch(
+        "test_branch_behind_hundred", "test_branch_behind", ancestor_start_lsn=lsn_a
+    )
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
-    main_cur.execute("""
+    main_cur.execute(
+        """
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
             FROM generate_series(1, 200000) g
-    """)
+    """
+    )
     lsn_c = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
 
     log.info(f"LSN after 400100 rows: {lsn_c}")
 
     # Branch at the point where only 200100 rows were inserted
-    env.neon_cli.create_branch("test_branch_behind_more",
-                               "test_branch_behind",
-                               ancestor_start_lsn=lsn_b)
+    env.neon_cli.create_branch(
+        "test_branch_behind_more", "test_branch_behind", ancestor_start_lsn=lsn_b
+    )
 
     pg_hundred = env.postgres.create_start("test_branch_behind_hundred")
     pg_more = env.postgres.create_start("test_branch_behind_more")
@@ -89,26 +95,24 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Check bad lsn's for branching
 
     # branch at segment boundary
-    env.neon_cli.create_branch("test_branch_segment_boundary",
-                               "test_branch_behind",
-                               ancestor_start_lsn="0/3000000")
+    env.neon_cli.create_branch(
+        "test_branch_segment_boundary", "test_branch_behind", ancestor_start_lsn="0/3000000"
+    )
     pg = env.postgres.create_start("test_branch_segment_boundary")
     assert pg.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn
     with pytest.raises(Exception, match="invalid branch start lsn"):
-        env.neon_cli.create_branch("test_branch_preinitdb",
-                                   ancestor_start_lsn="0/42")
+        env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn="0/42")
 
     # branch at pre-ancestor lsn
     with pytest.raises(Exception, match="less than timeline ancestor lsn"):
-        env.neon_cli.create_branch("test_branch_preinitdb",
-                                   "test_branch_behind",
-                                   ancestor_start_lsn="0/42")
+        env.neon_cli.create_branch(
+            "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn="0/42"
+        )
 
     # check that we cannot create branch based on garbage collected data
-    with env.pageserver.cursor(
-            cursor_factory=psycopg2.extras.DictCursor) as pscur:
+    with env.pageserver.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
         # call gc to advace latest_gc_cutoff_lsn
         pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
         row = pscur.fetchone()
@@ -116,9 +120,9 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     with pytest.raises(Exception, match="invalid branch start lsn"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
-        env.neon_cli.create_branch("test_branch_create_fail",
-                                   "test_branch_behind",
-                                   ancestor_start_lsn=gced_lsn)
+        env.neon_cli.create_branch(
+            "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn
+        )
 
     # check that after gc everything is still there
     assert query_scalar(hundred_cur, "SELECT count(*) FROM foo") == 100

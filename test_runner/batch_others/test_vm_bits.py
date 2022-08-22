@@ -25,8 +25,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("VACUUM FREEZE vmtest_delete")
 
     cur.execute("CREATE TABLE vmtest_update (id integer PRIMARY KEY)")
-    cur.execute(
-        "INSERT INTO vmtest_update SELECT g FROM generate_series(1, 1000) g")
+    cur.execute("INSERT INTO vmtest_update SELECT g FROM generate_series(1, 1000) g")
     cur.execute("VACUUM FREEZE vmtest_update")
 
     # DELETE and UPDATE the rows.
@@ -43,11 +42,13 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     # Check that an index-only scan doesn't see the deleted row. If the
     # clearing of the VM bit was not replayed correctly, this would incorrectly
     # return deleted row.
-    cur.execute("""
+    cur.execute(
+        """
     set enable_seqscan=off;
     set enable_indexscan=on;
     set enable_bitmapscan=off;
-    """)
+    """
+    )
 
     cur.execute("SELECT * FROM vmtest_delete WHERE id = 1")
     assert cur.fetchall() == []
@@ -68,11 +69,13 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     pg_new_conn = pg_new.connect()
     cur_new = pg_new_conn.cursor()
 
-    cur_new.execute("""
+    cur_new.execute(
+        """
     set enable_seqscan=off;
     set enable_indexscan=on;
     set enable_bitmapscan=off;
-    """)
+    """
+    )
 
     cur_new.execute("SELECT * FROM vmtest_delete WHERE id = 1")
     assert cur_new.fetchall() == []

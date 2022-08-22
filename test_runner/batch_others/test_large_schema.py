@@ -40,16 +40,12 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
             try:
                 conn = pg.connect()
                 cur = conn.cursor()
-                cur.execute(
-                    f"CREATE TABLE if not exists t_{i}(pk integer) partition by range (pk)"
-                )
+                cur.execute(f"CREATE TABLE if not exists t_{i}(pk integer) partition by range (pk)")
                 for j in range(1, partitions + 1):
                     cur.execute(
                         f"create table if not exists p_{i}_{j} partition of t_{i} for values from ({j}) to ({j + 1})"
                     )
-                cur.execute(
-                    f"insert into t_{i} values (generate_series(1,{partitions}))"
-                )
+                cur.execute(f"insert into t_{i} values (generate_series(1,{partitions}))")
                 cur.execute("vacuum full")
                 conn.close()
 
@@ -72,20 +68,16 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
 
     for i in range(1, tables + 1):
         cur.execute(f"SELECT count(*) FROM t_{i}")
-        assert cur.fetchone() == (partitions, )
+        assert cur.fetchone() == (partitions,)
 
     cur.execute("set enable_sort=off")
-    cur.execute(
-        "select * from pg_depend order by refclassid, refobjid, refobjsubid")
+    cur.execute("select * from pg_depend order by refclassid, refobjid, refobjsubid")
 
     # Check layer file sizes
     tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
-    timeline_path = "{}/tenants/{}/timelines/{}/".format(
-        env.repo_dir, tenant_id, timeline_id)
+    timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant_id, timeline_id)
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
-            log.info(
-                f"layer {filename} size is {os.path.getsize(timeline_path + filename)}"
-            )
+            log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
             assert os.path.getsize(timeline_path + filename) < 512_000_000

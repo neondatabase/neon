@@ -10,8 +10,7 @@ from fixtures.neon_fixtures import NeonEnv
 def test_twophase(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_twophase", "empty")
-    pg = env.postgres.create_start(
-        "test_twophase", config_lines=["max_prepared_transactions=5"])
+    pg = env.postgres.create_start("test_twophase", config_lines=["max_prepared_transactions=5"])
     log.info("postgres is running on 'test_twophase' branch")
 
     conn = pg.connect()
@@ -78,8 +77,8 @@ def test_twophase(neon_simple_env: NeonEnv):
     cur2.execute("ROLLBACK PREPARED 'insert_two'")
 
     cur2.execute("SELECT * FROM foo")
-    assert cur2.fetchall() == [("one", ), ("three", )]
+    assert cur2.fetchall() == [("one",), ("three",)]
 
     # Only one committed insert is visible on the original branch
     cur.execute("SELECT * FROM foo")
-    assert cur.fetchall() == [("three", )]
+    assert cur.fetchall() == [("three",)]

@@ -21,8 +21,7 @@ class BankClient(object):
 
     async def initdb(self):
         await self.conn.execute("DROP TABLE IF EXISTS bank_accs")
-        await self.conn.execute(
-            "CREATE TABLE bank_accs(uid int primary key, amount int)")
+        await self.conn.execute("CREATE TABLE bank_accs(uid int primary key, amount int)")
         await self.conn.execute(
             """
             INSERT INTO bank_accs
@@ -32,12 +31,10 @@ class BankClient(object):
             self.n_accounts - 1,
         )
         await self.conn.execute("DROP TABLE IF EXISTS bank_log")
-        await self.conn.execute(
-            "CREATE TABLE bank_log(from_uid int, to_uid int, amount int)")
+        await self.conn.execute("CREATE TABLE bank_log(from_uid int, to_uid int, amount int)")
 
     async def check_invariant(self):
-        row = await self.conn.fetchrow(
-            "SELECT sum(amount) AS sum FROM bank_accs")
+        row = await self.conn.fetchrow("SELECT sum(amount) AS sum FROM bank_accs")
         assert row["sum"] == self.n_accounts * self.init_amount
 
 
@@ -86,8 +83,7 @@ class WorkerStats(object):
         log.info("All workers made {} transactions".format(progress))
 
 
-async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id,
-                            n_accounts, max_transfer):
+async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accounts, max_transfer):
     pg_conn = await pg.connect_async()
     log.debug("Started worker {}".format(worker_id))
 
@@ -99,8 +95,7 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id,
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        log.debug("Executed transfer({}) {} => {}".format(
-            amount, from_uid, to_uid))
+        log.debug("Executed transfer({}) {} => {}".format(amount, from_uid, to_uid))
 
     log.debug("Finished worker {}".format(worker_id))
 
@@ -138,9 +133,7 @@ async def wait_for_lsn(
 
         await asyncio.sleep(polling_interval)
         flush_lsn = client.timeline_status(tenant_id, timeline_id).flush_lsn
-        log.debug(
-            f"safekeeper port={safekeeper.port.pg} flush_lsn={flush_lsn} wait_lsn={wait_lsn}"
-        )
+        log.debug(f"safekeeper port={safekeeper.port.pg} flush_lsn={flush_lsn} wait_lsn={wait_lsn}")
 
 
 # This test will run several iterations and check progress in each of them.
@@ -173,8 +166,7 @@ async def run_restarts_under_load(
     stats = WorkerStats(n_workers)
     workers = []
     for worker_id in range(n_workers):
-        worker = run_random_worker(stats, pg, worker_id, bank.n_accounts,
-                                   max_transfer)
+        worker = run_random_worker(stats, pg, worker_id, bank.n_accounts, max_transfer)
         workers.append(asyncio.create_task(worker))
 
     for it in range(iterations):
@@ -189,18 +181,15 @@ async def run_restarts_under_load(
         log.info(f"Postgres flush_lsn {flush_lsn}")
 
         pageserver_lsn = env.pageserver.http_client().timeline_detail(
-            uuid.UUID(tenant_id), uuid.UUID(
-                (timeline_id)))["local"]["last_record_lsn"]
+            uuid.UUID(tenant_id), uuid.UUID((timeline_id))
+        )["local"]["last_record_lsn"]
         sk_ps_lag = lsn_from_hex(flush_lsn) - lsn_from_hex(pageserver_lsn)
-        log.info(
-            f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb"
-        )
+        log.info(f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
 
         # Wait until alive safekeepers catch up with postgres
         for idx, safekeeper in enumerate(acceptors):
             if idx != victim_idx:
-                await wait_for_lsn(safekeeper, tenant_id, timeline_id,
-                                   flush_lsn)
+                await wait_for_lsn(safekeeper, tenant_id, timeline_id, flush_lsn)
 
         stats.reset()
         await asyncio.sleep(period_time)
@@ -226,8 +215,8 @@ def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch("test_safekeepers_restarts_under_load")
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     pg = env.postgres.create_start(
-        "test_safekeepers_restarts_under_load",
-        config_lines=["max_replication_write_lag=1MB"])
+        "test_safekeepers_restarts_under_load", config_lines=["max_replication_write_lag=1MB"]
+    )
 
     asyncio.run(run_restarts_under_load(env, pg, env.safekeepers))
 
@@ -253,16 +242,10 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
 
     # we try to simulate large (flush_lsn - truncate_lsn) lag, to test that WAL segments
     # are not removed before broadcasted to all safekeepers, with the help of replication slot
-    asyncio.run(
-        run_restarts_under_load(env,
-                                pg,
-                                env.safekeepers,
-                                period_time=15,
-                                iterations=5))
+    asyncio.run(run_restarts_under_load(env, pg, env.safekeepers, period_time=15, iterations=5))
 
 
-def postgres_create_start(env: NeonEnv, branch: str,
-                          pgdir_name: Optional[str]):
+def postgres_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
     pg = Postgres(
         env,
         tenant_id=env.initial_tenant,
@@ -274,17 +257,15 @@ def postgres_create_start(env: NeonEnv, branch: str,
 
     # embed current time in node name
     node_name = pgdir_name or f"pg_node_{time.time()}"
-    return pg.create_start(branch_name=branch,
-                           node_name=node_name,
-                           config_lines=["log_statement=all"])
+    return pg.create_start(
+        branch_name=branch, node_name=node_name, config_lines=["log_statement=all"]
+    )
 
 
-async def exec_compute_query(env: NeonEnv,
-                             branch: str,
-                             query: str,
-                             pgdir_name: Optional[str] = None):
-    with postgres_create_start(env, branch=branch,
-                               pgdir_name=pgdir_name) as pg:
+async def exec_compute_query(
+    env: NeonEnv, branch: str, query: str, pgdir_name: Optional[str] = None
+):
+    with postgres_create_start(env, branch=branch, pgdir_name=pgdir_name) as pg:
         before_conn = time.time()
         conn = await pg.connect_async()
         res = await conn.fetch(query)
@@ -294,10 +275,9 @@ async def exec_compute_query(env: NeonEnv,
         return res
 
 
-async def run_compute_restarts(env: NeonEnv,
-                               queries=16,
-                               batch_insert=10000,
-                               branch="test_compute_restarts"):
+async def run_compute_restarts(
+    env: NeonEnv, queries=16, batch_insert=10000, branch="test_compute_restarts"
+):
     cnt = 0
     sum = 0
 
@@ -306,17 +286,14 @@ async def run_compute_restarts(env: NeonEnv,
     for i in range(queries):
         if i % 4 == 0:
             await exec_compute_query(
-                env, branch,
-                f"INSERT INTO t SELECT 1 FROM generate_series(1, {batch_insert})"
+                env, branch, f"INSERT INTO t SELECT 1 FROM generate_series(1, {batch_insert})"
             )
             sum += batch_insert
             cnt += batch_insert
         elif (i % 4 == 1) or (i % 4 == 3):
             # Note that select causes lots of FPI's and increases probability of safekeepers
             # standing at different LSNs after compute termination.
-            actual_sum = (await
-                          exec_compute_query(env, branch,
-                                             "SELECT SUM(i) FROM t"))[0][0]
+            actual_sum = (await exec_compute_query(env, branch, "SELECT SUM(i) FROM t"))[0][0]
             assert actual_sum == sum, f"Expected sum={sum}, actual={actual_sum}"
         elif i % 4 == 2:
             await exec_compute_query(env, branch, "UPDATE t SET i = i + 1")
@@ -376,19 +353,15 @@ class BackgroundCompute(object):
         self.running = False
 
 
-async def run_concurrent_computes(env: NeonEnv,
-                                  num_computes=10,
-                                  run_seconds=20,
-                                  branch="test_concurrent_computes"):
+async def run_concurrent_computes(
+    env: NeonEnv, num_computes=10, run_seconds=20, branch="test_concurrent_computes"
+):
     await exec_compute_query(
-        env, branch,
-        "CREATE TABLE query_log (t timestamp default now(), index int, verify_key int)"
+        env, branch, "CREATE TABLE query_log (t timestamp default now(), index int, verify_key int)"
     )
 
     computes = [BackgroundCompute(i, env, branch) for i in range(num_computes)]
-    background_tasks = [
-        asyncio.create_task(compute.run()) for compute in computes
-    ]
+    background_tasks = [asyncio.create_task(compute.run()) for compute in computes]
 
     await asyncio.sleep(run_seconds)
     log.info("stopping all tasks but one")
@@ -405,11 +378,12 @@ async def run_concurrent_computes(env: NeonEnv,
         f"it already had {initial_queries_by_0}, timeout is {TIMEOUT_SECONDS}s"
     )
     for _ in range(10 * TIMEOUT_SECONDS):
-        current_queries_by_0 = len(
-            computes[0].successful_queries) - initial_queries_by_0
+        current_queries_by_0 = len(computes[0].successful_queries) - initial_queries_by_0
         if current_queries_by_0 >= 1:
-            log.info(f"Found {current_queries_by_0} successful queries "
-                     f"by computes[0], completing the test")
+            log.info(
+                f"Found {current_queries_by_0} successful queries "
+                f"by computes[0], completing the test"
+            )
             break
         await asyncio.sleep(0.1)
     else:
@@ -420,8 +394,10 @@ async def run_concurrent_computes(env: NeonEnv,
 
     result = await exec_compute_query(env, branch, "SELECT * FROM query_log")
     # we should have inserted something while single compute was running
-    log.info(f"Executed {len(result)} queries, {current_queries_by_0} of them "
-             f"by computes[0] after we started stopping the others")
+    log.info(
+        f"Executed {len(result)} queries, {current_queries_by_0} of them "
+        f"by computes[0] after we started stopping the others"
+    )
     for row in result:
         log.info(f"{row[0]} {row[1]} {row[2]}")
 
@@ -444,15 +420,13 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
 
 # Stop safekeeper and check that query cannot be executed while safekeeper is down.
 # Query will insert a single row into a table.
-async def check_unavailability(sk: Safekeeper,
-                               conn: asyncpg.Connection,
-                               key: int,
-                               start_delay_sec: int = 2):
+async def check_unavailability(
+    sk: Safekeeper, conn: asyncpg.Connection, key: int, start_delay_sec: int = 2
+):
     # shutdown one of two acceptors, that is, majority
     sk.stop()
 
-    bg_query = asyncio.create_task(
-        conn.execute(f"INSERT INTO t values ({key}, 'payload')"))
+    bg_query = asyncio.create_task(conn.execute(f"INSERT INTO t values ({key}, 'payload')"))
 
     await asyncio.sleep(start_delay_sec)
     # ensure that the query has not been executed yet
@@ -564,10 +538,12 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
 async def run_wal_lagging(env: NeonEnv, pg: Postgres):
     def safekeepers_guc(env: NeonEnv, active_sk: List[bool]) -> str:
         # use ports 10, 11 and 12 to simulate unavailable safekeepers
-        return ",".join([
-            f"localhost:{sk.port.pg if active else 10 + i}"
-            for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk))
-        ])
+        return ",".join(
+            [
+                f"localhost:{sk.port.pg if active else 10 + i}"
+                for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk))
+            ]
+        )
 
     conn = await pg.connect_async()
     await conn.execute("CREATE TABLE t(key int primary key, value text)")
@@ -581,8 +557,7 @@ async def run_wal_lagging(env: NeonEnv, pg: Postgres):
     quorum = len(env.safekeepers) // 2 + 1
 
     for it in range(n_iterations):
-        active_sk = list(map(lambda _: random.random() >= 0.5,
-                             env.safekeepers))
+        active_sk = list(map(lambda _: random.random() >= 0.5, env.safekeepers))
         active_count = sum(active_sk)
 
         if active_count < quorum:
@@ -603,8 +578,7 @@ async def run_wal_lagging(env: NeonEnv, pg: Postgres):
         await conn.close()
         pg.stop()
 
-    pg.adjust_for_safekeepers(
-        safekeepers_guc(env, [True] * len(env.safekeepers)))
+    pg.adjust_for_safekeepers(safekeepers_guc(env, [True] * len(env.safekeepers)))
     pg.start()
     conn = await pg.connect_async()
 

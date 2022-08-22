@@ -1,11 +1,7 @@
 from contextlib import closing
 from io import BufferedReader, RawIOBase
-from itertools import repeat
 
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.compare_fixtures import PgCompare
 
 
 class CopyTestData(RawIOBase):
@@ -23,15 +19,14 @@ class CopyTestData(RawIOBase):
             if self.rownum >= self.rows:
                 # No more rows, return EOF
                 return 0
-            self.linebuf = f"{self.rownum}\tSomewhat long string to consume some space.\n".encode(
-            )
+            self.linebuf = f"{self.rownum}\tSomewhat long string to consume some space.\n".encode()
             self.ptr = 0
             self.rownum += 1
 
         # Number of bytes to read in this call
-        l = min(len(self.linebuf) - self.ptr, len(b))
+        l = min(len(self.linebuf) - self.ptr, len(b))  # noqa: E741
 
-        b[:l] = self.linebuf[self.ptr:(self.ptr + l)]
+        b[:l] = self.linebuf[self.ptr : (self.ptr + l)]
         self.ptr += l
         return l
 

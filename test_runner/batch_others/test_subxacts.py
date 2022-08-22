@@ -17,9 +17,11 @@ def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE t1(i int, j int);
-    """)
+    """
+    )
 
     cur.execute("select pg_switch_wal();")
 

@@ -14,8 +14,9 @@ num_rows = 1000
 
 
 # Ensure that regular postgres can start from fullbackup
-def test_fullbackup(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin,
-                    port_distributor: PortDistributor):
+def test_fullbackup(
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, port_distributor: PortDistributor
+):
 
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
@@ -31,7 +32,8 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin,
         cur.execute("SET statement_timeout='300s'")
         cur.execute(
             f"""CREATE TABLE tbl AS SELECT 'long string to consume some space' || g
-                    from generate_series(1,{num_rows}) g""")
+                    from generate_series(1,{num_rows}) g"""
+        )
         cur.execute("CHECKPOINT")
 
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
@@ -49,9 +51,8 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin,
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
     subprocess_capture(
-        str(env.repo_dir),
-        ["tar", "-xf", tar_output_file, "-C",
-         str(restored_dir_path)])
+        str(env.repo_dir), ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)]
+    )
 
     # HACK
     # fullbackup returns neon specific pg_control and first WAL segment
@@ -62,13 +63,13 @@ def test_fullbackup(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin,
 
     # Restore from the backup and find the data we inserted
     port = port_distributor.get_port()
-    with VanillaPostgres(restored_dir_path, pg_bin, port,
-                         init=False) as vanilla_pg:
+    with VanillaPostgres(restored_dir_path, pg_bin, port, init=False) as vanilla_pg:
         # TODO make port an optional argument
-        vanilla_pg.configure([
-            f"port={port}",
-        ])
+        vanilla_pg.configure(
+            [
+                f"port={port}",
+            ]
+        )
         vanilla_pg.start()
-        num_rows_found = vanilla_pg.safe_psql("select count(*) from tbl;",
-                                              user="cloud_admin")[0][0]
+        num_rows_found = vanilla_pg.safe_psql("select count(*) from tbl;", user="cloud_admin")[0][0]
         assert num_rows == num_rows_found

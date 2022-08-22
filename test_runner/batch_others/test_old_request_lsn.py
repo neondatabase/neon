@@ -34,18 +34,22 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers.
     cur.execute("CREATE TABLE foo (id int4 PRIMARY KEY, val int, t text)")
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO foo
             SELECT g, 1, 'long string to consume some space' || g
             FROM generate_series(1, 100000) g
-    """)
+    """
+    )
 
     # Verify that the table is larger than shared_buffers, so that the SELECT below
     # will cause GetPage requests.
-    cur.execute("""
+    cur.execute(
+        """
         select setting::int * pg_size_bytes(unit) as shared_buffers, pg_relation_size('foo') as tbl_ize
         from pg_settings where name = 'shared_buffers'
-    """)
+    """
+    )
     row = cur.fetchone()
     assert row is not None
     log.info(f"shared_buffers is {row[0]}, table size {row[1]}")

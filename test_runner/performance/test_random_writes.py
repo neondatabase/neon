@@ -1,13 +1,8 @@
-import os
 import random
-import time
 from contextlib import closing
 
-import psycopg2.extras
 from fixtures.benchmark_fixture import MetricReport
-from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.compare_fixtures import PgCompare
 from fixtures.utils import query_scalar
 
 
@@ -43,12 +38,14 @@ def test_random_writes(neon_with_baseline: PgCompare):
         with conn.cursor() as cur:
             # Create the test table
             with env.record_duration("init"):
-                cur.execute("""
+                cur.execute(
+                    """
                     CREATE TABLE Big(
                         pk integer primary key,
                         count integer default 0
                     );
-                """)
+                """
+                )
 
                 # Insert n_rows in batches to avoid query timeouts
                 rows_inserted = 0
@@ -56,15 +53,12 @@ def test_random_writes(neon_with_baseline: PgCompare):
                     rows_to_insert = min(1000 * 1000, n_rows - rows_inserted)
                     low = rows_inserted + 1
                     high = rows_inserted + rows_to_insert
-                    cur.execute(
-                        f"INSERT INTO Big (pk) values (generate_series({low},{high}))"
-                    )
+                    cur.execute(f"INSERT INTO Big (pk) values (generate_series({low},{high}))")
                     rows_inserted += rows_to_insert
 
             # Get table size (can't be predicted because padding and alignment)
             table_size = query_scalar(cur, "SELECT pg_relation_size('Big')")
-            env.zenbenchmark.record("table_size", table_size, "bytes",
-                                    MetricReport.TEST_PARAM)
+            env.zenbenchmark.record("table_size", table_size, "bytes", MetricReport.TEST_PARAM)
 
             # Decide how much to write, based on knowledge of pageserver implementation.
             # Avoiding segment collisions maximizes (neon_runtime / vanilla_runtime).
@@ -86,6 +80,5 @@ def test_random_writes(neon_with_baseline: PgCompare):
                 for it in range(n_iterations):
                     for i in range(n_writes):
                         key = random.randint(1, n_rows)
-                        cur.execute(
-                            f"update Big set count=count+1 where pk={key}")
+                        cur.execute(f"update Big set count=count+1 where pk={key}")
                     env.flush()

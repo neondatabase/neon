@@ -8,8 +8,7 @@ from fixtures.neon_fixtures import NeonEnv, base_dir, check_restored_datadir_con
 # The pg_regress tests run for a long time, especially in debug mode,
 # so use a larger-than-default timeout.
 @pytest.mark.timeout(1800)
-def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: pathlib.Path,
-                    pg_bin, capsys):
+def test_pg_regress(neon_simple_env: NeonEnv, test_output_dir: pathlib.Path, pg_bin, capsys):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_pg_regress", "empty")

@@ -60,6 +60,7 @@ class PgBenchRunResult:
     run_duration: float
     run_start_timestamp: int
     run_end_timestamp: int
+    scale: int
 
     # TODO progress
 
@@ -92,11 +93,9 @@ class PgBenchRunResult:
             # number of transactions actually processed: 1000
             if line.startswith("number of transactions actually processed"):
                 if "/" in line:
-                    number_of_transactions_actually_processed = int(
-                        line.split("/")[1])
+                    number_of_transactions_actually_processed = int(line.split("/")[1])
                 else:
-                    number_of_transactions_actually_processed = int(
-                        line.split()[-1])
+                    number_of_transactions_actually_processed = int(line.split()[-1])
             # latency average = 19.894 ms
             if line.startswith("latency average"):
                 latency_average = float(line.split()[-2])
@@ -117,21 +116,22 @@ class PgBenchRunResult:
             # initial connection time = 3.858 ms
             # tps = 309.281539 (without initial connection time)
             if line.startswith("tps = ") and (
-                    "(excluding connections establishing)" in line
-                    or "(without initial connection time)"):
+                "(excluding connections establishing)" in line
+                or "(without initial connection time)"
+            ):
                 tps = float(line.split()[2])
 
         return cls(
             number_of_clients=number_of_clients,
             number_of_threads=number_of_threads,
-            number_of_transactions_actually_processed=
-            number_of_transactions_actually_processed,
+            number_of_transactions_actually_processed=number_of_transactions_actually_processed,
             latency_average=latency_average,
             latency_stddev=latency_stddev,
             tps=tps,
             run_duration=run_duration,
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
+            scale=scale,
         )
 
 
@@ -160,22 +160,23 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        regex = re.compile(r"done in (\d+\.\d+) s "
-                           r"\("
-                           r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
-                           r"(?:create tables (\d+\.\d+) s)?(?:, )?"
-                           r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
-                           r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
-                           r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
-                           r"\)\.")
+        regex = re.compile(
+            r"done in (\d+\.\d+) s "
+            r"\("
+            r"(?:drop tables (\d+\.\d+) s)?(?:, )?"
+            r"(?:create tables (\d+\.\d+) s)?(?:, )?"
+            r"(?:client-side generate (\d+\.\d+) s)?(?:, )?"
+            r"(?:vacuum (\d+\.\d+) s)?(?:, )?"
+            r"(?:primary keys (\d+\.\d+) s)?(?:, )?"
+            r"\)\."
+        )
 
         if (m := regex.match(last_line)) is not None:
             total, drop_tables, create_tables, client_side_generate, vacuum, primary_keys = [
                 float(v) for v in m.groups() if v is not None
             ]
         else:
-            raise RuntimeError(
-                f"can't parse pgbench initialize results from `{last_line}`")
+            raise RuntimeError(f"can't parse pgbench initialize results from `{last_line}`")
 
         return cls(
             total=total,
@@ -191,8 +192,7 @@ class PgBenchInitResult:
 
 
 @enum.unique
-class MetricReport(str,
-                   enum.Enum):  # str is a hack to make it json serializable
+class MetricReport(str, enum.Enum):  # str is a hack to make it json serializable
     # this means that this is a constant test parameter
     # like number of transactions, or number of clients
     TEST_PARAM = "test_param"
@@ -207,6 +207,7 @@ class NeonBenchmarker:
     An object for recording benchmark results. This is created for each test
     function by the zenbenchmark fixture
     """
+
     def __init__(self, property_recorder):
         # property recorder here is a pytest fixture provided by junitxml module
         # https://docs.pytest.org/en/6.2.x/reference.html#pytest.junitxml.record_property
@@ -253,8 +254,7 @@ class NeonBenchmarker:
             report=MetricReport.LOWER_IS_BETTER,
         )
 
-    def record_pg_bench_result(self, prefix: str,
-                               pg_bench_result: PgBenchRunResult):
+    def record_pg_bench_result(self, prefix: str, pg_bench_result: PgBenchRunResult):
         self.record(
             f"{prefix}.number_of_clients",
             pg_bench_result.number_of_clients,
@@ -287,10 +287,7 @@ class NeonBenchmarker:
                 unit="ms",
                 report=MetricReport.LOWER_IS_BETTER,
             )
-        self.record(f"{prefix}.tps",
-                    pg_bench_result.tps,
-                    "",
-                    report=MetricReport.HIGHER_IS_BETTER)
+        self.record(f"{prefix}.tps", pg_bench_result.tps, "", report=MetricReport.HIGHER_IS_BETTER)
         self.record(
             f"{prefix}.run_duration",
             pg_bench_result.run_duration,
@@ -309,16 +306,22 @@ class NeonBenchmarker:
             "",
             MetricReport.TEST_PARAM,
         )
+        self.record(
+            f"{prefix}.scale",
+            pg_bench_result.scale,
+            "",
+            MetricReport.TEST_PARAM,
+        )
 
-    def record_pg_bench_init_result(self, prefix: str,
-                                    result: PgBenchInitResult):
+    def record_pg_bench_init_result(self, prefix: str, result: PgBenchInitResult):
         test_params = [
             "start_timestamp",
             "end_timestamp",
         ]
         for test_param in test_params:
-            self.record(f"{prefix}.{test_param}", getattr(result, test_param),
-                        "", MetricReport.TEST_PARAM)
+            self.record(
+                f"{prefix}.{test_param}", getattr(result, test_param), "", MetricReport.TEST_PARAM
+            )
 
         metrics = [
             "duration",
@@ -330,10 +333,9 @@ class NeonBenchmarker:
         ]
         for metric in metrics:
             if (value := getattr(result, metric)) is not None:
-                self.record(f"{prefix}.{metric}",
-                            value,
-                            unit="s",
-                            report=MetricReport.LOWER_IS_BETTER)
+                self.record(
+                    f"{prefix}.{metric}", value, unit="s", report=MetricReport.LOWER_IS_BETTER
+                )
 
     def get_io_writes(self, pageserver) -> int:
         """
@@ -359,18 +361,15 @@ class NeonBenchmarker:
         # all prometheus metrics are floats. So to be pedantic, read it as a float
         # and round to integer.
         all_metrics = pageserver.http_client().get_metrics()
-        matches = re.search(rf"^{metric_name} (\S+)$", all_metrics,
-                            re.MULTILINE)
+        matches = re.search(rf"^{metric_name} (\S+)$", all_metrics, re.MULTILINE)
         assert matches
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenantid: uuid.UUID,
-                          timelineid: str):
+    def get_timeline_size(self, repo_dir: Path, tenantid: uuid.UUID, timelineid: str):
         """
         Calculate the on-disk size of a timeline
         """
-        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid.hex,
-                                                   timelineid)
+        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid.hex, timelineid)
 
         totalbytes = 0
         for root, dirs, files in os.walk(path):
@@ -430,8 +429,7 @@ def get_out_path(target_dir: Path, revision: str) -> Path:
 
 # Hook to print the results at the end
 @pytest.hookimpl(hookwrapper=True)
-def pytest_terminal_summary(terminalreporter: TerminalReporter,
-                            exitstatus: int, config: Config):
+def pytest_terminal_summary(terminalreporter: TerminalReporter, exitstatus: int, config: Config):
     yield
     revision = os.getenv("GITHUB_SHA", "local")
     platform = os.getenv("PLATFORM", "local")
@@ -443,8 +441,9 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter,
         result_entry = []
 
         for _, recorded_property in test_report.user_properties:
-            terminalreporter.write("{}.{}: ".format(test_report.head_line,
-                                                    recorded_property["name"]))
+            terminalreporter.write(
+                "{}.{}: ".format(test_report.head_line, recorded_property["name"])
+            )
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":
@@ -459,11 +458,13 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter,
 
             result_entry.append(recorded_property)
 
-        result.append({
-            "suit": test_report.nodeid,
-            "total_duration": test_report.duration,
-            "data": result_entry,
-        })
+        result.append(
+            {
+                "suit": test_report.nodeid,
+                "total_duration": test_report.duration,
+                "data": result_entry,
+            }
+        )
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
@@ -475,10 +476,5 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter,
         return
 
     get_out_path(Path(out_dir), revision=revision).write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "platform": platform,
-                "result": result
-            },
-            indent=4))
+        json.dumps({"revision": revision, "platform": platform, "result": result}, indent=4)
+    )

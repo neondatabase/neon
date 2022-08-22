@@ -10,13 +10,12 @@ async def repeat_bytes(buf, repetitions: int):
         yield buf
 
 
-async def copy_test_data_to_table(pg: Postgres, worker_id: int,
-                                  table_name: str):
+async def copy_test_data_to_table(pg: Postgres, worker_id: int, table_name: str):
     buf = BytesIO()
     for i in range(1000):
         buf.write(
-            f"{i}\tLoaded by worker {worker_id}. Long string to consume some space.\n"
-            .encode())
+            f"{i}\tLoaded by worker {worker_id}. Long string to consume some space.\n".encode()
+        )
     buf.seek(0)
 
     copy_input = repeat_bytes(buf.read(), 5000)
@@ -33,7 +32,7 @@ async def copy_test_data_to_table(pg: Postgres, worker_id: int,
 async def parallel_load_same_table(pg: Postgres, n_parallel: int):
     workers = []
     for worker_id in range(n_parallel):
-        worker = copy_test_data_to_table(pg, worker_id, f"copytest")
+        worker = copy_test_data_to_table(pg, worker_id, "copytest")
         workers.append(asyncio.create_task(worker))
 
     # await all workers
@@ -50,7 +49,7 @@ def test_parallel_copy(neon_simple_env: NeonEnv, n_parallel=5):
     # Create test table
     conn = pg.connect()
     cur = conn.cursor()
-    cur.execute(f"CREATE TABLE copytest (i int, t text)")
+    cur.execute("CREATE TABLE copytest (i int, t text)")
 
     # Run COPY TO to load the table with parallel connections.
     asyncio.run(parallel_load_same_table(pg, n_parallel))

@@ -52,7 +52,9 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
     with env.record_pageserver_writes(f"{prefix}.pageserver_writes"):
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = env.pg_bin.run_capture(cmdline, )
+        out = env.pg_bin.run_capture(
+            cmdline,
+        )
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
         env.flush()
@@ -77,16 +79,14 @@ def run_pgbench(env: PgCompare, prefix: str, cmdline):
 # the test database.
 #
 # Currently, the # of connections is hardcoded at 4
-def run_test_pgbench(env: PgCompare, scale: int, duration: int,
-                     workload_type: PgBenchLoadType):
+def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: PgBenchLoadType):
     env.zenbenchmark.record("scale", scale, "", MetricReport.TEST_PARAM)
 
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        init_pgbench(env, [
-            "pgbench", f"-s{scale}", "-i",
-            env.pg.connstr(options="-cstatement_timeout=1h")
-        ])
+        init_pgbench(
+            env, ["pgbench", f"-s{scale}", "-i", env.pg.connstr(options="-cstatement_timeout=1h")]
+        )
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
@@ -124,8 +124,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int,
 
 
 def get_durations_matrix(default: int = 45) -> List[int]:
-    durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX",
-                          default=str(default))
+    durations = os.getenv("TEST_PG_BENCH_DURATIONS_MATRIX", default=str(default))
     rv = []
     for d in durations.split(","):
         d = d.strip().lower()
@@ -161,10 +160,8 @@ def get_scales_matrix(default: int = 10) -> List[int]:
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
-    run_test_pgbench(neon_with_baseline, scale, duration,
-                     PgBenchLoadType.SIMPLE_UPDATE)
-    run_test_pgbench(neon_with_baseline, scale, duration,
-                     PgBenchLoadType.SELECT_ONLY)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # Run the pgbench tests, and generate a flamegraph from it
@@ -175,8 +172,7 @@ def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
 # can see how much overhead the profiling adds.
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
-def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int,
-                            duration: int):
+def test_pgbench_flamegraph(zenbenchmark, pg_bin, neon_env_builder, scale: int, duration: int):
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.pageserver_config_override = """
 profiling="page_requests"
@@ -189,10 +185,8 @@ profiling="page_requests"
 
     neon_compare = NeonCompare(zenbenchmark, env, pg_bin, "pgbench")
     run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.INIT)
-    run_test_pgbench(neon_compare, scale, duration,
-                     PgBenchLoadType.SIMPLE_UPDATE)
-    run_test_pgbench(neon_compare, scale, duration,
-                     PgBenchLoadType.SELECT_ONLY)
+    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # The following 3 tests run on an existing database as it was set up by previous tests,
@@ -204,24 +198,19 @@ profiling="page_requests"
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
-def test_pgbench_remote_init(remote_compare: PgCompare, scale: int,
-                             duration: int):
+def test_pgbench_remote_init(remote_compare: PgCompare, scale: int, duration: int):
     run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.INIT)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
-def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int,
-                                      duration: int):
-    run_test_pgbench(remote_compare, scale, duration,
-                     PgBenchLoadType.SIMPLE_UPDATE)
+def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, duration: int):
+    run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix())
 @pytest.mark.parametrize("duration", get_durations_matrix())
 @pytest.mark.remote_cluster
-def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int,
-                                    duration: int):
-    run_test_pgbench(remote_compare, scale, duration,
-                     PgBenchLoadType.SELECT_ONLY)
+def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
+    run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)

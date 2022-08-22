@@ -9,14 +9,9 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     "env",
     [
         # The test is too slow to run in CI, but fast enough to run with remote tests
-        pytest.param(
-            lazy_fixture("neon_compare"), id="neon", marks=pytest.mark.slow),
-        pytest.param(lazy_fixture("vanilla_compare"),
-                     id="vanilla",
-                     marks=pytest.mark.slow),
-        pytest.param(lazy_fixture("remote_compare"),
-                     id="remote",
-                     marks=pytest.mark.remote_cluster),
+        pytest.param(lazy_fixture("neon_compare"), id="neon", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
     ],
 )
 def test_dup_key(env: PgCompare):
@@ -33,7 +28,8 @@ def test_dup_key(env: PgCompare):
             with env.record_duration("write"):
                 cur.execute("create table t (i integer, filler text);")
                 cur.execute("insert into t values (0);")
-                cur.execute("""
+                cur.execute(
+                    """
 do $$
 begin
   for ivar in 1..5000000 loop
@@ -45,11 +41,12 @@ begin
   end loop;
 end;
 $$;
-""")
+"""
+                )
 
             # Write 3-4 MB to evict t from compute cache
             cur.execute("create table f (i integer);")
-            cur.execute(f"insert into f values (generate_series(1,100000));")
+            cur.execute("insert into f values (generate_series(1,100000));")
 
             # Read
             with env.record_duration("read"):

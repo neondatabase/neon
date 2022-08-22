@@ -62,9 +62,10 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
             "image_creation_threshold": "1",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "1 s",
-        })
+        }
+    )
 
-    timeline_main = env.neon_cli.create_timeline(f"test_main", tenant_id=tenant)
+    timeline_main = env.neon_cli.create_timeline("test_main", tenant_id=tenant)
     pg_main = env.postgres.create_start("test_main", tenant_id=tenant)
 
     main_cur = pg_main.connect().cursor()
@@ -86,15 +87,13 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
         f"do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}"
     )
 
-    env.neon_cli.create_branch("test_branch",
-                               "test_main",
-                               tenant_id=tenant,
-                               ancestor_start_lsn=lsn1)
+    env.neon_cli.create_branch(
+        "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
+    )
     pg_branch = env.postgres.create_start("test_branch", tenant_id=tenant)
 
     branch_cur = pg_branch.connect().cursor()
-    branch_cur.execute(
-        "INSERT INTO foo SELECT FROM generate_series(1, 100000)")
+    branch_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
 
     assert query_scalar(branch_cur, "SELECT count(*) FROM foo") == 200000
 
@@ -131,22 +130,25 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             "image_creation_threshold": "1",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "0 s",
-        })
+        }
+    )
 
     b0 = env.neon_cli.create_branch("b0", tenant_id=tenant)
     pg0 = env.postgres.create_start("b0", tenant_id=tenant)
-    res = pg0.safe_psql_many(queries=[
-        "CREATE TABLE t(key serial primary key)",
-        "INSERT INTO t SELECT FROM generate_series(1, 100000)",
-        "SELECT pg_current_wal_insert_lsn()",
-        "INSERT INTO t SELECT FROM generate_series(1, 100000)",
-    ])
+    res = pg0.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key serial primary key)",
+            "INSERT INTO t SELECT FROM generate_series(1, 100000)",
+            "SELECT pg_current_wal_insert_lsn()",
+            "INSERT INTO t SELECT FROM generate_series(1, 100000)",
+        ]
+    )
     lsn = res[2][0][0]
 
     # Use `failpoint=sleep` and `threading` to make the GC iteration triggers *before* the
     # branch creation task but the individual timeline GC iteration happens *after*
     # the branch creation task.
-    env.pageserver.safe_psql(f"failpoints before-timeline-gc=sleep(2000)")
+    env.pageserver.safe_psql("failpoints before-timeline-gc=sleep(2000)")
 
     def do_gc():
         env.pageserver.safe_psql(f"do_gc {tenant.hex} {b0.hex} 0")
@@ -161,9 +163,6 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
 
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
     with pytest.raises(Exception, match="invalid branch start lsn"):
-        env.neon_cli.create_branch("b1",
-                                   "b0",
-                                   tenant_id=tenant,
-                                   ancestor_start_lsn=lsn)
+        env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
 
     thread.join()

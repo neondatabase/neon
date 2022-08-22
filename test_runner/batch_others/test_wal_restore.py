@@ -26,14 +26,14 @@ def test_wal_restore(
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
     with VanillaPostgres(data_dir, PgBin(test_output_dir), port) as restored:
-        pg_bin.run_capture([
-            os.path.join(base_dir, "libs/utils/scripts/restore_from_wal.sh"),
-            os.path.join(pg_distrib_dir, "bin"),
-            str(test_output_dir / "repo" / "safekeepers" / "sk1" /
-                str(tenant_id) / "*"),
-            str(data_dir),
-            str(port),
-        ])
+        pg_bin.run_capture(
+            [
+                os.path.join(base_dir, "libs/utils/scripts/restore_from_wal.sh"),
+                os.path.join(pg_distrib_dir, "bin"),
+                str(test_output_dir / "repo" / "safekeepers" / "sk1" / str(tenant_id) / "*"),
+                str(data_dir),
+                str(port),
+            ]
+        )
         restored.start()
-        assert restored.safe_psql("select count(*) from t",
-                                  user="cloud_admin") == [(300000, )]
+        assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]

@@ -1,13 +1,7 @@
-import math
-import time
-from contextlib import closing
-from datetime import timedelta, timezone, tzinfo
-from uuid import UUID
+from datetime import timedelta
 
-import psycopg2.errors
-import psycopg2.extras
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 
@@ -35,8 +29,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     for i in range(1000):
         cur.execute(f"INSERT INTO foo VALUES({i})")
         # Get the timestamp at UTC
-        after_timestamp = query_scalar(
-            cur, "SELECT clock_timestamp()").replace(tzinfo=None)
+        after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
         tbl.append([i, after_timestamp])
 
     # Execute one more transaction with synchronous_commit enabled, to flush
@@ -72,9 +65,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
         # Launch a new read-only node at that LSN, and check that only the rows
         # that were supposed to be committed at that point in time are visible.
-        pg_here = env.postgres.create_start(branch_name="test_lsn_mapping",
-                                            node_name="test_lsn_mapping_read",
-                                            lsn=lsn)
+        pg_here = env.postgres.create_start(
+            branch_name="test_lsn_mapping", node_name="test_lsn_mapping_read", lsn=lsn
+        )
         assert pg_here.safe_psql("SELECT max(x) FROM foo")[0][0] == i
 
         pg_here.stop_and_destroy()

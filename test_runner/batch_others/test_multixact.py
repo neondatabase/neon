@@ -16,13 +16,16 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
 
     log.info("postgres is running on 'test_multixact' branch")
     cur = pg.connect().cursor()
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE t1(i int primary key);
         INSERT INTO t1 select * from generate_series(1, 100);
-    """)
+    """
+    )
 
     next_multixact_id_old = query_scalar(
-        cur, "SELECT next_multixact_id FROM pg_control_checkpoint()")
+        cur, "SELECT next_multixact_id FROM pg_control_checkpoint()"
+    )
 
     # Lock entries using parallel connections in a round-robin fashion.
     nclients = 20
@@ -61,14 +64,13 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    env.neon_cli.create_branch("test_multixact_new",
-                               "test_multixact",
-                               ancestor_start_lsn=lsn)
+    env.neon_cli.create_branch("test_multixact_new", "test_multixact", ancestor_start_lsn=lsn)
     pg_new = env.postgres.create_start("test_multixact_new")
 
     log.info("postgres is running on 'test_multixact_new' branch")
     next_multixact_id_new = pg_new.safe_psql(
-        "SELECT next_multixact_id FROM pg_control_checkpoint()")[0][0]
+        "SELECT next_multixact_id FROM pg_control_checkpoint()"
+    )[0][0]
 
     # Check that we restored pg_controlfile correctly
     assert next_multixact_id_new == next_multixact_id

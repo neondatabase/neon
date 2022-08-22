@@ -9,14 +9,9 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     "env",
     [
         # The test is too slow to run in CI, but fast enough to run with remote tests
-        pytest.param(
-            lazy_fixture("neon_compare"), id="neon", marks=pytest.mark.slow),
-        pytest.param(lazy_fixture("vanilla_compare"),
-                     id="vanilla",
-                     marks=pytest.mark.slow),
-        pytest.param(lazy_fixture("remote_compare"),
-                     id="remote",
-                     marks=pytest.mark.remote_cluster),
+        pytest.param(lazy_fixture("neon_compare"), id="neon", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla", marks=pytest.mark.slow),
+        pytest.param(lazy_fixture("remote_compare"), id="remote", marks=pytest.mark.remote_cluster),
     ],
 )
 def test_hot_table(env: PgCompare):
@@ -32,11 +27,9 @@ def test_hot_table(env: PgCompare):
             # Write many updates to a small table
             with env.record_duration("write"):
                 cur.execute("create table t (i integer primary key);")
-                cur.execute(
-                    f"insert into t values (generate_series(1,{num_rows}));")
+                cur.execute(f"insert into t values (generate_series(1,{num_rows}));")
                 for i in range(num_writes):
-                    cur.execute(
-                        f"update t set i = {i + num_rows} WHERE i = {i};")
+                    cur.execute(f"update t set i = {i + num_rows} WHERE i = {i};")
 
             # Read the table
             with env.record_duration("read"):
