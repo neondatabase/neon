@@ -1,11 +1,9 @@
-import os
 import time
-import psycopg2.extras
-import json
-from ast import Assert
 from contextlib import closing
-from fixtures.neon_fixtures import NeonEnvBuilder
+
+import psycopg2.extras
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
@@ -21,16 +19,16 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Check if failpoints enables. Otherwise the test doesn't make sense
     f = env.neon_cli.pageserver_enabled_features()
 
-    assert "failpoints" in f["features"], "Build pageserver with --features=failpoints option to run this test"
+    assert (
+        "failpoints" in f["features"]
+    ), "Build pageserver with --features=failpoints option to run this test"
     neon_env_builder.start()
 
     # Create a branch for us
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
-    pg = env.postgres.create_start('test_pageserver_recovery')
+    pg = env.postgres.create_start("test_pageserver_recovery")
     log.info("postgres is running on 'test_pageserver_recovery' branch")
-
-    connstr = pg.connstr()
 
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -62,4 +60,4 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     with closing(pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("select count(*) from foo")
-            assert cur.fetchone() == (100000, )
+            assert cur.fetchone() == (100000,)

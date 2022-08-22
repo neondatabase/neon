@@ -1,5 +1,5 @@
-from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
 # Test subtransactions
@@ -11,28 +11,30 @@ from fixtures.log_helper import log
 def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
     env.neon_cli.create_branch("test_subxacts", "empty")
-    pg = env.postgres.create_start('test_subxacts')
+    pg = env.postgres.create_start("test_subxacts")
 
     log.info("postgres is running on 'test_subxacts' branch")
     pg_conn = pg.connect()
     cur = pg_conn.cursor()
 
-    cur.execute('''
+    cur.execute(
+        """
         CREATE TABLE t1(i int, j int);
-    ''')
+    """
+    )
 
-    cur.execute('select pg_switch_wal();')
+    cur.execute("select pg_switch_wal();")
 
     # Issue 100 transactions, with 1000 subtransactions in each.
     for i in range(100):
-        cur.execute('begin')
+        cur.execute("begin")
         for j in range(1000):
-            cur.execute(f'savepoint sp{j}')
-            cur.execute(f'insert into t1 values ({i}, {j})')
-        cur.execute('commit')
+            cur.execute(f"savepoint sp{j}")
+            cur.execute(f"insert into t1 values ({i}, {j})")
+        cur.execute("commit")
 
     # force wal flush
-    cur.execute('checkpoint')
+    cur.execute("checkpoint")
 
     # Check that we can restore the content of the datadir correctly
     check_restored_datadir_content(test_output_dir, env, pg)

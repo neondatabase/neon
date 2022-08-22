@@ -18,35 +18,43 @@ class PgStatTable:
         return f"SELECT {','.join(self.columns)} FROM {self.table} {self.additional_query}"
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def pg_stats_rw() -> List[PgStatTable]:
     return [
-        PgStatTable("pg_stat_database",
-                    ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
-                    "WHERE datname='postgres'"),
+        PgStatTable(
+            "pg_stat_database",
+            ["tup_returned", "tup_fetched", "tup_inserted", "tup_updated", "tup_deleted"],
+            "WHERE datname='postgres'",
+        ),
     ]
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def pg_stats_ro() -> List[PgStatTable]:
     return [
-        PgStatTable("pg_stat_database", ["tup_returned", "tup_fetched"],
-                    "WHERE datname='postgres'"),
+        PgStatTable(
+            "pg_stat_database", ["tup_returned", "tup_fetched"], "WHERE datname='postgres'"
+        ),
     ]
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def pg_stats_wo() -> List[PgStatTable]:
     return [
-        PgStatTable("pg_stat_database", ["tup_inserted", "tup_updated", "tup_deleted"],
-                    "WHERE datname='postgres'"),
+        PgStatTable(
+            "pg_stat_database",
+            ["tup_inserted", "tup_updated", "tup_deleted"],
+            "WHERE datname='postgres'",
+        ),
     ]
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def pg_stats_wal() -> List[PgStatTable]:
     return [
-        PgStatTable("pg_stat_wal",
-                    ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
-                    "")
+        PgStatTable(
+            "pg_stat_wal",
+            ["wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full", "wal_write"],
+            "",
+        )
     ]

@@ -1,0 +1,219 @@
+name: 'Create Allure report'
+description: 'Create and publish Allure report'
+
+inputs:
+  action:
+    desctiption: 'generate or store'
+    required: true
+  build_type:
+    description: '`build_type` from run-python-test-set action'
+    required: true
+  test_selection:
+    description: '`test_selector` from run-python-test-set action'
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate input parameters
+      shell: bash -euxo pipefail {0}
+      run: |
+        if [ "${{ inputs.action }}" != "store"] && [ "${{ inputs.action }}" != "generate" ]; then
+          echo 2>&1 "Unknown inputs.action type '${{ inputs.action }}'; allowed 'generate' or 'store' only"
+          exit 1
+        fi
+
+        if [ -z "${{ inputs.test_selection }}" ] && [ "${{ inputs.action }}" == "store" ]; then
+          echo 2>&1 "inputs.test_selection must be set for 'store' action"
+          exit 2
+        fi
+
+    - name: Calculate key
+      id: calculate-key
+      shell: bash -euxo pipefail {0}
+      run: |
+        # TODO: for manually triggered workflows (via workflow_dispatch) we need to have a separate key
+
+        pr_number=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH" || true)
+        if [ "${pr_number}" != "null" ]; then
+          key=pr-${pr_number}
+        elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+          # Shortcut for a special branch
+          key=main
+        else
+          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -cd "[:alnum:]._-")
+        fi
+        echo "::set-output name=KEY::${key}"
+
+    - uses: actions/setup-java@v3
+      if: ${{ inputs.action == 'generate' }}
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Install Allure
+      if: ${{ inputs.action == 'generate' }}
+      shell: bash -euxo pipefail {0}
+      run: |
+        if ! which allure; then
+          ALLURE_ZIP=allure-${ALLURE_VERSION}.zip
+          wget -q https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/${ALLURE_ZIP}
+          echo "${ALLURE_ZIP_MD5}  ${ALLURE_ZIP}" | md5sum -c
+          unzip -q ${ALLURE_ZIP}
+          echo "$(pwd)/allure-${ALLURE_VERSION}/bin" >> $GITHUB_PATH
+          rm -f ${ALLURE_ZIP}
+        fi
+      env:
+        ALLURE_VERSION: 2.19.0
+        ALLURE_ZIP_MD5: ced21401a1a8b9dfb68cee9e4c210464
+
+    - name: Upload Allure results
+      if: ${{ inputs.action == 'store' }}
+      env:
+        REPORT_PREFIX: reports/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        TEST_OUTPUT: /tmp/test_output
+        BUCKET: neon-github-public-dev
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Add metadata
+        cat <<EOF > $TEST_OUTPUT/allure/results/executor.json
+          {
+            "name": "GitHub Actions",
+            "type": "github",
+            "url": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/latest/index.html",
+            "buildOrder": ${GITHUB_RUN_ID},
+            "buildName": "GitHub Actions Run #${{ github.run_number }}/${GITHUB_RUN_ATTEMPT}",
+            "buildUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}",
+            "reportUrl": "https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html",
+            "reportName": "Allure Report"
+          }
+        EOF
+        cat <<EOF > $TEST_OUTPUT/allure/results/environment.properties
+          TEST_SELECTION=${{ inputs.test_selection }}
+          BUILD_TYPE=${{ inputs.build_type }}
+        EOF
+
+        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}.tar.zst"
+        ZSTD_NBTHREADS=0
+
+        tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
+        aws s3 mv --only-show-errors ${ARCHIVE} "s3://${BUCKET}/${RAW_PREFIX}/${ARCHIVE}"
+
+    # Potentially we could have several running build for the same key (for example for the main branch),  so we use improvised lock for this
+    - name: Acquire Allure lock
+      if: ${{ inputs.action == 'generate' }}
+      shell: bash -euxo pipefail {0}
+      env:
+        LOCK_FILE: reports/${{ steps.calculate-key.outputs.KEY }}/lock.txt
+        BUCKET: neon-github-public-dev
+      run: |
+        LOCK_TIMEOUT=300 # seconds
+
+        for _ in $(seq 1 5); do
+          for i in $(seq 1 ${LOCK_TIMEOUT}); do
+            LOCK_ADDED=$(aws s3api head-object --bucket neon-github-public-dev --key ${LOCK_FILE} | jq --raw-output '.LastModified' || true)
+            # `date --date="..."` is supported only by gnu date (i.e. it doesn't work on BSD/macOS)
+            if [ -z "${LOCK_ADDED}" ] || [ "$(( $(date +%s) - $(date --date="${LOCK_ADDED}" +%s) ))" -gt "${LOCK_TIMEOUT}" ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" > lock.txt
+          aws s3 mv --only-show-errors lock.txt "s3://${BUCKET}/${LOCK_FILE}"
+
+          # A double-check that exactly WE have acquired the lock
+          aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt
+          if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" ]; then
+            break
+          fi
+        done
+
+    - name: Generate and publish final Allure report
+      if: ${{ inputs.action == 'generate' }}
+      id: generate-report
+      env:
+        REPORT_PREFIX: reports/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-key.outputs.KEY }}/${{ inputs.build_type }}
+        TEST_OUTPUT: /tmp/test_output
+        BUCKET: neon-github-public-dev
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Get previously uploaded data for this run
+        ZSTD_NBTHREADS=0
+
+        s3_filepaths=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${RAW_PREFIX}/${GITHUB_RUN_ID}- | jq --raw-output  '.Contents[].Key')
+        if [ -z "$s3_filepaths" ]; then
+          # There's no previously uploaded data for this run
+          exit 0
+        fi
+        for s3_filepath in ${s3_filepaths}; do
+          aws s3 cp --only-show-errors "s3://${BUCKET}/${s3_filepath}" "${TEST_OUTPUT}/allure/"
+
+          archive=${TEST_OUTPUT}/allure/$(basename $s3_filepath)
+          mkdir -p ${archive%.tar.zst}
+          tar -xf ${archive} -C ${archive%.tar.zst}
+          rm -f ${archive}
+        done
+
+        # Get history trend
+        aws s3 cp --recursive --only-show-errors "s3://${BUCKET}/${REPORT_PREFIX}/latest/history" "${TEST_OUTPUT}/allure/latest/history" || true
+
+        # Generate report
+        allure generate --clean --output $TEST_OUTPUT/allure/report $TEST_OUTPUT/allure/*
+
+        # Replace a logo link with a redirect to the latest version of the report
+        sed -i 's|<a href="." class=|<a href="https://'${BUCKET}'.s3.amazonaws.com/'${REPORT_PREFIX}'/latest/index.html" class=|g' $TEST_OUTPUT/allure/report/app.js
+
+        # Upload a history and the final report (in this particular order to not to have duplicated history in 2 places)
+        aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
+        aws s3 mv --recursive --only-show-errors "${TEST_OUTPUT}/allure/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
+
+        REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
+
+        # Generate redirect
+        cat <<EOF > ./index.html
+          <!DOCTYPE html>
+
+          <meta charset="utf-8">
+          <title>Redirecting to ${REPORT_URL}</title>
+          <meta http-equiv="refresh" content="0; URL=${REPORT_URL}">
+        EOF
+        aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
+
+        echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
+        echo "::set-output name=REPORT_URL::${REPORT_URL}"
+
+    - name: Release Allure lock
+      if: ${{ inputs.action == 'generate' && always() }}
+      shell: bash -euxo pipefail {0}
+      env:
+        LOCK_FILE: reports/${{ steps.calculate-key.outputs.KEY }}/lock.txt
+        BUCKET: neon-github-public-dev
+      run: |
+        aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt || exit 0
+
+        if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ inputs.test_selection }}" ]; then
+          aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
+        fi
+
+    - uses: actions/github-script@v6
+      if: ${{ inputs.action == 'generate' && always() }}
+      env:
+        REPORT_URL: ${{ steps.generate-report.outputs.REPORT_URL }}
+        BUILD_TYPE: ${{ inputs.build_type }}
+        SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      with:
+        script: |
+          const { REPORT_URL, BUILD_TYPE, SHA } = process.env
+
+          result = await github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: `${SHA}`,
+            state: 'success',
+            target_url: `${REPORT_URL}`,
+            context: `Allure report / ${BUILD_TYPE}`,
+          })
+
+          console.log(result);

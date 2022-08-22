@@ -1,4 +1,5 @@
 import pytest
+
 """
 This plugin allows tests to be marked as slow using pytest.mark.slow. By default slow
 tests are excluded. They need to be specifically requested with the --runslow flag in

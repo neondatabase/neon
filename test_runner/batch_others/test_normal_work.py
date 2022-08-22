@@ -1,33 +1,35 @@
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverHttpClient
-import pytest
 
 
 def check_tenant(env: NeonEnv, pageserver_http: NeonPageserverHttpClient):
     tenant_id, timeline_id = env.neon_cli.create_tenant()
-    pg = env.postgres.create_start('main', tenant_id=tenant_id)
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
-    res_1 = pg.safe_psql_many(queries=[
-        'CREATE TABLE t(key int primary key, value text)',
-        'INSERT INTO t SELECT generate_series(1,100000), \'payload\'',
-        'SELECT sum(key) FROM t',
-    ])
+    res_1 = pg.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+            "SELECT sum(key) FROM t",
+        ]
+    )
 
-    assert res_1[-1][0] == (5000050000, )
+    assert res_1[-1][0] == (5000050000,)
     # TODO check detach on live instance
     log.info("stopping compute")
     pg.stop()
     log.info("compute stopped")
 
     pg.start()
-    res_2 = pg.safe_psql('SELECT sum(key) FROM t')
-    assert res_2[0] == (5000050000, )
+    res_2 = pg.safe_psql("SELECT sum(key) FROM t")
+    assert res_2[0] == (5000050000,)
 
     pg.stop()
     pageserver_http.tenant_detach(tenant_id)
 
 
-@pytest.mark.parametrize('num_timelines,num_safekeepers', [(3, 1)])
+@pytest.mark.parametrize("num_timelines,num_safekeepers", [(3, 1)])
 def test_normal_work(neon_env_builder: NeonEnvBuilder, num_timelines: int, num_safekeepers: int):
     """
     Basic test:
