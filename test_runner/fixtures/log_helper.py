@@ -1,5 +1,6 @@
 import logging
 import logging.config
+
 """
 This file configures logging to use in python tests.
 Logs are automatically captured and shown in their

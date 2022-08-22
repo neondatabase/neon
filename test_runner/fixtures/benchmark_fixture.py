@@ -17,6 +17,7 @@ from typing import Iterator, Optional
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
+
 """
 This file contains fixtures for micro-benchmarks.
 

@@ -1,11 +1,11 @@
 import json
 import subprocess
-
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import PSQL
 from urllib.parse import urlparse
+
 import psycopg2
 import pytest
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import PSQL
 
 
 def test_proxy_select_1(static_proxy):

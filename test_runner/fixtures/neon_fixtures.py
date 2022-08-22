@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import enum
 import filecmp
 import json
@@ -10,14 +11,13 @@ import re
 import shutil
 import socket
 import subprocess
-import filecmp
-import asyncio
 import tarfile
 import tempfile
 import textwrap
 import time
 import uuid
 import warnings
+from asyncio.subprocess import Process
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -39,9 +39,9 @@ from fixtures.log_helper import log
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
-from asyncio.subprocess import Process
 
 from .utils import etcd_path, get_self_dir, lsn_from_hex, lsn_to_hex, subprocess_capture
+
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
