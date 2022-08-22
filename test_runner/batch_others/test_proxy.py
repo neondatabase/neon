@@ -119,7 +119,7 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
 
     # step 2.2
     psql_session_id = get_session_id_from_uri_line(uri_prefix, line_str)
-    log.info(f"Parsed psql_session_id='{psql_session_id}'" + " from Neon welcome message.")
+    log.info(f"Parsed psql_session_id='{psql_session_id}' from Neon welcome message.")
 
     # Step 3.
     create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
