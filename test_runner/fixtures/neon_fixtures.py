@@ -1076,9 +1076,10 @@ class NeonPageserverHttpClient(requests.Session):
         matches = re.search(
             f'^{name}{{tenant_id="{tenant_id.hex}",timeline_id="{timeline_id.hex}"}} (\\S+)$',
             metrics,
-        re.MULTILINE)
+            re.MULTILINE)
         assert matches
         return matches.group(1)
+
 
 @dataclass
 class PageserverPort:
@@ -2170,6 +2171,7 @@ class SafekeeperHttpClient(requests.Session):
             metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
         return metrics
 
+
 @dataclass
 class Etcd:
     """ An object managing etcd instance """
@@ -2410,6 +2412,7 @@ def wait_until(number_of_iterations: int, interval: float, func):
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
+
 def wait_while(number_of_iterations: int, interval: float, func):
     """
     Wait until 'func' returns false, or throws an exception.
@@ -2425,6 +2428,7 @@ def wait_while(number_of_iterations: int, interval: float, func):
         except Exception as e:
             return
     raise Exception("timed out while waiting for %s" % func)
+
 
 def remote_consistent_lsn(pageserver_http_client: NeonPageserverHttpClient,
                           tenant: uuid.UUID,

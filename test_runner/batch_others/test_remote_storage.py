@@ -134,9 +134,7 @@ def test_remote_storage_backup_and_restore(
             raise Exception(f'state is {tenant_state}')
 
     log.info("waiting for tenant attach to finish")
-    wait_until(number_of_iterations=20,
-               interval=1,
-               func=ll)
+    wait_until(number_of_iterations=20, interval=1, func=ll)
 
     detail = client.timeline_detail(UUID(tenant_id), UUID(timeline_id))
     log.info("Timeline detail after attach completed: %s", detail)

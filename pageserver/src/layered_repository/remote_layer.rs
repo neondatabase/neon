@@ -35,6 +35,11 @@ pub struct RemoteLayer {
 
     is_incremental: bool,
 
+    /// `download_watch` can be used to wait for download of the layer to finish.
+    /// If it is Some, you can subscribe on the watch to be notified when the
+    /// download finishes. If it's None, no download is in progress yet.
+    /// See Timeline::download_remote_layer(), that is the higher-level function
+    /// to coordinate layer download.
     pub download_watch: Mutex<Option<tokio::sync::watch::Sender<Result<()>>>>,
 }
 
@@ -177,7 +182,8 @@ impl RemoteLayer {
         }
     }
 
-    pub fn download_finished(&self, conf: &'static PageServerConf) -> Arc<dyn Layer> {
+    /// Create a Layer struct representing this layer, after it has been downloaded.
+    pub fn create_downloaded_layer(&self, conf: &'static PageServerConf) -> Arc<dyn Layer> {
         trace!("download finished for {}", self.filename().display());
 
         if self.is_delta {

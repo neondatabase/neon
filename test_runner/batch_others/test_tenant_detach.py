@@ -7,13 +7,13 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException, NeonPageserverHttpClient, wait_until
 
 
-
 def do_gc_target(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
     """Hack to unblock main, see https://github.com/neondatabase/neon/issues/2211"""
     try:
         env.pageserver.safe_psql(f'do_gc {tenant_id.hex} {timeline_id.hex} 0')
     except Exception as e:
         log.error("do_gc failed: %s", e)
+
 
 def check_tenant_exists(
     pageserver_http_client: NeonPageserverHttpClient,
@@ -25,6 +25,7 @@ def check_tenant_exists(
         tenant_status = pageserver_http_client.tenant_status(tenant_id)
         log.info(f"tenant status: {tenant_status}")
         raise "still running"
+
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()

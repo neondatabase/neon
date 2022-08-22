@@ -2421,7 +2421,7 @@ impl Timeline {
     /// Download a layer file from remote storage,
     ///
     /// This does not retry if the download fails. TODO: we probably
-    /// should download a couple of times
+    /// should retry the download a couple of times
     ///
     pub async fn download_remote_layer(
         self: Arc<Self>,
@@ -2430,6 +2430,7 @@ impl Timeline {
         let s = Arc::clone(&self);
         let remote_layer = Arc::clone(&remote_layer);
 
+        // Start download, unless it's already in progress.
         let mut receiver = {
             let mut download_watch = remote_layer.download_watch.lock().unwrap();
             if let Some(sender) = &*download_watch {
@@ -2442,24 +2443,25 @@ impl Timeline {
                 let (sender, receiver) = tokio::sync::watch::channel(Ok(()));
                 *download_watch = Some(sender);
 
-                // need to spawn, because the future returned by download_layer_file is not Sync
+                // Need to spawn, because the future returned by download_layer_file is
+                // not Sync. Spawn it in the storage sync runtime
                 let remote_layer = Arc::clone(&remote_layer);
-
-                // Spawn it in the storage sync runtime
                 let remote_client = s.remote_client.as_ref().unwrap();
                 remote_client.runtime.spawn(async move {
                     let remote_client = s.remote_client.as_ref().unwrap();
                     let result = remote_client.download_layer_file(&remote_layer.path).await;
                     self.metrics.layers_downloaded_total.inc();
 
-                    let new_layer = remote_layer.download_finished(self.conf);
-
+                    // Download complete. Replace the RemoteLayer with the corresponding
+                    // Delta- or ImageLayer in the layer map.
+                    let new_layer = remote_layer.create_downloaded_layer(self.conf);
                     let mut layers = self.layers.write().unwrap();
                     let l: Arc<dyn Layer> = remote_layer.clone();
                     layers.remove_historic(&l);
                     layers.insert_historic(new_layer);
                     drop(layers);
 
+                    // Notify waiters that the download has finished.
                     if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
                         let _ = sender.send_replace(result);
                     }
@@ -2468,11 +2470,8 @@ impl Timeline {
             }
         };
 
+        // Wait for the download to finish.
         receiver.changed().await?;
-        info!(
-            "wakeup because download finished for {}",
-            remote_layer.filename().display()
-        );
 
         let x = receiver.borrow();
         match x.as_ref() {

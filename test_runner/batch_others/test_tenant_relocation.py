@@ -29,11 +29,9 @@ from fixtures.neon_fixtures import (
 from fixtures.utils import lsn_from_hex, lsn_to_hex, subprocess_capture
 
 
-def assert_tenant_status(
-    pageserver_http_client: NeonPageserverHttpClient,
-    tenant: UUID,
-    expected_status: str
-):
+def assert_tenant_status(pageserver_http_client: NeonPageserverHttpClient,
+                         tenant: UUID,
+                         expected_status: str):
     tenant_status = pageserver_http_client.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
     assert tenant_status['state'] == expected_status, tenant_status

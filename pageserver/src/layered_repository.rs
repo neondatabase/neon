@@ -2015,6 +2015,7 @@ mod tests {
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
                 )?;
                 writer.finish_write(lsn);
+                drop(writer);
 
                 keyspace.add_key(test_key);
 
@@ -2061,6 +2062,7 @@ mod tests {
             )?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
+            drop(writer);
 
             keyspace.add_key(test_key);
         }
