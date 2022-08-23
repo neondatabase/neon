@@ -1,4 +1,4 @@
-ARG TAG=latest
+ARG TAG=pinned
 
 FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
