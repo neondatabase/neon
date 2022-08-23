@@ -72,7 +72,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     chmod 0750 /var/db/postgres/compute && \
     echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
-COPY --from=pg-build --chown=postgres /usr/local/pgsql /usr/local/pgsql
+# TODO: Check if we can make the extension setup more modular versus a linear build
+# currently plv8-build copies the output /usr/local/pgsql from postgis-build#
+COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local/pgsql
 COPY --from=compute-tools --chown=postgres /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \
