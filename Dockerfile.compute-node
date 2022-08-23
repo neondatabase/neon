@@ -1,4 +1,4 @@
-ARG COMPUTE_TOOLS_TAG=latest
+ARG TAG=latest
 
 FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
@@ -56,7 +56,7 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.3.tar.gz && \
     rm -rf /plv8-*
 
 # Compile and run the Neon-specific `compute_ctl` binary
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$COMPUTE_TOOLS_TAG AS compute-tools
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
 USER nonroot
 COPY --chown=nonroot compute_tools compute_tools
 COPY --chown=nonroot workspace_hack workspace_hack
