@@ -1,6 +1,4 @@
-//! Timeline synchronization logic to compress and upload to the remote storage all new timeline files from the checkpoints.
-//! FIXME update comment
-
+//! Helper functions to upload files to remote storage with a RemoteStorage
 use std::{fmt::Debug, path::Path};
 
 use anyhow::{Context, Result};
@@ -98,7 +96,6 @@ where
             source_path.display()
         )
     })?;
-    println!("STORAGE_PATH: {:?}", storage_path);
 
     let source_file = fs::File::open(&source_path).await.with_context(|| {
         format!(

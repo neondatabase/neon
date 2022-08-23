@@ -2456,8 +2456,10 @@ impl Timeline {
                     // Delta- or ImageLayer in the layer map.
                     let new_layer = remote_layer.create_downloaded_layer(self.conf);
                     let mut layers = self.layers.write().unwrap();
-                    let l: Arc<dyn Layer> = remote_layer.clone();
-                    layers.remove_historic(&l);
+                    {
+                        let l: Arc<dyn Layer> = remote_layer.clone();
+                        layers.remove_historic(&l);
+                    }
                     layers.insert_historic(new_layer);
                     drop(layers);
 
@@ -2517,6 +2519,17 @@ impl std::fmt::Debug for PageReconstructError {
 /// Run a function that can return PageReconstructError, downloading the missing
 /// file and retrying if needed.
 ///
+pub async fn retry_get_with_timeout<F, T>(f: F, timeout: Duration) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    match tokio::time::timeout(timeout, retry_get(f)).await {
+        Ok(r) => r,
+        Err(_) => bail!("timed out waiting for layer to be downloaded"),
+    }
+}
+
 pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
 where
     F: Send + Fn() -> Result<T, PageReconstructError>,

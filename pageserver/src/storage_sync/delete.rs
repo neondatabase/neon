@@ -1,5 +1,4 @@
-//! Timeline synchronization logic to delete a bulk of timeline's remote files from the remote storage.
-
+//! Helper functions to delete files from remote storage with a RemoteStorage
 use anyhow::{Context, Result};
 use tracing::debug;
 

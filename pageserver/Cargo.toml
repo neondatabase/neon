@@ -12,7 +12,6 @@ profiling = ["pprof"]
 failpoints = ["fail/failpoints"]
 
 [dependencies]
-async-trait = "0.1"
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"

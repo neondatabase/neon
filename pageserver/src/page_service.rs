@@ -30,7 +30,7 @@ use utils::{
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::layered_repository::retry_get;
+use crate::layered_repository::retry_get_with_timeout;
 use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
@@ -700,18 +700,13 @@ impl PageServerHandler {
 
     fn handle_get_rel_exists_request(
         &self,
-        timeline: &Arc<Timeline>,
+        timeline: &Timeline,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            timeline.as_ref(),
-            req.lsn,
-            req.latest,
-            &latest_gc_cutoff_lsn,
-        )?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let exists = timeline.get_rel_exists(req.rel, lsn)?;
 
@@ -722,17 +717,12 @@ impl PageServerHandler {
 
     fn handle_get_nblocks_request(
         &self,
-        timeline: &Arc<Timeline>,
+        timeline: &Timeline,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            timeline.as_ref(),
-            req.lsn,
-            req.latest,
-            &latest_gc_cutoff_lsn,
-        )?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
 
@@ -743,17 +733,12 @@ impl PageServerHandler {
 
     fn handle_db_size_request(
         &self,
-        timeline: &Arc<Timeline>,
+        timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            timeline.as_ref(),
-            req.lsn,
-            req.latest,
-            &latest_gc_cutoff_lsn,
-        )?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
         let total_blocks = timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
 
@@ -766,20 +751,15 @@ impl PageServerHandler {
 
     fn handle_get_page_at_lsn_request(
         &self,
-        timeline: &Arc<Timeline>,
+        timeline: &Timeline,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
             .entered();
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(
-            timeline.as_ref(),
-            req.lsn,
-            req.latest,
-            &latest_gc_cutoff_lsn,
-        )?;
+        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
         /*
-        // Add a 1s delay to some requests. The delayed causes the requests to
+        // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
         use rand::Rng;
         if rand::thread_rng().gen::<u8>() < 5 {
@@ -788,15 +768,11 @@ impl PageServerHandler {
          */
 
         let page = tokio::runtime::Handle::current().block_on(async {
-            match tokio::time::timeout(
+            retry_get_with_timeout(
+                || timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn),
                 std::time::Duration::from_secs(60),
-                retry_get(|| timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)),
             )
             .await
-            {
-                Ok(r) => r,
-                Err(_) => bail!("timed out waiting for layer to be downloaded"),
-            }
         })?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {

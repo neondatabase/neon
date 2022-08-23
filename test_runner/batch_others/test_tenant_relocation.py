@@ -453,7 +453,7 @@ def test_tenant_relocation(
 
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
-        # is no longer involved, and if it is, we will see the errorse
+        # is no longer involved, and if it is, we will see the error
         pageserver_http.tenant_detach(tenant_id)
 
         # Wait a little, so that the detach operation has time to finish.

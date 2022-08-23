@@ -911,10 +911,6 @@ where
             self.state.remote_consistent_lsn,
             self.state.peer_horizon_lsn,
         );
-        info!(
-            "get_horizon_segno: reomte {} peer {} backup {}",
-            self.state.remote_consistent_lsn, self.state.peer_horizon_lsn, self.state.backup_lsn
-        );
         if wal_backup_enabled {
             horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
         }

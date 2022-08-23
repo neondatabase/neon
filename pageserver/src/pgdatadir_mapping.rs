@@ -1451,7 +1451,7 @@ pub fn create_test_timeline(
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
-pub mod tests {
+mod tests {
     //use super::repo_harness::*;
     //use super::*;
 

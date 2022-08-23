@@ -1,5 +1,6 @@
 //! This module acts as a switchboard to access different tenants managed by this
-//! page server.
+//! page server. The code to handle tenant-related mgmt API commands like Attach,
+//! Detach or Create tenant is here.
 
 use crate::config::PageServerConf;
 use crate::layered_repository::{Repository, TenantState};
@@ -30,11 +31,10 @@ fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Repositor
         .expect("Failed to write() tenants lock, it got poisoned")
 }
 
-/// Initialize repositories with locally available timelines.
-/// Timelines that are only partially available locally (remote storage has more data than this pageserver)
-/// are scheduled for download and added to the repository once download is completed.
-/// TODO
-
+///
+/// Initialize Repository structs for tenants that are found on local disk. This is
+/// called once at pageserver startup.
+///
 pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -174,6 +174,12 @@ pub fn update_tenant_config(
     Ok(())
 }
 
+///
+/// Get reference to a Tenant's Repository object. Note that the tenant
+/// can be in any state, including Broken or Loading. If you are going to access
+/// the timelines or data in the tenant, you need to ensure that it is in Active
+/// state. See use get_active_tenant().
+///
 pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
     let m = read_tenants();
     let tenant = m

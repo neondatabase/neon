@@ -65,7 +65,7 @@ mod timeline;
 
 use storage_layer::Layer;
 
-pub use timeline::retry_get;
+pub use timeline::{retry_get, retry_get_with_timeout};
 pub use timeline::{PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
@@ -1034,7 +1034,10 @@ impl Repository {
 
         Ok(())
     }
+}
 
+/// Private functions
+impl Repository {
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1231,8 +1234,6 @@ impl Repository {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        info!("gc_iteration for tenant {}", self.tenant_id);
-
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().unwrap();
 
@@ -1349,6 +1350,11 @@ impl Repository {
         self.tenant_id
     }
 
+    ///
+    /// If the tenant is Loading or Attaching, wait for it to become Active.
+    /// Returns Ok if the tenant became Active, and Err if it became Broken
+    /// or Stopping.
+    ///
     pub async fn wait_until_active(&self) -> Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
@@ -1459,10 +1465,10 @@ pub mod repo_harness {
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
 
-    use crate::repository::Key;
-    use crate::walrecord::ZenithWalRecord;
     use crate::{
         config::PageServerConf,
+        repository::Key,
+        walrecord::ZenithWalRecord,
         walredo::{WalRedoError, WalRedoManager},
     };
 
@@ -1629,8 +1635,10 @@ pub mod repo_harness {
 
 #[cfg(test)]
 mod tests {
-    use super::repo_harness::*;
+    use super::metadata::METADATA_FILE_NAME;
     use super::*;
+    use crate::keyspace::KeySpaceAccum;
+    use crate::layered_repository::repo_harness::*;
     use crate::pgdatadir_mapping::create_test_timeline;
     use crate::repository::{Key, Value};
     use bytes::BytesMut;
@@ -1640,9 +1648,6 @@ mod tests {
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
-
-    use super::metadata::METADATA_FILE_NAME;
-    use crate::keyspace::KeySpaceAccum;
 
     pub fn assert_current_logical_size(timeline: &Timeline, lsn: Lsn) {
         let incremental = timeline.get_current_logical_size();
