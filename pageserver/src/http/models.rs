@@ -150,6 +150,9 @@ pub struct RemoteTimelineInfo {
     pub awaits_download: bool,
 }
 
+///
+/// This represents the output of the "timeline_detail" API call.
+///
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {

@@ -744,7 +744,7 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
         /*
-        // Add a 1s delay to some requests. The delayed causes the requests to
+        // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
         use rand::Rng;
         if rand::thread_rng().gen::<u8>() < 5 {

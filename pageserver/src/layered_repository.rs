@@ -656,9 +656,9 @@ impl Repository {
     /// Locate and load config
     pub fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
     ) -> anyhow::Result<TenantConfOpt> {
-        let target_config_path = TenantConf::path(conf, tenantid);
+        let target_config_path = TenantConf::path(conf, tenant_id);
 
         info!("load tenantconf from {}", target_config_path.display());
 
@@ -693,11 +693,11 @@ impl Repository {
 
     pub fn persist_tenant_config(
         conf: &'static PageServerConf,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
-        let target_config_path = TenantConf::path(conf, tenantid);
+        let target_config_path = TenantConf::path(conf, tenant_id);
         info!("save tenantconf to {}", target_config_path.display());
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -834,7 +834,7 @@ impl Repository {
         // compaction (both require `layer_removal_cs` lock),
         // but the GC iteration can run concurrently with branch creation.
         //
-        // See comments in [`LayeredRepository::branch_timeline`] for more information
+        // See comments in [`Repository::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if thread_mgr::is_shutdown_requested() {
