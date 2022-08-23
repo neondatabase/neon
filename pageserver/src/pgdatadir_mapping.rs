@@ -11,7 +11,7 @@ use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::TimestampTz;
@@ -936,7 +936,9 @@ impl<'a> DatadirModification<'a> {
         result?;
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer
+                .update_current_logical_size(pending_nblocks * i64::from(BLCKSZ))
+                .context("failed to update logical size after flush")?;
             self.pending_nblocks = 0;
         }
 
@@ -948,7 +950,7 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) -> anyhow::Result<()> {
         let writer = self.tline.writer();
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
@@ -964,7 +966,9 @@ impl<'a> DatadirModification<'a> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer
+                .update_current_logical_size(pending_nblocks * i64::from(BLCKSZ))
+                .context("Failed to update logical size after commit")?;
         }
 
         Ok(())

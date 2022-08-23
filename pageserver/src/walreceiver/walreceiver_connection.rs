@@ -315,18 +315,20 @@ pub async fn handle_walreceiver_connection(
 
             // Send zenith feedback message.
             // Regular standby_status_update fields are put into this message.
-            let zenith_status_update = ReplicationFeedback {
-                current_timeline_size: timeline.get_current_logical_size() as u64,
+            let status_update = ReplicationFeedback {
+                current_timeline_size: timeline
+                    .get_current_logical_size()
+                    .context("Status update creation failed to get current logical size")?,
                 ps_writelsn: write_lsn,
                 ps_flushlsn: flush_lsn,
                 ps_applylsn: apply_lsn,
                 ps_replytime: ts,
             };
 
-            debug!("zenith_status_update {zenith_status_update:?}");
+            debug!("zenith_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
-            zenith_status_update.serialize(&mut data)?;
+            status_update.serialize(&mut data)?;
             physical_stream
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
