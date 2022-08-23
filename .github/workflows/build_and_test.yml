@@ -471,6 +471,7 @@ jobs:
 
   compute-node-image:
     runs-on: dev
+    needs: [ compute-tools-image ]
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
 
     steps:
