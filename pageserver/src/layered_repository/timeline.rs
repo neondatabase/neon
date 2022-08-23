@@ -320,8 +320,8 @@ pub struct Timeline {
     metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
-    /// [`LayeredTimeline::get_layer_for_write`] and layer reads.
-    /// Locked automatically by [`LayeredTimelineWriter`] and checkpointer.
+    /// [`Timeline::get_layer_for_write`] and layer reads.
+    /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
     write_lock: Mutex<()>,
@@ -331,7 +331,7 @@ pub struct Timeline {
 
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other threads.
-    /// This lock is acquired in [`LayeredTimeline::gc`], [`LayeredTimeline::compact`],
+    /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`LayeredRepository::delete_timeline`].
     layer_removal_cs: Mutex<()>,
 

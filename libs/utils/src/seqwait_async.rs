@@ -1,8 +1,8 @@
-///
-/// Async version of 'seqwait.rs'
-///
-/// NOTE: This is currently unused. If you need this, you'll need to uncomment this in lib.rs.
-///
+//!
+//! Async version of 'seqwait.rs'
+//!
+//! NOTE: This is currently unused. If you need this, you'll need to uncomment this in lib.rs.
+//!
 
 #![warn(missing_docs)]
 

@@ -123,7 +123,6 @@ async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiErr
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
-
     check_permission(&request, Some(tenant_id))?;
 
     let new_timeline_info = tokio::task::spawn_blocking(move || {
@@ -291,7 +290,6 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
 }
 
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // check for management permission
     check_permission(&request, None)?;
 
     let response_data = tokio::task::spawn_blocking(move || {
@@ -340,7 +338,6 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // check for management permission
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
@@ -408,7 +405,6 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
-    // check for management permission
     check_permission(&request, Some(tenant_id))?;
 
     let mut tenant_conf: TenantConfOpt = Default::default();
