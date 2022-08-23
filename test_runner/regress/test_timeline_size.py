@@ -10,6 +10,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserverHttpClient,
     Postgres,
     assert_timeline_local,
     wait_for_last_flush_lsn,
@@ -23,11 +24,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
-    timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
-    assert (
-        timeline_details["local"]["current_logical_size"]
-        == timeline_details["local"]["current_logical_size_non_incremental"]
-    )
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
     pgmain = env.postgres.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -61,17 +58,14 @@ def test_timeline_size(neon_simple_env: NeonEnv):
 
 def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
 
     client = env.pageserver.http_client()
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
     timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
-    assert (
-        timeline_details["local"]["current_logical_size"]
-        == timeline_details["local"]["current_logical_size_non_incremental"]
-    )
 
-    pgmain = env.postgres.create_start("test_timeline_size")
-    log.info("postgres is running on 'test_timeline_size' branch")
+    pgmain = env.postgres.create_start("test_timeline_size_createdropdb")
+    log.info("postgres is running on 'test_timeline_size_createdropdb' branch")
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
@@ -81,6 +75,10 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
                 local_details["current_logical_size"]
                 == local_details["current_logical_size_non_incremental"]
             )
+            assert (
+                timeline_details["local"]["current_logical_size_non_incremental"]
+                == local_details["current_logical_size_non_incremental"]
+            ), "no writes should not change the incremental logical size"
 
             cur.execute("CREATE DATABASE foodb")
             with closing(pgmain.connect(dbname="foodb")) as conn:
@@ -140,13 +138,10 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
 
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota")
 
-    client = env.pageserver.http_client()
-    res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
-    assert (
-        res["local"]["current_logical_size"] == res["local"]["current_logical_size_non_incremental"]
-    )
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",
@@ -210,6 +205,12 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
             log.info(f"pg_cluster_size = {pg_cluster_size}")
+
+    new_res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
+    assert (
+        new_res["local"]["current_logical_size"]
+        == new_res["local"]["current_logical_size_non_incremental"]
+    ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
 
 
 def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
@@ -425,3 +426,22 @@ def assert_physical_size(env: NeonEnv, tenant_id: ZTenantId, timeline_id: ZTimel
         == res["local"]["current_physical_size_non_incremental"]
     )
     assert res["local"]["current_physical_size"] == get_timeline_dir_size(timeline_path)
+
+
+# Timeline logical size initialization is an asynchronous background task that runs once,
+# try a few times to ensure it's activated properly
+def wait_for_timeline_size_init(
+    client: NeonPageserverHttpClient, tenant: ZTenantId, timeline: ZTimelineId
+):
+    for i in range(10):
+        timeline_details = assert_timeline_local(client, tenant, timeline)
+        if (
+            timeline_details["local"]["current_logical_size"]
+            == timeline_details["local"]["current_logical_size_non_incremental"]
+        ):
+            return
+        log.info(f"waiting for current_logical_size of a timeline to be calculated, iteration {i}")
+        time.sleep(1)
+    raise Exception(
+        f"timed out while waiting for current_logical_size of a timeline to reach its non-incremental value, details: {timeline_details}"
+    )

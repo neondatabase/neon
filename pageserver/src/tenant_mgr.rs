@@ -4,7 +4,6 @@
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
 use crate::layered_repository::{load_metadata, Repository, Timeline};
-use crate::repository::RepositoryTimeline;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
@@ -378,15 +377,7 @@ pub fn get_local_timeline_with_load(
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
 ) -> anyhow::Result<Arc<Timeline>> {
-    let repository = get_repository_for_tenant(tenant_id)?;
-    match repository.get_timeline(timeline_id) {
-        Some(RepositoryTimeline::Loaded(loaded_timeline)) => {
-            loaded_timeline.init_logical_size()?;
-            Ok(loaded_timeline)
-        }
-        _ => load_local_timeline(&repository, timeline_id)
-            .with_context(|| format!("Failed to load local timeline for tenant {tenant_id}")),
-    }
+    get_repository_for_tenant(tenant_id)?.get_timeline_load(timeline_id)
 }
 
 pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
@@ -470,17 +461,6 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
     Ok(())
 }
 
-fn load_local_timeline(
-    repo: &Repository,
-    timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<Timeline>> {
-    let inmem_timeline = repo.get_timeline_load(timeline_id).with_context(|| {
-        format!("Inmem timeline {timeline_id} not found in tenant's repository")
-    })?;
-    inmem_timeline.init_logical_size()?;
-    Ok(inmem_timeline)
-}
-
 ///
 /// Get list of tenants, for the mgmt API
 ///
@@ -489,9 +469,11 @@ pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
         .iter()
         .map(|(id, tenant)| {
             let has_in_progress_downloads = remote_index
-                .tenant_entry(id)
-                .map(|entry| entry.has_in_progress_downloads());
+            .tenant_entry(id)
+            .map(|entry| entry.has_in_progress_downloads());
 
+            // TODO this is not correct when we might have remote storage sync disabled:
+            // we keep `RemoteTimelineIndex` in memory anyway for simplicity and this error message is printed still
             if has_in_progress_downloads.is_none() {
                 error!("timeline is not found in remote index while it is present in the tenants registry")
             }
@@ -581,7 +563,7 @@ fn attach_downloaded_tenant(
 
     // and then load its layers in memory
     for timeline_id in downloaded_timelines {
-        let _ = load_local_timeline(repo, timeline_id).with_context(|| {
+        repo.get_timeline_load(timeline_id).with_context(|| {
             format!(
                 "Failed to register add local timeline for tenant {}",
                 repo.tenant_id(),
