@@ -5,7 +5,7 @@ use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
 use metrics::core::{AtomicU64, GenericCounter};
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
-use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
+use std::sync::atomic::{self, AtomicBool, AtomicI64 as StdAtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -143,7 +143,7 @@ static CURRENT_LOGICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
         "Current logical size grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric")
+    .expect("failed to define current logical size metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
@@ -407,14 +407,8 @@ pub struct Timeline {
     ///
     /// Note that we also expose a copy of this value as a prometheus metric,
     /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
-    /// and `set_current_logical_size` functions to modify this, they will
-    /// also keep the prometheus metric in sync.
-    current_logical_size: AtomicI64,
-    // TODO we don't have a good, API to ensure on a compilation level
-    // that the timeline passes all initialization.
-    // Hence we ensure that we init at least once for every timeline
-    // and keep this flag to avoid potentually long recomputes.
-    logical_size_initialized: AtomicBool,
+    /// to modify this, it will also keep the prometheus metric in sync.
+    current_logical_size: LogicalSize,
 
     /// Information about the last processed message by the WAL receiver,
     /// or None if WAL receiver has not received anything for this timeline
@@ -423,6 +417,21 @@ pub struct Timeline {
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+}
+
+/// Internal structure to hold all data needed for logical size calculation.
+/// Calculation consists of two parts: initial size calculation, that potentially might take a lot of time,
+/// since requires all layers up to the `initial_part_end` to be read.
+struct LogicalSize {
+    /// Size, potentially slow to compute.
+    /// Might require multiple layers or even ancestor to be loaded to collect the size.
+    ///
+    /// NOTE: initial size is not a constant and will change between restarts.
+    initial_logical_size: OnceCell<u64>,
+    /// Latest Lsn that has its size uncalculated.
+    initial_part_end: Lsn,
+    /// All other size changes after startup, combined together.
+    size_added_after_initial: StdAtomicI64,
 }
 
 pub struct WalReceiverInfo {
@@ -733,8 +742,11 @@ impl Timeline {
             latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
 
-            current_logical_size: AtomicI64::new(0),
-            logical_size_initialized: AtomicBool::new(false),
+            current_logical_size: LogicalSize {
+                initial_logical_size: OnceCell::new(),
+                initial_part_end: metadata.disk_consistent_lsn(),
+                size_added_after_initial: StdAtomicI64::new(0),
+            },
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
 
@@ -838,65 +850,73 @@ impl Timeline {
     /// (Re-)calculate the logical size of the database at the latest LSN.
     ///
     /// This can be a slow operation.
-    pub fn init_logical_size(&self) -> Result<()> {
-        if self.logical_size_initialized.load(AtomicOrdering::Acquire) {
-            return Ok(());
-        }
-
+    fn init_logical_size(&self, last_lsn: Lsn) -> anyhow::Result<u64> {
         // Try a fast-path first:
         // Copy logical size from ancestor timeline if there has been no changes on this
         // branch, and no changes on the ancestor branch since the branch point.
-        if self.get_ancestor_lsn() == self.get_last_record_lsn() && self.ancestor_timeline.is_some()
-        {
+        if self.ancestor_timeline.is_some() && last_lsn == self.get_ancestor_lsn() {
             let ancestor = self.get_ancestor_timeline()?;
-            let ancestor_logical_size = ancestor.get_current_logical_size();
-            // Check LSN after getting logical size to exclude race condition
-            // when ancestor timeline is concurrently updated.
-            //
-            // Logical size 0 means that it was not initialized, so don't believe that.
-            if ancestor_logical_size != 0 && ancestor.get_last_record_lsn() == self.ancestor_lsn {
-                self.set_current_logical_size(ancestor_logical_size);
-                debug!(
-                    "logical size copied from ancestor: {}",
-                    ancestor_logical_size
-                );
-                return Ok(());
+            if ancestor.get_last_record_lsn() == self.ancestor_lsn {
+                let ancestor_logical_size =
+                    ancestor.get_current_logical_size().with_context(|| {
+                        format!(
+                            "Failed to get ancestor's {} logical size for timeline {}",
+                            ancestor.timeline_id, self.timeline_id
+                        )
+                    })?;
+                // Check LSN after getting logical size to exclude race condition
+                // when ancestor timeline is concurrently updated.
+                //
+                // Logical size 0 means that it was not initialized, so don't believe that.
+                if ancestor_logical_size != 0 {
+                    debug!("logical size matches ancestor's: {ancestor_logical_size}");
+                    return Ok(ancestor_logical_size);
+                }
             }
         }
 
         let timer = self.metrics.init_logical_size_histo.start_timer();
 
         // Have to calculate it the hard way
-        let last_lsn = self.get_last_record_lsn();
         let logical_size = self.get_current_logical_size_non_incremental(last_lsn)?;
-        self.set_current_logical_size(logical_size);
-        debug!("calculated logical size the hard way: {}", logical_size);
+        debug!("calculated logical size the hard way: {logical_size}");
 
         timer.stop_and_record();
-        Ok(())
+        Ok(logical_size)
     }
 
     /// Retrieve current logical size of the timeline
     ///
     /// NOTE: counted incrementally, includes ancestors.
-    pub fn get_current_logical_size(&self) -> u64 {
-        let current_logical_size = self.current_logical_size.load(AtomicOrdering::Acquire);
-        match u64::try_from(current_logical_size) {
-            Ok(sz) => sz,
-            Err(_) => {
-                error!(
-                    "current_logical_size is out of range: {}",
-                    current_logical_size
-                );
-                0
-            }
-        }
+    pub fn get_current_logical_size(&self) -> anyhow::Result<u64> {
+        let logical_size = &self.current_logical_size;
+        let &initial_size = logical_size
+            .initial_logical_size
+            .get_or_try_init(|| self.init_logical_size(logical_size.initial_part_end))
+            .context("Failed to initialize logical size")?;
+
+        let new_size = logical_size
+            .size_added_after_initial
+            .load(AtomicOrdering::Acquire);
+        let absolute_new_size = u64::try_from(
+            new_size
+                .checked_abs()
+                .with_context(|| format!("New size {new_size} is not expected to be i64::MIN"))?,
+        )
+        .with_context(|| format!("Failed to convert new size {new_size} to u64"))?;
+
+        if new_size < 0 {
+            initial_size.checked_sub(absolute_new_size)
+        } else {
+            initial_size.checked_add(absolute_new_size)
+        }.with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, new_size: {new_size}"))
     }
 
     /// Update current logical size, adding `delta' to the old value.
-    fn update_current_logical_size(&self, delta: i64) {
-        let new_size = self
-            .current_logical_size
+    fn update_current_logical_size(&self, delta: i64) -> anyhow::Result<()> {
+        let logical_size = &self.current_logical_size;
+        let new_size = logical_size
+            .size_added_after_initial
             .fetch_add(delta, AtomicOrdering::SeqCst);
 
         // Also set the value in the prometheus gauge. Note that
@@ -908,19 +928,14 @@ impl Timeline {
         // so it cannot happen. And even if it did, it wouldn't be
         // very serious, the metrics would just be slightly off until
         // the next update.
-        self.metrics.current_logical_size_gauge.set(new_size);
-    }
+        self.metrics.current_logical_size_gauge.set(
+            match logical_size.initial_logical_size.get() {
+                Some(&initial_size) => new_size + initial_size as i64,
+                None => new_size,
+            },
+        );
 
-    /// Set current logical size.
-    fn set_current_logical_size(&self, new_size: u64) {
-        self.current_logical_size
-            .store(new_size as i64, AtomicOrdering::SeqCst);
-        self.logical_size_initialized
-            .store(true, AtomicOrdering::SeqCst);
-
-        // Also set the value in the prometheus gauge. Same race condition
-        // here as in `update_current_logical_size`.
-        self.metrics.current_logical_size_gauge.set(new_size as i64);
+        Ok(())
     }
 
     ///
@@ -2328,7 +2343,7 @@ impl<'a> TimelineWriter<'a> {
         self.tl.finish_write(new_lsn);
     }
 
-    pub fn update_current_logical_size(&self, delta: i64) {
+    pub fn update_current_logical_size(&self, delta: i64) -> anyhow::Result<()> {
         self.tl.update_current_logical_size(delta)
     }
 }

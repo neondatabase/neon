@@ -136,14 +136,11 @@ impl Repository {
     }
 
     /// Get Timeline handle for locally available timeline. Load it into memory if it is not loaded.
-    pub fn get_timeline_load(&self, timelineid: ZTimelineId) -> Result<Arc<Timeline>> {
+    pub fn get_timeline_load(&self, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
         let mut timelines = self.timelines.lock().unwrap();
-        match self.get_timeline_load_internal(timelineid, &mut timelines)? {
+        match self.get_timeline_load_internal(timeline_id, &mut timelines)? {
             Some(local_loaded_timeline) => Ok(local_loaded_timeline),
-            None => anyhow::bail!(
-                "cannot get local timeline: unknown timeline id: {}",
-                timelineid
-            ),
+            None => anyhow::bail!("cannot get local timeline, unknown timeline id: {timeline_id}"),
         }
     }
 
@@ -559,33 +556,34 @@ impl Repository {
         timeline_id: ZTimelineId,
         timelines: &mut HashMap<ZTimelineId, LayeredTimelineEntry>,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
-        match timelines.get(&timeline_id) {
+        Ok(match timelines.get(&timeline_id) {
             Some(entry) => match entry {
                 LayeredTimelineEntry::Loaded(local_timeline) => {
                     debug!("timeline {timeline_id} found loaded into memory");
-                    return Ok(Some(Arc::clone(local_timeline)));
+                    Some(Arc::clone(local_timeline))
                 }
-                LayeredTimelineEntry::Unloaded { .. } => {}
+                LayeredTimelineEntry::Unloaded { .. } => {
+                    debug!(
+                        "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
+                    );
+                    let timeline = self.load_local_timeline(timeline_id, timelines)?;
+                    let was_loaded = timelines.insert(
+                        timeline_id,
+                        LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
+                    );
+                    ensure!(
+                        was_loaded.is_none()
+                            || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
+                        "assertion failure, inserted wrong timeline in an incorrect state"
+                    );
+                    Some(timeline)
+                }
             },
             None => {
                 debug!("timeline {timeline_id} not found");
-                return Ok(None);
+                None
             }
-        };
-        debug!(
-            "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
-        );
-        let timeline = self.load_local_timeline(timeline_id, timelines)?;
-        let was_loaded = timelines.insert(
-            timeline_id,
-            LayeredTimelineEntry::Loaded(Arc::clone(&timeline)),
-        );
-        ensure!(
-            was_loaded.is_none()
-                || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
-            "assertion failure, inserted wrong timeline in an incorrect state"
-        );
-        Ok(Some(timeline))
+        })
     }
 
     fn load_local_timeline(
