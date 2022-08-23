@@ -1085,7 +1085,7 @@ pub mod repo_harness {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::metadata::METADATA_FILE_NAME;
     use super::*;
     use crate::keyspace::KeySpaceAccum;
@@ -1466,12 +1466,6 @@ pub mod tests {
 
         Ok(())
     }
-
-    // Target file size in the unit tests. In production, the target
-    // file size is much larger, maybe 1 GB. But a small size makes it
-    // much faster to exercise all the logic for creating the files,
-    // garbage collection, compaction etc.
-    pub const TEST_FILE_SIZE: u64 = 4 * 1024 * 1024;
 
     #[test]
     fn test_images() -> Result<()> {
