@@ -936,7 +936,7 @@ impl<'a> DatadirModification<'a> {
         result?;
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
             self.pending_nblocks = 0;
         }
 
@@ -948,7 +948,7 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) -> anyhow::Result<()> {
         let writer = self.tline.writer();
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
@@ -964,7 +964,7 @@ impl<'a> DatadirModification<'a> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer.update_current_logical_size(pending_nblocks * BLCKSZ as i64);
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
         }
 
         Ok(())

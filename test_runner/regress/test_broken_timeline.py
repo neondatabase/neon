@@ -67,11 +67,21 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     assert pg0.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
     # But all others are broken
-    for n in range(1, 4):
-        (tenant, timeline, pg) = tenant_timelines[n]
-        with pytest.raises(Exception, match="Cannot load local timeline") as err:
+
+    # First timeline would fail instantly due to corrupt metadata file
+    (_tenant, _timeline, pg) = tenant_timelines[1]
+    with pytest.raises(Exception, match="Cannot load local timeline") as err:
+        pg.start()
+    log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
+
+    # Yet other timelines will fail when their layers will be queried during basebackup: we don't check layer file contents on startup, when loading the timeline
+    for n in range(2, 4):
+        (_tenant, _timeline, pg) = tenant_timelines[n]
+        with pytest.raises(Exception, match="extracting base backup failed") as err:
             pg.start()
-        log.info(f"compute startup failed as expected: {err}")
+        log.info(
+            f"compute startup failed lazily for timeline with corrupt layers, during basebackup preparation: {err}"
+        )
 
 
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):

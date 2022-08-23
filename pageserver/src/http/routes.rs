@@ -75,7 +75,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
 fn local_timeline_info_from_loaded_timeline(
-    timeline: &Timeline,
+    timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<LocalTimelineInfo> {
@@ -106,7 +106,11 @@ fn local_timeline_info_from_loaded_timeline(
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
         timeline_state: LocalTimelineState::Loaded,
-        current_logical_size: Some(timeline.get_current_logical_size()),
+        current_logical_size: Some(
+            timeline
+                .get_current_logical_size()
+                .context("Timeline info creation failed to get current logical size")?,
+        ),
         current_physical_size: Some(timeline.get_physical_size()),
         current_logical_size_non_incremental: if include_non_incremental_logical_size {
             Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
@@ -212,7 +216,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         ) {
             Ok(Some((new_timeline_id, new_timeline))) => {
                 // Created. Construct a TimelineInfo for it.
-                let local_info = local_timeline_info_from_loaded_timeline(new_timeline.as_ref(), false, false)?;
+                let local_info = local_timeline_info_from_loaded_timeline(&new_timeline, false, false)?;
                 Ok(Some(TimelineInfo {
                     tenant_id,
                     timeline_id: new_timeline_id,
