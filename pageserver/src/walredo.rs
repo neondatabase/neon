@@ -96,19 +96,8 @@ pub trait WalRedoManager: Send + Sync {
 macro_rules! redo_histogram_time_buckets {
     () => {
         vec![
-            0.050_000,
-            0.025_000,
-            0.010_000,
-            0.005_000,
-            0.002_500,
-            0.001_000,
-            0.000_500,
-            0.000_250,
-            0.000_100,
-            0.000_050,
-            0.000_025,
-            0.000_010,
-            0.000_005,
+            0.050_000, 0.025_000, 0.010_000, 0.005_000, 0.002_500, 0.001_000, 0.000_500, 0.000_250,
+            0.000_100, 0.000_050, 0.000_025, 0.000_010, 0.000_005,
         ]
     }
 }
@@ -119,18 +108,7 @@ macro_rules! redo_histogram_time_buckets {
 /// operation'.
 macro_rules! redo_histogram_count_buckets {
     () => {
-        vec![
-            0.0,
-            1.0,
-            2.0,
-            5.0,
-            10.0,
-            25.0,
-            50.0,
-            100.0,
-            250.0,
-            500.0,
-        ]
+        vec![ 0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0 ]
     }
 }
 
@@ -139,7 +117,8 @@ static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_wal_redo_seconds",
         "Time spent on WAL redo",
         redo_histogram_time_buckets!()
-    ).expect("failed to define a metric")
+    )
+    .expect("failed to define a metric")
 });
 
 static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
@@ -147,7 +126,8 @@ static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_wal_redo_wait_seconds",
         "Time spent waiting for access to the WAL redo process",
         redo_histogram_time_buckets!(),
-    ).expect("failed to define a metric")
+    )
+    .expect("failed to define a metric")
 });
 
 static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
@@ -155,7 +135,8 @@ static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
         "pageserver_wal_redo_records_histogram",
         "Histogram of number of records replayed per redo",
         redo_histogram_count_buckets!(),
-    ).expect("failed to define a metric")
+    )
+    .expect("failed to define a metric")
 });
 
 static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
