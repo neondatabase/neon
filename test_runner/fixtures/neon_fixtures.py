@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import enum
 import filecmp
 import json
@@ -1716,27 +1717,83 @@ def remote_pg(test_output_dir: Path) -> Iterator[RemotePostgres]:
         yield remote_pg
 
 
+class PSQL:
+    """
+    Helper class to make it easier to run psql in the proxy tests.
+    Copied and modified from PSQL from cloud/tests_e2e/common/psql.py
+    """
+
+    path: str
+    database_url: str
+
+    def __init__(
+        self,
+        path: str = "psql",
+        host: str = "127.0.0.1",
+        port: int = 5432,
+    ):
+        assert shutil.which(path)
+
+        self.path = path
+        self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
+
+    async def run(self, query=None):
+        run_args = [self.path, self.database_url]
+        run_args += ["--command", query] if query is not None else []
+
+        cmd_line = subprocess.list2cmdline(run_args)
+        log.info(f"Run psql: {cmd_line}")
+        return await asyncio.create_subprocess_exec(
+            *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+
 class NeonProxy(PgProtocol):
-    def __init__(self, proxy_port: int, http_port: int, auth_endpoint: str):
+    def __init__(self, proxy_port: int, http_port: int, auth_endpoint=None, mgmt_port=None):
         super().__init__(dsn=auth_endpoint, port=proxy_port)
         self.host = "127.0.0.1"
         self.http_port = http_port
         self.proxy_port = proxy_port
+        self.mgmt_port = mgmt_port
         self.auth_endpoint = auth_endpoint
         self._popen: Optional[subprocess.Popen[bytes]] = None
+        self.link_auth_uri_prefix = "http://dummy-uri"
 
     def start(self) -> None:
+        """
+        Starts a proxy with option '--auth-backend postgres' and a postgres instance already provided though '--auth-endpoint <postgress-instance>'."
+        """
         assert self._popen is None
+        assert self.auth_endpoint is not None
 
         # Start proxy
         args = [
-            os.path.join(str(neon_binpath), "proxy"),
+            os.path.join(neon_binpath, "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--auth-backend", "postgres"],
             *["--auth-endpoint", self.auth_endpoint],
         ]
         self._popen = subprocess.Popen(args)
+        self._wait_until_ready()
+
+    def start_with_link_auth(self) -> None:
+        """
+        Starts a proxy with option '--auth-backend link' and a dummy authentication link '--uri dummy-auth-link'."
+        """
+        assert self._popen is None
+
+        # Start proxy
+        bin_proxy = os.path.join(str(neon_binpath), "proxy")
+        args = [bin_proxy]
+        args.extend(["--http", f"{self.host}:{self.http_port}"])
+        args.extend(["--proxy", f"{self.host}:{self.proxy_port}"])
+        args.extend(["--mgmt", f"{self.host}:{self.mgmt_port}"])
+        args.extend(["--auth-backend", "link"])
+        args.extend(["--uri", self.link_auth_uri_prefix])
+        arg_str = " ".join(args)
+        log.info(f"starting proxy with command line ::: {arg_str}")
+        self._popen = subprocess.Popen(args, stdout=subprocess.PIPE)
         self._wait_until_ready()
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
@@ -1751,6 +1808,17 @@ class NeonProxy(PgProtocol):
             # NOTE the process will die when we're done with tests anyway, because
             # it's a child process. This is mostly to clean up in between different tests.
             self._popen.kill()
+
+
+@pytest.fixture(scope="function")
+def link_proxy(port_distributor) -> Iterator[NeonProxy]:
+    """Neon proxy that routes through link auth."""
+    http_port = port_distributor.get_port()
+    proxy_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
+    with NeonProxy(proxy_port, http_port, mgmt_port=mgmt_port) as proxy:
+        proxy.start_with_link_auth()
+        yield proxy
 
 
 @pytest.fixture(scope="function")
