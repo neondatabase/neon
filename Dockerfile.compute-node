@@ -79,7 +79,8 @@ COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local/pgsql
 COPY --from=compute-tools --chown=postgres /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \
-    apt install -y libreadline-dev libossp-uuid-dev gdal-bin libgdal-dev libprotobuf-c-dev
+    apt install -y libreadline-dev libossp-uuid-dev gdal-bin libgdal-dev libprotobuf-c-dev && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Debian bullseye provides GLIBC 2.31 when 2.34 is necessary as we compiled plv8 with that version
 RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
