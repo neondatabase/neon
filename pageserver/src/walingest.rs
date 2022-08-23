@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn test_relsize() -> Result<()> {
         let repo = RepoHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1190,7 +1190,7 @@ mod tests {
     #[test]
     fn test_drop_extend() -> Result<()> {
         let repo = RepoHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn test_truncate_extend() -> Result<()> {
         let repo = RepoHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn test_large_rel() -> Result<()> {
         let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(repo, TIMELINE_ID)?;
+        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;
