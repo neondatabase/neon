@@ -206,7 +206,6 @@ async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiErr
 async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
-
     check_permission(&request, Some(tenant_id))?;
 
     let new_timeline_info = tokio::task::spawn_blocking(move || {
@@ -244,11 +243,12 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
     let include_non_incremental_physical_size =
         query_param_present(&request, "include-non-incremental-physical-size");
+    check_permission(&request, Some(tenant_id))?;
+
     let local_timeline_infos = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
         list_local_timelines(
@@ -299,13 +299,12 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
     let include_non_incremental_physical_size =
         query_param_present(&request, "include-non-incremental-physical-size");
+    check_permission(&request, Some(tenant_id))?;
 
     let (local_timeline_info, remote_timeline_info) = async {
         // any error here will render local timeline as None
@@ -369,7 +368,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    info!("Handling tenant attach {}", tenant_id,);
+    info!("Handling tenant attach {}", tenant_id);
 
     tokio::task::spawn_blocking(move || {
         if tenant_mgr::get_tenant_state(tenant_id).is_some() {
@@ -478,9 +477,8 @@ async fn gather_tenant_timelines_index_parts(
 
 async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
 
     let state = get_state(&request);
     tokio::task::spawn_blocking(move || {
@@ -519,7 +517,6 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
 }
 
 async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // check for management permission
     check_permission(&request, None)?;
 
     let state = get_state(&request);
@@ -587,7 +584,6 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // check for management permission
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
@@ -656,7 +652,6 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
-    // check for management permission
     check_permission(&request, Some(tenant_id))?;
 
     let mut tenant_conf: TenantConfOpt = Default::default();
