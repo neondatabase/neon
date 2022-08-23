@@ -171,8 +171,8 @@ pub(crate) fn create_timeline(
     match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
-                .get_timeline_load(ancestor_timeline_id)
-                .context("Cannot branch off the timeline that's not present locally")?;
+                .get_timeline(ancestor_timeline_id)
+                .context("Cannot branch off the timeline that's not present in pageserver")?;
 
             if let Some(lsn) = ancestor_start_lsn.as_mut() {
                 // Wait for the WAL to arrive and be processed on the parent branch up

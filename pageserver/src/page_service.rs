@@ -599,7 +599,9 @@ impl PageServerHandler {
             info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
 
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.get_timeline_load(timeline_id)?;
+        let timeline = repo
+            .get_timeline(timeline_id)
+            .with_context(|| format!("Timeline {timeline_id} was not found"))?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
