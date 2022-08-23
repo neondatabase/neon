@@ -63,6 +63,27 @@ struct LayerEnvelope {
     layer: Arc<dyn Layer>,
 }
 
+
+// Representation of Key as numeric type.
+// We can not use native implementation of i128, because rstar::RTree
+// doesn't handle properly integer overflow during area calculation: sum(Xi*Yi).
+// Overflow will cause panic in debug mode and incorrect area calculation in release mode,
+// which leads to non-optimally balanced R-Tree (but doesn't fit correctness of R-Tree work).
+//
+// To prevent problems with overflow we may use BigInt representation of key. But BigInt
+// doesn't implement copy() method, which doesn't allow to store it in R-Tree.
+//
+// This is why we provide our own type IntKey with saturating arithmetic operation implementation.
+// Another possible solution is to perform multiplication using BigInt, then take square and store result is i128:
+//
+// impl Mul for IntKey {
+//    type Output = Self;
+//    fn mul(self, rhs: Self) -> Self::Output {
+//	      let a = BigUint::from(self.0 as u128);
+//	      let b = BigUint::from(rhs.0 as u128);
+//        IntKey((a * b).sqrt().to_u128().unwrap() as i128)
+//    }
+// }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Debug)]
 struct IntKey(i128);
 
@@ -114,24 +135,31 @@ impl Div for IntKey {
     }
 }
 
+// Add and mul operations are used by R-Tree to calculate area.
+// Them can cause integer overflow which leads to panic in debug build.
+// LSN range of one layer is now by default 256Mb  (28 bits).
+// And relation node is packed at bits 72..40.
+// 72+28=100 and we have 27 bits available.
+// It means that such overflow is not expected to happen frequently,
+// so we can use saturating mul/add to handle it without risk to get very non-optimal tree.
 impl Add for IntKey {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.wrapping_add(rhs.0))
+        IntKey(self.0.saturating_add(rhs.0))
     }
 }
 
 impl Sub for IntKey {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.wrapping_sub(rhs.0))
+        IntKey(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl Mul for IntKey {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.wrapping_mul(rhs.0))
+        IntKey(self.0.saturating_mul(rhs.0))
     }
 }
 
