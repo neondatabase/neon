@@ -17,7 +17,9 @@ use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
+use num_bigint::BigUint;
 use num_traits::identities::{One, Zero};
+use num_traits::ToPrimitive;
 use num_traits::{Bounded, Num, Signed};
 use rstar::{RTree, RTreeObject, AABB};
 use std::collections::VecDeque;
@@ -62,7 +64,6 @@ pub struct LayerMap {
 struct LayerEnvelope {
     layer: Arc<dyn Layer>,
 }
-
 
 // Representation of Key as numeric type.
 // We can not use native implementation of i128, because rstar::RTree
@@ -145,21 +146,30 @@ impl Div for IntKey {
 impl Add for IntKey {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.saturating_add(rhs.0))
+        //        IntKey(self.0.saturating_add(rhs.0))
+        //        IntKey(self.0.wrapping_add(rhs.0))
+        IntKey(self.0 + rhs.0)
     }
 }
 
 impl Sub for IntKey {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.saturating_sub(rhs.0))
+        //        IntKey(self.0.saturating_sub(rhs.0))
+        //        IntKey(self.0.wrapping_sub(rhs.0))
+        IntKey(self.0 - rhs.0)
     }
 }
 
 impl Mul for IntKey {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        IntKey(self.0.saturating_mul(rhs.0))
+        let a = BigUint::from(self.0 as u128);
+        let b = BigUint::from(rhs.0 as u128);
+        IntKey((a * b).sqrt().to_u128().unwrap() as i128)
+        //        IntKey(self.0.saturating_mul(rhs.0))
+        //        IntKey(self.0.wrapping_mul(rhs.0))
+        //        IntKey(self.0 * rhs.0)
     }
 }
 
