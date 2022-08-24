@@ -64,6 +64,11 @@
 #include "catalog/pg_tablespace_d.h"
 #include "postmaster/autovacuum.h"
 
+#if PG_VERSION_NUM >= 150000
+#include "access/xlogutils.h"
+#include "access/xlogrecovery.h"
+#endif
+
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
  * calls to md.c, and *also* do the calls to the Page Server. On every
@@ -645,7 +650,11 @@ zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, Bloc
 		 * _bt_blwritepage logs the full page without flushing WAL before
 		 * smgrextend (files are fsynced before build ends).
 		 */
+#if PG_VERSION_NUM >= 150000
+		flushlsn = GetFlushRecPtr(NULL);
+#else
 		flushlsn = GetFlushRecPtr();
+#endif
 		if (lsn > flushlsn)
 		{
 			elog(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
