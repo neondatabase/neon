@@ -81,7 +81,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
-fn local_timeline_info_from_loaded_timeline(
+fn local_timeline_info_from_timeline(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
@@ -171,7 +171,7 @@ fn list_local_timelines(
     for (timeline_id, repository_timeline) in repo_timelines {
         local_timeline_info.push((
             timeline_id,
-            local_timeline_info_from_loaded_timeline(
+            local_timeline_info_from_timeline(
                 &repository_timeline,
                 include_non_incremental_logical_size,
                 include_non_incremental_physical_size,
@@ -204,7 +204,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         ) {
             Ok(Some((new_timeline_id, new_timeline))) => {
                 // Created. Construct a TimelineInfo for it.
-                let local_info = local_timeline_info_from_loaded_timeline(&new_timeline, false, false)?;
+                let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)?;
                 Ok(Some(TimelineInfo {
                     tenant_id,
                     timeline_id: new_timeline_id,
@@ -299,7 +299,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                 repo.get_timeline(timeline_id)
                     .as_ref()
                     .map(|timeline| {
-                        local_timeline_info_from_loaded_timeline(
+                        local_timeline_info_from_timeline(
                             &timeline,
                             include_non_incremental_logical_size,
                             include_non_incremental_physical_size,

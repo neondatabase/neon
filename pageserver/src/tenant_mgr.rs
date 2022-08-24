@@ -367,15 +367,6 @@ pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Rep
     Ok(Arc::clone(&tenant.repo))
 }
 
-/// Retrieves local timeline for tenant.
-/// Loads it into memory if it is not already loaded.
-pub fn get_local_timeline_with_load(
-    tenant_id: ZTenantId,
-    timeline_id: ZTimelineId,
-) -> anyhow::Result<Arc<Timeline>> {
-    get_repository_for_tenant(tenant_id)?.get_timeline_load(timeline_id)
-}
-
 pub fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
     // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
     // It is important that we do not take locks here, and do not check whether the timeline exists
@@ -550,20 +541,9 @@ fn attach_downloaded_tenant(
     repo: &Repository,
     downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
-    // first, register timeline metadata to ensure ancestors will be found later during layer load
     for &timeline_id in &downloaded_timelines {
         repo.attach_timeline(timeline_id).with_context(|| {
             format!("Failed to load timeline {timeline_id} into in-memory repository")
-        })?;
-    }
-
-    // and then load its layers in memory
-    for timeline_id in downloaded_timelines {
-        repo.get_timeline_load(timeline_id).with_context(|| {
-            format!(
-                "Failed to register add local timeline for tenant {}",
-                repo.tenant_id(),
-            )
         })?;
     }
 

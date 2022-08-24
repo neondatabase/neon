@@ -194,7 +194,7 @@ impl Repository {
         src: ZTimelineId,
         dst: ZTimelineId,
         start_lsn: Option<Lsn>,
-    ) -> Result<()> {
+    ) -> Result<Arc<Timeline>> {
         // We need to hold this lock to prevent GC from starting at the same time. GC scans the directory to learn
         // about timelines, so otherwise a race condition is possible, where we create new timeline and GC
         // concurrently removes data that is needed by the new timeline.
@@ -512,85 +512,86 @@ impl Repository {
         Ok(())
     }
 
-    // Implementation of the public `get_timeline_load` function.
-    // Differences from the public:
-    //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
-    fn get_timeline_load_internal(
-        &self,
-        timeline_id: ZTimelineId,
-        timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
-    ) -> anyhow::Result<Option<Arc<Timeline>>> {
-        Ok(match timelines.get(&timeline_id) {
-            Some(entry) => match entry {
-                LayeredTimelineEntry::Loaded(local_timeline) => {
-                    debug!("timeline {timeline_id} found loaded into memory");
-                    Some(Arc::clone(local_timeline))
-                }
-                LayeredTimelineEntry::Unloaded { .. } => {
-                    debug!(
-            "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
-        );
-                    let timeline = self.load_local_timeline(timeline_id, timelines)?;
-                    let was_loaded = timelines.insert(timeline_id, Arc::clone(&timeline));
-                    ensure!(
-                        was_loaded.is_none()
-                            || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
-                        "assertion failure, inserted wrong timeline in an incorrect state"
-                    );
-                    Some(timeline)
-                }
-            },
-            None => {
-                debug!("timeline {timeline_id} not found");
-                None
-            }
-        })
-    }
+    // TODO kb rework this and make private?
+    // // Implementation of the public `get_timeline_load` function.
+    // // Differences from the public:
+    // //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
+    // pub fn get_timeline_load_internal(
+    //     &self,
+    //     timeline_id: ZTimelineId,
+    //     timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
+    // ) -> anyhow::Result<Option<Arc<Timeline>>> {
+    //     Ok(match timelines.get(&timeline_id) {
+    //         Some(entry) => match entry {
+    //             LayeredTimelineEntry::Loaded(local_timeline) => {
+    //                 debug!("timeline {timeline_id} found loaded into memory");
+    //                 Some(Arc::clone(local_timeline))
+    //             }
+    //             LayeredTimelineEntry::Unloaded { .. } => {
+    //                 debug!(
+    //         "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
+    //     );
+    //                 let timeline = self.load_local_timeline(timeline_id, timelines)?;
+    //                 let was_loaded = timelines.insert(timeline_id, Arc::clone(&timeline));
+    //                 ensure!(
+    //                     was_loaded.is_none()
+    //                         || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
+    //                     "assertion failure, inserted wrong timeline in an incorrect state"
+    //                 );
+    //                 Some(timeline)
+    //             }
+    //         },
+    //         None => {
+    //             debug!("timeline {timeline_id} not found");
+    //             None
+    //         }
+    //     })
+    // }
 
-    fn load_local_timeline(
-        &self,
-        timeline_id: ZTimelineId,
-        timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
-    ) -> anyhow::Result<Arc<Timeline>> {
-        let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
-            .context("failed to load metadata")?;
-        let disk_consistent_lsn = metadata.disk_consistent_lsn();
+    // fn load_local_timeline(
+    //     &self,
+    //     timeline_id: ZTimelineId,
+    //     timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
+    // ) -> anyhow::Result<Arc<Timeline>> {
+    //     let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+    //         .context("failed to load metadata")?;
+    //     let disk_consistent_lsn = metadata.disk_consistent_lsn();
 
-        let ancestor = metadata
-            .ancestor_timeline()
-            .map(|ancestor_timeline_id| {
-                trace!("loading {timeline_id}'s ancestor {ancestor_timeline_id}");
-                self.get_timeline_load_internal(ancestor_timeline_id, timelines)
-            })
-            .transpose()
-            .context("cannot load ancestor timeline")?
-            .flatten();
+    //     let ancestor = metadata
+    //         .ancestor_timeline()
+    //         .map(|ancestor_timeline_id| {
+    //             info!("loading {timeline_id}'s ancestor {ancestor_timeline_id}");
+    //             self.get_timeline_load_internal(ancestor_timeline_id, timelines)
+    //         })
+    //         .transpose()
+    //         .context("cannot load ancestor timeline")?
+    //         .flatten();
 
-        let _enter = info_span!("loading local timeline").entered();
+    //     let _enter = info_span!("loading local timeline").entered();
 
-        let timeline = Timeline::new(
-            self.conf,
-            Arc::clone(&self.tenant_conf),
-            metadata,
-            ancestor,
-            timeline_id,
-            self.tenant_id,
-            Arc::clone(&self.walredo_mgr),
-            self.upload_layers,
-        );
-        timeline
-            .load_layer_map(disk_consistent_lsn)
-            .context("failed to load layermap")?;
+    //     let timeline = Timeline::new(
+    //         self.conf,
+    //         Arc::clone(&self.tenant_conf),
+    //         metadata,
+    //         ancestor,
+    //         timeline_id,
+    //         self.tenant_id,
+    //         Arc::clone(&self.walredo_mgr),
+    //         self.upload_layers,
+    //     );
+    //     timeline
+    //         .load_layer_map(disk_consistent_lsn)
+    //         .context("failed to load layermap")?;
 
-        let timeline = Arc::new(timeline);
+    //     let timeline = Arc::new(timeline);
 
-        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-            id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
-            timeline: Arc::clone(&timeline),
-        });
+    //     crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
+    //         id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
+    //         timeline: Arc::clone(&timeline),
+    //     });
 
-        Ok(timeline)
-    }
+    //     Ok(timeline)
+    // }
 
     pub fn new(
         conf: &'static PageServerConf,

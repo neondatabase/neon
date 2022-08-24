@@ -108,7 +108,7 @@ fn bootstrap_timeline(
     tenantid: ZTenantId,
     tli: ZTimelineId,
     repo: &Repository,
-) -> Result<()> {
+) -> Result<Arc<Timeline>> {
     let initdb_path = conf
         .tenant_path(&tenantid)
         .join(format!("tmp-timeline-{}", tli));
@@ -141,7 +141,7 @@ fn bootstrap_timeline(
     // Remove temp dir. We don't need it anymore
     fs::remove_dir_all(pgdata_path)?;
 
-    Ok(())
+    Ok(timeline)
 }
 
 ///
@@ -168,7 +168,7 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    match ancestor_timeline_id {
+    let loaded_timeline = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
                 .get_timeline(ancestor_timeline_id)
@@ -200,9 +200,6 @@ pub(crate) fn create_timeline(
         }
         None => bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?,
     };
-
-    // load the timeline into memory
-    let loaded_timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
 
     Ok(Some((new_timeline_id, loaded_timeline)))
 }
