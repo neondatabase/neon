@@ -114,11 +114,10 @@ fn local_timeline_info_from_loaded_timeline(
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
         timeline_state: LocalTimelineState::Loaded,
-        current_logical_size: Some(
-            timeline
-                .get_current_logical_size()
-                .context("Timeline info creation failed to get current logical size")?,
-        ),
+        current_logical_size: timeline
+            .get_logical_size_if_initialized()
+            .transpose()
+            .context("Timeline info creation failed to get current logical size")?,
         current_physical_size: Some(timeline.get_physical_size()),
         current_logical_size_non_incremental: if include_non_incremental_logical_size {
             Some(timeline.get_current_logical_size_non_incremental(last_record_lsn)?)
