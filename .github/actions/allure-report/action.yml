@@ -18,7 +18,7 @@ runs:
     - name: Validate input parameters
       shell: bash -euxo pipefail {0}
       run: |
-        if [ "${{ inputs.action }}" != "store"] && [ "${{ inputs.action }}" != "generate" ]; then
+        if [ "${{ inputs.action }}" != "store" ] && [ "${{ inputs.action }}" != "generate" ]; then
           echo 2>&1 "Unknown inputs.action type '${{ inputs.action }}'; allowed 'generate' or 'store' only"
           exit 1
         fi
@@ -41,7 +41,7 @@ runs:
           # Shortcut for a special branch
           key=main
         else
-          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -cd "[:alnum:]._-")
+          key=branch-$(echo ${GITHUB_REF#refs/heads/} | tr -c "[:alnum:]._-" "-")
         fi
         echo "::set-output name=KEY::${key}"
 
@@ -94,7 +94,7 @@ runs:
           BUILD_TYPE=${{ inputs.build_type }}
         EOF
 
-        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}.tar.zst"
+        ARCHIVE="${GITHUB_RUN_ID}-${{ inputs.test_selection }}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
         ZSTD_NBTHREADS=0
 
         tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
@@ -207,7 +207,7 @@ runs:
         script: |
           const { REPORT_URL, BUILD_TYPE, SHA } = process.env
 
-          result = await github.rest.repos.createCommitStatus({
+          await github.rest.repos.createCommitStatus({
             owner: context.repo.owner,
             repo: context.repo.repo,
             sha: `${SHA}`,
@@ -215,5 +215,3 @@ runs:
             target_url: `${REPORT_URL}`,
             context: `Allure report / ${BUILD_TYPE}`,
           })
-
-          console.log(result);

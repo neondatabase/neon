@@ -3,11 +3,11 @@ description: 'Runs a Neon python test set, performing all the required preparati
 
 inputs:
   build_type:
-    description: 'Type of Rust (neon) and C (postgres) builds. Must be "release" or "debug".'
+    description: 'Type of Rust (neon) and C (postgres) builds. Must be "release" or "debug", or "remote" for the remote cluster'
     required: true
   rust_toolchain:
     description: 'Rust toolchain version to fetch the caches'
-    required: true
+    required: false
   test_selection:
     description: 'A python test suite to run'
     required: true
@@ -52,6 +52,7 @@ runs:
   using: "composite"
   steps:
     - name: Get Neon artifact
+      if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-artifact
@@ -78,7 +79,6 @@ runs:
     - name: Run pytest
       env:
         NEON_BIN: /tmp/neon/bin
-        POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
         TEST_OUTPUT: /tmp/test_output
         # this variable will be embedded in perf test report
         # and is needed to distinguish different environments
@@ -88,6 +88,12 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.real_s3_secret_access_key }}
       shell: bash -euxo pipefail {0}
       run: |
+        export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
+
+        if [ "${BUILD_TYPE}" = "remote" ]; then
+          export REMOTE_ENV=1
+        fi
+
         PERF_REPORT_DIR="$(realpath test_runner/perf-report-local)"
         rm -rf $PERF_REPORT_DIR
 
@@ -119,6 +125,13 @@ runs:
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
         elif [[ "${{ inputs.build_type }}" == "release" ]]; then
           cov_prefix=()
+        else
+          cov_prefix=()
+        fi
+
+        # Wake up the cluster if we use remote neon instance
+        if [ "${{ inputs.build_type }}" = "remote" ] && [ -n "${BENCHMARK_CONNSTR}" ]; then
+          ${POSTGRES_DISTRIB_DIR}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
         fi
 
         # Run the tests.
@@ -137,7 +150,6 @@ runs:
           --alluredir=$TEST_OUTPUT/allure/results \
           --tb=short \
           --verbose \
-          -m "not remote_cluster" \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
@@ -148,25 +160,10 @@ runs:
           fi
         fi
 
-    - name: Upload Allure results
-      if: ${{ always() && (inputs.test_selection == 'regress') }}
+    - name: Create Allure report
+      if: always()
       uses: ./.github/actions/allure-report
       with:
         action: store
         build_type: ${{ inputs.build_type }}
         test_selection: ${{ inputs.test_selection }}
-
-    - name: Delete all data but logs
-      shell: bash -euxo pipefail {0}
-      if: always()
-      run: |
-        du -sh /tmp/test_output/*
-        find /tmp/test_output -type f ! -name "*.log" ! -name "regression.diffs" ! -name "junit.xml" ! -name "*.filediff" ! -name "*.stdout" ! -name "*.stderr" ! -name "flamegraph.svg" ! -name "*.metrics" -delete
-        du -sh /tmp/test_output/*
-
-    - name: Upload python test logs
-      if: always()
-      uses: ./.github/actions/upload
-      with:
-        name: python-test-${{ inputs.test_selection }}-${{ runner.os }}-${{ inputs.build_type }}-${{ inputs.rust_toolchain }}-logs
-        path: /tmp/test_output/

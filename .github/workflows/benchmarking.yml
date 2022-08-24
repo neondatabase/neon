@@ -128,9 +128,9 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: "10gb"
-      REMOTE_ENV: "1"
       POSTGRES_DISTRIB_DIR: /usr
       TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
 
     strategy:
       fail-fast: false
@@ -138,22 +138,14 @@ jobs:
         connstr: [ BENCHMARK_CAPTEST_CONNSTR, BENCHMARK_RDS_CONNSTR ]
 
     runs-on: dev
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:2817580636
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rustlegacy:pinned
+      options: --init
 
     timeout-minutes: 360 # 6h
 
     steps:
     - uses: actions/checkout@v3
-
-    - name: Cache poetry deps
-      id: cache_poetry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pypoetry/virtualenvs
-        key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
-
-    - name: Install Python deps
-      run: ./scripts/pysync
 
     - name: Calculate platform
       id: calculate-platform
@@ -173,50 +165,54 @@ jobs:
 
     - name: Install Deps
       run: |
-        echo "deb http://apt.postgresql.org/pub/repos/apt focal-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
         sudo apt -y update
-        sudo apt install -y postgresql-14 postgresql-client-14
+        sudo apt install -y postgresql-14
 
     - name: Benchmark init
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
       env:
         PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
-      run: |
-        mkdir -p perf-report-captest
-
-        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_init -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
 
     - name: Benchmark simple-update
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
       env:
         PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
-      run: |
-        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_simple_update -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
-
-    - name: Benchmark select-only
-      env:
-        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
-        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
-      run: |
-        psql $BENCHMARK_CONNSTR -c "SELECT 1;"
-        ./scripts/pytest test_runner/performance/test_perf_pgbench.py::test_pgbench_remote_select_only -v -m "remote_cluster" --out-dir perf-report-captest --timeout 21600
-
-    - name: Submit result
-      env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-      run: |
-        REPORT_FROM=$(realpath perf-report-captest) REPORT_TO=staging scripts/generate_and_push_perf_report.sh
 
-    - name: Upload logs
-      if: always()
-      uses: ./.github/actions/upload
+    - name: Benchmark simple-update
+      uses: ./.github/actions/run-python-test-set
       with:
-        name: bench-captest-${{ steps.calculate-platform.outputs.PLATFORM }}
-        path: /tmp/test_output/
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: true
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+      env:
+        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
+        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Create Allure report
+      uses: ./.github/actions/allure-report
+      with:
+        action: generate
+        build_type: ${{ env.BUILD_TYPE }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}

@@ -278,7 +278,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests ]
+    needs: [ regress-tests, benchmarks ]
     if: always()
     strategy:
       fail-fast: false
@@ -290,7 +290,7 @@ jobs:
         with:
           submodules: false
 
-      - name: Merge and  Allure results
+      - name: Create Allure report
         uses: ./.github/actions/allure-report
         with:
           action: generate

@@ -2339,13 +2339,8 @@ def get_test_output_dir(request: Any) -> pathlib.Path:
     return test_dir
 
 
-ATTACHMENT_SUFFIXES = frozenset(
-    (
-        ".log",
-        ".stderr",
-        ".stdout",
-        ".diffs",
-    )
+ATTACHMENT_NAME_REGEX = re.compile(
+    r".+\.log|.+\.stderr|.+\.stdout|.+\.filediff|.+\.metrics|flamegraph\.svg|regression\.diffs"
 )
 
 
@@ -2371,11 +2366,9 @@ def test_output_dir(request: Any) -> Iterator[pathlib.Path]:
     yield test_dir
 
     for attachment in test_dir.glob("**/*"):
-        if attachment.suffix in ATTACHMENT_SUFFIXES:
+        if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
             source = str(attachment)
             name = str(attachment.relative_to(test_dir))
-            attachment_type = "text/plain"
-            extension = attachment.suffix.removeprefix(".")
 
             # compress files larger than 1Mb, they're hardly readable in a browser
             if attachment.stat().st_size > 1024 * 1024:
@@ -2383,8 +2376,16 @@ def test_output_dir(request: Any) -> Iterator[pathlib.Path]:
                 with tarfile.open(source, "w:gz") as tar:
                     tar.add(attachment, arcname=attachment.name)
                 name = f"{name}.tar.gz"
+
+            if source.endswith(".tar.gz"):
                 attachment_type = "application/gzip"
                 extension = "tar.gz"
+            elif source.endswith(".svg"):
+                attachment_type = "image/svg+xml"
+                extension = "svg"
+            else:
+                attachment_type = "text/plain"
+                extension = attachment.suffix.removeprefix(".")
 
             allure.attach.file(source, name, attachment_type, extension)
 
