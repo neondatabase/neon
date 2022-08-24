@@ -476,6 +476,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
