@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
-use std::sync::atomic::{self, AtomicBool, AtomicI64 as StdAtomicI64, Ordering as AtomicOrdering};
+use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -389,25 +389,6 @@ pub struct Timeline {
     repartition_threshold: u64,
 
     /// Current logical size of the "datadir", at the last LSN.
-    ///
-    /// Size shouldn't ever be negative, but this is signed for two reasons:
-    ///
-    /// 1. If we initialized the "baseline" size lazily, while we already
-    /// process incoming WAL, the incoming WAL records could decrement the
-    /// variable and temporarily make it negative. (This is just future-proofing;
-    /// the initialization is currently not done lazily.)
-    ///
-    /// 2. If there is a bug and we e.g. forget to increment it in some cases
-    /// when size grows, but remember to decrement it when it shrinks again, the
-    /// variable could go negative. In that case, it seems better to at least
-    /// try to keep tracking it, rather than clamp or overflow it. Note that
-    /// get_current_logical_size() will clamp the returned value to zero if it's
-    /// negative, and log an error. Could set it permanently to zero or some
-    /// special value to indicate "broken" instead, but this will do for now.
-    ///
-    /// Note that we also expose a copy of this value as a prometheus metric,
-    /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
-    /// to modify this, it will also keep the prometheus metric in sync.
     current_logical_size: LogicalSize,
 
     /// Information about the last processed message by the WAL receiver,
@@ -431,7 +412,26 @@ struct LogicalSize {
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     initial_part_end: Option<Lsn>,
     /// All other size changes after startup, combined together.
-    size_added_after_initial: StdAtomicI64,
+    ///
+    /// Size shouldn't ever be negative, but this is signed for two reasons:
+    ///
+    /// 1. If we initialized the "baseline" size lazily, while we already
+    /// process incoming WAL, the incoming WAL records could decrement the
+    /// variable and temporarily make it negative. (This is just future-proofing;
+    /// the initialization is currently not done lazily.)
+    ///
+    /// 2. If there is a bug and we e.g. forget to increment it in some cases
+    /// when size grows, but remember to decrement it when it shrinks again, the
+    /// variable could go negative. In that case, it seems better to at least
+    /// try to keep tracking it, rather than clamp or overflow it. Note that
+    /// get_current_logical_size() will clamp the returned value to zero if it's
+    /// negative, and log an error. Could set it permanently to zero or some
+    /// special value to indicate "broken" instead, but this will do for now.
+    ///
+    /// Note that we also expose a copy of this value as a prometheus metric,
+    /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
+    /// to modify this, it will also keep the prometheus metric in sync.
+    size_added_after_initial: AtomicI64,
 }
 
 pub struct WalReceiverInfo {
@@ -752,7 +752,7 @@ impl Timeline {
                 LogicalSize {
                     initial_logical_size: OnceCell::new(),
                     initial_part_end: Some(disk_consistent_lsn),
-                    size_added_after_initial: StdAtomicI64::new(0),
+                    size_added_after_initial: AtomicI64::new(0),
                 }
             } else {
                 // we're creating timeline data without any layers existing locally,
@@ -760,7 +760,7 @@ impl Timeline {
                 LogicalSize {
                     initial_logical_size: OnceCell::with_value(0),
                     initial_part_end: None,
-                    size_added_after_initial: StdAtomicI64::new(0),
+                    size_added_after_initial: AtomicI64::new(0),
                 }
             },
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
