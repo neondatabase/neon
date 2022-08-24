@@ -9,7 +9,7 @@ RUN apt update &&  \
 FROM build-deps AS pg-build
 COPY vendor/postgres postgres
 RUN cd postgres && \
-    ./configure && \
+    ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
     # Install headers
