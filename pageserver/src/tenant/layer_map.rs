@@ -17,7 +17,7 @@ use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
-use num_bigint::BigUint;
+use num_bigint::BigInt;
 use num_traits::identities::{One, Zero};
 use num_traits::ToPrimitive;
 use num_traits::{Bounded, Num, Signed};
@@ -74,17 +74,7 @@ struct LayerEnvelope {
 // To prevent problems with overflow we may use BigInt representation of key. But BigInt
 // doesn't implement copy() method, which doesn't allow to store it in R-Tree.
 //
-// This is why we provide our own type IntKey with saturating arithmetic operation implementation.
-// Another possible solution is to perform multiplication using BigInt, then take square and store result is i128:
-//
-// impl Mul for IntKey {
-//    type Output = Self;
-//    fn mul(self, rhs: Self) -> Self::Output {
-//	      let a = BigUint::from(self.0 as u128);
-//	      let b = BigUint::from(rhs.0 as u128);
-//        IntKey((a * b).sqrt().to_u128().unwrap() as i128)
-//    }
-// }
+// This is why we use BigInt temporary for perform multiplication and then take square and store result as i128.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Debug)]
 struct IntKey(i128);
 
@@ -164,9 +154,10 @@ impl Sub for IntKey {
 impl Mul for IntKey {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self::Output {
-        let a = BigUint::from(self.0 as u128);
-        let b = BigUint::from(rhs.0 as u128);
-        IntKey((a * b).sqrt().to_u128().unwrap() as i128)
+        let a = BigInt::from(self.0);
+        let b = BigInt::from(rhs.0);
+        let c = (a * b).sqrt().to_i128().unwrap();
+        IntKey(c)
         //        IntKey(self.0.saturating_mul(rhs.0))
         //        IntKey(self.0.wrapping_mul(rhs.0))
         //        IntKey(self.0 * rhs.0)
@@ -286,6 +277,14 @@ impl LayerMap {
                 continue;
             }
             assert!(l.get_key_range().contains(&key));
+            if l.get_lsn_range().start >= end_lsn {
+                info!(
+                    "l.get_lsn_range().start={}, l.get_lsn_range().end={}, end_lsn={}",
+                    l.get_lsn_range().start,
+                    l.get_lsn_range().end,
+                    end_lsn
+                );
+            }
             assert!(l.get_lsn_range().start < end_lsn);
             if l.get_lsn_range().end >= end_lsn {
                 // this layer contains the requested point in the key/lsn space.

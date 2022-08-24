@@ -713,7 +713,7 @@ impl DeltaLayerWriter {
         for buf in block_buf.blocks {
             file.write_all(buf.as_ref())?;
         }
-
+        assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
         let summary = Summary {
             magic: DELTA_FILE_MAGIC,
