@@ -425,13 +425,13 @@ pub struct Timeline {
 /// Calculation consists of two parts: initial size calculation, that potentially might take a lot of time,
 /// since requires all layers up to the `initial_part_end` to be read.
 struct LogicalSize {
-    /// Size, potentially slow to compute.
-    /// Might require multiple layers or even ancestor to be loaded to collect the size.
+    /// Size, potentially slow to compute, derived from all layers located locally on this node's FS.
+    /// Might require multiple layers read or even ancestor's ones to be read to collect the size.
     ///
     /// NOTE: initial size is not a constant and will change between restarts.
     initial_logical_size: OnceCell<u64>,
-    /// Latest Lsn that has its size uncalculated.
-    initial_part_end: Lsn,
+    /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
+    initial_part_end: Option<Lsn>,
     /// All other size changes after startup, combined together.
     size_added_after_initial: StdAtomicI64,
 }
@@ -502,7 +502,9 @@ impl Timeline {
     /// the Repository implementation may incorrectly return a value from an ancestor
     /// branch, for example, or waste a lot of cycles chasing the non-existing key.
     ///
-    pub fn get(&self, key: Key, lsn: Lsn) -> Result<Bytes> {
+    pub fn get(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
+        anyhow::ensure!(lsn.is_valid(), "Invalid LSN");
+
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
@@ -705,6 +707,8 @@ impl Timeline {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         upload_layers: bool,
     ) -> Timeline {
+        let disk_consistent_lsn = metadata.disk_consistent_lsn();
+
         let mut result = Timeline {
             conf,
             tenant_conf,
@@ -716,12 +720,12 @@ impl Timeline {
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
-                last: metadata.disk_consistent_lsn(),
+                last: disk_consistent_lsn,
                 prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
             }),
-            disk_consistent_lsn: AtomicLsn::new(metadata.disk_consistent_lsn().0),
+            disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
-            last_freeze_at: AtomicLsn::new(metadata.disk_consistent_lsn().0),
+            last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
             last_freeze_ts: RwLock::new(Instant::now()),
 
             ancestor_timeline: ancestor,
@@ -744,10 +748,22 @@ impl Timeline {
             latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
 
-            current_logical_size: LogicalSize {
-                initial_logical_size: OnceCell::new(),
-                initial_part_end: metadata.disk_consistent_lsn(),
-                size_added_after_initial: StdAtomicI64::new(0),
+            current_logical_size: if disk_consistent_lsn.is_valid() {
+                // we're creating timeline data with some layer files existing locally,
+                // need to recalculate timeline's logical size based on data in the layers.
+                LogicalSize {
+                    initial_logical_size: OnceCell::new(),
+                    initial_part_end: Some(disk_consistent_lsn),
+                    size_added_after_initial: StdAtomicI64::new(0),
+                }
+            } else {
+                // we're creating timeline data without any layers existing locally,
+                // initial logical size is 0.
+                LogicalSize {
+                    initial_logical_size: OnceCell::with_value(0),
+                    initial_part_end: None,
+                    size_added_after_initial: StdAtomicI64::new(0),
+                }
             },
             partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
             repartition_threshold: 0,
@@ -894,7 +910,13 @@ impl Timeline {
         let logical_size = &self.current_logical_size;
         let &initial_size = logical_size
             .initial_logical_size
-            .get_or_try_init(|| self.init_logical_size(logical_size.initial_part_end))
+            .get_or_try_init(|| match logical_size.initial_part_end {
+                Some(invalid_lsn) if !invalid_lsn.is_valid() => {
+                    anyhow::bail!("Cannot calculate current logical size for timeline {} with invalid Lsn ({})", self.timeline_id, invalid_lsn)
+                }
+                Some(valid_lsn) => self.init_logical_size(valid_lsn),
+                None => Ok(0),
+            })
             .context("Failed to initialize logical size")?;
 
         let new_size = logical_size
