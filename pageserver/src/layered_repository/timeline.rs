@@ -1806,7 +1806,7 @@ impl Timeline {
                         break;
                     }
                     key_values_total_size += next_size;
-                    if key_values_total_size > target_file_size {
+                    if key_values_total_size > target_file_size && lsn != next_lsn {
                         // split key between multiple layers: such layer can contain only single key
                         dup_start_lsn = if dup_end_lsn.is_valid() {
                             dup_end_lsn
