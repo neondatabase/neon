@@ -901,6 +901,19 @@ impl Timeline {
         Ok(logical_size)
     }
 
+    pub fn get_logical_size_if_initialized(&self) -> Option<anyhow::Result<u64>> {
+        if self
+            .current_logical_size
+            .initial_logical_size
+            .get()
+            .is_none()
+        {
+            None
+        } else {
+            Some(self.get_current_logical_size())
+        }
+    }
+
     /// Retrieve current logical size of the timeline
     ///
     /// NOTE: counted incrementally, includes ancestors.
