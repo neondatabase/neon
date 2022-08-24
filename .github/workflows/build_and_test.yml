@@ -137,7 +137,7 @@ jobs:
         shell: bash -euxo pipefail {0}
 
       - name: Build neon extensions
-        run: mold -run make neon-ext -j(nproc)
+        run: mold -run make neon-pg-ext -j(nproc)
         shell: bash -euxo pipefail {0}
 
       - name: Run cargo build

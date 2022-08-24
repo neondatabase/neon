@@ -82,7 +82,7 @@ jobs:
         run: make postgres
 
       - name: Build neon extensions
-        run: make neon-ext
+        run: make neon-pg-ext
 
       # Plain configure output can contain weird errors like 'error: C compiler cannot create executables'
       # and the real cause will be inside config.log
