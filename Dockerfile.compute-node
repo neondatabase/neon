@@ -8,7 +8,8 @@ RUN apt update &&  \
 # Build Postgres from the neon postgres repository.
 FROM build-deps AS pg-build
 COPY vendor/postgres postgres
-RUN cd postgres &&  \
+RUN cd postgres && \
+    ./configure && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
     # Install headers
