@@ -1498,7 +1498,15 @@ impl Timeline {
         Ok(new_delta_path)
     }
 
-    pub fn compact(&self) -> Result<()> {
+    pub fn compact(&self) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+
+        // Last record Lsn could be zero in case the timelie was just created
+        if !last_record_lsn.is_valid() {
+            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
+            return Ok(());
+        }
+
         //
         // High level strategy for compaction / image creation:
         //

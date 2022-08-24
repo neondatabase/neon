@@ -465,9 +465,11 @@ pub fn list_tenants(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
         .iter()
         .map(|(id, tenant)| {
             let has_in_progress_downloads = remote_index
-                .tenant_entry(id)
-                .map(|entry| entry.has_in_progress_downloads());
+            .tenant_entry(id)
+            .map(|entry| entry.has_in_progress_downloads());
 
+            // TODO this is not correct when we might have remote storage sync disabled:
+            // we keep `RemoteTimelineIndex` in memory anyway for simplicity and this error message is printed still
             if has_in_progress_downloads.is_none() {
                 error!("timeline is not found in remote index while it is present in the tenants registry")
             }

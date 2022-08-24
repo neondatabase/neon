@@ -25,9 +25,11 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     client = env.pageserver.http_client()
     timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert (
-        timeline_details["local"]["current_logical_size"]
-        == timeline_details["local"]["current_logical_size_non_incremental"]
-    )
+        timeline_details["local"].get("current_logical_size") is None
+    ), "should have no logical size initialized for a branched timeline that has no data streamed"
+    assert (
+        timeline_details["local"]["current_logical_size_non_incremental"] > 0
+    ), "incremental logical size should be calculated always"
 
     pgmain = env.postgres.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -68,9 +70,11 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     client = env.pageserver.http_client()
     timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert (
-        timeline_details["local"]["current_logical_size"]
-        == timeline_details["local"]["current_logical_size_non_incremental"]
-    )
+        timeline_details["local"].get("current_logical_size") is None
+    ), "should have no logical size initialized for a branched timeline that has no data streamed"
+    assert (
+        timeline_details["local"]["current_logical_size_non_incremental"] > 0
+    ), "incremental logical size should be calculated always"
 
     pgmain = env.postgres.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -82,9 +86,15 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
             res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res["local"]
             assert (
-                local_details["current_logical_size"]
+                local_details.get("current_logical_size") is None
+            ), "should have no logical size initialized for a branched timeline that has no data streamed"
+            assert (
+                local_details["current_logical_size_non_incremental"] > 0
+            ), "incremental logical size should be calculated always"
+            assert (
+                timeline_details["local"]["current_logical_size_non_incremental"]
                 == local_details["current_logical_size_non_incremental"]
-            )
+            ), "no writes should not change the incremental logical size"
 
             cur.execute("CREATE DATABASE foodb")
             with closing(pgmain.connect(dbname="foodb")) as conn:
@@ -149,8 +159,11 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
     assert (
-        res["local"]["current_logical_size"] == res["local"]["current_logical_size_non_incremental"]
-    )
+        res["local"].get("current_logical_size") is None
+    ), "should have no logical size initialized for a branched timeline that has no data streamed"
+    assert (
+        res["local"]["current_logical_size_non_incremental"] > 0
+    ), "incremental logical size should be calculated always"
 
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",
@@ -214,6 +227,12 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
             log.info(f"pg_cluster_size = {pg_cluster_size}")
+
+    new_res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
+    assert (
+        new_res["local"]["current_logical_size"]
+        == new_res["local"]["current_logical_size_non_incremental"]
+    ), "after the WAL is streamed, current_logical_size is expected to be calculated and to be equal its non-incremental value"
 
 
 def test_timeline_physical_size_init(neon_simple_env: NeonEnv):
