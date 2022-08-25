@@ -89,15 +89,52 @@ pub trait WalRedoManager: Send + Sync {
 // for access to the postgres process ('wait') since there is only one for
 // each tenant.
 
+/// Time buckets are small because we want to be able to measure the
+/// smallest redo processing times. These buckets allow us to measure down
+/// to 5us, which equates to 200'000 pages/sec, which equates to 1.6GB/sec.
+/// This is much better than the previous 5ms aka 200 pages/sec aka 1.6MB/sec.
+macro_rules! redo_histogram_time_buckets {
+    () => {
+        vec![
+            0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
+            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000,
+        ]
+    };
+}
+
+/// While we're at it, also measure the amount of records replayed in each
+/// operation. We have a global 'total replayed' counter, but that's not
+/// as useful as 'what is the skew for how many records we replay in one
+/// operation'.
+macro_rules! redo_histogram_count_buckets {
+    () => {
+        vec![0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
+    };
+}
+
 static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!("pageserver_wal_redo_seconds", "Time spent on WAL redo")
-        .expect("failed to define a metric")
+    register_histogram!(
+        "pageserver_wal_redo_seconds",
+        "Time spent on WAL redo",
+        redo_histogram_time_buckets!()
+    )
+    .expect("failed to define a metric")
 });
 
 static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the WAL redo process"
+        "Time spent waiting for access to the WAL redo process",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
+static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_records_histogram",
+        "Histogram of number of records replayed per redo",
+        redo_histogram_count_buckets!(),
     )
     .expect("failed to define a metric")
 });
@@ -262,7 +299,10 @@ impl PostgresRedoManager {
 
         let end_time = Instant::now();
         let duration = end_time.duration_since(lock_time);
+
         WAL_REDO_TIME.observe(duration.as_secs_f64());
+        WAL_REDO_RECORDS_HISTOGRAM.observe(records.len() as f64);
+
         debug!(
             "postgres applied {} WAL records in {} us to reconstruct page image at LSN {}",
             records.len(),
