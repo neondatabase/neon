@@ -19,7 +19,7 @@ macro_rules! postgres_ffi {
                 #![allow(dead_code)]
 
                 use serde::{Deserialize, Serialize};
-                include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+                include!(concat!(env!("OUT_DIR"), "/bindings_", $version, ".rs"));
             }
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
