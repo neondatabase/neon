@@ -73,7 +73,6 @@ bool		am_wal_proposer;
 
 char	   *zenith_timeline_walproposer = NULL;
 char	   *zenith_tenant_walproposer = NULL;
-char	   *zenith_pageserver_connstring_walproposer = NULL;
 
 /* Declared in walproposer.h, defined here, initialized in libpqwalproposer.c */
 WalProposerFunctionsType *WalProposerFunctions = NULL;
@@ -879,21 +878,13 @@ HandleConnectionEvent(Safekeeper *sk)
 static void
 SendStartWALPush(Safekeeper *sk)
 {
-	char *query = NULL;
-	if (zenith_pageserver_connstring_walproposer != NULL) {
-		query = psprintf("START_WAL_PUSH %s", zenith_pageserver_connstring_walproposer);
-	} else {
-		query = psprintf("START_WAL_PUSH");
-	}
-	if (!walprop_send_query(sk->conn, query))
+	if (!walprop_send_query(sk->conn, "START_WAL_PUSH"))
 	{
-		pfree(query);
 		elog(WARNING, "Failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
 			sk->host, sk->port, walprop_error_message(sk->conn));
 		ShutdownConnection(sk);
 		return;
 	}
-	pfree(query);
 	sk->state = SS_WAIT_EXEC_RESULT;
 	UpdateEventSet(sk, WL_SOCKET_READABLE);
 }

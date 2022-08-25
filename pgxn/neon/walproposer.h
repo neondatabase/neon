@@ -38,7 +38,6 @@ typedef struct WalMessage WalMessage;
 
 extern char *zenith_timeline_walproposer;
 extern char *zenith_tenant_walproposer;
-extern char	*zenith_pageserver_connstring_walproposer;
 
 /* Possible return values from ReadPGAsync */
 typedef enum

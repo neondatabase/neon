@@ -416,12 +416,6 @@ pg_init_libpagestore(void)
 	zenith_timeline_walproposer = zenith_timeline;
 	zenith_tenant_walproposer = zenith_tenant;
 
-	/*
-	 * Walproposer instructs safekeeper which pageserver to use for
-	 * replication
-	 */
-	zenith_pageserver_connstring_walproposer = page_server_connstring;
-
 	if (wal_redo)
 	{
 		neon_log(PageStoreTrace, "set inmem_smgr hook");
