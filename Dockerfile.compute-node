@@ -74,7 +74,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 
 # TODO: Check if we can make the extension setup more modular versus a linear build
 # currently plv8-build copies the output /usr/local/pgsql from postgis-build#
-COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local/pgsql
+COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \
@@ -88,9 +88,8 @@ RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.lis
     apt install -y --no-install-recommends -t testing binutils && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# "temporary" symlink for compatibility with old control-plane
+# "temporary" symlink for old control-plane
 RUN ln -s /usr/local/bin/compute_ctl /usr/local/bin/zenith_ctl
 
-ENV PATH=/usr/local/pgsql/bin:$PATH
 USER postgres
 ENTRYPOINT ["/usr/local/bin/compute_ctl"]
