@@ -125,31 +125,24 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_timeline_info = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
+    // FIXME
+    //let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
 
-        match timelines::create_timeline(
-            get_config(&request),
-            tenant_id,
-            request_data.new_timeline_id.map(ZTimelineId::from),
-            request_data.ancestor_timeline_id.map(ZTimelineId::from),
-            request_data.ancestor_start_lsn,
-        ) {
-            Ok(Some(new_timeline)) => {
-                // Created. Construct a TimelineInfo for it.
-                Ok(Some(build_timeline_info(&new_timeline, false, false)?))
-            }
-            Ok(None) => Ok(None), // timeline already exists
-            Err(err) => Err(err),
+    match timelines::create_timeline(
+        get_config(&request),
+        tenant_id,
+        request_data.new_timeline_id.map(ZTimelineId::from),
+        request_data.ancestor_timeline_id.map(ZTimelineId::from),
+        request_data.ancestor_start_lsn,
+    ).await {
+        Ok(Some(new_timeline)) => {
+            // Created. Construct a TimelineInfo for it.
+            let info = build_timeline_info(&new_timeline, false, false)?;
+            json_response(StatusCode::CREATED, info)
         }
-    })
-    .await
-        .map_err(ApiError::from_err)??;
-
-    Ok(match new_timeline_info {
-        Some(info) => json_response(StatusCode::CREATED, info)?,
-        None => json_response(StatusCode::CONFLICT, ())?,
-    })
+        Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
+        Err(err) => Err(err).map_err(ApiError::from_err)?,
+    }
 }
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -253,19 +246,15 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    tokio::task::spawn_blocking(move || {
-        let _enter =
-            info_span!("timeline_delete_handler", tenant = %tenant_id, timeline = %timeline_id)
-                .entered();
-        let repo = tenant_mgr::get_tenant(tenant_id)?;
-        if let Err(err) = repo.delete_timeline(timeline_id) {
-            error!("could not delete timeline: {:?}", err);
-            return Err(err);
-        }
-        Ok(())
-    })
-    .await
-    .map_err(ApiError::from_err)??;
+    // FIXME span
+    //let _enter =
+    //    info_span!("timeline_delete_handler", tenant = %tenant_id, timeline = %timeline_id)
+    //        .entered();
+    let repo = tenant_mgr::get_tenant(tenant_id)?;
+    if let Err(err) = repo.delete_timeline(timeline_id).await {
+        error!("could not delete timeline: {:?}", err);
+        return Err(err).map_err(ApiError::from_err)?;
+    }
 
     json_response(StatusCode::OK, ())
 }
@@ -274,17 +263,14 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
-        if let Err(err) = tenant_mgr::detach_tenant(tenant_id) {
-            // FIXME: distinguish between "Tenant is already present locally" and other errors
-            error!("could not detach tenant: {:?}", err);
-            return Err(err);
-        }
-        Ok(())
-    })
-    .await
-    .map_err(ApiError::from_err)??;
+    // FIXME
+    //let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+
+    if let Err(err) = tenant_mgr::detach_tenant(tenant_id).await {
+        // FIXME: distinguish between "Tenant is already present locally" and other errors
+        error!("could not detach tenant: {:?}", err);
+        return Err(err).map_err(ApiError::from_err);
+    }
 
     json_response(StatusCode::OK, ())
 }

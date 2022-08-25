@@ -168,10 +168,8 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
-use anyhow::{ensure, Context, Result};
-use once_cell::sync::OnceCell;
+use anyhow::{ensure, Result};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio::runtime::Runtime;
 use tracing::{error, info, warn};
@@ -184,40 +182,11 @@ pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 use crate::{
     config::PageServerConf, layered_repository::metadata::TimelineMetadata,
-    storage_sync::index::RelativePath,
+    storage_sync::index::RelativePath, task_mgr, task_mgr::TaskKind, task_mgr::BACKGROUND_RUNTIME,
+    {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
 use utils::zid::{ZTenantId, ZTimelineId};
-
-static STORAGE_SYNC_RUNTIME: OnceCell<Runtime> = OnceCell::new();
-
-///
-/// Initialization at pageserver startup
-///
-pub fn init_storage_sync(_conf: &'static PageServerConf) -> anyhow::Result<()> {
-    // Build the tokio runtime to use for uploads. We use a separate runtime, so
-    // that we can see the resources used by uploading, when looking at
-    // 'top -H' or similar.
-    //
-    // It's also good to avoid hogging all threads that would be needed to process
-    // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
-    // happen, but still.
-    //
-    // Uploading is not very CPU intensive, so one or two threads would probably
-    // suffice, but we stick to defaults for now.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .thread_name("storage-sync-runtime-thread")
-        .enable_all()
-        // FIXME: register with thread_mgr
-        //.on_thread_start(|| ))
-        .build()
-        .context("Failed to create storage sync runtime")?;
-
-    if STORAGE_SYNC_RUNTIME.set(runtime).is_err() {
-        panic!("storage sync runtime already initialized");
-    }
-    Ok(())
-}
 
 ///
 /// A client for accessing a timeline's data in remote storage.
@@ -320,6 +289,8 @@ enum UploadOp {
 
 impl RemoteTimelineClient {
     pub fn init_upload_queue(&self, files: &HashSet<RelativePath>, metadata: &TimelineMetadata) {
+        info!("initializing upload queue for tenant {}, disk_consistent_lsn: {}",
+              self.tenant_id, metadata.disk_consistent_lsn());
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.latest_files = files.clone();
         upload_queue.latest_metadata = Some(metadata.clone());
@@ -594,9 +565,18 @@ impl RemoteTimelineClient {
 
             // Spawn task to perform the task
             let self_rc = Arc::clone(self);
-            let _handle = self.runtime.spawn(async move {
-                self_rc.perform_upload_task(task).await;
-            });
+            task_mgr::spawn(
+                self.runtime.handle(),
+                TaskKind::RemoteUploadTask,
+                Some(self.tenant_id),
+                Some(self.timeline_id),
+                "remote upload",
+                false,
+                async move {
+                    self_rc.perform_upload_task(task).await;
+                    Ok(())
+                },
+            );
 
             // Loop back to process next task
         }
@@ -708,34 +688,17 @@ pub fn create_remote_timeline_client(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no remote storage configured"))?;
 
-    let runtime = STORAGE_SYNC_RUNTIME
-        .get()
-        .expect("storage sync runtime not initialized");
-
     let storage_impl =
         GenericRemoteStorage::new(conf.workdir.clone(), &remote_storage_config.clone())?;
 
     Ok(RemoteTimelineClient {
         conf,
-        runtime,
+        runtime: &BACKGROUND_RUNTIME,
         tenant_id,
         timeline_id,
         storage_impl,
         upload_queue: Mutex::new(UploadQueue::default()),
     })
-}
-
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
-
-// FIXME: copied from connection_manager. Move to utils?
-async fn exponential_backoff(n: u32, base: f64, max_seconds: f64) {
-    if n == 0 {
-        return;
-    }
-    let seconds_to_wait = base.powf(f64::from(n) - 1.0).min(max_seconds);
-    info!("Backoff: waiting {seconds_to_wait} seconds before proceeding with the task");
-    tokio::time::sleep(Duration::from_secs_f64(seconds_to_wait)).await;
 }
 
 #[cfg(test)]

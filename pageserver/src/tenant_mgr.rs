@@ -4,9 +4,9 @@
 
 use crate::config::PageServerConf;
 use crate::layered_repository::{Repository, TenantState};
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
 use crate::tenant_config::TenantConfOpt;
-use crate::thread_mgr;
-use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
 use anyhow::{bail, Context, Result};
 use once_cell::sync::Lazy;
@@ -36,14 +36,6 @@ fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Repositor
 /// called once at pageserver startup.
 ///
 pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let rt_guard = runtime.enter();
-
-    let mut handles = Vec::new();
-
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
     for dir_entry in std::fs::read_dir(&tenants_dir)
@@ -61,8 +53,7 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
 
                 // Start loading the tenant into memory. It will initially be in Loading
                 // state.
-                let (repo, handle) = Repository::spawn_load(conf, tenant_id)?;
-                handles.push(handle);
+                let repo = Repository::spawn_load(conf, tenant_id)?;
                 write_tenants().insert(tenant_id, repo);
             }
             Err(e) => {
@@ -78,23 +69,6 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
             }
         }
     }
-    drop(rt_guard);
-
-    thread_mgr::spawn(
-        ThreadKind::InitialLoad,
-        None,
-        None,
-        "initial tenant load",
-        false,
-        move || {
-            info!("in initial load thread");
-            for h in handles {
-                let _ = runtime.block_on(h);
-            }
-            info!("initial load done!");
-            Ok(())
-        },
-    )?;
 
     Ok(())
 }
@@ -102,26 +76,28 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<()> {
 ///
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
-pub fn shutdown_all_tenants() {
-    let mut m = write_tenants();
-    let mut tenantids = Vec::new();
-    for (tenantid, tenant) in m.iter_mut() {
-        tenant.state.send_modify(|state_guard| match *state_guard {
-            TenantState::Loading
-            | TenantState::Attaching
-            | TenantState::Active
-            | TenantState::Stopping => {
-                *state_guard = TenantState::Stopping;
-                tenantids.push(*tenantid)
-            }
-            TenantState::Broken => {}
-        });
-    }
-    drop(m);
+pub async fn shutdown_all_tenants() {
+    let tenant_ids = {
+        let mut m = write_tenants();
+        let mut tenant_ids = Vec::new();
+        for (tenantid, tenant) in m.iter_mut() {
+            tenant.state.send_modify(|state_guard| match *state_guard {
+                TenantState::Loading
+                | TenantState::Attaching
+                | TenantState::Active
+                | TenantState::Stopping => {
+                    *state_guard = TenantState::Stopping;
+                    tenant_ids.push(*tenantid)
+                }
+                TenantState::Broken => {}
+            });
+        }
+        tenant_ids
+    };
 
-    thread_mgr::shutdown_threads(Some(ThreadKind::WalReceiverManager), None, None);
+    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
 
-    // Ok, no background threads running anymore. Flush any remaining data in
+    // Ok, no background tasks running anymore. Flush any remaining data in
     // memory to disk.
     //
     // We assume that any incoming connections that might request pages from
@@ -129,11 +105,11 @@ pub fn shutdown_all_tenants() {
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
-    for tenant_id in tenantids {
+    for tenant_id in tenant_ids {
         debug!("shutdown tenant {tenant_id}");
         match get_tenant(tenant_id) {
             Ok(repo) => {
-                if let Err(err) = repo.checkpoint() {
+                if let Err(err) = repo.checkpoint().await {
                     error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
                 }
             }
@@ -195,41 +171,36 @@ pub fn get_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
 /// with a 30 s timeout. Returns an error if the tenant does not
 /// exist, or it's not active yet and the wait times out,
 ///
-pub fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
+pub async fn get_active_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
     let tenant = get_tenant(tenant_id)?;
 
-    tokio::runtime::Handle::current().block_on(async {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            tenant.wait_until_active(),
-        )
-        .await
-        {
-            Ok(Ok(())) => Ok(tenant),
-            Ok(Err(e)) => Err(e),
-            Err(_) => bail!("timeout waiting for tenant {} to become active", tenant_id),
-        }
-    })
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tenant.wait_until_active(),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(tenant),
+        Ok(Err(e)) => Err(e),
+        Err(_) => bail!("timeout waiting for tenant {} to become active", tenant_id),
+    }
 }
 
-pub fn detach_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
+pub async fn detach_tenant(tenant_id: ZTenantId) -> anyhow::Result<()> {
     let repo = get_tenant(tenant_id)?;
-    let task = repo.spawn_detach()?;
-    drop(repo);
+    let task = repo.detach_tenant();
 
     // FIXME: Should we go ahead and remove the tenant anyway, if detaching fails? It's a bit
     // annoying if a tenant gets wedged so that you can't even detach it. OTOH, it's scary
     // to delete files if we're not sure what's wrong.
-    tokio::spawn(async move {
-        match task.await {
-            Ok(_) => {
-                write_tenants().remove(&tenant_id);
-            }
-            Err(err) => {
-                error!("detaching tenant {} failed: {:?}", tenant_id, err);
-            }
-        };
-    });
+    match task.await {
+        Ok(_) => {
+            write_tenants().remove(&tenant_id);
+        }
+        Err(err) => {
+            error!("detaching tenant {} failed: {:?}", tenant_id, err);
+        }
+    };
     Ok(())
 }
 

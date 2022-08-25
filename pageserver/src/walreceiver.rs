@@ -26,95 +26,40 @@ mod connection_manager;
 mod walreceiver_connection;
 
 use crate::config::PageServerConf;
+use crate::task_mgr::WALRECEIVER_RUNTIME;
 
 use anyhow::{ensure, Context};
 use etcd_broker::Client;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use std::cell::Cell;
 use std::future::Future;
 use std::sync::Arc;
-use std::thread_local;
-use tokio::{runtime::Handle, select, sync::watch, task::JoinHandle};
+use tokio::sync::watch;
 use tracing::*;
 use url::Url;
 
 pub use connection_manager::spawn_connection_manager_task;
 
-thread_local! {
-    // Boolean that is true only for WAL receiver threads
-    //
-    // This is used in `wait_lsn` to guard against usage that might lead to a deadlock.
-    //
-    // FIXME: check if this still works. The code that used to set this is gone..
-    pub(crate) static IS_WAL_RECEIVER: Cell<bool> = Cell::new(false);
-}
-
 static ETCD_CLIENT: OnceCell<Client> = OnceCell::new();
-
-static WALRECEIVER_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
-static WALRECEIVER_RUNTIME_HANDLE: OnceCell<Handle> = OnceCell::new();
-
-///
-/// Get a handle to the WAL receiver runtime
-///
-pub fn get_walreceiver_runtime() -> Handle {
-    //
-    // In unit tests, page server startup doesn't happen and no one calls
-    // init_etcd_client. Use the current runtime instead.
-    //
-    if cfg!(test) {
-        WALRECEIVER_RUNTIME_HANDLE
-            .get_or_init(Handle::current)
-            .clone()
-    } else {
-        WALRECEIVER_RUNTIME_HANDLE
-            .get()
-            .expect("walreceiver runtime not initialized")
-            .clone()
-    }
-}
 
 ///
 /// Initialize the etcd client. This must be called once at page server startup.
 ///
-pub fn init_etcd_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .thread_name("wal-receiver-runtime-thread")
-        .enable_all()
-        .on_thread_start(|| IS_WAL_RECEIVER.with(|c| c.set(true)))
-        .build()
-        .context("Failed to create storage sync runtime")?;
-
+pub async fn init_etcd_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
     let etcd_endpoints = conf.broker_endpoints.clone();
     ensure!(
         !etcd_endpoints.is_empty(),
         "Cannot start wal receiver: etcd endpoints are empty"
     );
 
-    let etcd_client = runtime
-        .block_on(Client::connect(etcd_endpoints.clone(), None))
+    let etcd_client = Client::connect(etcd_endpoints.clone(), None)
+        .await
         .context("Failed to connect to etcd")?;
 
     // FIXME: Should we still allow the pageserver to start, if etcd
     // doesn't work? It could still serve GetPage requests, with the
     // data it has locally and from what it can download from remote
     // storage
-
-    if WALRECEIVER_RUNTIME_HANDLE
-        .set(runtime.handle().clone())
-        .is_err()
-    {
-        panic!("walreceiver runtime already initialized");
-    }
-    // XXX: It's not enough to hold on to the handle. If the Runtime is
-    // dropped, the runtime is gone and all the threads are killed, even if
-    // you still hold a reference to its handle. So we stash the Runtime
-    // itself in WALRECEIVER_RUNTIME, to prevent it from being dropped.
-    if WALRECEIVER_RUNTIME.set(runtime).is_err() {
-        panic!("walreceiver runtime already initialized");
-    }
-
     if ETCD_CLIENT.set(etcd_client).is_err() {
         panic!("etcd already initialized");
     }
@@ -141,7 +86,6 @@ pub fn get_etcd_client() -> &'static etcd_broker::Client {
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
 pub struct TaskHandle<E> {
-    handle: JoinHandle<Result<(), String>>,
     events_receiver: watch::Receiver<TaskEvent<E>>,
     cancellation: watch::Sender<()>,
 }
@@ -150,7 +94,7 @@ pub struct TaskHandle<E> {
 pub enum TaskEvent<E> {
     Started,
     NewEvent(E),
-    End(Result<(), String>),
+    End,
 }
 
 impl<E: Clone> TaskHandle<E> {
@@ -167,46 +111,28 @@ impl<E: Clone> TaskHandle<E> {
         let events_sender = Arc::new(events_sender);
 
         let sender = Arc::clone(&events_sender);
-        let handle = get_walreceiver_runtime().spawn(async move {
+        let _ = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskEvent::Started).ok();
             task(sender, cancellation_receiver).await
         });
 
         TaskHandle {
-            handle,
             events_receiver,
             cancellation,
         }
     }
 
     async fn next_task_event(&mut self) -> TaskEvent<E> {
-        select! {
-            next_task_event = self.events_receiver.changed() => match next_task_event {
-                Ok(()) => self.events_receiver.borrow().clone(),
-                Err(_task_channel_part_dropped) => join_on_handle(&mut self.handle).await,
-            },
-            task_completion_result = join_on_handle(&mut self.handle) => task_completion_result,
+        match self.events_receiver.changed().await {
+            Ok(()) => self.events_receiver.borrow().clone(),
+            Err(_task_channel_part_dropped) => TaskEvent::End,
         }
     }
 
     /// Aborts current task, waiting for it to finish.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         self.cancellation.send(()).ok();
-        if let Err(e) = self.handle.await {
-            error!("Task failed to shut down: {e}")
-        }
-    }
-}
-
-async fn join_on_handle<E>(handle: &mut JoinHandle<Result<(), String>>) -> TaskEvent<E> {
-    match handle.await {
-        Ok(task_result) => TaskEvent::End(task_result),
-        Err(e) => {
-            if e.is_cancelled() {
-                TaskEvent::End(Ok(()))
-            } else {
-                TaskEvent::End(Err(format!("WAL receiver task panicked: {e}")))
-            }
-        }
+        // wait until the sender is dropped
+        while self.events_receiver.changed().await.is_ok() {}
     }
 }

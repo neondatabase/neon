@@ -17,7 +17,7 @@ use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use metrics::{
@@ -49,17 +49,17 @@ use crate::tenant_config::TenantConfOpt;
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
     lsn::{AtomicLsn, Lsn, RecordLsn},
+    simple_rcu::{Rcu, RcuReadGuard},
     seqwait::SeqWait,
     zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::page_cache;
 use crate::repository::{GcResult, Key, Value};
-use crate::thread_mgr;
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
 use crate::virtual_file::VirtualFile;
 use crate::walreceiver::spawn_connection_manager_task;
-use crate::walreceiver::TaskHandle;
-use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 
@@ -284,9 +284,6 @@ pub struct Timeline {
     /// layer files on-demand.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
-    /// WAL receiver task
-    walreceiver: RwLock<Option<TaskHandle<()>>>,
-
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
     // the WAL up to the request. The SeqWait provides functions for
@@ -329,14 +326,8 @@ pub struct Timeline {
     /// Used to ensure that there is only one thread
     layer_flush_lock: Mutex<()>,
 
-    /// Layer removal lock.
-    /// A lock to ensure that no layer of the timeline is removed concurrently by other threads.
-    /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`LayeredRepository::delete_timeline`].
-    layer_removal_cs: Mutex<()>,
-
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    pub latest_gc_cutoff_lsn: RwLock<Lsn>,
+    pub latest_gc_cutoff_lsn: Rcu<Lsn>,
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
@@ -398,6 +389,7 @@ pub struct WalReceiverInfo {
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
 ///
+#[derive(Clone)]
 pub struct GcInfo {
     /// Specific LSNs that are needed.
     ///
@@ -442,8 +434,8 @@ impl Timeline {
     }
 
     /// Lock and get timeline's GC cuttof
-    pub fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
-        self.latest_gc_cutoff_lsn.read().unwrap()
+    pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
+        self.latest_gc_cutoff_lsn.read()
     }
 
     /// Look up given page version.
@@ -541,12 +533,12 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
+    pub async fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
         // This should never be called from the WAL receiver thread, because that could lead
         // to a deadlock.
         ensure!(
-            !IS_WAL_RECEIVER.with(|c| c.get()),
-            "wait_lsn called by WAL receiver thread"
+            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnection),
+            "wait_lsn cannot be called in WAL receiver"
         );
 
         self.metrics.wait_lsn_time_histo.observe_closure_duration(
@@ -566,7 +558,7 @@ impl Timeline {
     pub fn check_lsn_is_in_scope(
         &self,
         lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
     ) -> Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
@@ -587,7 +579,7 @@ impl Timeline {
     ///
     /// NOTE: This has nothing to do with checkpoint in PostgreSQL. We don't
     /// know anything about them here in the repository.
-    pub fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
+    pub async fn checkpoint(&self, cconf: CheckpointConfig) -> anyhow::Result<()> {
         match cconf {
             CheckpointConfig::Flush => {
                 self.freeze_inmem_layer(false);
@@ -596,16 +588,12 @@ impl Timeline {
             CheckpointConfig::Forced => {
                 self.freeze_inmem_layer(false);
                 self.flush_frozen_layers(true)?;
-                self.compact()
+                self.compact().await
             }
         }
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
-    ///
-    /// FIXME: This ought to return &'a TimelineWriter, where TimelineWriter
-    /// is a generic type in this trait. But that doesn't currently work in
-    /// Rust: https://rust-lang.github.io/rfcs/1598-generic_associated_types.html
     pub fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
@@ -679,7 +667,6 @@ impl Timeline {
 
             walredo_mgr,
             remote_client: remote_client.map(Arc::new),
-            walreceiver: RwLock::new(None),
 
             // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
             last_record_lsn: SeqWait::new(RecordLsn {
@@ -698,7 +685,6 @@ impl Timeline {
 
             write_lock: Mutex::new(()),
             layer_flush_lock: Mutex::new(()),
-            layer_removal_cs: Mutex::new(()),
 
             gc_info: RwLock::new(GcInfo {
                 retain_lsns: Vec::new(),
@@ -706,7 +692,7 @@ impl Timeline {
                 pitr_cutoff: Lsn(0),
             }),
 
-            latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
+            latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
 
             current_logical_size: AtomicI64::new(0),
@@ -752,14 +738,13 @@ impl Timeline {
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
-        let walreceiver = spawn_connection_manager_task(
+        let _ = spawn_connection_manager_task(
             self.conf.broker_etcd_prefix.clone(),
             self.myself.upgrade().unwrap(),
             walreceiver_connect_timeout,
             lagging_wal_timeout,
             max_lsn_wal_lag,
-        );
-        *self.walreceiver.write().unwrap() = Some(walreceiver);
+        )?;
 
         Ok(())
     }
@@ -1106,6 +1091,7 @@ impl Timeline {
     /// this function will download it.
     ///
     pub async fn reconcile_with_remote(&self, index_part: Option<&IndexPart>) -> Result<()> {
+        trace!("reconciling {}/{} with remote storage", self.tenant_id, self.timeline_id);
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1238,10 +1224,20 @@ impl Timeline {
         // TODO: stop new getpage requests. Or was that done by caller already?
 
         // Shut down WAL receiver
-        let walreceiver: Option<TaskHandle<()>> = self.walreceiver.write().unwrap().take();
-        if let Some(walreceiver_task) = walreceiver {
-            walreceiver_task.shutdown().await;
-        }
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
+        // I think WalReceiverConnection kills and waits for the WalReceiverManager tasks to shut
+        // down, so this might not be necessary. But better safe than sorry.
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverConnection),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
 
         // Wait for all upload tasks to finish.
         if let Some(remote_client) = &self.remote_client {
@@ -1400,22 +1396,23 @@ impl Timeline {
                 self.last_freeze_at.store(last_lsn);
                 *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
-                // Launch a thread to flush the frozen layer to disk, unless
-                // a thread was already running. (If the thread was running
+                // Launch a task to flush the frozen layer to disk, unless
+                // a task was already running. (If the task was running
                 // at the time that we froze the layer, it must've seen the
                 // the layer we just froze before it exited; see comments
                 // in flush_frozen_layers())
                 if let Ok(guard) = self.layer_flush_lock.try_lock() {
                     drop(guard);
                     let self_clone = self.myself.upgrade().unwrap();
-                    thread_mgr::spawn(
-                        thread_mgr::ThreadKind::LayerFlushThread,
+                    task_mgr::spawn(
+                        task_mgr::BACKGROUND_RUNTIME.handle(),
+                        task_mgr::TaskKind::LayerFlushTask,
                         Some(self.tenant_id),
                         Some(self.timeline_id),
-                        "layer flush thread",
+                        "layer flush task",
                         false,
-                        move || self_clone.flush_frozen_layers(false),
-                    )?;
+                        async move { self_clone.flush_frozen_layers(false) },
+                    );
                 }
             }
         }
@@ -1424,8 +1421,8 @@ impl Timeline {
 
     /// Flush all frozen layers to disk.
     ///
-    /// Only one thread at a time can be doing layer-flushing for a
-    /// given timeline. If 'wait' is true, and another thread is
+    /// Only one task at a time can be doing layer-flushing for a
+    /// given timeline. If 'wait' is true, and another task is
     /// currently doing the flushing, this function will wait for it
     /// to finish. If 'wait' is false, this function will return
     /// immediately instead.
@@ -1452,9 +1449,9 @@ impl Timeline {
                 // Drop the 'layer_flush_lock' *before* 'layers'. That
                 // way, if you freeze a layer, and then call
                 // flush_frozen_layers(false), it is guaranteed that
-                // if another thread was busy flushing layers and the
+                // if another task was busy flushing layers and the
                 // call therefore returns immediately, the other
-                // thread will have seen the newly-frozen layer and
+                // task will have seen the newly-frozen layer and
                 // will flush that too (assuming no errors).
                 drop(flush_lock_guard);
                 drop(layers);
@@ -1548,7 +1545,7 @@ impl Timeline {
             ondisk_prev_record_lsn,
             ancestor_timelineid,
             self.ancestor_lsn,
-            *self.latest_gc_cutoff_lsn.read().unwrap(),
+            *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,
         );
 
@@ -1613,7 +1610,7 @@ impl Timeline {
         Ok(new_delta_path)
     }
 
-    pub fn compact(&self) -> Result<()> {
+    pub async fn compact(&self) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
         //
@@ -1648,7 +1645,6 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
 
         let target_file_size = self.get_checkpoint_distance();
 
@@ -2175,15 +2171,13 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub fn gc(&self) -> Result<GcResult> {
+    pub async fn gc(&self) -> Result<GcResult> {
         let mut result: GcResult = Default::default();
         let now = SystemTime::now();
 
         fail_point!("before-timeline-gc");
 
-        let _layer_removal_cs = self.layer_removal_cs.lock().unwrap();
-
-        let gc_info = self.gc_info.read().unwrap();
+        let gc_info = self.gc_info.read().unwrap().clone();
 
         let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
         let pitr_cutoff = gc_info.pitr_cutoff;
@@ -2201,11 +2195,12 @@ impl Timeline {
             return Ok(result);
         }
 
-        let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
+        // FIXME
+        //let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
 
         // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.
-        *self.latest_gc_cutoff_lsn.write().unwrap() = new_gc_cutoff;
+        self.latest_gc_cutoff_lsn.store(new_gc_cutoff).await;
 
         info!("GC starting");
 
@@ -2314,6 +2309,9 @@ impl Timeline {
             );
             layers_to_remove.push(Arc::clone(l));
         }
+
+        // FIXME: should we update metadata on-disk with the latest_gc_cutoff_lsn, before
+        // we delete the files?
 
         // Actually delete the layers from disk and remove them from the map.
         // (couldn't do this in the loop above, because you cannot modify a collection
@@ -2446,28 +2444,37 @@ impl Timeline {
                 // Need to spawn, because the future returned by download_layer_file is
                 // not Sync. Spawn it in the storage sync runtime
                 let remote_layer = Arc::clone(&remote_layer);
-                let remote_client = s.remote_client.as_ref().unwrap();
-                remote_client.runtime.spawn(async move {
-                    let remote_client = s.remote_client.as_ref().unwrap();
-                    let result = remote_client.download_layer_file(&remote_layer.path).await;
-                    self.metrics.layers_downloaded_total.inc();
 
-                    // Download complete. Replace the RemoteLayer with the corresponding
-                    // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self.conf);
-                    let mut layers = self.layers.write().unwrap();
-                    {
-                        let l: Arc<dyn Layer> = remote_layer.clone();
-                        layers.remove_historic(&l);
-                    }
-                    layers.insert_historic(new_layer);
-                    drop(layers);
+                task_mgr::spawn(
+                    &tokio::runtime::Handle::current(),
+                    TaskKind::RemoteDownloadTask,
+                    Some(self.tenant_id),
+                    Some(self.timeline_id),
+                    &format!("download layer {}", remote_layer.filename().display()),
+                    false,
+                    async move {
+                        let remote_client = s.remote_client.as_ref().unwrap();
+                        let result = remote_client.download_layer_file(&remote_layer.path).await;
+                        self.metrics.layers_downloaded_total.inc();
 
-                    // Notify waiters that the download has finished.
-                    if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
-                        let _ = sender.send_replace(result);
-                    }
-                });
+                        // Download complete. Replace the RemoteLayer with the corresponding
+                        // Delta- or ImageLayer in the layer map.
+                        let new_layer = remote_layer.create_downloaded_layer(self.conf);
+                        let mut layers = self.layers.write().unwrap();
+                        {
+                            let l: Arc<dyn Layer> = remote_layer.clone();
+                            layers.remove_historic(&l);
+                        }
+                        layers.insert_historic(new_layer);
+                        drop(layers);
+
+                        // Notify waiters that the download has finished.
+                        if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
+                            let _ = sender.send_replace(result);
+                        }
+                        Ok(())
+                    },
+                );
                 receiver
             }
         };
@@ -2477,7 +2484,7 @@ impl Timeline {
 
         let x = receiver.borrow();
         match x.as_ref() {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(()), // FIXME: is Ok(error) also possible?
             Err(err) => Err(anyhow!(
                 "could not download layer file {}: {:?}",
                 remote_layer.filename().display(),

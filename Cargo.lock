@@ -1851,6 +1851,8 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
+ "async-trait",
  "byteorder",
  "bytes",
  "chrono",
@@ -1891,6 +1893,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "tokio-scoped",
+ "tokio-util",
  "toml_edit",
  "tracing",
  "url",
@@ -3376,6 +3380,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-scoped"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4beb8ba13bc53ac53ce1d52b42f02e5d8060f0f42138862869beb769722b256"
+dependencies = [
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "tokio-stream"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3665,6 +3679,7 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode",
  "byteorder",
  "bytes",
@@ -3692,6 +3707,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "workspace_hack",

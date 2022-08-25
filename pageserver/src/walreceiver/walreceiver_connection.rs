@@ -21,6 +21,9 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use super::TaskEvent;
 use crate::{
     layered_repository::{Timeline, WalReceiverInfo},
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::WALRECEIVER_RUNTIME,
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
@@ -83,24 +86,31 @@ pub async fn handle_walreceiver_connection(
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     let mut connection_cancellation = cancellation.clone();
-    tokio::spawn(
+    task_mgr::spawn(
+        WALRECEIVER_RUNTIME.handle(),
+        TaskKind::WalReceiverConnection,
+        Some(timeline.tenant_id),
+        Some(timeline.timeline_id),
+        "walreceiver connection",
+        false,
         async move {
             select! {
-                    connection_result = connection => match connection_result{
-                            Ok(()) => info!("Walreceiver db connection closed"),
-                            Err(connection_error) => {
-                                if connection_error.is_closed() {
-                                    info!("Connection closed regularly: {connection_error}")
-                                } else {
-                                    warn!("Connection aborted: {connection_error}")
-                                }
-                            }
-                        },
+                connection_result = connection => match connection_result{
+                    Ok(()) => info!("Walreceiver db connection closed"),
+                    Err(connection_error) => {
+                        if connection_error.is_closed() {
+                            info!("Connection closed regularly: {connection_error}")
+                        } else {
+                            warn!("Connection aborted: {connection_error}")
+                        }
+                    }
+                },
 
-                    _ = connection_cancellation.changed() => info!("Connection cancelled"),
+                _ = connection_cancellation.changed() => info!("Connection cancelled"),
             }
+            Ok(())
         }
-        .instrument(info_span!("safekeeper_handle_db")),
+        .instrument(info_span!("safekeeper_handle_db")), // FIXME
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.

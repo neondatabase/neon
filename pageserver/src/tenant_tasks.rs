@@ -1,75 +1,78 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
 
-use std::ops::ControlFlow;
 use std::time::Duration;
 
 use crate::layered_repository::{Repository, TenantState};
-use anyhow;
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use std::sync::Arc;
 use tracing::*;
 
+// FIXME: use task_mgr
 pub fn start_background_loops(repo: &Arc<Repository>) {
+    let tenant_id = repo.tenant_id();
     let repo_clone = Arc::clone(repo);
-    tokio::spawn(async { crate::tenant_tasks::compaction_loop(repo_clone).await });
+    task_mgr::spawn(
+        &BACKGROUND_RUNTIME.handle(),
+        TaskKind::Compaction,
+        Some(tenant_id),
+        None,
+        &format!("compactor for tenant {tenant_id}"),
+        false,
+        async {
+            compaction_loop(repo_clone).await;
+            Ok(())
+        }
+    );
     let repo_clone = Arc::clone(repo);
-    tokio::spawn(async { crate::tenant_tasks::gc_loop(repo_clone).await });
+    task_mgr::spawn(
+        &BACKGROUND_RUNTIME.handle(),
+        TaskKind::GarbageCollector,
+        Some(tenant_id),
+        None,
+        &format!("garbage collector for tenant {tenant_id}"),
+        false,
+        async {
+            gc_loop(repo_clone).await;
+            Ok(())
+        }
+    );
 }
 
 ///
 /// Compaction task's main loop
 ///
-pub async fn compaction_loop(repo: Arc<Repository>) {
+async fn compaction_loop(repo: Arc<Repository>) {
     loop {
         trace!("waking up");
 
         // Run blocking part of the task
         let repo = Arc::clone(&repo);
-        let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
+        let sleep_duration = {
             // Break if tenant is not active
             if repo.get_state() != TenantState::Active {
-                return Ok(ControlFlow::Break(()));
+                break;
             }
-
-            // Break if we're not allowed to write to disk
-            // TODO do this inside repo.compaction_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
 
             // Run compaction
             let compaction_period = repo.get_compaction_period();
-            repo.compaction_iteration()?;
-            Ok(ControlFlow::Continue(compaction_period))
-        })
-        .await;
-
-        // Decide whether to sleep or break
-        let sleep_duration = match period {
-            Ok(Ok(ControlFlow::Continue(period))) => period,
-            Ok(Ok(ControlFlow::Break(()))) => break,
-            Ok(Err(e)) => {
+            if let Err(e) = repo.compaction_iteration().await {
                 error!("Compaction failed, retrying: {}", e);
                 Duration::from_secs(2)
-            }
-            Err(e) => {
-                error!("Compaction join error, retrying: {}", e);
-                Duration::from_secs(2)
+            } else {
+                compaction_period
             }
         };
 
         // Sleep
         // FIXME: cancellation
         tokio::select! {
-                /*
-                    _ = cancel.changed() => {
-                        trace!("received cancellation request");
-                        break;
-                    },
-        */
-                    _ = tokio::time::sleep(sleep_duration) => {},
-                }
+            _ = task_mgr::shutdown_watcher() => {
+                trace!("received cancellation request");
+                break;
+            },
+            _ = tokio::time::sleep(sleep_duration) => {},
+        }
     }
 
     trace!("compaction loop stopped. State is {:?}", repo.get_state());
@@ -78,58 +81,36 @@ pub async fn compaction_loop(repo: Arc<Repository>) {
 ///
 /// GC task's main loop
 ///
-pub async fn gc_loop(repo: Arc<Repository>) {
+async fn gc_loop(repo: Arc<Repository>) {
     loop {
         trace!("waking up");
 
+        let gc_period = repo.get_gc_period();
+        let gc_horizon = repo.get_gc_horizon();
+
         // Run blocking part of the task
         let repo = Arc::clone(&repo);
-        let period: Result<Result<_, anyhow::Error>, _> = tokio::task::spawn_blocking(move || {
-            // Break if tenant is not active
-            if repo.get_state() != TenantState::Active {
-                return Ok(ControlFlow::Break(()));
-            }
+        let mut sleep_duration = gc_period;
 
-            // Break if we're not allowed to write to disk
-            // TODO do this inside repo.gc_iteration instead.
-            let _guard = match repo.file_lock.try_read() {
-                Ok(g) => g,
-                Err(_) => return Ok(ControlFlow::Break(())),
-            };
+        // Break if tenant is not active
+        if repo.get_state() != TenantState::Active {
+            break;
+        }
 
-            // Run gc
-            let gc_period = repo.get_gc_period();
-            let gc_horizon = repo.get_gc_horizon();
-            if gc_horizon > 0 {
-                repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)?;
-            }
-
-            Ok(ControlFlow::Continue(gc_period))
-        })
-        .await;
-
-        // Decide whether to sleep or break
-        let sleep_duration = match period {
-            Ok(Ok(ControlFlow::Continue(period))) => period,
-            Ok(Ok(ControlFlow::Break(()))) => break,
-            Ok(Err(e)) => {
+        // Run gc
+        if gc_horizon > 0 {
+            if let Err(e) = repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false).await {
                 error!("Gc failed, retrying: {}", e);
-                Duration::from_secs(2)
+                sleep_duration = Duration::from_secs(2)
             }
-            Err(e) => {
-                error!("Gc join error, retrying: {}", e);
-                Duration::from_secs(2)
-            }
-        };
+        }
 
         // Sleep
         tokio::select! {
-            /*
-            _ = cancel.changed() => {
+            _ = task_mgr::shutdown_watcher() => {
                 trace!("received cancellation request");
                 break;
             },
-             */
             _ = tokio::time::sleep(sleep_duration) => {},
         }
     }

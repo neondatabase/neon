@@ -17,6 +17,9 @@ use std::{
 };
 
 use crate::layered_repository::Timeline;
+use crate::task_mgr;
+use crate::task_mgr::TaskKind;
+use crate::task_mgr::WALRECEIVER_RUNTIME;
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use etcd_broker::{
@@ -44,15 +47,19 @@ pub fn spawn_connection_manager_task(
     wal_connect_timeout: Duration,
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
-) -> TaskHandle<()> {
+) -> anyhow::Result<()> {
     let mut etcd_client = get_etcd_client().clone();
 
-    let id = ZTenantTimelineId {
-        tenant_id: timeline.tenant_id,
-        timeline_id: timeline.timeline_id,
-    };
+    let tenant_id = timeline.tenant_id;
+    let timeline_id = timeline.timeline_id;
 
-    TaskHandle::spawn(move |_, mut cancellation| {
+    task_mgr::spawn(
+        &WALRECEIVER_RUNTIME.handle(),
+        TaskKind::WalReceiverManager,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!("walreceiver for tenant {} timeline {}", timeline.tenant_id, timeline.timeline_id),
+        false,
         async move {
             info!("WAL receiver broker started, connecting to etcd");
             let mut walreceiver_state = WalreceiverState::new(
@@ -63,8 +70,9 @@ pub fn spawn_connection_manager_task(
             );
             loop {
                 select! {
-                    _ = cancellation.changed() => {
-                        info!("Broker subscription init cancelled, shutting down");
+                    _ = task_mgr::shutdown_watcher() => {
+                        info!("WAL receiver shutdown requested, shutting down");
+                        // Kill current connection, if any
                         if let Some(wal_connection) = walreceiver_state.wal_connection.take()
                         {
                             wal_connection.connection_task.shutdown().await;
@@ -80,13 +88,15 @@ pub fn spawn_connection_manager_task(
                 }
             }
         }
-        .instrument(info_span!("wal_connection_manager", id = %id))
-    })
+        .instrument(info_span!("wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
+    );
+    Ok(())
 }
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
 /// If etcd subscription is cancelled, exits.
+
 async fn connection_manager_loop_step(
     broker_prefix: &str,
     etcd_client: &mut Client,
@@ -108,19 +118,32 @@ async fn connection_manager_loop_step(
     loop {
         let time_until_next_retry = walreceiver_state.time_until_next_retry();
 
+        // FIXME: my (Heikki) notes while trying to understand how this works:
+        //
+        // These things are happening concurrently:
+        //
+        //  - keep receiving WAL on the current connection
+        //      - if the shared state says we need to change connection, disconnect and return
+        //      - this runs in a separate task and we receive updates via a watch channel
+        //  - change connection if the rules decide so, or if the current connection dies
+        //  - receive updates from broker
+        //      - this might change the current desired connection
         select! {
+            // TODO: what does this do?
             broker_connection_result = &mut broker_subscription.watcher_handle => {
                 cleanup_broker_connection(broker_connection_result, walreceiver_state);
                 return;
             },
 
+            // TODO: what does this do?
             Some(wal_connection_update) = async {
                 match walreceiver_state.wal_connection.as_mut() {
                     Some(wal_connection) => Some(wal_connection.connection_task.next_task_event().await),
                     None => None,
                 }
             } => {
-                let wal_connection = walreceiver_state.wal_connection.as_mut().expect("Should have a connection, as checked by the corresponding select! guard");
+                let wal_connection = walreceiver_state.wal_connection.as_mut()
+                    .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
                     TaskEvent::Started => {},
                     TaskEvent::NewEvent(status) => {
@@ -133,16 +156,14 @@ async fn connection_manager_loop_step(
                         }
                         wal_connection.status = status;
                     },
-                    TaskEvent::End(end_result) => {
-                        match end_result {
-                            Ok(()) => debug!("WAL receiving task finished"),
-                            Err(e) => warn!("WAL receiving task failed: {e}"),
-                        };
+                    TaskEvent::End => {
+                        debug!("WAL receiving task finished");
                         walreceiver_state.drop_old_connection(false).await;
                     },
                 }
             },
 
+            // Got a new update from etcd
             broker_update = broker_subscription.value_updates.recv() => {
                 match broker_update {
                     Some(broker_update) => walreceiver_state.register_timeline_update(broker_update),

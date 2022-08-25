@@ -63,7 +63,7 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 // - run initdb to init temporary instance and get bootstrap data
 // - after initialization complete, remove the temp dir.
 //
-fn bootstrap_timeline(
+async fn bootstrap_timeline(
     conf: &'static PageServerConf,
     tenantid: ZTenantId,
     tli: ZTimelineId,
@@ -90,7 +90,7 @@ fn bootstrap_timeline(
         bail!("failpoint before-checkpoint-new-timeline");
     });
 
-    timeline.checkpoint(CheckpointConfig::Forced)?;
+    timeline.checkpoint(CheckpointConfig::Forced).await?;
 
     info!(
         "created root timeline {} timeline.lsn {}",
@@ -113,7 +113,7 @@ fn bootstrap_timeline(
 /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
 /// a new unique ID is generated.
 ///
-pub(crate) fn create_timeline(
+pub(crate) async fn create_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     new_timeline_id: Option<ZTimelineId>,
@@ -142,7 +142,7 @@ pub(crate) fn create_timeline(
                 // sizes etc. and that would get confused if the previous page versions
                 // are not in the repository yet.
                 *lsn = lsn.align();
-                ancestor_timeline.wait_lsn(*lsn)?;
+                ancestor_timeline.wait_lsn(*lsn).await?;
 
                 let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                 if ancestor_ancestor_lsn > *lsn {
@@ -162,7 +162,7 @@ pub(crate) fn create_timeline(
             timeline
         }
         None => {
-            let timeline = bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?;
+            let timeline = bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref()).await?;
             timeline.launch_wal_receiver()?;
             timeline
         }

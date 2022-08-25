@@ -8,6 +8,9 @@ pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive
 pub mod seqwait;
 
+/// SimpleRcu is a simple read-copy-update implementation
+pub mod simple_rcu;
+
 /// append only ordered map implemented with a Vec
 pub mod vec_map;
 
@@ -16,6 +19,7 @@ pub mod vec_map;
 
 pub mod bin_ser;
 pub mod postgres_backend;
+pub mod postgres_backend_async;
 pub mod pq_proto;
 
 // dealing with connstring parsing and handy access to it's parts
