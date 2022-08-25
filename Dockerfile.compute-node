@@ -1,0 +1,93 @@
+ARG TAG=pinned
+
+FROM debian:bullseye-slim AS build-deps
+RUN apt update &&  \
+    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
+    libcurl4-openssl-dev libossp-uuid-dev
+
+# Build Postgres from the neon postgres repository.
+FROM build-deps AS pg-build
+COPY vendor/postgres postgres
+RUN cd postgres && \
+    ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
+    # Install headers
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install
+
+# Build PostGIS from the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
+# Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
+# investigation to check that it works, and also keeps working in the future. So for now, we compile our own binaries.
+FROM build-deps AS postgis-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+RUN apt update && \
+    apt install -y gdal-bin libgdal-dev libprotobuf-c-dev protobuf-c-compiler xsltproc wget
+
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.2.3.tar.gz && \
+    tar xvzf postgis-3.2.3.tar.gz && \
+    cd postgis-3.2.3 && \
+    ./autogen.sh && \
+    export PATH="/usr/local/pgsql/bin:$PATH" && \
+    ./configure && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    cd extensions/postgis && \
+    make clean && \
+    make -j $(getconf _NPROCESSORS_ONLN) install
+
+# Build plv8
+FROM build-deps AS plv8-build
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+RUN apt update && \
+    apt install -y git curl wget make ninja-build build-essential libncurses5 python3-dev pkg-config libc++-dev libc++abi-dev libglib2.0-dev
+
+# https://github.com/plv8/plv8/issues/475
+# Debian bullseye provides binutils 2.35 when >= 2.38 is necessary
+RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
+    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    apt update && \
+    apt install -y --no-install-recommends -t testing binutils
+
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.3.tar.gz && \
+    tar xvzf v3.1.3.tar.gz && \
+    cd plv8-3.1.3 && \
+    export PATH="/usr/local/pgsql/bin:$PATH" && \
+    make && \
+    make install && \
+    rm -rf /plv8-*
+
+# Compile and run the Neon-specific `compute_ctl` binary
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
+USER nonroot
+COPY --chown=nonroot compute_tools compute_tools
+COPY --chown=nonroot workspace_hack workspace_hack
+RUN cd compute_tools && cargo build --release
+
+# Put it all together into the final image
+FROM debian:bullseye-slim
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+
+# TODO: Check if we can make the extension setup more modular versus a linear build
+# currently plv8-build copies the output /usr/local/pgsql from postgis-build#
+COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local/pgsql
+COPY --from=compute-tools --chown=postgres /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
+
+RUN apt update &&  \
+    apt install -y libreadline-dev libossp-uuid-dev gdal-bin libgdal-dev libprotobuf-c-dev && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Debian bullseye provides GLIBC 2.31 when 2.34 is necessary as we compiled plv8 with that version
+RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
+    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    apt update && \
+    apt install -y --no-install-recommends -t testing binutils && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+ENV PATH=/usr/local/pgsql/bin:$PATH
+USER postgres
+ENTRYPOINT ["/usr/local/bin/compute_ctl"]

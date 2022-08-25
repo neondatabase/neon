@@ -472,10 +472,6 @@ jobs:
   compute-node-image:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
-    # note: This image depends on neondatabase/compute-tools:latest (or :thisversion),
-    # which isn't available until after the image is promoted.
-    # Ergo, we must explicitly build and promote compute-tools separately.
-    needs: [ compute-tools-image ]
 
     steps:
       - name: Checkout
@@ -487,9 +483,8 @@ jobs:
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Kaniko build compute node
-        working-directory: ./vendor/postgres/
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg=TAG=$GITHUB_RUN_ID --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+      - name: Kaniko build compute node with extensions
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
