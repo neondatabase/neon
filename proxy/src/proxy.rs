@@ -1,6 +1,6 @@
 use crate::auth;
 use crate::cancellation::{self, CancelMap};
-use crate::config::{ProxyConfig, TlsConfig};
+use crate::config::{AuthUrls, ProxyConfig, TlsConfig};
 use crate::stream::{MetricsStream, PqStream, Stream};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
@@ -93,20 +93,21 @@ async fn handle_client(
         None => return Ok(()), // it's a cancellation request
     };
 
+    // Extract credentials which we're going to use for auth.
     let creds = {
         let sni = stream.get_ref().sni_hostname();
         let common_name = tls.and_then(|tls| tls.common_name.as_deref());
         let result = config
             .auth_backend
-            .map(|_| auth::ClientCredentials::parse(params, sni, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds);
+    let client = Client::new(stream, creds, &params);
     cancel_map
-        .with_session(|session| client.connect_to_db(config, session))
+        .with_session(|session| client.connect_to_db(&config.auth_urls, session))
         .await
 }
 
@@ -174,38 +175,57 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Thin connection context.
-struct Client<S> {
+struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<S>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<auth::ClientCredentials>,
+    creds: auth::BackendType<auth::ClientCredentials<'a>>,
+    /// KV-dictionary with PostgreSQL connection params.
+    params: &'a StartupMessageParams,
 }
 
-impl<S> Client<S> {
+impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
-    fn new(stream: PqStream<S>, creds: auth::BackendType<auth::ClientCredentials>) -> Self {
-        Self { stream, creds }
+    fn new(
+        stream: PqStream<S>,
+        creds: auth::BackendType<auth::ClientCredentials<'a>>,
+        params: &'a StartupMessageParams,
+    ) -> Self {
+        Self {
+            stream,
+            creds,
+            params,
+        }
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(
         self,
-        config: &ProxyConfig,
+        urls: &AuthUrls,
         session: cancellation::Session<'_>,
     ) -> anyhow::Result<()> {
-        let Self { mut stream, creds } = self;
+        let Self {
+            mut stream,
+            creds,
+            params,
+        } = self;
 
         // Authenticate and connect to a compute node.
-        let auth = creds.authenticate(&config.auth_urls, &mut stream).await;
+        let auth = creds.authenticate(urls, &mut stream).await;
         let node = async { auth }.or_else(|e| stream.throw_error(e)).await?;
+        let reported_auth_ok = node.reported_auth_ok;
 
-        let (db, cancel_closure) = node.connect().or_else(|e| stream.throw_error(e)).await?;
-        let cancel_key_data = session.enable_cancellation(cancel_closure);
+        let (db, cancel_closure) = node
+            .connect(params)
+            .or_else(|e| stream.throw_error(e))
+            .await?;
+
+        let cancel_key_data = session.enable_query_cancellation(cancel_closure);
 
         // Report authentication success if we haven't done this already.
-        if !node.reported_auth_ok {
+        if !reported_auth_ok {
             stream
                 .write_message_noflush(&Be::AuthenticationOk)?
                 .write_message_noflush(&BeParameterStatusMessage::encoding())?;

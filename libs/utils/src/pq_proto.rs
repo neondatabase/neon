@@ -7,11 +7,14 @@ use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::future::Future;
-use std::io::{self, Cursor};
-use std::str;
-use std::time::{Duration, SystemTime};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    future::Future,
+    io::{self, Cursor},
+    str,
+    time::{Duration, SystemTime},
+};
 use tokio::io::AsyncReadExt;
 use tracing::{trace, warn};
 
@@ -53,7 +56,67 @@ pub enum FeStartupPacket {
     },
 }
 
-pub type StartupMessageParams = HashMap<String, String>;
+#[derive(Debug)]
+pub struct StartupMessageParams {
+    params: HashMap<String, String>,
+}
+
+impl StartupMessageParams {
+    /// Get parameter's value by its name.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.params.get(name).map(|s| s.as_str())
+    }
+
+    /// Split command-line options according to PostgreSQL's logic,
+    /// taking into account all escape sequences but leaving them as-is.
+    /// [`None`] means that there's no `options` in [`Self`].
+    pub fn options_raw(&self) -> Option<impl Iterator<Item = &str>> {
+        // See `postgres: pg_split_opts`.
+        let mut last_was_escape = false;
+        let iter = self
+            .get("options")?
+            .split(move |c: char| {
+                // We split by non-escaped whitespace symbols.
+                let should_split = c.is_ascii_whitespace() && !last_was_escape;
+                last_was_escape = c == '\\' && !last_was_escape;
+                should_split
+            })
+            .filter(|s| !s.is_empty());
+
+        Some(iter)
+    }
+
+    /// Split command-line options according to PostgreSQL's logic,
+    /// applying all escape sequences (using owned strings as needed).
+    /// [`None`] means that there's no `options` in [`Self`].
+    pub fn options_escaped(&self) -> Option<impl Iterator<Item = Cow<'_, str>>> {
+        // See `postgres: pg_split_opts`.
+        let iter = self.options_raw()?.map(|s| {
+            let mut preserve_next_escape = false;
+            let escape = |c| {
+                // We should remove '\\' unless it's preceded by '\\'.
+                let should_remove = c == '\\' && !preserve_next_escape;
+                preserve_next_escape = should_remove;
+                should_remove
+            };
+
+            match s.contains('\\') {
+                true => Cow::Owned(s.replace(escape, "")),
+                false => Cow::Borrowed(s),
+            }
+        });
+
+        Some(iter)
+    }
+
+    // This function is mostly useful in tests.
+    #[doc(hidden)]
+    pub fn new<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> Self {
+        Self {
+            params: pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).into(),
+        }
+    }
+}
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CancelKeyData {
@@ -237,9 +300,9 @@ impl FeStartupPacket {
             stream.read_exact(params_bytes.as_mut()).await?;
 
             // Parse params depending on request code
-            let most_sig_16_bits = request_code >> 16;
-            let least_sig_16_bits = request_code & ((1 << 16) - 1);
-            let message = match (most_sig_16_bits, least_sig_16_bits) {
+            let req_hi = request_code >> 16;
+            let req_lo = request_code & ((1 << 16) - 1);
+            let message = match (req_hi, req_lo) {
                 (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                     ensure!(params_len == 8, "expected 8 bytes for CancelRequest params");
                     let mut cursor = Cursor::new(params_bytes);
@@ -248,49 +311,44 @@ impl FeStartupPacket {
                         cancel_key: cursor.read_i32().await?,
                     })
                 }
-                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => FeStartupPacket::SslRequest,
+                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
+                    // Requested upgrade to SSL (aka TLS)
+                    FeStartupPacket::SslRequest
+                }
                 (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
+                    // Requested upgrade to GSSAPI
                     FeStartupPacket::GssEncRequest
                 }
                 (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
                     bail!("Unrecognized request code {}", unrecognized_code)
                 }
+                // TODO bail if protocol major_version is not 3?
                 (major_version, minor_version) => {
-                    // TODO bail if protocol major_version is not 3?
-                    // Parse null-terminated (String) pairs of param name / param value
-                    let params_str = str::from_utf8(&params_bytes).unwrap();
-                    let mut params_tokens = params_str.split('\0');
-                    let mut params: HashMap<String, String> = HashMap::new();
-                    while let Some(name) = params_tokens.next() {
-                        let value = params_tokens
+                    // Parse pairs of null-terminated strings (key, value).
+                    // See `postgres: ProcessStartupPacket, build_startup_packet`.
+                    let mut tokens = str::from_utf8(&params_bytes)
+                        .context("StartupMessage params: invalid utf-8")?
+                        .strip_suffix('\0') // drop packet's own null terminator
+                        .context("StartupMessage params: missing null terminator")?
+                        .split_terminator('\0');
+
+                    let mut params = HashMap::new();
+                    while let Some(name) = tokens.next() {
+                        let value = tokens
                             .next()
-                            .context("expected even number of params in StartupMessage")?;
-                        if name == "options" {
-                            // parsing options arguments "...&options=<var0>%3D<val0>+<var1>=<var1>..."
-                            // '%3D' is '=' and '+' is ' '
+                            .context("StartupMessage params: key without value")?;
 
-                            // Note: we allow users that don't have SNI capabilities,
-                            // to pass a special keyword argument 'project'
-                            // to be used to determine the cluster name by the proxy.
-
-                            //TODO: write unit test for this and refactor in its own function.
-                            for cmdopt in value.split(' ') {
-                                let nameval: Vec<&str> = cmdopt.split('=').collect();
-                                if nameval.len() == 2 {
-                                    params.insert(nameval[0].to_string(), nameval[1].to_string());
-                                }
-                            }
-                        } else {
-                            params.insert(name.to_string(), value.to_string());
-                        }
+                        params.insert(name.to_owned(), value.to_owned());
                     }
+
                     FeStartupPacket::StartupMessage {
                         major_version,
                         minor_version,
-                        params,
+                        params: StartupMessageParams { params },
                     }
                 }
             };
+
             Ok(Some(FeMessage::StartupPacket(message)))
         })
     }
@@ -965,6 +1023,33 @@ mod tests {
         // Parse serialized data and check that new field is not parsed
         let zf_parsed = ReplicationFeedback::parse(data.freeze());
         assert_eq!(zf, zf_parsed);
+    }
+
+    #[test]
+    fn test_startup_message_params_options_escaped() {
+        fn split_options(params: &StartupMessageParams) -> Vec<Cow<'_, str>> {
+            params
+                .options_escaped()
+                .expect("options are None")
+                .collect()
+        }
+
+        let make_params = |options| StartupMessageParams::new([("options", options)]);
+
+        let params = StartupMessageParams::new([]);
+        assert!(matches!(params.options_escaped(), None));
+
+        let params = make_params("");
+        assert!(split_options(&params).is_empty());
+
+        let params = make_params("foo");
+        assert_eq!(split_options(&params), ["foo"]);
+
+        let params = make_params(" foo  bar ");
+        assert_eq!(split_options(&params), ["foo", "bar"]);
+
+        let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
+        assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
     }
 
     // Make sure that `read` is sync/async callable
