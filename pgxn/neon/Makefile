@@ -1,4 +1,4 @@
-# contrib/neon/Makefile
+# pgxs/neon/Makefile
 
 
 MODULE_big = neon

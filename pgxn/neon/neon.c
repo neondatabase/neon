@@ -20,6 +20,7 @@
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/pg_lsn.h"
+#include "utils/guc.h"
 
 #include "neon.h"
 #include "walproposer.h"
@@ -33,6 +34,8 @@ void		_PG_init(void)
 	pg_init_libpagestore();
 	pg_init_libpqwalproposer();
 	pg_init_walproposer();
+
+	EmitWarningsOnPlaceholders("neon");
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);

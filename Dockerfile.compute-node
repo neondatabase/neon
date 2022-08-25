@@ -13,7 +13,8 @@ RUN cd postgres && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
     # Install headers
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install
 
 # Build PostGIS from the upstream PostGIS mirror. PostGIS compiles against neon postgres sources without changes.
 # Perhaps we could even use the upstream binaries, compiled against vanilla Postgres, but it would require some
@@ -55,6 +56,16 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.3.tar.gz && \
     make install && \
     rm -rf /plv8-*
 
+# compile neon extensions
+FROM build-deps AS neon-pg-ext-build
+COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY pgxn/ pgxn/
+
+RUN make -j $(getconf _NPROCESSORS_ONLN) \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon \
+        -s install
+
 # Compile and run the Neon-specific `compute_ctl` binary
 FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
 USER nonroot
@@ -73,8 +84,8 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
 
 # TODO: Check if we can make the extension setup more modular versus a linear build
-# currently plv8-build copies the output /usr/local/pgsql from postgis-build#
-COPY --from=plv8-build --chown=postgres /usr/local/pgsql /usr/local
+# currently plv8-build copies the output /usr/local/pgsql from postgis-build, etc#
+COPY --from=neon-pg-ext-build --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/compute_tools/target/release/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \

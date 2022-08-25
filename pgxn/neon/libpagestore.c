@@ -402,7 +402,6 @@ pg_init_libpagestore(void)
 							NULL, NULL, NULL);
 
 	relsize_hash_init();
-	EmitWarningsOnPlaceholders("neon");
 
 	if (page_server != NULL)
 		neon_log(ERROR, "libpagestore already loaded");
