@@ -11,7 +11,7 @@ use crate::layered_repository::Timeline;
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::*;
 use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Result};
 use bytes::{Buf, Bytes};
 use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils::TimestampTz;
@@ -936,9 +936,7 @@ impl<'a> DatadirModification<'a> {
         result?;
 
         if pending_nblocks != 0 {
-            writer
-                .update_current_logical_size(pending_nblocks * i64::from(BLCKSZ))
-                .context("failed to update logical size after flush")?;
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
             self.pending_nblocks = 0;
         }
 
@@ -966,9 +964,7 @@ impl<'a> DatadirModification<'a> {
         writer.finish_write(lsn);
 
         if pending_nblocks != 0 {
-            writer
-                .update_current_logical_size(pending_nblocks * i64::from(BLCKSZ))
-                .context("Failed to update logical size after commit")?;
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
         }
 
         Ok(())
