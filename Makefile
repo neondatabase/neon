@@ -51,7 +51,7 @@ CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
 # Top level Makefile to build Zenith and PostgreSQL
 #
 .PHONY: all
-all: zenith postgres
+all: zenith postgres neon-pg-ext
 
 ### Zenith Rust bits
 #
@@ -87,25 +87,39 @@ postgres: postgres-configure \
 		  postgres-headers # to prevent `make install` conflicts with zenith's `postgres-headers`
 	+@echo "Compiling PostgreSQL"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 install
-	+@echo "Compiling contrib/neon"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon install
-	+@echo "Compiling contrib/neon_test_utils"
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/neon_test_utils install
+	+@echo "Compiling libpq"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/src/interfaces/libpq install
 	+@echo "Compiling pg_buffercache"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pageinspect install
 
-
 .PHONY: postgres-clean
 postgres-clean:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build MAKELEVEL=0 clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pg_buffercache clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/contrib/pageinspect clean
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/src/interfaces/libpq clean
+
+neon-pg-ext: postgres
+	+@echo "Compiling neon"
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/bin/pg_config \
+		-C $(ROOT_PROJECT_DIR)/pgxn/neon install
+	+@echo "Compiling neon_test_utils"
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/bin/pg_config \
+		-C $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils install
+
+.PHONY: neon-pg-ext-clean
+	$(MAKE) -C $(ROOT_PROJECT_DIR)/pgxn/neon clean
+	$(MAKE) -C $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils clean
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
 clean:
 	cd $(POSTGRES_INSTALL_DIR)/build && $(MAKE) clean
 	$(CARGO_CMD_PREFIX) cargo clean
+	cd pgxn/neon && $(MAKE) clean
+	cd pgxn/neon_test_utils && $(MAKE) clean
 
 # This removes everything
 .PHONY: distclean

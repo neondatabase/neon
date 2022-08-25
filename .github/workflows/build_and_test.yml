@@ -136,6 +136,10 @@ jobs:
         run: mold -run make postgres -j$(nproc)
         shell: bash -euxo pipefail {0}
 
+      - name: Build neon extensions
+        run: mold -run make neon-pg-ext -j$(nproc)
+        shell: bash -euxo pipefail {0}
+
       - name: Run cargo build
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS --features failpoints --bins --tests
