@@ -1,8 +1,8 @@
+import time
 from contextlib import closing
 
 import psycopg2.extras
 import pytest
-import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
 
@@ -26,23 +26,24 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     # Extend compaction_period and gc_period to disable background compaction and gc.
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            'gc_period': '100 m',
-            'gc_horizon': '1048576',
-            'checkpoint_distance': '8192',
-            'compaction_period': '1 s',
-            'compaction_threshold': '1',
-            'compaction_target_size': '8192',
-        })
+            "gc_period": "100 m",
+            "gc_horizon": "1048576",
+            "checkpoint_distance": "8192",
+            "compaction_period": "1 s",
+            "compaction_threshold": "1",
+            "compaction_target_size": "8192",
+        }
+    )
 
-    env.neon_cli.create_timeline('test_layer_map', tenant_id=tenant)
-    pg = env.postgres.create_start('test_layer_map', tenant_id=tenant)
+    env.neon_cli.create_timeline("test_layer_map", tenant_id=tenant)
+    pg = env.postgres.create_start("test_layer_map", tenant_id=tenant)
     cur = pg.connect().cursor()
     cur.execute("create table t(x integer)")
     for i in range(n_iters):
-        cur.execute(f'insert into t values (generate_series(1,{n_records}))')
+        cur.execute(f"insert into t values (generate_series(1,{n_records}))")
         time.sleep(1)
 
-    cur.execute('vacuum t')
-    with zenbenchmark.record_duration('test_query'):
-        cur.execute('SELECT count(*) from t')
+    cur.execute("vacuum t")
+    with zenbenchmark.record_duration("test_query"):
+        cur.execute("SELECT count(*) from t")
         assert cur.fetchone()[0] == n_iters * n_records
