@@ -8,12 +8,11 @@ use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use std::sync::Arc;
 use tracing::*;
 
-// FIXME: use task_mgr
 pub fn start_background_loops(repo: &Arc<Repository>) {
     let tenant_id = repo.tenant_id();
     let repo_clone = Arc::clone(repo);
     task_mgr::spawn(
-        &BACKGROUND_RUNTIME.handle(),
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
         Some(tenant_id),
         None,
@@ -22,11 +21,11 @@ pub fn start_background_loops(repo: &Arc<Repository>) {
         async {
             compaction_loop(repo_clone).await;
             Ok(())
-        }
+        },
     );
     let repo_clone = Arc::clone(repo);
     task_mgr::spawn(
-        &BACKGROUND_RUNTIME.handle(),
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
         Some(tenant_id),
         None,
@@ -35,7 +34,7 @@ pub fn start_background_loops(repo: &Arc<Repository>) {
         async {
             gc_loop(repo_clone).await;
             Ok(())
-        }
+        },
     );
 }
 
@@ -65,7 +64,6 @@ async fn compaction_loop(repo: Arc<Repository>) {
         };
 
         // Sleep
-        // FIXME: cancellation
         tokio::select! {
             _ = task_mgr::shutdown_watcher() => {
                 trace!("received cancellation request");
@@ -99,7 +97,10 @@ async fn gc_loop(repo: Arc<Repository>) {
 
         // Run gc
         if gc_horizon > 0 {
-            if let Err(e) = repo.gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false).await {
+            if let Err(e) = repo
+                .gc_iteration(None, gc_horizon, repo.get_pitr_interval(), false)
+                .await
+            {
                 error!("Gc failed, retrying: {}", e);
                 sleep_duration = Duration::from_secs(2)
             }

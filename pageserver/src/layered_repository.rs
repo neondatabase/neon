@@ -340,7 +340,8 @@ impl Repository {
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}", *latest_gc_cutoff_lsn
+                "invalid branch start lsn: less than latest GC cutoff {}",
+                *latest_gc_cutoff_lsn
             ))?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
@@ -415,6 +416,7 @@ impl Repository {
         Ok(new_timeline)
     }
 
+    #[instrument(skip(self), fields(tenant_id = %self.tenant_id, timeline_id=%timeline_id))]
     pub async fn delete_timeline(&self, timeline_id: ZTimelineId) -> anyhow::Result<()> {
         // Start with the shutdown of timeline tasks (this shuts down the walreceiver)
         // It is important that we do not take locks here, and do not check whether the timeline exists
@@ -492,7 +494,8 @@ impl Repository {
             let _timer = timeline::STORAGE_TIME
                 .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
                 .start_timer();
-            self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc).await
+            self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
+                .await
         }
     }
 
@@ -514,9 +517,6 @@ impl Repository {
         };
 
         for (_timelineid, timeline) in &timelines_to_compact {
-            // FIXME
-            //let _entered =
-            //    info_span!("compact", timeline = %timelineid, tenant = %self.tenant_id).entered();
             timeline.compact().await?;
         }
 
@@ -628,7 +628,7 @@ impl Repository {
             TaskKind::Attach,
             Some(tenant_id),
             None,
-            &format!("attach tenant {tenant_id}"),
+            "attach tenant",
             false,
             async move {
                 match repo_clone.attach_tenant().await {
@@ -638,7 +638,7 @@ impl Repository {
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
-                Ok(()) // FIXME
+                Ok(())
             },
         );
 
@@ -648,6 +648,7 @@ impl Repository {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     async fn attach_tenant(self: &Arc<Repository>) -> Result<()> {
         // Get list of remote timelines
         // download index files for every tenant timeline
@@ -726,7 +727,7 @@ impl Repository {
                 .context("failed to load layermap")?;
 
             // Download everything from remote storage to local disk
-            timeline.reconcile_with_remote(Some(index_part)).await?;
+            timeline.reconcile_with_remote(Some(index_part), true).await?;
 
             info!("calculating initial size of {}", timeline.timeline_id);
             // FIXME: This will retry the whole init_logical_size operation, if it needs
@@ -770,6 +771,7 @@ impl Repository {
     /// If the loading fails for some reason, the Repository will go into Broken
     /// state.
     ///
+    #[instrument(skip(conf), fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: ZTenantId,
@@ -820,6 +822,7 @@ impl Repository {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     async fn load_tenant(self: &Arc<Repository>) -> Result<()> {
         info!("loading tenant task {}", self.tenant_id);
 
@@ -898,9 +901,8 @@ impl Repository {
     }
 
     fn load_local_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
-        // FIXME
-        //let _enter =
-        //    info_span!("loading timeline state from disk", timeline = %timeline_id).entered();
+        let _enter =
+            info_span!("loading timeline state from disk", timeline = %timeline_id).entered();
         let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
             .context("failed to load metadata")?;
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -948,6 +950,7 @@ impl Repository {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%timeline_id))]
     async fn load_timeline(&self, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
         let timeline = self.load_local_timeline(timeline_id)?;
 
@@ -955,7 +958,7 @@ impl Repository {
             // Reconcile local state with remote storage, downloading anything that's
             // missing locally, and scheduling uploads for anything that's missing
             // in remote storage.
-            timeline.reconcile_with_remote(None).await?;
+            timeline.reconcile_with_remote(None, false).await?;
         }
 
         timeline.init_logical_size()?;
@@ -970,6 +973,7 @@ impl Repository {
     /// or to a different pageserver.
     ///
     /// Returns a JoinHandle that you can use to wait for the detach operation to finish.
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     pub async fn detach_tenant(&self) -> Result<()> {
         let old_state = self.state.send_replace(TenantState::Stopping);
         if old_state == TenantState::Stopping {
@@ -1021,6 +1025,7 @@ impl Repository {
     }
 
     /// Called on pageserver shutdown
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id))]
     pub async fn shutdown(&self) -> Result<()> {
         let old_state = self.state.send_replace(TenantState::Stopping);
         if old_state == TenantState::Stopping {
@@ -1225,6 +1230,7 @@ impl Repository {
     // - if a relation has a non-incremental persistent layer on a child branch, then we
     //   don't need to keep that in the parent anymore. But currently
     //   we do.
+    #[instrument(skip(self), fields(tenant_id = %self.tenant_id, timeline_id = ?target_timeline_id))]
     async fn gc_iteration_internal(
         &self,
         target_timeline_id: Option<ZTimelineId>,
@@ -1232,10 +1238,6 @@ impl Repository {
         pitr: Duration,
         checkpoint_before_gc: bool,
     ) -> Result<GcResult> {
-        // FIXME
-        //let _span_guard =
-        //    info_span!("gc iteration", tenant = %self.tenant_id, timeline = ?target_timeline_id)
-        //        .entered();
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
@@ -1266,8 +1268,10 @@ impl Repository {
                             // If target_timeline is specified, we only need to know branchpoints of its children
                             if let Some(timelineid) = target_timeline_id {
                                 if ancestor_timeline_id == &timelineid {
-                                    all_branchpoints
-                                        .insert((*ancestor_timeline_id, timeline.get_ancestor_lsn()));
+                                    all_branchpoints.insert((
+                                        *ancestor_timeline_id,
+                                        timeline.get_ancestor_lsn(),
+                                    ));
                                 }
                             }
                             // Collect branchpoints for all timelines
@@ -1312,7 +1316,9 @@ impl Repository {
                     // The timeline was deleted, while we were busy GC'ing other timelines
                     // It could happen, but should be rare. Print a message to the log,
                     // so that if it happens more frequently than we expect, we might notice.
-                    info!("timeline {timeline_id} could not be GC'd, becuase it concurrently deleted");
+                    info!(
+                        "timeline {timeline_id} could not be GC'd, becuase it concurrently deleted"
+                    );
                 }
             }
         }
@@ -1814,7 +1820,8 @@ mod tests {
         // FIXME: this doesn't actually remove any layer currently, given how the checkpointing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Some(Lsn(0x25))) {
@@ -1888,7 +1895,8 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25)).is_ok());
 
         Ok(())
@@ -1907,7 +1915,8 @@ mod tests {
         make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
 
         // run gc on parent
-        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false).await?;
+        repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, false)
+            .await?;
 
         // Check that the data is still accessible on the branch.
         assert_eq!(

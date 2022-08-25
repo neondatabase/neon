@@ -1,4 +1,4 @@
-//! Server-side synchronous Postgres connection, as limited as we need.
+//! Server-side asynchronous Postgres connection, as limited as we need.
 //! To use, create PostgresBackend and run() it, passing the Handler
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
@@ -67,7 +67,7 @@ pub enum ProcessMsgResult {
 /// May not be readable. See [`PostgresBackend::take_stream_in`]
 pub enum Stream {
     Unencrypted(tokio::net::TcpStream),
-    Tls(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
     Broken,
 }
 
@@ -195,13 +195,10 @@ impl PostgresBackend {
     }
 
     // Wrapper for run_message_loop() that shuts down socket when we are done
-    pub async fn run<F, S>(
-        mut self,
-        handler: &mut impl Handler,
-        shutdown_watcher: F,
-    ) -> Result<()>
-    where F: Fn() -> S,
-          S: Future,
+    pub async fn run<F, S>(mut self, handler: &mut impl Handler, shutdown_watcher: F) -> Result<()>
+    where
+        F: Fn() -> S,
+        S: Future,
     {
         let ret = self.run_message_loop(handler, shutdown_watcher).await;
         let _ = self.stream.shutdown();
@@ -213,8 +210,9 @@ impl PostgresBackend {
         handler: &mut impl Handler,
         shutdown_watcher: F,
     ) -> Result<()>
-    where F: Fn() -> S,
-          S: Future,
+    where
+        F: Fn() -> S,
+        S: Future,
     {
         trace!("postgres backend to {:?} started", self.peer_addr);
 
@@ -289,7 +287,7 @@ impl PostgresBackend {
             let acceptor = TlsAcceptor::from(self.tls_config.clone().unwrap());
             let tls_stream = acceptor.accept(plain_stream).await?;
 
-            self.stream = Stream::Tls(tls_stream);
+            self.stream = Stream::Tls(Box::new(tls_stream));
             return Ok(());
         };
         bail!("TLS already started");

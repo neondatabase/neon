@@ -333,7 +333,11 @@ pub fn import_basebackup_from_tar<Reader: Read>(
                 debug!("directory {:?}", file_path);
             }
             _ => {
-                bail!("entry {} in backup tar archive is of unexpected type: {:?}", file_path.display(), header.entry_type());
+                bail!(
+                    "entry {} in backup tar archive is of unexpected type: {:?}",
+                    file_path.display(),
+                    header.entry_type()
+                );
             }
         }
     }
@@ -386,7 +390,11 @@ pub fn import_wal_from_tar<Reader: Read>(
                     continue;
                 }
                 _ => {
-                    bail!("entry {} in WAL tar archive is of unexpected type: {:?}", file_path.display(), header.entry_type());
+                    bail!(
+                        "entry {} in WAL tar archive is of unexpected type: {:?}",
+                        file_path.display(),
+                        header.entry_type()
+                    );
                 }
             }
         };
@@ -553,7 +561,10 @@ pub fn import_file<Reader: Read>(
         // this to import arbitrary postgres databases.
         bail!("Importing pg_tblspc is not implemented");
     } else {
-        debug!("ignoring unrecognized file \"{}\" in tar archive", file_path.display());
+        debug!(
+            "ignoring unrecognized file \"{}\" in tar archive",
+            file_path.display()
+        );
     }
 
     Ok(None)

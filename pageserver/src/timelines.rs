@@ -113,6 +113,7 @@ async fn bootstrap_timeline(
 /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
 /// a new unique ID is generated.
 ///
+#[instrument(skip(conf))]
 pub(crate) async fn create_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
@@ -162,7 +163,8 @@ pub(crate) async fn create_timeline(
             timeline
         }
         None => {
-            let timeline = bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref()).await?;
+            let timeline =
+                bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref()).await?;
             timeline.launch_wal_receiver()?;
             timeline
         }

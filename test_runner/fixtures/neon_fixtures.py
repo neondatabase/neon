@@ -1342,7 +1342,10 @@ class NeonCli(AbstractNeonCli):
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
-            res = self.raw_cli(cmd)
+            s3_env_vars = None
+            if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
+                s3_env_vars = self.env.remote_storage.access_env_vars()
+            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
 

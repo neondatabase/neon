@@ -13,7 +13,9 @@ use pageserver::{
     config::{defaults::*, PageServerConf},
     http, page_cache, page_service, profiling, task_mgr,
     task_mgr::TaskKind,
-    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME},
+    task_mgr::{
+        BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
+    },
     tenant_mgr, virtual_file, LOG_FILE_NAME,
 };
 use utils::{
@@ -318,7 +320,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
             .with_graceful_shutdown(task_mgr::shutdown_watcher());
 
         task_mgr::spawn(
-            &MGMT_REQUEST_RUNTIME.handle(),
+            MGMT_REQUEST_RUNTIME.handle(),
             TaskKind::HttpEndpointListener,
             None,
             None,
@@ -334,7 +336,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection.
     task_mgr::spawn(
-        &COMPUTE_REQUEST_RUNTIME.handle(),
+        COMPUTE_REQUEST_RUNTIME.handle(),
         TaskKind::LibpqEndpointListener,
         None,
         None,

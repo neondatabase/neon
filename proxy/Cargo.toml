@@ -11,7 +11,7 @@ bstr = "0.2.17"
 bytes = { version = "1.0.1", features = ['serde'] }
 clap = "3.0"
 futures = "0.3.13"
-hashbrown = "0.11.2"
+hashbrown = "0.12"
 hex = "0.4.3"
 hmac = "0.12.1"
 hyper = "0.14"

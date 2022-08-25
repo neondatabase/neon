@@ -110,7 +110,7 @@ pub async fn handle_walreceiver_connection(
             }
             Ok(())
         }
-        .instrument(info_span!("safekeeper_handle_db")), // FIXME
+        .instrument(info_span!("walreceiver connection")), // FIXME
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.

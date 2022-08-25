@@ -54,7 +54,7 @@ pub fn spawn_connection_manager_task(
     let timeline_id = timeline.timeline_id;
 
     task_mgr::spawn(
-        &WALRECEIVER_RUNTIME.handle(),
+        WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverManager,
         Some(tenant_id),
         Some(timeline_id),

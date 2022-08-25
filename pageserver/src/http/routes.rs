@@ -125,16 +125,15 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    // FIXME
-    //let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
-
     match timelines::create_timeline(
         get_config(&request),
         tenant_id,
         request_data.new_timeline_id.map(ZTimelineId::from),
         request_data.ancestor_timeline_id.map(ZTimelineId::from),
         request_data.ancestor_start_lsn,
-    ).await {
+    )
+    .await
+    {
         Ok(Some(new_timeline)) => {
             // Created. Construct a TimelineInfo for it.
             let info = build_timeline_info(&new_timeline, false, false)?;
@@ -154,7 +153,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_infos = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_list", tenant = %tenant_id).entered();
+        let _enter = info_span!("timeline_list", tenant_id = %tenant_id).entered();
         let repo = tenant_mgr::get_tenant(tenant_id)?;
 
         let mut result = Vec::new();
@@ -197,7 +196,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_info = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("timeline_detail_handler", tenant = %tenant_id).entered();
+        let _enter = info_span!("timeline_detail_handler", tenant_id = %tenant_id).entered();
         let repo = tenant_mgr::get_tenant(tenant_id)?;
         let timeline = repo.get_timeline(timeline_id).ok_or_else(|| {
             ApiError::NotFound(format!(
@@ -227,7 +226,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let conf = get_config(&request);
 
     tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_attach_handler", tenant = %tenant_id).entered();
+        let _enter = info_span!("tenant_attach_handler", tenant_id = %tenant_id).entered();
         if let Err(err) = tenant_mgr::attach_tenant(conf, tenant_id) {
             // FIXME: distinguish between "Tenant is already present locally" and other errors
             error!("could not attach tenant: {:?}", err);
@@ -246,10 +245,6 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    // FIXME span
-    //let _enter =
-    //    info_span!("timeline_delete_handler", tenant = %tenant_id, timeline = %timeline_id)
-    //        .entered();
     let repo = tenant_mgr::get_tenant(tenant_id)?;
     if let Err(err) = repo.delete_timeline(timeline_id).await {
         error!("could not delete timeline: {:?}", err);
@@ -262,9 +257,6 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-
-    // FIXME
-    //let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
 
     if let Err(err) = tenant_mgr::detach_tenant(tenant_id).await {
         // FIXME: distinguish between "Tenant is already present locally" and other errors

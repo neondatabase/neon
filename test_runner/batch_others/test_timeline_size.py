@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     Postgres,
-    assert_timeline_local,
     wait_for_last_flush_lsn,
 )
 from fixtures.utils import get_timeline_dir_size

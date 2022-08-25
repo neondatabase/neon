@@ -181,8 +181,12 @@ use self::index::IndexPart;
 pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 use crate::{
-    config::PageServerConf, layered_repository::metadata::TimelineMetadata,
-    storage_sync::index::RelativePath, task_mgr, task_mgr::TaskKind, task_mgr::BACKGROUND_RUNTIME,
+    config::PageServerConf,
+    layered_repository::metadata::TimelineMetadata,
+    storage_sync::index::RelativePath,
+    task_mgr,
+    task_mgr::TaskKind,
+    task_mgr::BACKGROUND_RUNTIME,
     {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
@@ -289,8 +293,11 @@ enum UploadOp {
 
 impl RemoteTimelineClient {
     pub fn init_upload_queue(&self, files: &HashSet<RelativePath>, metadata: &TimelineMetadata) {
-        info!("initializing upload queue for tenant {}, disk_consistent_lsn: {}",
-              self.tenant_id, metadata.disk_consistent_lsn());
+        info!(
+            "initializing upload queue for tenant {}, disk_consistent_lsn: {}",
+            self.tenant_id,
+            metadata.disk_consistent_lsn()
+        );
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.latest_files = files.clone();
         upload_queue.latest_metadata = Some(metadata.clone());

@@ -278,7 +278,7 @@ where
 }
 
 /// This wrapper function runs in a newly-spawned task. It initializes the
-/// task-local variables and calls the payload function. FIXME
+/// task-local variables and calls the payload function.
 async fn task_wrapper<F>(
     task_name: String,
     task_id: u64,
@@ -290,6 +290,7 @@ async fn task_wrapper<F>(
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
     debug!("Starting task '{}'", task_name);
+
     let result = SHUTDOWN_RX
         .scope(
             shutdown_rx,
@@ -301,7 +302,16 @@ async fn task_wrapper<F>(
             }),
         )
         .await;
+    task_finish(result, task_name, task_id, shutdown_process_on_error).await;
+}
 
+async fn task_finish(
+    result: std::result::Result<anyhow::Result<()>, std::boxed::Box<dyn std::any::Any + std::marker::Send>>,
+    task_name: String,
+    task_id: u64,
+    shutdown_process_on_error: bool,
+)
+{
     // Remove our entry from the global hashmap.
     let task = TASKS
         .lock()

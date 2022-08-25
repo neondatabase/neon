@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_timeline_local,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,

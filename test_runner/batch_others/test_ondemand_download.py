@@ -31,7 +31,7 @@ def test_ondemand_download_large_rel(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_ondemand_download_large_rel",
     )
 
     ##### First start, insert secret data and upload it to the remote storage
@@ -135,7 +135,7 @@ def test_ondemand_download_timetravel(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_ondemand_download_timetravel",
     )
 
     ##### First start, insert secret data and upload it to the remote storage

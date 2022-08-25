@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 
 use std::ops::Deref;
-use std::sync::{Arc, Weak};
 use std::sync::RwLock;
+use std::sync::{Arc, Weak};
 use tokio::sync::watch::Sender;
 
 ///
@@ -10,8 +10,7 @@ use tokio::sync::watch::Sender;
 /// Storing to the Rcu updates the value, making new readers immediately see the new value,
 /// but it also waits for all current readers to finish.
 ///
-pub struct Rcu<V>
-{
+pub struct Rcu<V> {
     inner: RwLock<RcuInner<V>>,
 }
 
@@ -20,8 +19,7 @@ struct RcuInner<V> {
     old_cells: Vec<Weak<RcuCell<V>>>,
 }
 
-struct RcuCell<V>
-{
+struct RcuCell<V> {
     value: V,
 
     /// A dummy channel. We never send anything to this channel. The point is that
@@ -41,8 +39,7 @@ impl<V> RcuCell<V> {
     }
 }
 
-impl<V> Rcu<V>
-{
+impl<V> Rcu<V> {
     /// Create a new `Rcu`, initialized to a particular number
     pub fn new(starting_val: V) -> Self {
         let inner = RcuInner {

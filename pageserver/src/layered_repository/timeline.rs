@@ -49,8 +49,8 @@ use crate::tenant_config::TenantConfOpt;
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
     lsn::{AtomicLsn, Lsn, RecordLsn},
-    simple_rcu::{Rcu, RcuReadGuard},
     seqwait::SeqWait,
+    simple_rcu::{Rcu, RcuReadGuard},
     zid::{ZTenantId, ZTimelineId},
 };
 
@@ -1090,8 +1090,12 @@ impl Timeline {
     /// The caller can provide IndexPart if it has it already. If it's None,
     /// this function will download it.
     ///
-    pub async fn reconcile_with_remote(&self, index_part: Option<&IndexPart>) -> Result<()> {
-        trace!("reconciling {}/{} with remote storage", self.tenant_id, self.timeline_id);
+    pub async fn reconcile_with_remote(&self, index_part: Option<&IndexPart>, first_save: bool) -> Result<()> {
+        trace!(
+            "reconciling {}/{} with remote storage",
+            self.tenant_id,
+            self.timeline_id
+        );
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1205,7 +1209,7 @@ impl Timeline {
             self.timeline_id,
             self.tenant_id,
             &remote_metadata,
-            true,
+            first_save,
         )?;
 
         info!(
@@ -1610,6 +1614,7 @@ impl Timeline {
         Ok(new_delta_path)
     }
 
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn compact(&self) -> Result<()> {
         //
         // High level strategy for compaction / image creation:
@@ -2171,6 +2176,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn gc(&self) -> Result<GcResult> {
         let mut result: GcResult = Default::default();
         let now = SystemTime::now();
@@ -2421,6 +2427,7 @@ impl Timeline {
     /// This does not retry if the download fails. TODO: we probably
     /// should retry the download a couple of times
     ///
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, file=%remote_layer.filename().display()))]
     pub async fn download_remote_layer(
         self: Arc<Self>,
         remote_layer: Arc<RemoteLayer>,
