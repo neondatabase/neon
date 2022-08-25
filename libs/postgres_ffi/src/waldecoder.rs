@@ -170,6 +170,7 @@ impl WalStreamDecoder {
                 }
                 State::SkippingEverything { .. } => {}
             }
+            // now read page contents
             match &mut self.state {
                 State::WaitingForRecord => {
                     // need to have at least the xl_tot_len field
@@ -194,8 +195,8 @@ impl WalStreamDecoder {
                         return Ok(Some(self.complete_record(recordbuf)?));
                     } else {
                         // Need to assemble the record from pieces. Remember the size of the
-                        // record, and loop back. On next iteration, we will reach the 'else'
-                        // branch below, and copy the part of the record that was on this page
+                        // record, and loop back. On next iterations, we will reach the branch
+                        // below, and copy the part of the record that was on this or next page(s)
                         // to 'recordbuf'.  Subsequent iterations will skip page headers, and
                         // append the continuations from the next pages to 'recordbuf'.
                         self.state = State::ReassemblingRecord {

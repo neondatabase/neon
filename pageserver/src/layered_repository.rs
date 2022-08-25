@@ -191,20 +191,6 @@ pub struct Repository {
     // registered tasks have finished, the tenant will go away.
     pub state: tokio::sync::watch::Sender<TenantState>,
 
-    // Allows us to gracefully cancel operations that edit the directory
-    // that backs this layered repository. Usage:
-    //
-    // Use `let _guard = file_lock.try_read()` while writing any files.
-    // Use `let _guard = file_lock.write().unwrap()` to wait for all writes to finish.
-    //
-    // TODO try_read this lock during checkpoint as well to prevent race
-    //      between checkpoint and detach/delete.
-    // TODO try_read this lock for all gc/compaction operations, not just
-    //      ones scheduled by the tenant task manager.
-
-    // FIXME: is this still needed? Why?
-    //pub file_lock: RwLock<()>,
-
     // Overridden tenant-specific config parameters.
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
