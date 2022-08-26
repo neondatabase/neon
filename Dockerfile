@@ -10,12 +10,13 @@ ARG TAG=pinned
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
-COPY vendor/postgres vendor/postgres
-COPY Makefile Makefile
+COPY --chown=nonroot vendor/postgres vendor/postgres
+COPY --chown=nonroot pgxn pgxn
+COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
 RUN set -e \
-    && mold -run make -j $(nproc) -s postgres \
+    && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf tmp_install/build \
     && tar -C tmp_install -czf /home/nonroot/postgres_install.tar.gz .
 
