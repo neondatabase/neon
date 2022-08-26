@@ -52,17 +52,10 @@ def test_remote_storage_backup_and_restore(
     )
 
     data_id = 1
-    data_secret = "very secret secret"
+    data = "just some data"
 
-    ##### First start, insert secret data and upload it to the remote storage
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
-
-    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead.
-    # See https://github.com/neondatabase/neon/pull/2272
-    tenant, _ = env.neon_cli.create_tenant()
-    env.initial_tenant = tenant
-
     pg = env.postgres.create_start("main")
 
     client = env.pageserver.http_client()
@@ -76,8 +69,8 @@ def test_remote_storage_backup_and_restore(
         with pg.cursor() as cur:
             cur.execute(
                 f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                CREATE TABLE t{checkpoint_number}(id int primary key, data text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data}|{checkpoint_number}');
             """
             )
             current_lsn = lsn_from_hex(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -157,6 +150,6 @@ def test_remote_storage_backup_and_restore(
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data}|{checkpoint_number}"
             )

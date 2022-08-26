@@ -126,12 +126,6 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
-    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead.
-    # See https://github.com/neondatabase/neon/pull/2272
-    tenant, _ = env.neon_cli.create_tenant()
-    env.initial_tenant = tenant
-
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
     pg = env.postgres.create_start("test_import_from_pageserver_small")
 
@@ -149,12 +143,6 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
-
-    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead.
-    # See https://github.com/neondatabase/neon/pull/2272
-    tenant, _ = env.neon_cli.create_tenant()
-    env.initial_tenant = tenant
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")
     pg = env.postgres.create_start("test_import_from_pageserver_multisegment")

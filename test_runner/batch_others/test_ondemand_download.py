@@ -138,15 +138,8 @@ def test_ondemand_download_timetravel(
         test_name="test_ondemand_download_timetravel",
     )
 
-    ##### First start, insert secret data and upload it to the remote storage
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
-
-    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead.
-    # See https://github.com/neondatabase/neon/pull/2272
-    tenant, _ = env.neon_cli.create_tenant()
-    env.initial_tenant = tenant
-
     pg = env.postgres.create_start("main")
 
     client = env.pageserver.http_client()

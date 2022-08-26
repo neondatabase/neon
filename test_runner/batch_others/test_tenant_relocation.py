@@ -258,12 +258,6 @@ def test_tenant_relocation(
 
     env = neon_env_builder.init_start()
 
-    # FIXME: The initial tenant isn't uploaded correctly at bootstrapping.
-    # Create a tenant after bootstrapping and use that instead.
-    # See https://github.com/neondatabase/neon/pull/2272
-    tenant, _ = env.neon_cli.create_tenant()
-    env.initial_tenant = tenant
-
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
 
