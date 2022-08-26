@@ -311,6 +311,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(tenant_id))?;
 
     let (local_timeline_info, remote_timeline_info) = async {
+        debug!("Timeline info requested");
         // any error here will render local timeline as None
         // XXX .in_current_span does not attach messages in spawn_blocking future to current future's span
         let local_timeline_info = tokio::task::spawn_blocking(move || {

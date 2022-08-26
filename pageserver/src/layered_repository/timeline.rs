@@ -440,6 +440,7 @@ struct LogicalSize {
     size_added_after_initial: AtomicI64,
 }
 
+#[derive(Debug, Clone)]
 enum CurrentSize {
     Partial(u64),
     Full(u64),
@@ -936,6 +937,7 @@ impl Timeline {
     /// the initial size calculation has not been run (gets triggered on the first size access).
     pub fn get_current_logical_size(self: &Arc<Self>) -> anyhow::Result<u64> {
         let current_size = self.current_logical_size.current_size()?;
+        debug!("Current size: {current_size:?}");
         let size = current_size.size();
         if let (CurrentSize::Partial(_), Some(init_lsn)) =
             (current_size, self.current_logical_size.initial_part_end)
@@ -952,6 +954,7 @@ impl Timeline {
         let mut task_guard = match self.initial_size_computation_task.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
+                debug!("Skipping timeline logical size init: task lock is taken already");
                 // other `try_spawn_size_init_task` is already checking the lock, don't repeat its job
                 return;
             }
@@ -977,6 +980,7 @@ impl Timeline {
                 Err(mpsc::TryRecvError::Empty) => {
                     // let the task finish
                     *task_guard = Some((old_task, task_finish_signal));
+                    return;
                 }
             }
         }

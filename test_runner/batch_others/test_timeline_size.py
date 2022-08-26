@@ -20,8 +20,10 @@ from fixtures.neon_fixtures import (
 from fixtures.utils import get_timeline_dir_size
 
 
-def test_timeline_size(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_size(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.rust_log_override = "DEBUG"
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("empty")
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
@@ -59,8 +61,10 @@ def test_timeline_size(neon_simple_env: NeonEnv):
             )
 
 
-def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_size_createdropdb(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.rust_log_override = "DEBUG"
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("empty")
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
 
     client = env.pageserver.http_client()
@@ -142,6 +146,7 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
 
 
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.rust_log_override = "DEBUG"
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota")
