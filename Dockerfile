@@ -5,6 +5,7 @@
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
 ARG TAG=pinned
+ARG PG_VERSION=v14
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -35,7 +36,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
-COPY --from=pg-build /home/nonroot/pg_install/include/postgresql/server pg_install/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION}/include/postgresql/server pg_install/include/${PG_VERSION}/postgresql/server
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
@@ -64,7 +65,8 @@ COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/pageserver 
 COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper /usr/local/bin
 COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
 
-COPY --from=pg-build /home/nonroot/pg_install/ /usr/local/
+# v14 is default for now
+COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION} /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
