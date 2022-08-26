@@ -57,7 +57,6 @@ fn main() {
     };
     // Currently, we only expect to find PostgreSQL v14 sources, in "pg_install/v14". In the
     // future, we will run this for all supported PostgreSQL versions.
-    pg_install_dir.push("v14");
 
     for pg_version in vec!["v14", "v15"] {
         pg_install_dir.push(pg_version);
@@ -66,7 +65,10 @@ fn main() {
             pg_install_dir = cwd.join("..").join("..").join(pg_install_dir);
         }
 
-        let pg_config_bin = pg_install_dir.join("bin").join("pg_config");
+        let pg_config_bin = pg_install_dir
+            .join("bin")
+            .join("pg_config")
+            .join(pg_version);
         let inc_server_path: String = if pg_config_bin.exists() {
             let output = Command::new(pg_config_bin)
                 .arg("--includedir-server")

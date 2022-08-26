@@ -10,16 +10,39 @@
 use utils::lsn::Lsn;
 
 macro_rules! postgres_ffi {
-    ($version:ident) => {
+    ("v14") => {
         #[path = "."]
-        pub mod $version {
+        pub mod v14 {
             // fixme: does this have to be 'pub'?
             pub mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
 
                 use serde::{Deserialize, Serialize};
-                include!(concat!(env!("OUT_DIR"), "/bindings_", $version, ".rs"));
+                include!(concat!(env!("OUT_DIR"), "/bindings_v14.rs"));
+            }
+            pub mod controlfile_utils;
+            pub mod nonrelfile_utils;
+            pub mod pg_constants;
+            pub mod relfile_utils;
+            pub mod waldecoder;
+            pub mod xlog_utils;
+
+            // Re-export some symbols from bindings
+            pub use bindings::DBState_DB_SHUTDOWNED;
+            pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
+        }
+    };
+    ("v15") => {
+        #[path = "."]
+        pub mod v15 {
+            // fixme: does this have to be 'pub'?
+            pub mod bindings {
+                // bindgen generates bindings for a lot of stuff we don't need
+                #![allow(dead_code)]
+
+                use serde::{Deserialize, Serialize};
+                include!(concat!(env!("OUT_DIR"), "/bindings_v15.rs"));
             }
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
@@ -35,7 +58,8 @@ macro_rules! postgres_ffi {
     };
 }
 
-postgres_ffi!(v14);
+postgres_ffi!("v14");
+postgres_ffi!("v15");
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::{uint32, uint64, Oid};
