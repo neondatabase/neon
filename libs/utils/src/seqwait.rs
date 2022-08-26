@@ -157,15 +157,17 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
-    pub async fn wait_for_timeout(&self, num: V, timeout_duration: Duration) -> Result<(), SeqWaitError> {
+    pub async fn wait_for_timeout(
+        &self,
+        num: V,
+        timeout_duration: Duration,
+    ) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
-            Ok(Some(mut rx)) => {
-                match timeout(timeout_duration, rx.changed()).await {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(_)) => Err(SeqWaitError::Shutdown),
-                    Err(_) => Err(SeqWaitError::Timeout),
-                }
+            Ok(Some(mut rx)) => match timeout(timeout_duration, rx.changed()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(SeqWaitError::Shutdown),
+                Err(_) => Err(SeqWaitError::Timeout),
             },
             Err(e) => Err(e),
         }
