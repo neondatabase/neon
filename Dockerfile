@@ -15,8 +15,12 @@ COPY pgxn pgxn
 COPY Makefile Makefile
 
 ENV BUILD_TYPE release
+RUN whoami
+RUN ls -lah pgxn
+RUN ls -lah pgxn/neon
+RUN ls -lah pgxn/neon
+RUN chown -r nonroot:nonroot pgxn
 RUN set -e \
-    && mold -run make -j $(nproc) -s postgres \
     && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf tmp_install/build \
     && tar -C tmp_install -czf /home/nonroot/postgres_install.tar.gz .
