@@ -12,6 +12,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserverHttpClient,
     Postgres,
     assert_timeline_local,
     wait_for_last_flush_lsn,
@@ -24,7 +25,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
-    wait_for_timeline_size_init(env, new_timeline_id)
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
     pgmain = env.postgres.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -63,7 +64,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
 
     client = env.pageserver.http_client()
-    wait_for_timeline_size_init(env, new_timeline_id)
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
     timeline_details = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
 
     pgmain = env.postgres.create_start("test_timeline_size_createdropdb")
@@ -145,7 +146,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota")
 
-    wait_for_timeline_size_init(env, new_timeline_id)
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
     pgmain = env.postgres.create_start(
         "test_timeline_size_quota",
@@ -434,9 +435,10 @@ def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
 
 # Timeline logical size initialization is an asynchronous background task that runs once,
 # try a few times to ensure it's activated properly
-def wait_for_timeline_size_init(env: NeonEnv, timeline: uuid.UUID):
-    client = env.pageserver.http_client()
-    timeline_details = assert_timeline_local(client, env.initial_tenant, timeline)
+def wait_for_timeline_size_init(
+    client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
+):
+    timeline_details = assert_timeline_local(client, tenant, timeline)
 
     for i in range(30):
         if (

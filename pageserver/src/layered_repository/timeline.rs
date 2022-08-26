@@ -5,7 +5,7 @@ use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
 use metrics::core::{AtomicU64, GenericCounter};
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
@@ -414,7 +414,7 @@ struct LogicalSize {
     /// Might require reading multiple layers, and even ancestor's layers, to collect the size.
     ///
     /// NOTE: initial size is not a constant and will change between restarts.
-    initial_logical_size: OnceCell<u64>,
+    initial_logical_size: RwLock<Option<u64>>,
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     initial_part_end: Option<Lsn>,
     /// All other size changes after startup, combined together.
@@ -457,7 +457,7 @@ impl CurrentSize {
 impl LogicalSize {
     fn empty_initial() -> Self {
         Self {
-            initial_logical_size: OnceCell::with_value(0),
+            initial_logical_size: RwLock::new(Some(0)),
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
         }
@@ -465,7 +465,7 @@ impl LogicalSize {
 
     fn deferred_initial(compute_to: Lsn) -> Self {
         Self {
-            initial_logical_size: OnceCell::new(),
+            initial_logical_size: RwLock::new(None),
             initial_part_end: Some(compute_to),
             size_added_after_initial: AtomicI64::new(0),
         }
@@ -473,8 +473,8 @@ impl LogicalSize {
 
     fn current_size(&self) -> anyhow::Result<CurrentSize> {
         let size_increment = self.size_added_after_initial.load(AtomicOrdering::Acquire);
-
-        match self.initial_logical_size.get() {
+        let current_logical_size = { *self.initial_logical_size.read().unwrap() };
+        match current_logical_size {
             Some(initial_size) => {
                 let absolute_size_increment = u64::try_from(
                     size_increment
@@ -992,13 +992,15 @@ impl Timeline {
                 .spawn(move || {
                     let _enter = info_span!("initial_size_calculation", timeline = %timeline_id).entered();
                     let calculated_size = thread_timeline.calculate_logical_size(init_lsn)?;
-                    match thread_timeline
-                                                                                    .current_logical_size
-                                                                                    .initial_logical_size
-                                                                                    .set(calculated_size) {
-                        Ok(()) => info!("Successfully calculated initial logical size"),
-                        Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
+                    let mut current_logical_size_accesor = thread_timeline.current_logical_size.initial_logical_size.write().unwrap();
+                    match current_logical_size_accesor.as_mut() {
+                        None => {
+                            *current_logical_size_accesor = Some(calculated_size);
+                            info!("Successfully calculated initial logical size");
+                        },
+                        Some(existing_value) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already initialized to {existing_value}, not changing"),
                     };
+                    drop(current_logical_size_accesor);
 
                     finish_sender.send(()).ok();
                     Ok(())
@@ -1053,7 +1055,10 @@ impl Timeline {
         let timer = self.metrics.init_logical_size_histo.start_timer();
 
         // Have to calculate it the hard way
-        info!("Calculating size non-incrementally");
+        info!(
+            "Calculating size non-incrementally for timeline {}",
+            self.timeline_id
+        );
         let logical_size = self.get_current_logical_size_non_incremental(up_to_lsn)?;
         debug!("calculated logical size the hard way: {logical_size}");
 
