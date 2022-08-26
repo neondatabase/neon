@@ -1090,7 +1090,11 @@ impl Timeline {
     /// The caller can provide IndexPart if it has it already. If it's None,
     /// this function will download it.
     ///
-    pub async fn reconcile_with_remote(&self, index_part: Option<&IndexPart>, first_save: bool) -> Result<()> {
+    pub async fn reconcile_with_remote(
+        &self,
+        index_part: Option<&IndexPart>,
+        first_save: bool,
+    ) -> Result<()> {
         trace!(
             "reconciling {}/{} with remote storage",
             self.tenant_id,

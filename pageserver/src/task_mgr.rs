@@ -306,12 +306,14 @@ async fn task_wrapper<F>(
 }
 
 async fn task_finish(
-    result: std::result::Result<anyhow::Result<()>, std::boxed::Box<dyn std::any::Any + std::marker::Send>>,
+    result: std::result::Result<
+        anyhow::Result<()>,
+        std::boxed::Box<dyn std::any::Any + std::marker::Send>,
+    >,
     task_name: String,
     task_id: u64,
     shutdown_process_on_error: bool,
-)
-{
+) {
     // Remove our entry from the global hashmap.
     let task = TASKS
         .lock()

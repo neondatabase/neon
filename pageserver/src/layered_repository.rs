@@ -727,7 +727,9 @@ impl Repository {
                 .context("failed to load layermap")?;
 
             // Download everything from remote storage to local disk
-            timeline.reconcile_with_remote(Some(index_part), true).await?;
+            timeline
+                .reconcile_with_remote(Some(index_part), true)
+                .await?;
 
             info!("calculating initial size of {}", timeline.timeline_id);
             // FIXME: This will retry the whole init_logical_size operation, if it needs
