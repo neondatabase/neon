@@ -1,19 +1,18 @@
-**/.git/
-**/__pycache__
-**/.pytest_cache
+*
 
-.git
-.github
-target
-tmp_check
-tmp_install
-tmp_check_cli
-test_output
-.vscode
-.neon
-integration_tests/.neon
-.mypy_cache
+!Cargo.toml
+!Cargo.lock
+!Makefile
 
-Dockerfile
-.dockerignore
-
+!.cargo/
+!.config/
+!control_plane/
+!compute_tools/
+!libs/
+!pageserver/
+!pgxn/
+!proxy/
+!safekeeper/
+!vendor/postgres/
+!workspace_hack/
+!neon_local/
