@@ -14,9 +14,6 @@ pub mod simple_rcu;
 /// append only ordered map implemented with a Vec
 pub mod vec_map;
 
-// Async version of SeqWait. Currently unused.
-// pub mod seqwait_async;
-
 pub mod bin_ser;
 pub mod postgres_backend;
 pub mod postgres_backend_async;

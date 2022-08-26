@@ -541,15 +541,15 @@ impl Timeline {
             "wait_lsn cannot be called in WAL receiver"
         );
 
-        self.metrics.wait_lsn_time_histo.observe_closure_duration(
-            || self.last_record_lsn
-                .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
-                .with_context(|| {
-                    format!(
-                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                        lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                    )
-                }))?;
+        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+
+        self.last_record_lsn.wait_for_timeout(lsn, self.conf.wait_lsn_timeout).await
+            .with_context(||
+                format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
+                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
+                )
+            )?;
 
         Ok(())
     }
