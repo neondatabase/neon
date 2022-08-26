@@ -10,16 +10,11 @@ ARG TAG=pinned
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
-COPY vendor/postgres vendor/postgres
-COPY pgxn pgxn
-COPY Makefile Makefile
+COPY --chown=nonroot vendor/postgres vendor/postgres
+COPY --chown=nonroot pgxn pgxn
+COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
-RUN whoami
-RUN ls -lah pgxn
-RUN ls -lah pgxn/neon
-RUN ls -lah pgxn/neon
-RUN chown -r nonroot:nonroot pgxn
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf tmp_install/build \
