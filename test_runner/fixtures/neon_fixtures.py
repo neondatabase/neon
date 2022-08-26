@@ -1738,13 +1738,16 @@ class PSQL:
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
     async def run(self, query=None):
-        run_args = [self.path, self.database_url]
-        run_args += ["--command", query] if query is not None else []
+        run_args = [self.path, "--no-psqlrc", "--quiet", "--tuples-only", self.database_url]
+        if query is not None:
+            run_args += ["--command", query]
 
-        cmd_line = subprocess.list2cmdline(run_args)
-        log.info(f"Run psql: {cmd_line}")
+        log.info(f"Run psql: {subprocess.list2cmdline(run_args)}")
         return await asyncio.create_subprocess_exec(
-            *run_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            *run_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"LC_ALL": "C", **os.environ},  # one locale to rule them all
         )
 
 

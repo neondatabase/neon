@@ -115,33 +115,22 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
      Step 4. assert that select 1 has been executed correctly.
     """
 
-    # Step 1.
     psql = PSQL(
         host=link_proxy.host,
         port=link_proxy.proxy_port,
     )
-    proc = await psql.run("select 1")
+    proc = await psql.run("select 42")
 
-    # Step 2.1
     uri_prefix = link_proxy.link_auth_uri_prefix
     line_str = await get_uri_line_from_process_welcome_notice(uri_prefix, proc)
 
-    # step 2.2
     psql_session_id = get_session_id_from_uri_line(uri_prefix, line_str)
     log.info(f"Parsed psql_session_id='{psql_session_id}' from Neon welcome message.")
 
-    # Step 3.
     create_and_send_db_info(vanilla_pg, psql_session_id, link_proxy.mgmt_port)
 
-    # Step 4.
-    # Expecting proxy output::
-    # b' ?column? \n'
-    # b'----------\n'
-    # b'        1\n'
-    # b'(1 row)\n'
-    out_bytes = await proc.stdout.read()
-    expected_out_bytes = b" ?column? \n----------\n        1\n(1 row)\n\n"
-    assert out_bytes == expected_out_bytes
+    out = (await proc.stdout.read()).decode("utf-8").strip()
+    assert out == "42"
 
 
 # Pass extra options to the server.
