@@ -97,14 +97,20 @@ COPY --from=neon-pg-ext-build --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \
-    apt install -y libreadline-dev libossp-uuid-dev gdal-bin libgdal-dev libprotobuf-c-dev && \
+    apt install -y \
+        libreadline8 \
+        libossp-uuid16 \
+        libgeos-c1v5 \
+        libgdal28 \
+        libproj19 \
+        libprotobuf-c1 && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Debian bullseye provides GLIBC 2.31 when 2.34 is necessary as we compiled plv8 with that version
 RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
     echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
     apt update && \
-    apt install -y --no-install-recommends -t testing binutils && \
+    apt install -y --no-install-recommends -t testing libc6 && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # "temporary" symlink for old control-plane
