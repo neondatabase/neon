@@ -432,8 +432,6 @@ impl PageServerHandler {
                 msg = pgb.read_message() => { msg }
             };
 
-            let profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
                 Some(m) => {
@@ -486,7 +484,6 @@ impl PageServerHandler {
 
             pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
             pgb.flush().await?;
-            drop(profiling_guard);
         }
         Ok(())
     }
@@ -745,7 +742,13 @@ impl PageServerHandler {
          */
 
         let page = retry_get_with_timeout(
-            || timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn),
+            || {
+                // FIXME: this profiling now happens at different place than it used to. The
+                // current profiling is based on a thread-local variable, so it doesn't work
+                // across awaits
+                let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
+                timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)
+            },
             std::time::Duration::from_secs(60),
         )
         .await?;
