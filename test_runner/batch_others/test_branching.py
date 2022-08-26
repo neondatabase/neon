@@ -5,7 +5,7 @@ from typing import List
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin, Postgres
+from fixtures.neon_fixtures import NeonEnv, PgBin, Postgres, fork_at_current_lsn
 from performance.test_perf_pgbench import get_scales_matrix
 
 
@@ -46,7 +46,9 @@ def test_branching_with_pgbench(
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-T15", connstr])
 
-    env.neon_cli.create_branch("b0", tenant_id=tenant)
+    pg = env.postgres.create_start("main", tenant_id=tenant)
+    fork_at_current_lsn(env, pg, "b0", tenant_id=tenant)
+
     pgs: List[Postgres] = []
     pgs.append(env.postgres.create_start("b0", tenant_id=tenant))
 
@@ -72,9 +74,9 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
+            fork_at_current_lsn(env, pg, "b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
         else:
-            env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
+            fork_at_current_lsn(env, pg, "b{}".format(i + 1), "b0", tenant_id=tenant)
 
         pgs.append(env.postgres.create_start("b{}".format(i + 1), tenant_id=tenant))
 

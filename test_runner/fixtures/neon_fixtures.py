@@ -2637,3 +2637,15 @@ def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: uuid.UUID, timel
     """Wait for pageserver to catch up the latest flush LSN"""
     last_flush_lsn = lsn_from_hex(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
+
+
+def fork_at_current_lsn(
+    env: NeonEnv,
+    pg: Postgres,
+    new_branch_name: str = DEFAULT_BRANCH_NAME,
+    ancestor_branch_name: Optional[str] = None,
+    tenant_id: Optional[uuid.UUID] = None,
+) -> uuid.UUID:
+    """Create new branch for current tenant/timeline on the last LSN. Before branch creation this function enforce that LSN is replayed by pagserver"""
+    current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
+    env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)

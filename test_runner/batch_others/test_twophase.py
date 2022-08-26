@@ -1,7 +1,7 @@
 import os
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 
 
 #
@@ -55,7 +55,7 @@ def test_twophase(neon_simple_env: NeonEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    env.neon_cli.create_branch("test_twophase_prepared", "test_twophase")
+    fork_at_current_lsn(env, pg, "test_twophase_prepared", "test_twophase")
 
     # Start compute on the new branch
     pg2 = env.postgres.create_start(
