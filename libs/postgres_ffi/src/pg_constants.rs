@@ -199,10 +199,11 @@ pub const XLP_LONG_HEADER: u16 = 0x0002;
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&str; 22] = [
+pub const PGDATA_SUBDIRS: [&str; 23] = [
     "global",
     "pg_wal/archive_status",
     "pg_commit_ts",
+    "pg_csn",
     "pg_dynshmem",
     "pg_notify",
     "pg_serial",
