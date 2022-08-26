@@ -142,7 +142,13 @@ impl Timeline {
         let nblocks = buf.get_u32_le();
 
         if latest {
-            // Update relation size cache
+            // Update relation size cache only if "latest" flag is set.
+            // This flag is set by compute when it is working with most recent version of relation.
+            // Typically master compute node always set latest=true.
+            // Please notice, that even if compute node "by mistake" specifies old LSN but set
+            // latest=true, then it can not cause cache corruption, because with latest=true
+            // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
+            // associated with most recent value of LSN.
             self.update_cached_rel_size(tag, lsn, nblocks);
         }
         Ok(nblocks)
