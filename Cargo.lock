@@ -1166,15 +1166,6 @@ checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 
 [[package]]
 name = "hashbrown"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
-dependencies = [
- "ahash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
@@ -1382,7 +1373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
- "hashbrown 0.12.3",
+ "hashbrown",
 ]
 
 [[package]]
@@ -2281,7 +2272,7 @@ dependencies = [
  "clap 3.2.16",
  "futures",
  "git-version",
- "hashbrown 0.12.3",
+ "hashbrown",
  "hex",
  "hmac 0.12.1",
  "hyper",
@@ -2320,15 +2311,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8533f14c8382aaad0d592c812ac3b826162128b65662331e1127b45c3d18536b"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "quickcheck"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "588f6378e4dd99458b60ec275b4477add41ce4fa9f64dcba6f15adccb19b50d6"
-dependencies = [
- "rand",
 ]
 
 [[package]]
@@ -3249,7 +3231,6 @@ dependencies = [
  "js-sys",
  "libc",
  "num_threads",
- "quickcheck",
  "time-macros",
 ]
 
@@ -3537,9 +3518,9 @@ checksum = "b6bc1c9ce2b5135ac7f93c72918fc37feb872bdc6a5533a8b85eb4b86bfdae52"
 
 [[package]]
 name = "tracing"
-version = "0.1.34"
+version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0ecdcb44a79f0fe9844f0c4f33a342cbcbb5117de8001e6ba0dc2351327d09"
+checksum = "2fce9567bd60a67d08a16488756721ba392f24f29006402881e43b19aac64307"
 dependencies = [
  "cfg-if",
  "log",
@@ -3561,11 +3542,11 @@ dependencies = [
 
 [[package]]
 name = "tracing-core"
-version = "0.1.26"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f54c8ca710e81886d498c2fd3331b56c93aa248d49de2222ad2742247c60072f"
+checksum = "5aeea4303076558a00714b823f9ad67d58a3bbda1df83d8827d21193156e22f7"
 dependencies = [
- "lazy_static",
+ "once_cell",
  "valuable",
 ]
 
@@ -3988,6 +3969,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "bstr",
  "bytes",
  "chrono",
  "clap 2.34.0",
@@ -3997,7 +3979,7 @@ dependencies = [
  "futures-task",
  "futures-util",
  "generic-array",
- "hashbrown 0.11.2",
+ "hashbrown",
  "hex",
  "hyper",
  "indexmap",
@@ -4012,6 +3994,7 @@ dependencies = [
  "prost",
  "rand",
  "regex",
+ "regex-automata",
  "regex-syntax",
  "scopeguard",
  "serde",

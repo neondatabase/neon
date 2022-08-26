@@ -541,10 +541,6 @@ impl Repository {
         };
 
         for (_timelineid, timeline) in &timelines_to_compact {
-            // FIXME
-            //let _entered =
-            //    info_span!("checkpoint", timeline = %timelineid, tenant = %self.tenant_id)
-            //        .entered();
             timeline.checkpoint(CheckpointConfig::Flush).await?;
         }
 

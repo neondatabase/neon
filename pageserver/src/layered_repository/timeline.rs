@@ -1344,6 +1344,7 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
@@ -1473,6 +1474,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
+    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.filename().display()))]
     fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
@@ -2180,7 +2182,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, cutoff))]
     pub async fn gc(&self) -> Result<GcResult> {
         let mut result: GcResult = Default::default();
         let now = SystemTime::now();
@@ -2204,9 +2206,7 @@ impl Timeline {
             );
             return Ok(result);
         }
-
-        // FIXME
-        //let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
+        tracing::Span::current().record("cutoff", new_gc_cutoff.to_string());
 
         // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
         // See branch_timeline() for details.

@@ -110,7 +110,7 @@ pub async fn handle_walreceiver_connection(
             }
             Ok(())
         }
-        .instrument(info_span!("walreceiver connection")), // FIXME
+        .instrument(info_span!("walreceiver connection")),
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.

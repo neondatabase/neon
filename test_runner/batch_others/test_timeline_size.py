@@ -8,12 +8,7 @@ from uuid import UUID
 import psycopg2.errors
 import psycopg2.extras
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-    Postgres,
-    wait_for_last_flush_lsn,
-)
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, wait_for_last_flush_lsn
 from fixtures.utils import get_timeline_dir_size
 
 
