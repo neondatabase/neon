@@ -3,6 +3,7 @@
 **/.pytest_cache
 
 .git
+.github
 target
 tmp_check
 tmp_install
