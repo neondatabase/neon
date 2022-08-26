@@ -438,6 +438,7 @@ impl Timeline {
             SlruKind::Clog,
             SlruKind::MultiXactMembers,
             SlruKind::MultiXactOffsets,
+            SlruKind::Csn,
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
@@ -557,7 +558,11 @@ impl<'a> DatadirModification<'a> {
             slru_dir_to_key(SlruKind::MultiXactMembers),
             empty_dir.clone(),
         );
-        self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+        self.put(
+            slru_dir_to_key(SlruKind::MultiXactOffsets),
+            empty_dir.clone(),
+        );
+        self.put(slru_dir_to_key(SlruKind::Csn), empty_dir);
 
         Ok(())
     }
@@ -1230,6 +1235,7 @@ fn slru_dir_to_key(kind: SlruKind) -> Key {
             SlruKind::Clog => 0x00,
             SlruKind::MultiXactMembers => 0x01,
             SlruKind::MultiXactOffsets => 0x02,
+            SlruKind::Csn => 0x03,
         },
         field3: 0,
         field4: 0,
@@ -1245,6 +1251,7 @@ fn slru_block_to_key(kind: SlruKind, segno: u32, blknum: BlockNumber) -> Key {
             SlruKind::Clog => 0x00,
             SlruKind::MultiXactMembers => 0x01,
             SlruKind::MultiXactOffsets => 0x02,
+            SlruKind::Csn => 0x03,
         },
         field3: 1,
         field4: segno,
@@ -1260,6 +1267,7 @@ fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
             SlruKind::Clog => 0x00,
             SlruKind::MultiXactMembers => 0x01,
             SlruKind::MultiXactOffsets => 0x02,
+            SlruKind::Csn => 0x03,
         },
         field3: 1,
         field4: segno,
@@ -1273,6 +1281,7 @@ fn slru_segment_key_range(kind: SlruKind, segno: u32) -> Range<Key> {
         SlruKind::Clog => 0x00,
         SlruKind::MultiXactMembers => 0x01,
         SlruKind::MultiXactOffsets => 0x02,
+        SlruKind::Csn => 0x03,
     };
 
     Key {
@@ -1382,6 +1391,7 @@ pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
                 0x00 => SlruKind::Clog,
                 0x01 => SlruKind::MultiXactMembers,
                 0x02 => SlruKind::MultiXactOffsets,
+                0x03 => SlruKind::Csn,
                 _ => bail!("unrecognized slru kind 0x{:02x}", key.field2),
             };
             let segno = key.field4;
