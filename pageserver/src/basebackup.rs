@@ -174,6 +174,7 @@ where
             SlruKind::Clog,
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
+            SlruKind::Csn,
         ] {
             for segno in self
                 .timeline

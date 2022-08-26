@@ -209,10 +209,11 @@ pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&str; 22] = [
+pub const PGDATA_SUBDIRS: [&str; 23] = [
     "global",
     "pg_wal/archive_status",
     "pg_commit_ts",
+    "pg_csn",
     "pg_dynshmem",
     "pg_notify",
     "pg_serial",

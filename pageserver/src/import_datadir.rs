@@ -563,6 +563,11 @@ async fn import_file(
 
         import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact members slru");
+    } else if file_path.starts_with("pg_csn") {
+        let slru = SlruKind::Csn;
+
+        import_slru(modification, slru, file_path, reader, len).await?;
+        debug!("imported csn slru");
     } else if file_path.starts_with("pg_twophase") {
         let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
