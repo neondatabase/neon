@@ -2636,7 +2636,7 @@ def wait_for_last_record_lsn(
 def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: uuid.UUID, timeline: uuid.UUID):
     """Wait for pageserver to catch up the latest flush LSN"""
     last_flush_lsn = lsn_from_hex(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-    return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
+    wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
 def fork_at_current_lsn(
@@ -2648,4 +2648,4 @@ def fork_at_current_lsn(
 ) -> uuid.UUID:
     """Create new branch for current tenant/timeline on the last LSN. Before branch creation this function enforce that LSN is replayed by pagserver"""
     current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
-    env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+    return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
