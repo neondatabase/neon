@@ -210,7 +210,7 @@ impl RemoteTimelineIndex {
 }
 
 /// Restored index part data about the timeline, stored in the remote index.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone)]
 pub struct RemoteTimeline {
     timeline_layers: HashSet<PathBuf>,
     missing_layers: HashSet<PathBuf>,

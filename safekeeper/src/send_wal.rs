@@ -36,7 +36,7 @@ const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 type FullTransactionId = u64;
 
 /// Hot standby feedback received from replica
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct HotStandbyFeedback {
     pub ts: TimestampTz,
     pub xmin: FullTransactionId,
@@ -54,7 +54,7 @@ impl HotStandbyFeedback {
 }
 
 /// Standby status update
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StandbyReply {
     pub write_lsn: Lsn, // last lsn received by pageserver
     pub flush_lsn: Lsn, // pageserver's disk consistent lSN
