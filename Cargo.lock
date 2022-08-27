@@ -1166,18 +1166,12 @@ checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
 
 [[package]]
 name = "hashbrown"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
-dependencies = [
- "ahash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+dependencies = [
+ "ahash",
+]
 
 [[package]]
 name = "heck"
@@ -1379,7 +1373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10a35a97730320ffe8e2d410b5d3b69279b98d2c14bdb8b70ea89ecf7888d41e"
 dependencies = [
  "autocfg",
- "hashbrown 0.12.3",
+ "hashbrown",
 ]
 
 [[package]]
@@ -2274,7 +2268,7 @@ dependencies = [
  "clap 3.2.16",
  "futures",
  "git-version",
- "hashbrown 0.11.2",
+ "hashbrown",
  "hex",
  "hmac 0.12.1",
  "hyper",
@@ -2289,7 +2283,7 @@ dependencies = [
  "routerify",
  "rstest",
  "rustls",
- "rustls-pemfile 0.2.1",
+ "rustls-pemfile",
  "scopeguard",
  "serde",
  "serde_json",
@@ -2313,15 +2307,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8533f14c8382aaad0d592c812ac3b826162128b65662331e1127b45c3d18536b"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "quickcheck"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "588f6378e4dd99458b60ec275b4477add41ce4fa9f64dcba6f15adccb19b50d6"
-dependencies = [
- "rand",
 ]
 
 [[package]]
@@ -2508,7 +2493,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls",
- "rustls-pemfile 1.0.1",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2695,15 +2680,6 @@ dependencies = [
  "ring",
  "sct",
  "webpki",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eebeaeb360c87bfb72e84abdb3447159c0eaececf1bef2aecd65a8be949d1c9"
-dependencies = [
- "base64",
 ]
 
 [[package]]
@@ -3242,7 +3218,6 @@ dependencies = [
  "js-sys",
  "libc",
  "num_threads",
- "quickcheck",
  "time-macros",
 ]
 
@@ -3683,7 +3658,7 @@ dependencies = [
  "rand",
  "routerify",
  "rustls",
- "rustls-pemfile 0.2.1",
+ "rustls-pemfile",
  "rustls-split",
  "serde",
  "serde_json",
@@ -3969,6 +3944,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "bstr",
  "bytes",
  "chrono",
  "clap 2.34.0",
@@ -3978,7 +3954,7 @@ dependencies = [
  "futures-task",
  "futures-util",
  "generic-array",
- "hashbrown 0.11.2",
+ "hashbrown",
  "hex",
  "hyper",
  "indexmap",
@@ -3993,6 +3969,7 @@ dependencies = [
  "prost",
  "rand",
  "regex",
+ "regex-automata",
  "regex-syntax",
  "scopeguard",
  "serde",
