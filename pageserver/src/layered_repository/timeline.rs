@@ -11,9 +11,7 @@ use tracing::*;
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
@@ -33,7 +31,7 @@ use crate::layered_repository::{
     image_layer::{ImageLayer, ImageLayerWriter},
     inmemory_layer::InMemoryLayer,
     layer_map::{LayerMap, SearchResult},
-    metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
+    metadata::{save_metadata, TimelineMetadata, METADATA_FILE_NAME},
     par_fsync,
     remote_layer::RemoteLayer,
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
@@ -58,7 +56,6 @@ use crate::page_cache;
 use crate::repository::{GcResult, Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::virtual_file::VirtualFile;
 use crate::walreceiver::spawn_connection_manager_task;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
@@ -1057,7 +1054,7 @@ impl Timeline {
                     let future = tl.download_remote_layer(Arc::clone(&remote_layer));
 
                     let dynfuture: std::pin::Pin<
-                        Box<dyn std::future::Future<Output = Result<()>> + Send + Sync>,
+                        Box<dyn Future<Output = Result<()>> + Send + Sync>,
                     > = Box::pin(future);
                     return Err(PageReconstructError::NeedDownload(dynfuture));
                 }
@@ -2658,79 +2655,4 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
-}
-
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    timeline_id: ZTimelineId,
-    tenant_id: ZTenantId,
-) -> anyhow::Result<TimelineMetadata> {
-    let metadata_path = metadata_path(conf, timeline_id, tenant_id);
-    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
-        format!(
-            "Failed to read metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })?;
-    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
-        format!(
-            "Failed to parse metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })
-}
-
-/// Save timeline metadata to file
-pub fn save_metadata(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-    data: &TimelineMetadata,
-    first_save: bool,
-) -> Result<()> {
-    let _enter = info_span!("saving metadata").entered();
-    let path = metadata_path(conf, timelineid, tenantid);
-    // use OpenOptions to ensure file presence is consistent with first_save
-    let mut file = VirtualFile::open_with_options(
-        &path,
-        OpenOptions::new().write(true).create_new(first_save),
-    )?;
-
-    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
-
-    if file.write(&metadata_bytes)? != metadata_bytes.len() {
-        bail!("Could not write all the metadata bytes in a single call");
-    }
-    file.sync_all()?;
-
-    // fsync the parent directory to ensure the directory entry is durable
-    if first_save {
-        let timeline_dir = File::open(
-            &path
-                .parent()
-                .expect("Metadata should always have a parent dir"),
-        )?;
-        timeline_dir.sync_all()?;
-    }
-
-    Ok(())
-}
-
-/// Delete the metadata file.
-pub fn delete_metadata(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> Result<()> {
-    let path = metadata_path(conf, timelineid, tenantid);
-    fs::remove_file(&path)?;
-
-    // fsync the parent directory to ensure the removal is durable
-    let timeline_dir = File::open(
-        &path
-            .parent()
-            .expect("Metadata should always have a parent dir"),
-    )?;
-    timeline_dir.sync_all()?;
-    Ok(())
 }

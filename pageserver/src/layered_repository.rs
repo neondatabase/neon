@@ -71,10 +71,10 @@ pub use timeline::{PageReconstructError, Timeline};
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 // re-export for use in storage_sync.rs
-pub use crate::layered_repository::timeline::save_metadata;
+pub use crate::layered_repository::metadata::save_metadata;
 
 // re-export for use in tenant_mgr.rs
-pub use crate::layered_repository::timeline::load_metadata;
+pub use crate::layered_repository::metadata::load_metadata;
 
 // re-export for use in walreceiver
 pub use crate::layered_repository::timeline::WalReceiverInfo;
@@ -262,7 +262,7 @@ impl Repository {
         crashsafe_dir::create_dir_all(timeline_path)?;
 
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        timeline::save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
+        save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
 
         let remote_client = if self.upload_layers {
             let remote_client =
@@ -381,7 +381,7 @@ impl Repository {
             src_timeline.initdb_lsn,
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
-        timeline::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
+        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
 
         let remote_client = if self.upload_layers {
             let remote_client = create_remote_timeline_client(self.conf, self.tenant_id, dst)?;
@@ -1002,7 +1002,7 @@ impl Repository {
         // FIXME: this isn't bulletproof either, if we crash after deleting some of the index
         // files, but not all.
         for timeline in timelines.iter() {
-            timeline::delete_metadata(self.conf, timeline.timeline_id, self.tenant_id)?;
+            metadata::delete_metadata(self.conf, timeline.timeline_id, self.tenant_id)?;
         }
 
         // If removal fails there will be no way to successfully retry detach,

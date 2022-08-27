@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use utils::lsn::Lsn;
 
-// Note: LayeredTimeline::load_layer_map() relies on this sort order
+// Note: Timeline::load_layer_map() relies on this sort order
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct DeltaFileName {
     pub key_range: Range<Key>,

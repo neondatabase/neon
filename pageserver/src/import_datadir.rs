@@ -434,7 +434,7 @@ pub fn import_wal_from_tar<Reader: Read>(
     Ok(())
 }
 
-pub fn import_file<Reader: Read>(
+fn import_file<Reader: Read>(
     modification: &mut DatadirModification,
     file_path: &Path,
     reader: Reader,

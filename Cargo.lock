@@ -1887,7 +1887,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-postgres",
- "tokio-scoped",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -2109,7 +2108,6 @@ dependencies = [
  "bindgen",
  "byteorder",
  "bytes",
- "chrono",
  "crc32c",
  "env_logger",
  "hex",
@@ -2287,7 +2285,7 @@ dependencies = [
  "routerify",
  "rstest",
  "rustls",
- "rustls-pemfile 0.2.1",
+ "rustls-pemfile",
  "scopeguard",
  "serde",
  "serde_json",
@@ -2497,7 +2495,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls",
- "rustls-pemfile 1.0.1",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2684,15 +2682,6 @@ dependencies = [
  "ring",
  "sct",
  "webpki",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eebeaeb360c87bfb72e84abdb3447159c0eaececf1bef2aecd65a8be949d1c9"
-dependencies = [
- "base64",
 ]
 
 [[package]]
@@ -3364,16 +3353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-scoped"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4beb8ba13bc53ac53ce1d52b42f02e5d8060f0f42138862869beb769722b256"
-dependencies = [
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "tokio-stream"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3682,7 +3661,7 @@ dependencies = [
  "rand",
  "routerify",
  "rustls",
- "rustls-pemfile 0.2.1",
+ "rustls-pemfile",
  "rustls-split",
  "serde",
  "serde_json",

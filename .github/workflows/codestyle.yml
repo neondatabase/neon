@@ -110,7 +110,7 @@ jobs:
         run: ./run_clippy.sh
 
       - name: Ensure all project builds
-        run: cargo build --all --all-targets
+        run: cargo build --locked --all --all-targets
 
   check-codestyle-python:
     runs-on: [ self-hosted, Linux, k8s-runner ]
