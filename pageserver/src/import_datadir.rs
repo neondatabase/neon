@@ -331,7 +331,11 @@ pub fn import_basebackup_from_tar<Reader: Read>(
                 debug!("directory {:?}", file_path);
             }
             _ => {
-                panic!("tar::EntryType::?? {}", file_path.display());
+                bail!(
+                    "entry {} in backup tar archive is of unexpected type: {:?}",
+                    file_path.display(),
+                    header.entry_type()
+                );
             }
         }
     }
@@ -384,7 +388,11 @@ pub fn import_wal_from_tar<Reader: Read>(
                     continue;
                 }
                 _ => {
-                    panic!("tar::EntryType::?? {}", file_path.display());
+                    bail!(
+                        "entry {} in WAL tar archive is of unexpected type: {:?}",
+                        file_path.display(),
+                        header.entry_type()
+                    );
                 }
             }
         };
@@ -424,14 +432,12 @@ pub fn import_wal_from_tar<Reader: Read>(
     Ok(())
 }
 
-pub fn import_file<Reader: Read>(
+fn import_file<Reader: Read>(
     modification: &mut DatadirModification,
     file_path: &Path,
     reader: Reader,
     len: usize,
 ) -> Result<Option<ControlFileData>> {
-    debug!("looking at {:?}", file_path);
-
     if file_path.starts_with("global") {
         let spcnode = pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
@@ -553,7 +559,10 @@ pub fn import_file<Reader: Read>(
         // this to import arbitrary postgres databases.
         bail!("Importing pg_tblspc is not implemented");
     } else {
-        debug!("ignored");
+        debug!(
+            "ignoring unrecognized file \"{}\" in tar archive",
+            file_path.display()
+        );
     }
 
     Ok(None)
