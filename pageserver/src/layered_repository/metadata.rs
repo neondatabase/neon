@@ -1,4 +1,4 @@
-//! Every image of a certain timeline from [`crate::layered_repository::LayeredRepository`]
+//! Every image of a certain timeline from [`crate::layered_repository::Repository`]
 //! has a metadata that needs to be stored persistently.
 //!
 //! Later, the file gets is used in [`crate::remote_storage::storage_sync`] as a part of
@@ -30,7 +30,7 @@ pub const METADATA_FILE_NAME: &str = "metadata";
 
 /// Metadata stored on disk for each timeline
 ///
-/// The fields correspond to the values we hold in memory, in LayeredTimeline.
+/// The fields correspond to the values we hold in memory, in Timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineMetadata {
     hdr: TimelineMetadataHeader,

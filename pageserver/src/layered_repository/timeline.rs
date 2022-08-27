@@ -366,7 +366,7 @@ pub struct Timeline {
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other threads.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`LayeredRepository::delete_timeline`].
+    /// and [`Repository::delete_timeline`].
     layer_removal_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected

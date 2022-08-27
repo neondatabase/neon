@@ -38,17 +38,17 @@ from fixtures.utils import lsn_from_hex, query_scalar
 #   * queries the specific data, ensuring that it matches the one stored before
 #
 # The tests are done for all types of remote storage pageserver supports.
-@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_remote_storage_backup_and_restore(
     neon_env_builder: NeonEnvBuilder,
-    remote_storatge_kind: RemoteStorageKind,
+    remote_storage_kind: RemoteStorageKind,
 ):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storatge_kind,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_remote_storage_backup_and_restore",
     )
 

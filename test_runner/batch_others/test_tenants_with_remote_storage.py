@@ -53,10 +53,10 @@ async def all_tenants_workload(env: NeonEnv, tenants_pgs):
     await asyncio.gather(*workers)
 
 
-@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
-def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storatge_kind,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_tenants_many",
     )
 

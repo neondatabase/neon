@@ -63,7 +63,7 @@ pub async fn handle_walreceiver_connection(
     )
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver conection")?;
+    .context("Failed to open walreceiver connection")?;
 
     info!("connected!");
     let mut connection_status = WalConnectionStatus {

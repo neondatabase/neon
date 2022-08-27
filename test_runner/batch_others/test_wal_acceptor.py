@@ -420,12 +420,12 @@ def wait_wal_trim(tenant_id, timeline_id, sk, target_size):
         time.sleep(0.5)
 
 
-@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
-def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
 
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storatge_kind,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_safekeepers_wal_backup",
     )
 
@@ -468,12 +468,12 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: Remo
     wait_segment_offload(tenant_id, timeline_id, env.safekeepers[1], "0/5000000")
 
 
-@pytest.mark.parametrize("remote_storatge_kind", available_remote_storages())
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storatge_kind: RemoteStorageKind):
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
 
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storatge_kind,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_s3_wal_replay",
     )
 
