@@ -69,7 +69,7 @@ pub use timeline::Timeline;
 pub use crate::layered_repository::ephemeral_file::writeback as writeback_ephemeral_file;
 
 // re-export for use in storage_sync.rs
-pub use crate::layered_repository::timeline::save_metadata;
+pub use crate::layered_repository::metadata::save_metadata;
 
 // re-export for use in walreceiver
 pub use crate::layered_repository::timeline::WalReceiverInfo;
@@ -185,7 +185,7 @@ impl Repository {
         crashsafe_dir::create_dir_all(timeline_path)?;
 
         let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        timeline::save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
+        save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
 
         let timeline = Timeline::new(
             self.conf,
@@ -294,7 +294,7 @@ impl Repository {
             src_timeline.initdb_lsn,
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
-        timeline::save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
+        save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
         timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
         info!("branched timeline {} from {} at {}", dst, src, start_lsn);

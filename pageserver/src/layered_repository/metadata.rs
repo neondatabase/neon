@@ -6,10 +6,13 @@
 //!
 //! The module contains all structs and related helper methods related to timeline metadata.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::ensure;
+use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use tracing::info_span;
 use utils::{
     bin_ser::BeSer,
     lsn::Lsn,
@@ -17,6 +20,7 @@ use utils::{
 };
 
 use crate::config::PageServerConf;
+use crate::virtual_file::VirtualFile;
 use crate::STORAGE_FORMAT_VERSION;
 
 /// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
@@ -63,17 +67,6 @@ struct TimelineMetadataBody {
     ancestor_lsn: Lsn,
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
-}
-
-/// Points to a place in pageserver's local directory,
-/// where certain timeline's metadata file should be located.
-pub fn metadata_path(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-) -> PathBuf {
-    conf.timeline_path(&timelineid, &tenantid)
-        .join(METADATA_FILE_NAME)
 }
 
 impl TimelineMetadata {
@@ -171,6 +164,53 @@ impl TimelineMetadata {
     pub fn initdb_lsn(&self) -> Lsn {
         self.body.initdb_lsn
     }
+}
+
+/// Points to a place in pageserver's local directory,
+/// where certain timeline's metadata file should be located.
+pub fn metadata_path(
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+) -> PathBuf {
+    conf.timeline_path(&timelineid, &tenantid)
+        .join(METADATA_FILE_NAME)
+}
+
+/// Save timeline metadata to file
+pub fn save_metadata(
+    conf: &'static PageServerConf,
+    timelineid: ZTimelineId,
+    tenantid: ZTenantId,
+    data: &TimelineMetadata,
+    first_save: bool,
+) -> anyhow::Result<()> {
+    let _enter = info_span!("saving metadata").entered();
+    let path = metadata_path(conf, timelineid, tenantid);
+    // use OpenOptions to ensure file presence is consistent with first_save
+    let mut file = VirtualFile::open_with_options(
+        &path,
+        OpenOptions::new().write(true).create_new(first_save),
+    )?;
+
+    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
+
+    if file.write(&metadata_bytes)? != metadata_bytes.len() {
+        bail!("Could not write all the metadata bytes in a single call");
+    }
+    file.sync_all()?;
+
+    // fsync the parent directory to ensure the directory entry is durable
+    if first_save {
+        let timeline_dir = File::open(
+            &path
+                .parent()
+                .expect("Metadata should always have a parent dir"),
+        )?;
+        timeline_dir.sync_all()?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

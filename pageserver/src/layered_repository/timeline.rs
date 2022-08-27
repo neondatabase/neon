@@ -11,8 +11,6 @@ use tracing::*;
 use std::cmp::{max, min, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
@@ -32,7 +30,7 @@ use crate::layered_repository::{
     image_layer::{ImageLayer, ImageLayerWriter},
     inmemory_layer::InMemoryLayer,
     layer_map::{LayerMap, SearchResult},
-    metadata::{metadata_path, TimelineMetadata, METADATA_FILE_NAME},
+    metadata::{save_metadata, TimelineMetadata, METADATA_FILE_NAME},
     par_fsync,
     storage_layer::{Layer, ValueReconstructResult, ValueReconstructState},
 };
@@ -54,7 +52,6 @@ use utils::{
 use crate::repository::{GcResult, RepositoryTimeline};
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
-use crate::virtual_file::VirtualFile;
 use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
@@ -2341,40 +2338,4 @@ fn rename_to_backup(path: PathBuf) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
-}
-
-/// Save timeline metadata to file
-pub fn save_metadata(
-    conf: &'static PageServerConf,
-    timelineid: ZTimelineId,
-    tenantid: ZTenantId,
-    data: &TimelineMetadata,
-    first_save: bool,
-) -> Result<()> {
-    let _enter = info_span!("saving metadata").entered();
-    let path = metadata_path(conf, timelineid, tenantid);
-    // use OpenOptions to ensure file presence is consistent with first_save
-    let mut file = VirtualFile::open_with_options(
-        &path,
-        OpenOptions::new().write(true).create_new(first_save),
-    )?;
-
-    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
-
-    if file.write(&metadata_bytes)? != metadata_bytes.len() {
-        bail!("Could not write all the metadata bytes in a single call");
-    }
-    file.sync_all()?;
-
-    // fsync the parent directory to ensure the directory entry is durable
-    if first_save {
-        let timeline_dir = File::open(
-            &path
-                .parent()
-                .expect("Metadata should always have a parent dir"),
-        )?;
-        timeline_dir.sync_all()?;
-    }
-
-    Ok(())
 }
