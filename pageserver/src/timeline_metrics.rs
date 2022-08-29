@@ -24,7 +24,7 @@ fn get_buckets_for_critical_operations() -> Vec<f64> {
 }
 
 // Metrics collected on operations on the storage repository.
-const STORAGE_TIME_OPERATIONS: &'static [&'static str] = &[
+const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "layer flush",
     "compact",
     "create images",
@@ -82,31 +82,6 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-const SMGR_QUERY_TIME_OPERATIONS: &'static [&'static str] = &[
-    "get_rel_exists",
-    "get_rel_size",
-    "get_page_at_lsn",
-    "get_db_size",
-];
-
-const SMGR_QUERY_TIME_BUCKETS: &[f64] = &[
-    0.00001, // 1/100000 s
-    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
-    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
-    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
-    0.1,  // 1/10 s
-];
-
-static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_smgr_query_seconds",
-        "Time spent on smgr query handling",
-        &["smgr_query_type", "tenant_id", "timeline_id"],
-        SMGR_QUERY_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
-
 // Metrics for determining timeline's physical size.
 // A layered timeline's physical is defined as the total size of
 // (delta/image) layer files on disk.
@@ -157,10 +132,10 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &'static [&'static str] =
+const STORAGE_IO_TIME_OPERATIONS: &[&str] =
     &["open", "close", "read", "write", "seek", "fsync", "gc"];
 
-const STORAGE_IO_SIZE_OPERATIONS: &'static [&'static str] = &["read", "write"];
+const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
 pub static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -177,6 +152,31 @@ pub static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
         &["operation", "tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+const SMGR_QUERY_TIME_OPERATIONS: &[&str] = &[
+    "get_rel_exists",
+    "get_rel_size",
+    "get_page_at_lsn",
+    "get_db_size",
+];
+
+const SMGR_QUERY_TIME_BUCKETS: &[f64] = &[
+    0.00001, // 1/100000 s
+    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
+    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
+    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
+    0.1,  // 1/10 s
+];
+
+pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_smgr_query_seconds",
+        "Time spent on smgr query handling",
+        &["smgr_query_type", "tenant_id", "timeline_id"],
+        SMGR_QUERY_TIME_BUCKETS.into()
     )
     .expect("failed to define a metric")
 });
@@ -261,15 +261,15 @@ impl TimelineMetrics {
     }
 
     pub fn storage_io_time(&self, op: &str) -> metrics::Histogram {
-        return STORAGE_IO_TIME
-            .get_metric_with_label_values(&[&op, &self.tenant_id, &self.timeline_id])
-            .unwrap();
+        STORAGE_IO_TIME
+            .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
+            .unwrap()
     }
 
     pub fn storage_io_size(&self, op: &str) -> GenericGauge<metrics::core::AtomicI64> {
-        return STORAGE_IO_SIZE
+        STORAGE_IO_SIZE
             .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
-            .unwrap();
+            .unwrap()
     }
 
     pub fn smgr_query_time(&self, op: &str) -> metrics::Histogram {
