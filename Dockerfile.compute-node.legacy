@@ -37,7 +37,8 @@ RUN adduser postgres
 RUN mkdir /pg && chown postgres:postgres /pg
 
 # Copy source files
-COPY ./vendor/postgres /pg/
+# version 14 is default for now
+COPY ./vendor/postgres-v14 /pg/
 COPY ./pgxn /pg/
 
 # Build and install Postgres locally
