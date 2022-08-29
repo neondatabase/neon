@@ -214,4 +214,24 @@ mod tests {
             &["one", "store two start", "release a", "store two done",]
         );
     }
+
+    #[test]
+    fn double_reader() {
+        let rcu = Rcu::new(5);
+        let reader1 = rcu.read();
+        let reader2 = rcu.read();
+
+        assert_eq!(5, *reader1);
+        assert_eq!(5, *reader2);
+    }
+
+    #[test]
+    fn double_writer() {
+        let rcu = Rcu::new(3);
+        let writer1 = rcu.write();
+        let writer2 = rcu.write();
+
+        assert_eq!(3, *writer1);
+        assert_eq!(3, *writer2);
+    }
 }
