@@ -15,6 +15,7 @@ pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
 pub mod thread_mgr;
+pub mod timeline_metrics;
 pub mod timelines;
 pub mod virtual_file;
 pub mod walingest;
