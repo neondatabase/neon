@@ -35,13 +35,13 @@ pub const METADATA_FILE_NAME: &str = "metadata";
 /// Metadata stored on disk for each timeline
 ///
 /// The fields correspond to the values we hold in memory, in Timeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TimelineMetadata {
     hdr: TimelineMetadataHeader,
     body: TimelineMetadataBody,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct TimelineMetadataHeader {
     checksum: u32,       // CRC of serialized metadata body
     size: u16,           // size of serialized metadata
@@ -49,7 +49,7 @@ struct TimelineMetadataHeader {
 }
 const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct TimelineMetadataBody {
     disk_consistent_lsn: Lsn,
     // This is only set if we know it. We track it in memory when the page

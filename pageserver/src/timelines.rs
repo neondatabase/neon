@@ -159,7 +159,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<(ZTimelineId, Arc<Timeline>)>> {
+) -> Result<Option<Arc<Timeline>>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
@@ -201,5 +201,5 @@ pub(crate) fn create_timeline(
         None => bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?,
     };
 
-    Ok(Some((new_timeline_id, loaded_timeline)))
+    Ok(Some(loaded_timeline))
 }

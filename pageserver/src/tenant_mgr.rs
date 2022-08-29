@@ -3,6 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::http::models::TenantInfo;
+use crate::layered_repository::metadata::TimelineMetadata;
 use crate::layered_repository::{load_metadata, Repository, Timeline};
 use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
@@ -188,7 +189,7 @@ impl std::fmt::Debug for LocalTimelineUpdate {
 pub fn attach_downloaded_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
-    sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>>,
+    sync_status_updates: HashMap<ZTenantId, HashSet<(ZTimelineId, TimelineMetadata)>>,
 ) {
     if sync_status_updates.is_empty() {
         debug!("No sync status updates to apply");
@@ -208,11 +209,9 @@ pub fn attach_downloaded_tenants(
                 continue;
             }
         };
-        match attach_downloaded_tenant(&repo, downloaded_timelines) {
-            Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
-            Err(e) => error!(
-                "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
-            ),
+        match repo.init_attach_timelines(downloaded_timelines) {
+            Ok(()) => info!("successfully loaded local timelines for tenant {tenant_id}"),
+            Err(e) => error!("Failed to load local timelines for tenant {tenant_id}: {e:?}"),
         }
     }
 }
@@ -486,7 +485,7 @@ fn check_broken_timeline(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     timeline_id: ZTimelineId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TimelineMetadata> {
     let metadata =
         load_metadata(conf, timeline_id, tenant_id).context("failed to load metadata")?;
 
@@ -496,7 +495,7 @@ fn check_broken_timeline(
         anyhow::bail!("Timeline {timeline_id} has a zero disk consistent LSN.");
     }
 
-    Ok(())
+    Ok(metadata)
 }
 
 /// Note: all timelines are attached at once if and only if all of them are locally complete
@@ -511,9 +510,9 @@ fn init_local_repository(
         match init_status {
             LocalTimelineInitStatus::LocallyComplete => {
                 debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
-                check_broken_timeline(conf, tenant_id, timeline_id)
+                let metadata = check_broken_timeline(conf, tenant_id, timeline_id)
                     .context("found broken timeline")?;
-                timelines_to_attach.insert(timeline_id);
+                timelines_to_attach.insert((timeline_id, metadata));
             }
             LocalTimelineInitStatus::NeedsSync => {
                 debug!(
@@ -532,21 +531,8 @@ fn init_local_repository(
     // Lets fail here loudly to be on the safe side.
     // XXX: It may be a better api to actually distinguish between repository startup
     //   and processing of newly downloaded timelines.
-    attach_downloaded_tenant(&repo, timelines_to_attach)
-        .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?;
-    Ok(())
-}
-
-fn attach_downloaded_tenant(
-    repo: &Repository,
-    downloaded_timelines: HashSet<ZTimelineId>,
-) -> anyhow::Result<()> {
-    for &timeline_id in &downloaded_timelines {
-        repo.attach_timeline(timeline_id).with_context(|| {
-            format!("Failed to load timeline {timeline_id} into in-memory repository")
-        })?;
-    }
-
+    repo.init_attach_timelines(timelines_to_attach)
+        .with_context(|| format!("Failed to init local timelines for tenant {tenant_id}"))?;
     Ok(())
 }
 

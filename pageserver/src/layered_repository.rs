@@ -16,15 +16,19 @@ use tracing::*;
 use utils::zid::ZTenantTimelineId;
 
 use std::cmp::min;
+use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::num::NonZeroU64;
 use std::ops::Bound::Included;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+use std::sync::MutexGuard;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
@@ -144,16 +148,15 @@ impl Repository {
     /// Initdb lsn is provided for timeline impl to be able to perform checks for some operations against it.
     pub fn create_empty_timeline(
         &self,
-        timeline_id: ZTimelineId,
+        new_timeline_id: ZTimelineId,
         initdb_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let mut timelines = self.timelines.lock().unwrap();
-        let vacant_timeline_entry = match timelines.entry(timeline_id) {
-            Entry::Occupied(_) => bail!("Timeline already exists"),
-            Entry::Vacant(vacant_entry) => vacant_entry,
-        };
+        anyhow::ensure!(
+            self.get_timeline(new_timeline_id).is_none(),
+            "Timeline {new_timeline_id} already exists"
+        );
 
-        let timeline_path = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        let timeline_path = self.conf.timeline_path(&new_timeline_id, &self.tenant_id);
         if timeline_path.exists() {
             bail!("Timeline directory already exists, but timeline is missing in repository map. This is a bug.")
         }
@@ -161,31 +164,26 @@ impl Repository {
         // Create the timeline directory, and write initial metadata to file.
         crashsafe_dir::create_dir_all(timeline_path)?;
 
-        let metadata = TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
-        save_metadata(self.conf, timeline_id, self.tenant_id, &metadata, true)?;
-
-        let timeline = Timeline::new(
+        let new_metadata =
+            TimelineMetadata::new(Lsn(0), None, None, Lsn(0), initdb_lsn, initdb_lsn);
+        save_metadata(
             self.conf,
-            Arc::clone(&self.tenant_conf),
-            metadata,
-            None,
-            timeline_id,
+            new_timeline_id,
             self.tenant_id,
-            Arc::clone(&self.walredo_mgr),
-            self.upload_layers,
-        );
-        timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
+            &new_metadata,
+            true,
+        )?;
 
-        // Insert if not exists
-        let timeline = Arc::new(timeline);
-        vacant_timeline_entry.insert(Arc::clone(&timeline));
+        let mut timelines = self.timelines.lock().unwrap();
+        let new_timeline =
+            self.initialize_new_timeline(new_timeline_id, new_metadata, &mut timelines)?;
+        new_timeline.layers.write().unwrap().next_open_layer_at = Some(initdb_lsn);
 
-        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-            id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
-            timeline: Arc::clone(&timeline),
-        });
+        if let hash_map::Entry::Vacant(v) = timelines.entry(new_timeline_id) {
+            v.insert(Arc::clone(&new_timeline));
+        }
 
-        Ok(timeline)
+        Ok(new_timeline)
     }
 
     /// Branch a timeline
@@ -209,9 +207,8 @@ impl Repository {
         // Step 2 is to avoid initializing the new branch using data removed by past GC iterations
         // or in-queue GC iterations.
 
-        let mut timelines = self.timelines.lock().unwrap();
-        let src_timeline = timelines
-            .get(&src)
+        let src_timeline = self
+            .get_timeline(src)
             // message about timeline being remote is one .context up in the stack
             .ok_or_else(|| anyhow::anyhow!("unknown timeline id: {src}"))?;
 
@@ -231,7 +228,7 @@ impl Repository {
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context(format!(
                 "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn
+                *latest_gc_cutoff_lsn,
             ))?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
@@ -272,11 +269,16 @@ impl Repository {
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;
         save_metadata(self.conf, dst, self.tenant_id, &metadata, true)?;
-        timelines.insert(dst, LayeredTimelineEntry::Unloaded { id: dst, metadata });
 
-        info!("branched timeline {} from {} at {}", dst, src, start_lsn);
+        let mut timelines_accessor = self.timelines.lock().unwrap();
+        let new_timeline = self.initialize_new_timeline(dst, metadata, &mut timelines_accessor)?;
+        {
+            timelines_accessor.insert(dst, Arc::clone(&new_timeline));
+        }
 
-        Ok(())
+        info!("branched timeline {dst} from {src} at {start_lsn}");
+
+        Ok(new_timeline)
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
@@ -395,19 +397,28 @@ impl Repository {
         Ok(())
     }
 
-    /// Updates timeline based on the `TimelineSyncStatusUpdate`, received from the remote storage synchronization.
-    /// See [`crate::remote_storage`] for more details about the synchronization.
-    pub fn attach_timeline(&self, timeline_id: ZTimelineId) -> Result<()> {
-        debug!("attach timeline_id: {}", timeline_id,);
-        match self.timelines.lock().unwrap().entry(timeline_id) {
-            Entry::Occupied(_) => bail!("We completed a download for a timeline that already exists in repository. This is a bug."),
-            Entry::Vacant(entry) => {
-                // we need to get metadata of a timeline, another option is to pass it along with Downloaded status
-                let metadata = load_metadata(self.conf, timeline_id, self.tenant_id).context("failed to load local metadata")?;
-                // finally we make newly downloaded timeline visible to repository
-                entry.insert(LayeredTimelineEntry::Unloaded { id: timeline_id, metadata })
-            },
-        };
+    pub fn init_attach_timelines(
+        &self,
+        timelines: HashSet<(ZTimelineId, TimelineMetadata)>,
+    ) -> anyhow::Result<()> {
+        let mut timelines_accessor = self.timelines.lock().unwrap();
+
+        for (timeline_id, metadata) in timelines {
+            let timeline = self
+                .initialize_new_timeline(timeline_id, metadata, &mut timelines_accessor)
+                .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
+
+            match timelines_accessor.entry(timeline.timeline_id) {
+                hash_map::Entry::Occupied(_) => anyhow::bail!(
+                    "Found freshly initialized timeline {} in the tenant map",
+                    timeline.timeline_id
+                ),
+                hash_map::Entry::Vacant(v) => {
+                    v.insert(timeline);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -512,86 +523,52 @@ impl Repository {
         Ok(())
     }
 
-    // TODO kb rework this and make private?
-    // // Implementation of the public `get_timeline_load` function.
-    // // Differences from the public:
-    // //  * interface in that the caller must already hold the mutex on the 'timelines' hashmap.
-    // pub fn get_timeline_load_internal(
-    //     &self,
-    //     timeline_id: ZTimelineId,
-    //     timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
-    // ) -> anyhow::Result<Option<Arc<Timeline>>> {
-    //     Ok(match timelines.get(&timeline_id) {
-    //         Some(entry) => match entry {
-    //             LayeredTimelineEntry::Loaded(local_timeline) => {
-    //                 debug!("timeline {timeline_id} found loaded into memory");
-    //                 Some(Arc::clone(local_timeline))
-    //             }
-    //             LayeredTimelineEntry::Unloaded { .. } => {
-    //                 debug!(
-    //         "timeline {timeline_id} found on a local disk, but not loaded into the memory, loading"
-    //     );
-    //                 let timeline = self.load_local_timeline(timeline_id, timelines)?;
-    //                 let was_loaded = timelines.insert(timeline_id, Arc::clone(&timeline));
-    //                 ensure!(
-    //                     was_loaded.is_none()
-    //                         || matches!(was_loaded, Some(LayeredTimelineEntry::Unloaded { .. })),
-    //                     "assertion failure, inserted wrong timeline in an incorrect state"
-    //                 );
-    //                 Some(timeline)
-    //             }
-    //         },
-    //         None => {
-    //             debug!("timeline {timeline_id} not found");
-    //             None
-    //         }
-    //     })
-    // }
+    fn initialize_new_timeline(
+        &self,
+        new_timeline_id: ZTimelineId,
+        new_metadata: TimelineMetadata,
+        timelines: &mut MutexGuard<HashMap<ZTimelineId, Arc<Timeline>>>,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let ancestor = match new_metadata.ancestor_timeline() {
+            Some(ancestor_timeline_id) => Some(
+                timelines
+                    .get(&ancestor_timeline_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                        "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
+                    )
+                    })?,
+            ),
+            None => None,
+        };
 
-    // fn load_local_timeline(
-    //     &self,
-    //     timeline_id: ZTimelineId,
-    //     timelines: &mut HashMap<ZTimelineId, Arc<Timeline>>,
-    // ) -> anyhow::Result<Arc<Timeline>> {
-    //     let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
-    //         .context("failed to load metadata")?;
-    //     let disk_consistent_lsn = metadata.disk_consistent_lsn();
+        let new_disk_consistent_lsn = new_metadata.disk_consistent_lsn();
 
-    //     let ancestor = metadata
-    //         .ancestor_timeline()
-    //         .map(|ancestor_timeline_id| {
-    //             info!("loading {timeline_id}'s ancestor {ancestor_timeline_id}");
-    //             self.get_timeline_load_internal(ancestor_timeline_id, timelines)
-    //         })
-    //         .transpose()
-    //         .context("cannot load ancestor timeline")?
-    //         .flatten();
+        let new_timeline = Arc::new(Timeline::new(
+            self.conf,
+            Arc::clone(&self.tenant_conf),
+            new_metadata,
+            ancestor,
+            new_timeline_id,
+            self.tenant_id,
+            Arc::clone(&self.walredo_mgr),
+            self.upload_layers,
+        ));
 
-    //     let _enter = info_span!("loading local timeline").entered();
+        if new_disk_consistent_lsn.is_valid() {
+            new_timeline
+                .load_layer_map(new_disk_consistent_lsn)
+                .context("failed to load layermap")?;
+        }
 
-    //     let timeline = Timeline::new(
-    //         self.conf,
-    //         Arc::clone(&self.tenant_conf),
-    //         metadata,
-    //         ancestor,
-    //         timeline_id,
-    //         self.tenant_id,
-    //         Arc::clone(&self.walredo_mgr),
-    //         self.upload_layers,
-    //     );
-    //     timeline
-    //         .load_layer_map(disk_consistent_lsn)
-    //         .context("failed to load layermap")?;
+        crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
+            id: ZTenantTimelineId::new(self.tenant_id(), new_timeline_id),
+            timeline: Arc::clone(&new_timeline),
+        });
 
-    //     let timeline = Arc::new(timeline);
-
-    //     crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
-    //         id: ZTenantTimelineId::new(self.tenant_id(), timeline_id),
-    //         timeline: Arc::clone(&timeline),
-    //     });
-
-    //     Ok(timeline)
-    // }
+        Ok(new_timeline)
+    }
 
     pub fn new(
         conf: &'static PageServerConf,
@@ -997,20 +974,21 @@ pub mod repo_harness {
                 false,
             );
             // populate repo with locally available timelines
+            let mut timelines_to_load = HashSet::new();
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
                 .expect("should be able to read timelines dir")
             {
-                let timeline_dir_entry = timeline_dir_entry.unwrap();
+                let timeline_dir_entry = timeline_dir_entry?;
                 let timeline_id: ZTimelineId = timeline_dir_entry
                     .path()
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .parse()
-                    .unwrap();
-
-                repo.attach_timeline(timeline_id)?;
+                    .parse()?;
+                let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
+                timelines_to_load.insert((timeline_id, timeline_metadata));
             }
+            repo.init_attach_timelines(timelines_to_load)?;
 
             Ok(repo)
         }
@@ -1093,7 +1071,10 @@ mod tests {
 
         match repo.create_empty_timeline(TIMELINE_ID, Lsn(0)) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(e.to_string(), "Timeline already exists"),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                format!("Timeline {TIMELINE_ID} already exists")
+            ),
         }
 
         Ok(())
@@ -1391,7 +1372,9 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness.try_load().err().expect("should fail");
-        assert_eq!(err.to_string(), "failed to load local metadata");
+        assert!(err
+            .to_string()
+            .starts_with("Failed to parse metadata bytes from path"));
 
         let mut found_error_message = false;
         let mut err_source = err.source();
