@@ -66,16 +66,6 @@ fn main() -> Result<()> {
     let (key_max, key_map) = analyze(keys);
     let (lsn_max, lsn_map) = analyze(lsns);
 
-
-    // TODO
-    // 1. Why is there empty space below deltas?
-    // - does image happen at LSN **after** last delta?
-    // 2. Why are images overriding each other?
-    // 4. Am I hiding rectangles behind others?
-    // 5. Why does it start with images, not deltas?
-    // 6. Time flows down. Does that make sense?
-    // 7. Why so many deltas at the same time? Compaction?
-
     // Initialize stats
     let mut num_deltas = 0;
     let mut num_images = 0;
