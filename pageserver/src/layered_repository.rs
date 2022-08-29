@@ -254,7 +254,8 @@ impl Repository {
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
             .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {latest_gc_cutoff_lsn}"
+                "invalid branch start lsn: less than latest GC cutoff {}",
+                *latest_gc_cutoff_lsn
             ))?;
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
@@ -290,7 +291,7 @@ impl Repository {
             dst_prev,
             Some(src),
             start_lsn,
-            *src_timeline.latest_gc_cutoff_lsn.read().unwrap(),
+            *src_timeline.latest_gc_cutoff_lsn.read(),
             src_timeline.initdb_lsn,
         );
         crashsafe_dir::create_dir_all(self.conf.timeline_path(&dst, &self.tenant_id))?;

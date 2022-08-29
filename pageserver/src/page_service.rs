@@ -17,13 +17,14 @@ use std::io::{self, Read};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::Arc;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
     lsn::Lsn,
     postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
     pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    simple_rcu::RcuReadGuard,
     zid::{ZTenantId, ZTimelineId},
 };
 
@@ -639,7 +640,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         mut lsn: Lsn,
         latest: bool,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
     ) -> Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint

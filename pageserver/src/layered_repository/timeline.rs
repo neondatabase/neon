@@ -14,7 +14,7 @@ use std::fs;
 use std::ops::{Deref, Range};
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use metrics::{
@@ -46,6 +46,7 @@ use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
+    simple_rcu::{Rcu, RcuReadGuard},
     zid::{ZTenantId, ZTimelineId},
 };
 
@@ -367,7 +368,7 @@ pub struct Timeline {
     layer_removal_cs: Mutex<()>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
-    pub latest_gc_cutoff_lsn: RwLock<Lsn>,
+    pub latest_gc_cutoff_lsn: Rcu<Lsn>,
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
@@ -478,8 +479,8 @@ impl Timeline {
     }
 
     /// Lock and get timeline's GC cuttof
-    pub fn get_latest_gc_cutoff_lsn(&self) -> RwLockReadGuard<Lsn> {
-        self.latest_gc_cutoff_lsn.read().unwrap()
+    pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
+        self.latest_gc_cutoff_lsn.read()
     }
 
     /// Look up given page version.
@@ -594,7 +595,7 @@ impl Timeline {
     pub fn check_lsn_is_in_scope(
         &self,
         lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
     ) -> Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
@@ -729,7 +730,7 @@ impl Timeline {
                 pitr_cutoff: Lsn(0),
             }),
 
-            latest_gc_cutoff_lsn: RwLock::new(metadata.latest_gc_cutoff_lsn()),
+            latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
             initdb_lsn: metadata.initdb_lsn(),
 
             current_logical_size: AtomicI64::new(0),
@@ -1377,7 +1378,7 @@ impl Timeline {
                 ondisk_prev_record_lsn,
                 ancestor_timelineid,
                 self.ancestor_lsn,
-                *self.latest_gc_cutoff_lsn.read().unwrap(),
+                *self.latest_gc_cutoff_lsn.read(),
                 self.initdb_lsn,
             );
 
@@ -2032,9 +2033,21 @@ impl Timeline {
 
         let _enter = info_span!("garbage collection", timeline = %self.timeline_id, tenant = %self.tenant_id, cutoff = %new_gc_cutoff).entered();
 
-        // We need to ensure that no one branches at a point before latest_gc_cutoff_lsn.
-        // See branch_timeline() for details.
-        *self.latest_gc_cutoff_lsn.write().unwrap() = new_gc_cutoff;
+        // We need to ensure that no one tries to read page versions or create
+        // branches at a point before latest_gc_cutoff_lsn. See branch_timeline()
+        // for details. This will block until the old value is no longer in use.
+        //
+        // The GC cutoff should only ever move forwards.
+        {
+            let write_guard = self.latest_gc_cutoff_lsn.write();
+            ensure!(
+                *write_guard <= new_gc_cutoff,
+                "Cannot move GC cutoff LSN backwards (was {}, new {})",
+                *write_guard,
+                new_gc_cutoff
+            );
+            write_guard.store(new_gc_cutoff);
+        }
 
         info!("GC starting");
 
