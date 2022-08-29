@@ -517,7 +517,6 @@ impl PageServerHandler {
             }
             drop(profiling_guard);
         }
-
         Ok(())
     }
 
