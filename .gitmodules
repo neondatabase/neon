@@ -1,8 +1,8 @@
 [submodule "vendor/postgres-v14"]
 	path = vendor/postgres-v14
-	url = https://github.com/neondatabase/postgres.git
-	branch = REL_14_STABLE_neon
+	url = https://github.com/DSLAM-UMD/postgres.git
+	branch = remotexact
 [submodule "vendor/postgres-v15"]
 	path = vendor/postgres-v15
-	url = https://github.com/neondatabase/postgres.git
-	branch = REL_15_STABLE_neon
+	url = https://github.com/DSLAM-UMD/postgres.git
+	branch = REL_15_STABLE_remotexact

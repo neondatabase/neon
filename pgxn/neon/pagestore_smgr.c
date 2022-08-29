@@ -45,6 +45,7 @@
  */
 #include "postgres.h"
 
+#include "access/remotexact.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
@@ -53,6 +54,7 @@
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
+#include "multiregion.h"
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -99,6 +101,8 @@ char	   *page_server_connstring;
 char	   *neon_timeline;
 char	   *neon_tenant;
 int32		max_cluster_size;
+bool		neon_slru_clog;
+bool		neon_slru_multixact;
 
 /* unlogged relation build states */
 typedef enum
@@ -111,6 +115,9 @@ typedef enum
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+
+static void neon_read_at_lsn_multi_region(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+										  int region, XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
 /*
  * Prefetch implementation:
@@ -167,6 +174,7 @@ typedef enum PrefetchStatus {
 
 typedef struct PrefetchRequest {
 	BufferTag	buftag; /* must be first entry in the struct */
+	int	region;
 	XLogRecPtr	effective_request_lsn;
 	NeonResponse *response; /* may be null */
 	PrefetchStatus status;
@@ -255,14 +263,14 @@ XLogRecPtr	prefetch_lsn = 0;
 
 static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
-static uint64 prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn);
+static uint64 prefetch_register_buffer(BufferTag tag, int region, bool *force_latest, XLogRecPtr *force_lsn);
 static bool prefetch_read(PrefetchRequest *slot);
 static void prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn);
 static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
 
-static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
+static XLogRecPtr neon_get_request_lsn(bool *latest, int region, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
 
 static bool
@@ -533,7 +541,7 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->my_ring_index == MyPState->ring_receive);
 
 	old = MemoryContextSwitchTo(MyPState->errctx);
-	response = (NeonResponse *) page_server->receive();
+	response = (NeonResponse *) page_server->receive(slot->region);
 	MemoryContextSwitchTo(old);
 	if (response)
 	{
@@ -640,6 +648,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		.req.tag = T_NeonGetPageRequest,
 		.req.latest = false,
 		.req.lsn = 0,
+		.req.region = slot->region,
 		.rnode = slot->buftag.rnode,
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
@@ -655,6 +664,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	{
 		XLogRecPtr lsn = neon_get_request_lsn(
 			&request.req.latest,
+			slot->region,
 			slot->buftag.rnode,
 			slot->buftag.forkNum,
 			slot->buftag.blockNum
@@ -712,7 +722,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
  */
 
 static uint64
-prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn)
+prefetch_register_buffer(BufferTag tag, int region, bool *force_latest, XLogRecPtr *force_lsn)
 {
 	uint64	ring_index;
 	PrefetchRequest req;
@@ -734,7 +744,8 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		Assert(MyPState->ring_last <= ring_index &&
 			   ring_index < MyPState->ring_unused);
 		Assert(BUFFERTAGS_EQUAL(slot->buftag, tag));
-
+		Assert(slot->region == region);
+		
 		/*
 		 * If we want a specific lsn, we do not accept requests that were made
 		 * with a potentially different LSN.
@@ -844,6 +855,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	 * function reads the buffer tag from the slot.
 	 */
 	slot->buftag = tag;
+	slot->region = region;
 	slot->my_ring_index = ring_index;
 
 	prefetch_do_request(slot, force_latest, force_lsn);
@@ -864,18 +876,18 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 static NeonResponse *
 page_server_request(void const *req)
 {
-	NeonResponse* resp;
+	NeonRequest *neon_req = (NeonRequest *) req;
+	NeonResponse *resp;
 	do {
-		page_server->send((NeonRequest *) req);
+		page_server->send(neon_req);
 		page_server->flush();
 		MyPState->ring_flush = MyPState->ring_unused;
 		consume_prefetch_responses();
-		resp = page_server->receive();
+		resp = page_server->receive(neon_req->region);
 	} while (resp == NULL);
 	return resp;
 
 }
-
 
 StringInfoData
 nm_pack_request(NeonRequest * msg)
@@ -894,6 +906,7 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendint32(&s, msg_req->req.region);
 				pq_sendint32(&s, msg_req->rnode.spcNode);
 				pq_sendint32(&s, msg_req->rnode.dbNode);
 				pq_sendint32(&s, msg_req->rnode.relNode);
@@ -907,6 +920,7 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendint32(&s, msg_req->req.region);
 				pq_sendint32(&s, msg_req->rnode.spcNode);
 				pq_sendint32(&s, msg_req->rnode.dbNode);
 				pq_sendint32(&s, msg_req->rnode.relNode);
@@ -930,6 +944,7 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendint32(&s, msg_req->req.region);
 				pq_sendint32(&s, msg_req->rnode.spcNode);
 				pq_sendint32(&s, msg_req->rnode.dbNode);
 				pq_sendint32(&s, msg_req->rnode.relNode);
@@ -938,11 +953,26 @@ nm_pack_request(NeonRequest * msg)
 
 				break;
 			}
+		case T_NeonGetSlruPageRequest:
+			{
+				NeonGetSlruPageRequest *msg_req = (NeonGetSlruPageRequest *) msg;
+
+				pq_sendbyte(&s, msg_req->req.latest);
+				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendint32(&s, msg_req->req.region);
+				pq_sendbyte(&s, msg_req->kind);
+				pq_sendint32(&s, msg_req->segno);
+				pq_sendint32(&s, msg_req->blkno);
+				pq_sendbyte(&s, msg_req->check_exists_only);
+
+				break;
+			}
 
 			/* pagestore -> pagestore_client. We never need to create these. */
 		case T_NeonExistsResponse:
 		case T_NeonNblocksResponse:
 		case T_NeonGetPageResponse:
+		case T_NeonGetSlruPageResponse:
 		case T_NeonErrorResponse:
 		case T_NeonDbSizeResponse:
 		default:
@@ -966,6 +996,7 @@ nm_unpack_response(StringInfo s)
 				NeonExistsResponse *msg_resp = palloc0(sizeof(NeonExistsResponse));
 
 				msg_resp->tag = tag;
+				msg_resp->lsn = pq_getmsgint64(s);
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
 
@@ -978,6 +1009,7 @@ nm_unpack_response(StringInfo s)
 				NeonNblocksResponse *msg_resp = palloc0(sizeof(NeonNblocksResponse));
 
 				msg_resp->tag = tag;
+				msg_resp->lsn = pq_getmsgint64(s);
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
 
@@ -991,6 +1023,7 @@ nm_unpack_response(StringInfo s)
 
 				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
 				msg_resp->tag = tag;
+				msg_resp->lsn = pq_getmsgint64(s);
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
@@ -1007,6 +1040,25 @@ nm_unpack_response(StringInfo s)
 
 				msg_resp->tag = tag;
 				msg_resp->db_size = pq_getmsgint64(s);
+				pq_getmsgend(s);
+
+				resp = (NeonResponse *) msg_resp;
+				break;
+			}
+
+		case T_NeonGetSlruPageResponse:
+			{
+				NeonGetSlruPageResponse *msg_resp = palloc0(offsetof(NeonGetSlruPageResponse, page) + BLCKSZ);
+
+				msg_resp->tag = tag;
+				msg_resp->lsn = pq_getmsgint64(s);
+				msg_resp->seg_exists = pq_getmsgbyte(s);
+				msg_resp->page_exists = pq_getmsgbyte(s);
+				if (msg_resp->page_exists)
+				{
+					/* XXX:	should be varlena */
+					memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
+				}
 				pq_getmsgend(s);
 
 				resp = (NeonResponse *) msg_resp;
@@ -1069,6 +1121,7 @@ nm_to_string(NeonMessage * msg)
 								 msg_req->rnode.dbNode,
 								 msg_req->rnode.relNode);
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
+				appendStringInfo(&s, ", \"region\": %d", msg_req->req.region);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
 				appendStringInfoChar(&s, '}');
@@ -1085,6 +1138,7 @@ nm_to_string(NeonMessage * msg)
 								 msg_req->rnode.dbNode,
 								 msg_req->rnode.relNode);
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
+				appendStringInfo(&s, ", \"region\": %d", msg_req->req.region);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
 				appendStringInfoChar(&s, '}');
@@ -1102,11 +1156,13 @@ nm_to_string(NeonMessage * msg)
 								 msg_req->rnode.relNode);
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
+				appendStringInfo(&s, ", \"region\": %d", msg_req->req.region);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
 				appendStringInfoChar(&s, '}');
 				break;
 			}
+
 		case T_NeonDbSizeRequest:
 			{
 				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
@@ -1119,23 +1175,42 @@ nm_to_string(NeonMessage * msg)
 				break;
 			}
 
+		case T_NeonGetSlruPageRequest:
+			{
+				NeonGetSlruPageRequest *msg_req = (NeonGetSlruPageRequest *) msg;
+
+				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruPageRequest\"");
+				appendStringInfo(&s, ", \"kind\": %d", msg_req->kind);
+				appendStringInfo(&s, ", \"segno\": %d", msg_req->segno);
+				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
+				appendStringInfo(&s, ", \"check_exists_only\": %d", msg_req->check_exists_only);
+				appendStringInfo(&s, ", \"region\": %d", msg_req->req.region);
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
+				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfoChar(&s, '}');
+				break;
+			}
+
 			/* pagestore -> pagestore_client */
 		case T_NeonExistsResponse:
 			{
 				NeonExistsResponse *msg_resp = (NeonExistsResponse *) msg;
 
 				appendStringInfoString(&s, "{\"type\": \"NeonExistsResponse\"");
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_resp->lsn));
 				appendStringInfo(&s, ", \"exists\": %d}",
 								 msg_resp->exists);
 				appendStringInfoChar(&s, '}');
 
 				break;
 			}
+
 		case T_NeonNblocksResponse:
 			{
 				NeonNblocksResponse *msg_resp = (NeonNblocksResponse *) msg;
 
 				appendStringInfoString(&s, "{\"type\": \"NeonNblocksResponse\"");
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_resp->lsn));
 				appendStringInfo(&s, ", \"n_blocks\": %u}",
 								 msg_resp->n_blocks);
 				appendStringInfoChar(&s, '}');
@@ -1144,11 +1219,22 @@ nm_to_string(NeonMessage * msg)
 			}
 		case T_NeonGetPageResponse:
 			{
-#if 0
 				NeonGetPageResponse *msg_resp = (NeonGetPageResponse *) msg;
-#endif
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_resp->lsn));
+				appendStringInfo(&s, ", \"page\": \"XXX\"}");
+				appendStringInfoChar(&s, '}');
+				break;
+			}
+		case T_NeonGetSlruPageResponse:
+			{
+				NeonGetSlruPageResponse *msg_resp = (NeonGetSlruPageResponse *) msg;
+
+				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruPageResponse\"");
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_resp->lsn));
+				appendStringInfo(&s, ", \"seg_exists\": %d", msg_resp->seg_exists);
+				appendStringInfo(&s, ", \"page_exists\": %d", msg_resp->page_exists);
 				appendStringInfo(&s, ", \"page\": \"XXX\"}");
 				appendStringInfoChar(&s, '}');
 				break;
@@ -1377,7 +1463,7 @@ nm_adjust_lsn(XLogRecPtr lsn)
  * Return LSN for requesting pages and number of blocks from page server
  */
 static XLogRecPtr
-neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
+neon_get_request_lsn(bool *latest, int region, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr	lsn;
 
@@ -1393,6 +1479,18 @@ neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockN
 		*latest = true;
 		lsn = InvalidXLogRecPtr;
 		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
+	}
+
+	// Since only keep track of the latest written LSN of the current region, we need to 
+	// rely on zenith to find the latest LSN. Hence, it is insufficient to use RegionIsRemote(region)
+	// because the global region is also separate from the current region.
+	else if (IsMultiRegion() && region != current_region)
+	{
+		*latest = false;
+		lsn = get_region_lsn(region);
+		elog(LOG, "get lsn %X/%X for region %d", LSN_FORMAT_ARGS(lsn), region);
+		if (lsn == InvalidXLogRecPtr)
+			*latest = true;
 	}
 	else
 	{
@@ -1495,12 +1593,17 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest,
+					  				   reln->smgr_region,
+									   reln->smgr_rnode.node,
+									   forkNum,
+									   REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
+			.req.region = reln->smgr_region,
 			.rnode = reln->smgr_rnode.node,
 		.forknum = forkNum};
 
@@ -1516,11 +1619,12 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+					 errmsg("could not read relation existence of rel %u/%u/%u.%u in region %d from page server at lsn %X/%08X",
 							reln->smgr_rnode.node.spcNode,
 							reln->smgr_rnode.node.dbNode,
 							reln->smgr_rnode.node.relNode,
 							forkNum,
+							reln->smgr_region,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
@@ -1773,7 +1877,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 		.blockNum = blocknum
 	};
 
-	ring_index = prefetch_register_buffer(tag, NULL, NULL);
+	ring_index = prefetch_register_buffer(tag, reln->smgr_region, NULL, NULL);
 
 	Assert(ring_index < MyPState->ring_unused &&
 		   MyPState->ring_last <= ring_index);
@@ -1827,6 +1931,12 @@ void
 neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 				 XLogRecPtr request_lsn, bool request_latest, char *buffer)
 {
+	neon_read_at_lsn_multi_region(rnode, forkNum, blkno, current_region, request_lsn, request_latest, buffer);
+}
+
+static void neon_read_at_lsn_multi_region(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+										  int region, XLogRecPtr request_lsn, bool request_latest, char *buffer)
+{
 	NeonResponse *resp;
 	BufferTag	buftag;
 	uint64		ring_index;
@@ -1877,7 +1987,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		{
 			pgBufferUsage.prefetch.misses += 1;
 
-			ring_index = prefetch_register_buffer(buftag, &request_latest,
+			ring_index = prefetch_register_buffer(buftag, region, &request_latest,
 												  &request_lsn);
 			slot = GetPrfSlot(ring_index);
 		}
@@ -1910,16 +2020,28 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		case T_NeonGetPageResponse:
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
 			lfc_write(rnode, forkNum, blkno, buffer);
+
+			if (RegionIsRemote(region))
+			{
+				XLogRecPtr lsn = ((NeonGetPageResponse *) resp)->lsn;
+				/*
+					Set the LSN on the page to be equal to the LSN snapshot of the current transaction
+					so that we don't need to evict the page from local buffer if we use the same LSN
+					snapshot for the subsequent transactions.
+				*/
+				PageSetLSN((Page) buffer, lsn);
+			}
 			break;
 
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+					 errmsg("could not read block %u in rel %u/%u/%u.%u in region %d, from page server at lsn %X/%08X",
 							blkno,
 							rnode.spcNode,
 							rnode.dbNode,
 							rnode.relNode,
+							region,
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
@@ -1967,9 +2089,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		return;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
-	neon_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
-
+	request_lsn = neon_get_request_lsn(&latest, reln->smgr_region, reln->smgr_rnode.node, forkNum, blkno);
+	neon_read_at_lsn_multi_region(reln->smgr_rnode.node, forkNum, blkno, reln->smgr_region, request_lsn, latest, buffer);
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
@@ -2174,12 +2295,17 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest,
+									   reln->smgr_region,
+									   reln->smgr_rnode.node,
+									   forknum,
+									   REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
+			.req.region = reln->smgr_region,
 			.rnode = reln->smgr_rnode.node,
 			.forknum = forknum,
 		};
@@ -2196,11 +2322,12 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+					 errmsg("could not read relation size of rel %u/%u/%u.%u in region %d from page server at lsn %X/%08X",
 							reln->smgr_rnode.node.spcNode,
 							reln->smgr_rnode.node.dbNode,
 							reln->smgr_rnode.node.relNode,
 							forknum,
+							reln->smgr_region,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
@@ -2211,11 +2338,12 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	}
 	update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
 
-	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
+	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u region %d (request LSN %X/%08X): %u blocks",
 		 reln->smgr_rnode.node.spcNode,
 		 reln->smgr_rnode.node.dbNode,
 		 reln->smgr_rnode.node.relNode,
 		 forknum,
+		 reln->smgr_region,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 		 n_blocks);
 
@@ -2235,7 +2363,7 @@ neon_dbsize(Oid dbNode)
 	bool		latest;
 	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
-	request_lsn = neon_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, GLOBAL_REGION, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
@@ -2530,10 +2658,13 @@ AtEOXact_neon(XactEvent event, void *arg)
 			 */
 			unlogged_build_rel = NULL;
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+			clear_region_lsns();
 			break;
 
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:
+			clear_region_lsns();
+			/* fall through */
 		case XACT_EVENT_PREPARE:
 		case XACT_EVENT_PRE_COMMIT:
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
@@ -2592,3 +2723,231 @@ smgr_init_neon(void)
 	smgr_init_standard();
 	neon_init();
 }
+
+/*
+ * SLRU stuff
+ */
+
+const char *
+slru_kind_to_string(NeonSlruKind kind)
+{
+	switch (kind)
+	{
+		case NEON_CLOG:
+			return "pg_xact";
+		case NEON_MULTI_XACT_MEMBERS:
+			return "pg_multixact/members";
+		case NEON_MULTI_XACT_OFFSETS:
+			return "pg_multixact/offsets";
+		default:
+			return "invalid";
+	}
+}
+
+bool
+slru_kind_from_string(const char* str, NeonSlruKind* kind)
+{
+	if (strcmp(str, "pg_xact") == 0)
+	{
+		*kind = NEON_CLOG;
+		return true;
+	}
+	else if (strcmp(str, "pg_multixact/members") == 0)
+	{
+		*kind = NEON_MULTI_XACT_MEMBERS;
+		return true;
+	}
+	else if (strcmp(str, "pg_multixact/offsets") == 0)
+	{
+		*kind = NEON_MULTI_XACT_OFFSETS;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * neon_slru_kind_check() - Check if the SLRU kind is supported by the pageserver
+ */
+bool
+neon_slru_kind_check(SlruCtl ctl)
+{
+	const char *dir = ctl->Dir;
+
+	if (strcmp(dir, "pg_xact") == 0 && neon_slru_clog)
+	{
+		return true;
+	}
+
+	if ((strcmp(dir, "pg_multixact/members") == 0 || strcmp(dir, "pg_multixact/offsets") == 0) &&
+		neon_slru_multixact)
+	{
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * neon_slru_read_page() -- Read the specified block from a Simple LRU.
+ *
+ * NOTE: Never call ereport(ERROR) in here to comply with the behavior expected in slru.c
+ */
+bool
+neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, char *buffer)
+{
+	NeonResponse 				*resp;
+	NeonGetSlruPageResponse 	*get_slru_page_resp;
+	NeonSlruKind	kind;
+	bool			latest;
+	XLogRecPtr		request_lsn;
+	bool 			read_ok = false;
+	// FIXME: select the right region for specific slru kinds
+	int				region = current_region;
+	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
+
+	if (!slru_kind_from_string(ctl->Dir, &kind))
+	{
+		ereport(WARNING, errmsg("unexpected slru kind \"%s\"", ctl->Dir));
+		return false;
+	}
+
+	// FIXME: select the right region for specific slru kinds
+	request_lsn = neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+
+	/**
+	 * During recovery, if there is no WAL redoing, the function GetXLogReplayRecPtr will return
+	 * a lsn 0, causing zenith_get_request_lsn to give out an invalid lsn with "latest" being false,
+	 * which is later rejected by the page server.
+	 * 
+	 * For this corner case to occur, a backend has to request a page during recovery
+	 * mode and no WAL redoing actually happens, so this rarely happens with normal backends. 
+	 * However, since the startup process calls TrimCLOG and TrimMultiXact towards the end of
+	 * the recovery process, this case always happens with the startup process whenever there
+	 * is no WAL redoing.
+	 * 
+	 * It is safe to just grab the latest page here because TrimCLOG and TrimMultiXact are called
+	 * after log redoing.
+	 */
+	if (RecoveryInProgress() && request_lsn == InvalidXLogRecPtr) 
+		latest = true;
+
+	{
+		NeonGetSlruPageRequest request = {
+			.req.tag = T_NeonGetSlruPageRequest,
+			.req.latest = latest,
+			.req.lsn = request_lsn,
+			.req.region = region,
+			.kind = kind,
+			.segno = segno,
+			.blkno = offset,
+			.check_exists_only = false
+		};
+
+		resp = page_server_request(&request);
+	}
+
+	switch (resp->tag)
+	{
+		case T_NeonGetSlruPageResponse:
+			get_slru_page_resp = (NeonGetSlruPageResponse *) resp;
+
+			/* see notes about reading truncated segment in recovery in SlruPhysicalWritePage in slru.c */
+			if (get_slru_page_resp->seg_exists)
+			{
+				memcpy(buffer, get_slru_page_resp->page, BLCKSZ);
+			}
+			else if (InRecovery)
+			{
+				ereport(LOG,
+						(errmsg("segment \"%s/%d\" doesn't exist, reading as zeroes",
+								slru_kind_to_string(kind), segno)));
+				MemSet(buffer, 0, BLCKSZ);
+			}
+
+			read_ok = true;
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(WARNING,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg("could not read block %lu in SLRU %s/%u in region %d, from page server at lsn %X/%08X",
+							offset,
+							slru_kind_to_string(kind),
+							segno,
+							region,
+							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			elog(WARNING, "unexpected response from page server with tag 0x%02x", resp->tag);
+	}
+
+	pfree(resp);
+
+	return read_ok;
+}
+
+bool
+neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset)
+{
+	NeonResponse	*resp;
+	NeonSlruKind	kind;
+	bool			latest;
+	XLogRecPtr		request_lsn;
+	// FIXME: select the right region for specific slru kinds
+	int				region = current_region;
+	bool			exists = false;
+	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
+
+	if (!slru_kind_from_string(ctl->Dir, &kind))
+	{
+		ereport(ERROR, errmsg("unexpected slru kind \"%s\"", ctl->Dir));
+		return false;
+	}
+
+	// FIXME: select the right region for specific slru kinds
+	request_lsn = neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	{
+		NeonGetSlruPageRequest request = {
+			.req.tag = T_NeonGetSlruPageRequest,
+			.req.latest = latest,
+			.req.lsn = request_lsn,
+			.req.region = region,
+			.kind = kind,
+			.segno = segno,
+			.blkno = offset,
+			.check_exists_only = true
+		};
+
+		resp = page_server_request(&request);
+	}
+
+	switch (resp->tag)
+	{
+		case T_NeonGetSlruPageResponse:
+			exists = ((NeonGetSlruPageResponse *) resp)->page_exists;
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg("could not read block %lu in SLRU %s/%u in region %d from page server at lsn %X/%08X",
+							offset,
+							slru_kind_to_string(kind),
+							segno,
+							region,
+							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+	}
+
+	pfree(resp);
+
+	return exists;
+} 

@@ -65,6 +65,7 @@
 #include "rusagestub.h"
 #endif
 
+#include "access/remotexact.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #if PG_VERSION_NUM >= 150000
@@ -499,7 +500,7 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
-	reln = smgropen(rnode, InvalidBackendId, RELPERSISTENCE_PERMANENT);
+	reln = smgropen(rnode, InvalidBackendId, RELPERSISTENCE_PERMANENT, current_region);
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{

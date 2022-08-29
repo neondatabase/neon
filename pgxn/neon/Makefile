@@ -11,7 +11,8 @@ OBJS = \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
-	walproposer_utils.o
+	walproposer_utils.o \
+	multiregion.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)

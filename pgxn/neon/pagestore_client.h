@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include "storage/relfilenode.h"
 #include "storage/block.h"
@@ -32,14 +33,18 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonGetSlruPageRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
 	T_NeonNblocksResponse,
 	T_NeonGetPageResponse,
+	T_NeonGetSlruPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 }			NeonMessageTag;
+
+
 
 /* base struct for c-style inheritance */
 typedef struct
@@ -66,6 +71,7 @@ typedef struct
 	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
+	int			region;			/* region to fetch page from */
 }			NeonRequest;
 
 typedef struct
@@ -96,6 +102,22 @@ typedef struct
 	BlockNumber blkno;
 }			NeonGetPageRequest;
 
+typedef enum
+{
+	NEON_CLOG = 0,
+	NEON_MULTI_XACT_MEMBERS,
+	NEON_MULTI_XACT_OFFSETS,
+} NeonSlruKind;
+
+typedef struct
+{
+	NeonRequest req;
+	NeonSlruKind kind;
+	int segno;
+	BlockNumber blkno;
+	bool check_exists_only;
+} NeonGetSlruPageRequest;
+
 /* supertype of all the Neon*Response structs below */
 typedef struct
 {
@@ -105,18 +127,21 @@ typedef struct
 typedef struct
 {
 	NeonMessageTag tag;
+	XLogRecPtr	lsn;
 	bool		exists;
 }			NeonExistsResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
+	XLogRecPtr	lsn;
 	uint32		n_blocks;
 }			NeonNblocksResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
+	XLogRecPtr	lsn;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
 
@@ -127,6 +152,15 @@ typedef struct
 	NeonMessageTag tag;
 	int64		db_size;
 }			NeonDbSizeResponse;
+
+typedef struct
+{
+	NeonMessageTag tag;
+	XLogRecPtr	lsn;
+	bool		seg_exists;
+	bool		page_exists;
+	char		page[FLEXIBLE_ARRAY_MEMBER];
+} NeonGetSlruPageResponse;
 
 typedef struct
 {
@@ -146,7 +180,7 @@ extern char *nm_to_string(NeonMessage * msg);
 typedef struct
 {
 	void		(*send) (NeonRequest * request);
-	NeonResponse *(*receive) (void);
+	NeonResponse *(*receive) (int region);
 	void		(*flush) (void);
 }			page_server_api;
 
@@ -163,6 +197,8 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
+extern bool neon_slru_clog;
+extern bool neon_slru_multixact;
 
 extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
 extern void smgr_init_neon(void);
@@ -209,5 +245,11 @@ extern bool lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno, c
 extern bool lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
+/* neon SLRU functionality */
+extern const char *slru_kind_to_string(NeonSlruKind kind);
+extern bool slru_kind_from_string(const char* str, NeonSlruKind* kind);
+extern bool neon_slru_kind_check(SlruCtl ctl);
+extern bool neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, char *buffer);
+extern bool neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset);
 
 #endif
