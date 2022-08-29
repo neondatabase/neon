@@ -142,20 +142,27 @@ postgres-v15-clean:
 
 neon-pg-ext-v14: postgres-v14
 	+@echo "Compiling neon v14"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-v14
+	(cd $(POSTGRES_INSTALL_DIR)/build/neon-v14 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config \
-		-C $(ROOT_PROJECT_DIR)/pgxn/neon install
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install)
 	+@echo "Compiling neon_test_utils" v14
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v14
+	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v14 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v14/bin/pg_config \
-		-C $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils install
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
 
-# FIXME build neon extension in a separate directory for each version?
 neon-pg-ext-v15: postgres-v15
 	+@echo "Compiling neon v15"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-v15
+	(cd $(POSTGRES_INSTALL_DIR)/build/neon-v15 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config \
-		-C $(ROOT_PROJECT_DIR)/pgxn/neon install
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install)
 	+@echo "Compiling neon_test_utils" v15
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v15
+	(cd $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-v15 && \
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config \
-		-C $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils install
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install)
 
 .PHONY: neon-pg-ext-clean
 	$(MAKE) -C $(ROOT_PROJECT_DIR)/pgxn/neon clean
