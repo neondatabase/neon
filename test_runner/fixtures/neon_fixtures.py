@@ -188,7 +188,7 @@ def can_bind(host: str, port: int) -> bool:
     Check whether a host:port is available to bind for listening
 
     Inspired by the can_bind() perl function used in Postgres tests, in
-    vendor/postgres/src/test/perl/PostgresNode.pm
+    vendor/postgres-v14/src/test/perl/PostgresNode.pm
     """
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         # TODO: The pageserver and safekeepers don't use SO_REUSEADDR at the

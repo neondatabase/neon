@@ -40,15 +40,15 @@ and create new databases and accounts (control plane API in our case).
 
 Integration tests, written in Python using the `pytest` framework.
 
-`/vendor/postgres`:
+`/vendor/postgres-v14`:
 
 PostgreSQL source tree, with the modifications needed for Neon.
 
-`/vendor/postgres/contrib/neon`:
+`/pgxn/neon`:
 
 PostgreSQL extension that implements storage manager API and network communications with remote page server.
 
-`/vendor/postgres/contrib/neon_test_utils`:
+`/pgxn/neon_test_utils`:
 
 PostgreSQL extension that contains functions needed for testing and debugging.
 
