@@ -165,6 +165,8 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 struct TimelineMetrics {
+    tenant_id: String,
+    timeline_id: String,
     pub reconstruct_time_histo: Histogram,
     pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
     pub flush_time_histo: Histogram,
@@ -219,6 +221,8 @@ impl TimelineMetrics {
             .unwrap();
 
         TimelineMetrics {
+            tenant_id,
+            timeline_id,
             reconstruct_time_histo,
             materialized_page_cache_hit_counter,
             flush_time_histo,
@@ -231,6 +235,24 @@ impl TimelineMetrics {
             current_physical_size_gauge,
             current_logical_size_gauge,
         }
+    }
+}
+
+impl Drop for TimelineMetrics {
+    fn drop(&mut self) {
+        let tenant_id = &self.tenant_id;
+        let timeline_id = &self.timeline_id;
+        let _ = RECONSTRUCT_TIME.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = STORAGE_TIME.remove_label_values(&["layer flush", tenant_id, timeline_id]);
+        let _ = STORAGE_TIME.remove_label_values(&["compact", tenant_id, timeline_id]);
+        let _ = STORAGE_TIME.remove_label_values(&["create images", tenant_id, timeline_id]);
+        let _ = STORAGE_TIME.remove_label_values(&["init logical size", tenant_id, timeline_id]);
+        let _ = STORAGE_TIME.remove_label_values(&["load layer map", tenant_id, timeline_id]);
+        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = CURRENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
     }
 }
 
