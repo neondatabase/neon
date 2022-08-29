@@ -5,7 +5,7 @@ use std::{fmt::Debug, path::PathBuf};
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use once_cell::sync::Lazy;
-use remote_storage::RemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemoteStorage};
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
@@ -30,16 +30,12 @@ static NO_LAYERS_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Serializes and uploads the given index part data to the remote storage.
-pub(super) async fn upload_index_part<P, S>(
+pub(super) async fn upload_index_part(
     conf: &'static PageServerConf,
-    storage: &S,
+    storage: &GenericRemoteStorage,
     sync_id: ZTenantTimelineId,
     index_part: IndexPart,
-) -> anyhow::Result<()>
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> anyhow::Result<()> {
     let index_part_bytes = serde_json::to_vec(&index_part)
         .context("Failed to serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
@@ -84,17 +80,13 @@ pub(super) enum UploadedTimeline {
 /// No extra checks for overlapping files is made and any files that are already present remotely will be overwritten, if submitted during the upload.
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
-pub(super) async fn upload_timeline_layers<'a, P, S>(
-    storage: &'a S,
+pub(super) async fn upload_timeline_layers<'a>(
+    storage: &'a GenericRemoteStorage,
     sync_queue: &SyncQueue,
     remote_timeline: Option<&'a RemoteTimeline>,
     sync_id: ZTenantTimelineId,
     mut upload_data: SyncData<LayersUpload>,
-) -> UploadedTimeline
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> UploadedTimeline {
     let upload = &mut upload_data.data;
     let new_upload_lsn = upload
         .metadata
@@ -264,10 +256,10 @@ mod tests {
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
-        let storage = LocalFs::new(
+        let storage = GenericRemoteStorage::from(LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
-        )?;
+        )?);
         let current_retries = 3;
         let metadata = dummy_metadata(Lsn(0x30));
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
@@ -351,7 +343,10 @@ mod tests {
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), harness.conf.workdir.clone())?;
+        let storage = GenericRemoteStorage::from(LocalFs::new(
+            tempdir()?.path().to_owned(),
+            harness.conf.workdir.clone(),
+        )?);
         let current_retries = 5;
         let metadata = dummy_metadata(Lsn(0x40));
 
@@ -440,7 +435,10 @@ mod tests {
         let harness = RepoHarness::create("test_upload_index_part")?;
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let storage = LocalFs::new(tempdir()?.path().to_owned(), harness.conf.workdir.clone())?;
+        let storage = GenericRemoteStorage::from(LocalFs::new(
+            tempdir()?.path().to_owned(),
+            harness.conf.workdir.clone(),
+        )?);
         let metadata = dummy_metadata(Lsn(0x40));
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
 
@@ -470,7 +468,7 @@ mod tests {
             "Should have only the index part file uploaded"
         );
 
-        let index_part_path = storage_files.first().unwrap();
+        let index_part_path = storage_files.first().unwrap().as_path();
         assert_eq!(
             index_part_path.file_stem().and_then(|name| name.to_str()),
             Some(IndexPart::FILE_NAME),

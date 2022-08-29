@@ -156,7 +156,7 @@ use std::{
 use anyhow::{anyhow, bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use once_cell::sync::{Lazy, OnceCell};
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
+use remote_storage::GenericRemoteStorage;
 use tokio::{
     fs,
     runtime::Runtime,
@@ -259,28 +259,15 @@ pub fn start_local_timeline_sync(
 
     match config.remote_storage_config.as_ref() {
         Some(storage_config) => {
-            match GenericRemoteStorage::new(config.workdir.clone(), storage_config)
-                .context("Failed to init the generic remote storage")?
-            {
-                GenericRemoteStorage::Local(local_fs_storage) => {
-                    storage_sync::spawn_storage_sync_thread(
-                        config,
-                        local_timeline_files,
-                        local_fs_storage,
-                        storage_config.max_concurrent_syncs,
-                        storage_config.max_sync_errors,
-                    )
-                }
-                GenericRemoteStorage::S3(s3_bucket_storage) => {
-                    storage_sync::spawn_storage_sync_thread(
-                        config,
-                        local_timeline_files,
-                        s3_bucket_storage,
-                        storage_config.max_concurrent_syncs,
-                        storage_config.max_sync_errors,
-                    )
-                }
-            }
+            let storage_impl = GenericRemoteStorage::new(config.workdir.clone(), storage_config)
+                .context("Failed to init the generic remote storage")?;
+            storage_sync::spawn_storage_sync_thread(
+                config,
+                local_timeline_files,
+                storage_impl,
+                storage_config.max_concurrent_syncs,
+                storage_config.max_sync_errors,
+            )
             .context("Failed to spawn the storage sync thread")
         }
         None => {
@@ -810,17 +797,13 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
 
 /// Launch a thread to perform remote storage sync tasks.
 /// See module docs for loop step description.
-pub(super) fn spawn_storage_sync_thread<P, S>(
+pub(super) fn spawn_storage_sync_thread(
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
-    storage: S,
+    storage: GenericRemoteStorage,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
-) -> anyhow::Result<SyncStartupData>
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> anyhow::Result<SyncStartupData> {
     let sync_queue = SyncQueue::new(max_concurrent_timelines_sync);
     SYNC_QUEUE
         .set(sync_queue)
@@ -873,15 +856,12 @@ where
     })
 }
 
-fn storage_sync_loop<P, S>(
+fn storage_sync_loop(
     runtime: Runtime,
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<S>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
-) where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) {
     info!("Starting remote storage sync loop");
     loop {
         let loop_storage = Arc::clone(&storage);
@@ -983,18 +963,14 @@ enum UploadStatus {
     Nothing,
 }
 
-async fn process_batches<P, S>(
+async fn process_batches(
     conf: &'static PageServerConf,
     max_sync_errors: NonZeroU32,
-    storage: Arc<S>,
+    storage: Arc<GenericRemoteStorage>,
     index: &RemoteIndex,
     batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
     sync_queue: &SyncQueue,
-) -> HashSet<ZTenantId>
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> HashSet<ZTenantId> {
     let mut sync_results = batched_tasks
         .into_iter()
         .map(|(sync_id, batch)| {
@@ -1030,17 +1006,13 @@ where
     downloaded_timelines
 }
 
-async fn process_sync_task_batch<P, S>(
+async fn process_sync_task_batch(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<S>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
     sync_id: ZTenantTimelineId,
     batch: SyncTaskBatch,
-) -> DownloadStatus
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> DownloadStatus {
     let sync_start = Instant::now();
     let current_remote_timeline = { index.read().await.timeline_entry(&sync_id).cloned() };
 
@@ -1175,19 +1147,15 @@ where
     download_status
 }
 
-async fn download_timeline_data<P, S>(
+async fn download_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&S, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
     sync_id: ZTenantTimelineId,
     new_download_data: SyncData<LayersDownload>,
     sync_start: Instant,
     task_name: &str,
-) -> DownloadStatus
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> DownloadStatus {
     match download_timeline_layers(
         conf,
         storage,
@@ -1298,17 +1266,14 @@ async fn update_local_metadata(
     Ok(())
 }
 
-async fn delete_timeline_data<P, S>(
+async fn delete_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&S, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
     sync_id: ZTenantTimelineId,
     mut new_delete_data: SyncData<LayersDeletion>,
     sync_start: Instant,
     task_name: &str,
-) where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) {
     let timeline_delete = &mut new_delete_data.data;
 
     if !timeline_delete.deletion_registered {
@@ -1343,19 +1308,15 @@ async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMeta
     .context("Failed to parse metadata bytes")
 }
 
-async fn upload_timeline_data<P, S>(
+async fn upload_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&S, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
     sync_id: ZTenantTimelineId,
     new_upload_data: SyncData<LayersUpload>,
     sync_start: Instant,
     task_name: &str,
-) -> UploadStatus
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> UploadStatus {
     let mut uploaded_data = match upload_timeline_layers(
         storage,
         sync_queue,
@@ -1406,17 +1367,13 @@ enum RemoteDataUpdate<'a> {
     Delete(&'a HashSet<PathBuf>),
 }
 
-async fn update_remote_data<P, S>(
+async fn update_remote_data(
     conf: &'static PageServerConf,
-    storage: &S,
+    storage: &GenericRemoteStorage,
     index: &RemoteIndex,
     sync_id: ZTenantTimelineId,
     update: RemoteDataUpdate<'_>,
-) -> anyhow::Result<()>
-where
-    P: Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
+) -> anyhow::Result<()> {
     let updated_remote_timeline = {
         let mut index_accessor = index.write().await;
 

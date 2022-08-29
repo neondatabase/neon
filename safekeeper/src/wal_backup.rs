@@ -417,33 +417,23 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
 async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
-    let storage = REMOTE_STORAGE.get().expect("failed to get remote storage");
+    let storage = REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap();
 
     let file = File::open(&source_file).await?;
 
     // Storage is initialized by launcher at this point.
-    match storage.as_ref().unwrap() {
-        GenericRemoteStorage::Local(local_storage) => {
-            let destination = local_storage.remote_object_id(source_file)?;
+    let destination = storage.remote_object_id(source_file)?;
 
-            debug!(
-                "local upload about to start from {} to {}",
-                source_file.display(),
-                destination.display()
-            );
-            local_storage.upload(file, size, &destination, None).await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(source_file)?;
-
-            debug!(
-                "S3 upload about to start from {} to {:?}",
-                source_file.display(),
-                s3key
-            );
-            s3_storage.upload(file, size, &s3key, None).await
-        }
-    }?;
+    debug!(
+        "upload about to start from {} to {:?}",
+        source_file.display(),
+        destination
+    );
+    storage.upload(file, size, &destination, None).await?;
 
     Ok(())
 }
@@ -452,40 +442,22 @@ pub async fn read_object(
     file_path: PathBuf,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
-    let download = match REMOTE_STORAGE
+    let storage = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?
         .as_ref()
-        .context("No remote storage configured")?
-    {
-        GenericRemoteStorage::Local(local_storage) => {
-            let source = local_storage.remote_object_id(&file_path)?;
+        .context("No remote storage configured")?;
+    let source = storage.remote_object_id(&file_path)?;
 
-            info!(
-                "local download about to start from {} at offset {}",
-                source.display(),
-                offset
-            );
-            local_storage
-                .download_byte_range(&source, offset, None)
-                .await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(&file_path)?;
-
-            info!(
-                "S3 download about to start from {:?} at offset {}",
-                s3key, offset
-            );
-            s3_storage.download_byte_range(&s3key, offset, None).await
-        }
-    }
-    .with_context(|| {
-        format!(
-            "Failed to open WAL segment download stream for local storage path {}",
-            file_path.display()
-        )
-    })?;
-
+    info!("download about to start from {source:?} at offset {offset}");
+    let download = storage
+        .download_byte_range(&source, offset, None)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to open WAL segment download stream for local storage path {}",
+                file_path.display()
+            )
+        })?;
     Ok(download.download_stream)
 }

@@ -165,6 +165,237 @@ impl GenericRemoteStorage {
     }
 }
 
+impl From<LocalFs> for GenericRemoteStorage {
+    fn from(local: LocalFs) -> Self {
+        GenericRemoteStorage::Local(local)
+    }
+}
+
+pub enum GenericRemoteObjectId {
+    Local(<LocalFs as RemoteStorage>::RemoteObjectId),
+    S3(<S3Bucket as RemoteStorage>::RemoteObjectId),
+}
+
+impl GenericRemoteObjectId {
+    // Some tests explicitly use LocalFs implementation, and like to peek into
+    // the path.
+    //
+    // heikki: I tried to mark this with #[cfg(test)], but then it's not available
+    // to tests in other crates.
+    pub fn as_path(&self) -> &Path {
+        match self {
+            Self::Local(l) => l,
+            Self::S3(_) => panic!("as_path() called on S3 id"),
+        }
+    }
+}
+
+impl RemoteObjectName for GenericRemoteObjectId {
+    fn object_name(&self) -> Option<&str> {
+        match self {
+            Self::Local(imp) => imp.object_name(),
+            Self::S3(imp) => imp.object_name(),
+        }
+    }
+}
+
+impl Debug for GenericRemoteObjectId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            Self::Local(imp) => imp.fmt(formatter),
+            Self::S3(imp) => imp.fmt(formatter),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteStorage for GenericRemoteStorage {
+    /// A way to uniquely reference a file in the remote storage.
+    type RemoteObjectId = GenericRemoteObjectId;
+
+    /// Attempts to derive the storage path out of the local path, if the latter is correct.
+    fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId> {
+        match self {
+            Self::Local(imp) => Ok(GenericRemoteObjectId::Local(
+                imp.remote_object_id(local_path)?,
+            )),
+            Self::S3(imp) => Ok(GenericRemoteObjectId::S3(imp.remote_object_id(local_path)?)),
+        }
+    }
+
+    /// Gets the download path of the given storage file.
+    fn local_path(&self, remote_object_id: &Self::RemoteObjectId) -> anyhow::Result<PathBuf> {
+        match self {
+            Self::Local(imp) => {
+                if let GenericRemoteObjectId::Local(remote_object_id) = remote_object_id {
+                    imp.local_path(remote_object_id)
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+            Self::S3(imp) => {
+                if let GenericRemoteObjectId::S3(remote_object_id) = remote_object_id {
+                    imp.local_path(remote_object_id)
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+        }
+    }
+
+    /// Lists all items the storage has right now.
+    async fn list(&self) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        match self {
+            Self::Local(imp) => {
+                let mut result: Vec<Self::RemoteObjectId> = Vec::new();
+                for id in imp.list().await? {
+                    result.push(GenericRemoteObjectId::Local(id));
+                }
+                Ok(result)
+            }
+            Self::S3(imp) => {
+                let mut result: Vec<Self::RemoteObjectId> = Vec::new();
+                for id in imp.list().await? {
+                    result.push(GenericRemoteObjectId::S3(id));
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    /// Lists all top level subdirectories for a given prefix
+    /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
+    /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
+    /// so this method doesnt need to.
+    async fn list_prefixes(
+        &self,
+        prefix: Option<Self::RemoteObjectId>,
+    ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
+        match self {
+            Self::Local(imp) => {
+                let prefix = match prefix {
+                    None => None,
+                    Some(GenericRemoteObjectId::Local(prefix)) => Some(prefix),
+                    _ => panic!("unexpected remote object id kind"),
+                };
+                let mut result: Vec<Self::RemoteObjectId> = Vec::new();
+                for id in imp.list_prefixes(prefix).await? {
+                    result.push(GenericRemoteObjectId::Local(id));
+                }
+                Ok(result)
+            }
+            Self::S3(imp) => {
+                let prefix = match prefix {
+                    None => None,
+                    Some(GenericRemoteObjectId::S3(prefix)) => Some(prefix),
+                    _ => panic!("unexpected remote object id kind"),
+                };
+                let mut result: Vec<Self::RemoteObjectId> = Vec::new();
+                for id in imp.list_prefixes(prefix).await? {
+                    result.push(GenericRemoteObjectId::S3(id));
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    /// Streams the local file contents into remote into the remote storage entry.
+    async fn upload(
+        &self,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        // S3 PUT request requires the content length to be specified,
+        // otherwise it starts to fail with the concurrent connection count increasing.
+        from_size_bytes: usize,
+        to: &Self::RemoteObjectId,
+        metadata: Option<StorageMetadata>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Local(imp) => {
+                if let GenericRemoteObjectId::Local(to) = to {
+                    imp.upload(from, from_size_bytes, to, metadata).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+            Self::S3(imp) => {
+                if let GenericRemoteObjectId::S3(to) = to {
+                    imp.upload(from, from_size_bytes, to, metadata).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+        }
+    }
+
+    /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
+    async fn download(&self, from: &Self::RemoteObjectId) -> Result<Download, DownloadError> {
+        match self {
+            Self::Local(imp) => {
+                if let GenericRemoteObjectId::Local(from) = from {
+                    imp.download(from).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+            Self::S3(imp) => {
+                if let GenericRemoteObjectId::S3(from) = from {
+                    imp.download(from).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+        }
+    }
+
+    /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Returns the metadata, if any was stored with the file previously.
+    async fn download_byte_range(
+        &self,
+        from: &Self::RemoteObjectId,
+        start_inclusive: u64,
+        end_exclusive: Option<u64>,
+    ) -> Result<Download, DownloadError> {
+        match self {
+            Self::Local(imp) => {
+                if let GenericRemoteObjectId::Local(from) = from {
+                    imp.download_byte_range(from, start_inclusive, end_exclusive)
+                        .await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+            Self::S3(imp) => {
+                if let GenericRemoteObjectId::S3(from) = from {
+                    imp.download_byte_range(from, start_inclusive, end_exclusive)
+                        .await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+        }
+    }
+
+    async fn delete(&self, path: &Self::RemoteObjectId) -> anyhow::Result<()> {
+        match self {
+            Self::Local(imp) => {
+                if let GenericRemoteObjectId::Local(path) = path {
+                    imp.delete(path).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+            Self::S3(imp) => {
+                if let GenericRemoteObjectId::S3(path) = path {
+                    imp.delete(path).await
+                } else {
+                    panic!("unexpected remote object id kind");
+                }
+            }
+        }
+    }
+}
+
 /// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
 /// Immutable, cannot be changed once the file is created.
 #[derive(Debug, Clone, PartialEq, Eq)]

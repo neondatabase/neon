@@ -447,21 +447,18 @@ async fn gather_tenant_timelines_index_parts(
     state: &State,
     tenant_id: ZTenantId,
 ) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
-    let index_parts = match state.remote_storage.as_ref() {
-        Some(GenericRemoteStorage::Local(local_storage)) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, local_storage, tenant_id)
-                .await
-        }
-        // FIXME here s3 storage contains its own limits, that are separate from sync storage thread ones
-        //       because it is a different instance. We can move this limit to some global static
-        //       or use one instance everywhere.
-        Some(GenericRemoteStorage::S3(s3_storage)) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, s3_storage, tenant_id)
-                .await
-        }
-        None => return Ok(None),
-    }
-    .with_context(|| format!("Failed to download index parts for tenant {tenant_id}"))?;
+    let remote_storage = if let Some(remote_storage) = state.remote_storage.as_ref() {
+        remote_storage
+    } else {
+        return Ok(None);
+    };
+    // FIXME here s3 storage contains its own limits, that are separate from sync storage thread ones
+    //       because it is a different instance. We can move this limit to some global static
+    //       or use one instance everywhere.
+    let index_parts =
+        storage_sync::gather_tenant_timelines_index_parts(state.conf, remote_storage, tenant_id)
+            .await
+            .with_context(|| format!("Failed to download index parts for tenant {tenant_id}"))?;
 
     let mut remote_timelines = Vec::with_capacity(index_parts.len());
     for (timeline_id, index_part) in index_parts {
