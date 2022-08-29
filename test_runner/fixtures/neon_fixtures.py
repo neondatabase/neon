@@ -2642,7 +2642,7 @@ def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: uuid.UUID, timel
 def fork_at_current_lsn(
     env: NeonEnv,
     pg: Postgres,
-    new_branch_name: str = DEFAULT_BRANCH_NAME,
+    new_branch_name: str,
     ancestor_branch_name: str,
     tenant_id: Optional[uuid.UUID] = None,
 ) -> uuid.UUID:
