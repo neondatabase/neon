@@ -139,7 +139,7 @@ impl Repository {
             .lock()
             .unwrap()
             .iter()
-            .map(|(timeline_id, timeline_entry)| (*timeline_id, Arc::clone(&timeline_entry)))
+            .map(|(timeline_id, timeline_entry)| (*timeline_id, Arc::clone(timeline_entry)))
             .collect()
     }
 

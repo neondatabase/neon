@@ -94,10 +94,7 @@ def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
 
         assert timeline_details["tenant_id"] == tenant_id.hex
         assert timeline_details["timeline_id"] == timeline_id_str
-
-        local_timeline_details = timeline_details.get("local")
-        assert local_timeline_details is not None
-        assert local_timeline_details["timeline_state"] == "Loaded"
+        assert timeline_details.get("local") is not None
 
 
 def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):

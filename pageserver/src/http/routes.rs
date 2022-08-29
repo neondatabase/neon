@@ -277,7 +277,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                     .as_ref()
                     .map(|timeline| {
                         local_timeline_info_from_timeline(
-                            &timeline,
+                            timeline,
                             include_non_incremental_logical_size,
                             include_non_incremental_physical_size,
                         )
