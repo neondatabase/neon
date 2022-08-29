@@ -2,6 +2,7 @@
 /tmp_check
 /tmp_install
 /tmp_check_cli
+/neon_install
 __pycache__/
 test_output/
 .vscode
