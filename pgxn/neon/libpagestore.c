@@ -14,8 +14,10 @@
  */
 #include "postgres.h"
 
+#include "multiregion.h"
 #include "pagestore_client.h"
 #include "fmgr.h"
+#include "access/remotexact.h"
 #include "access/xlog.h"
 
 #include "libpq-fe.h"
@@ -70,7 +72,14 @@ pageserver_connect()
 				 errdetail_internal("%s", msg)));
 	}
 
-	query = psprintf("pagestream %s %s", zenith_tenant, zenith_timeline);
+	if (neon_multiregion_enabled())
+	{
+		neon_log(LOG, "multi-region enabled, timelines: %s", neon_region_timelines);
+		query = psprintf("multipagestream %s %s", zenith_tenant, neon_region_timelines);
+	}
+	else
+		query = psprintf("pagestream %s %s", zenith_tenant, zenith_timeline);
+
 	ret = PQsendQuery(pageserver_conn, query);
 	if (ret != 1)
 	{
@@ -161,6 +170,10 @@ pageserver_call(ZenithRequest *request)
 	StringInfoData resp_buff;
 	ZenithResponse *resp;
 
+	/* Fallback to the current region if the request region is unknown */
+	if (request->region == UNKNOWN_REGION)
+		request->region = current_region;
+
 	PG_TRY();
 	{
 		/* If the connection was lost for some reason, reconnect */
@@ -210,6 +223,8 @@ pageserver_call(ZenithRequest *request)
 
 		resp = zm_unpack_response(&resp_buff);
 		PQfreemem(resp_buff.data);
+
+		set_region_lsn(request->region, resp);
 
 		if (message_level_is_interesting(PageStoreTrace))
 		{
@@ -400,6 +415,25 @@ pg_init_libpagestore(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("neon.slru_clog",
+							 "read clog from the page server",
+							 NULL,
+							 &neon_slru_clog,
+							 false,
+							 PGC_POSTMASTER,
+							 0, /* no flags required */
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("neon.slru_multixact",
+							 "read multixact from the page server",
+							 NULL,
+							 &neon_slru_multixact,
+							 false,
+							 PGC_POSTMASTER,
+							 0, /* no flags required */
+							 NULL, NULL, NULL);
+
+	DefineMultiRegionCustomVariables();
 
 	relsize_hash_init();
 
@@ -429,4 +463,10 @@ pg_init_libpagestore(void)
 		smgr_init_hook = smgr_init_zenith;
 		dbsize_hook = zenith_dbsize;
 	}
+
+	slru_kind_check_hook = neon_slru_kind_check;
+	slru_read_page_hook = neon_slru_read_page;
+	slru_page_exists_hook = neon_slru_page_exists;
+
+	get_region_lsn_hook = get_region_lsn;
 }

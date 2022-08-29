@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include "storage/relfilenode.h"
 #include "storage/block.h"
@@ -32,11 +33,13 @@ typedef enum
 	T_ZenithNblocksRequest,
 	T_ZenithGetPageRequest,
 	T_ZenithDbSizeRequest,
+	T_ZenithGetSlruPageRequest,
 
 	/* pagestore -> pagestore_client */
 	T_ZenithExistsResponse = 100,
 	T_ZenithNblocksResponse,
 	T_ZenithGetPageResponse,
+	T_ZenithGetSlruPageResponse,
 	T_ZenithErrorResponse,
 	T_ZenithDbSizeResponse,
 } ZenithMessageTag;
@@ -63,6 +66,7 @@ typedef struct
 	ZenithMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
+	int			region;			/* region to fetch page from */
 } ZenithRequest;
 
 typedef struct
@@ -95,6 +99,22 @@ typedef struct
 	BlockNumber blkno;
 } ZenithGetPageRequest;
 
+typedef enum
+{
+	ZENITH_CLOG = 0,
+	ZENITH_MULTI_XACT_MEMBERS,
+	ZENITH_MULTI_XACT_OFFSETS,
+} ZenithSlruKind;
+
+typedef struct
+{
+	ZenithRequest req;
+	ZenithSlruKind kind;
+	int segno;
+	BlockNumber blkno;
+	bool check_exists_only;
+} ZenithGetSlruPageRequest;
+
 /* supertype of all the Zenith*Response structs below */
 typedef struct
 {
@@ -104,18 +124,21 @@ typedef struct
 typedef struct
 {
 	ZenithMessageTag tag;
+	XLogRecPtr	lsn;
 	bool		exists;
 } ZenithExistsResponse;
 
 typedef struct
 {
 	ZenithMessageTag tag;
+	XLogRecPtr	lsn;
 	uint32		n_blocks;
 } ZenithNblocksResponse;
 
 typedef struct
 {
 	ZenithMessageTag tag;
+	XLogRecPtr	lsn;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 } ZenithGetPageResponse;
 
@@ -124,6 +147,15 @@ typedef struct
 	ZenithMessageTag tag;
 	int64		db_size;
 } ZenithDbSizeResponse;
+
+typedef struct
+{
+	ZenithMessageTag tag;
+	XLogRecPtr	lsn;
+	bool		seg_exists;
+	bool		page_exists;
+	char		page[FLEXIBLE_ARRAY_MEMBER];
+} ZenithGetSlruPageResponse;
 
 typedef struct
 {
@@ -151,6 +183,8 @@ extern char *zenith_timeline;
 extern char *zenith_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
+extern bool neon_slru_clog;
+extern bool neon_slru_multixact;
 
 extern const f_smgr *smgr_zenith(BackendId backend, RelFileNode rnode);
 extern void smgr_init_zenith(void);
@@ -175,7 +209,7 @@ extern void zenith_read(SMgrRelation reln, ForkNumber forknum, BlockNumber block
 						char *buffer);
 
 extern void zenith_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-			XLogRecPtr request_lsn, bool request_latest, char *buffer);
+							   XLogRecPtr request_lsn, bool request_latest, char *buffer);
 
 extern void zenith_write(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, char *buffer, bool skipFsync);
@@ -217,5 +251,12 @@ extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumbe
 extern void set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(RelFileNode rnode, ForkNumber forknum);
+
+/* zenith SLRU functionality */
+extern const char *slru_kind_to_string(ZenithSlruKind kind);
+extern bool slru_kind_from_string(const char* str, ZenithSlruKind* kind);
+extern bool neon_slru_kind_check(SlruCtl ctl);
+extern bool neon_slru_read_page(SlruCtl ctl, int segno, off_t offset, char *buffer);
+extern bool neon_slru_page_exists(SlruCtl ctl, int segno, off_t offset);
 
 #endif
