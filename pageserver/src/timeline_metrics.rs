@@ -300,3 +300,7 @@ impl Drop for TimelineMetrics {
         }
     }
 }
+
+pub fn remove_tenant_metrics(tenant_id: &str) {
+    let _ = STORAGE_TIME.remove_label_values(&["gc", tenant_id, "-"]);
+}
