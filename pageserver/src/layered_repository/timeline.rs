@@ -1213,7 +1213,9 @@ impl Timeline {
             layer = Arc::clone(open_layer);
         } else {
             // No writeable layer yet. Create one.
-            let start_lsn = layers.next_open_layer_at.unwrap();
+            let start_lsn = layers
+                .next_open_layer_at
+                .context("No next open layer found")?;
 
             trace!(
                 "creating layer for write at {}/{} for record at {}",

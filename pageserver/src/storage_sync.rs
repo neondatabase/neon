@@ -928,7 +928,7 @@ fn storage_sync_loop<P, S>(
                     );
                     let mut timelines_to_attach: HashMap<
                         ZTenantId,
-                        HashSet<(ZTimelineId, TimelineMetadata)>,
+                        Vec<(ZTimelineId, TimelineMetadata)>,
                     > = HashMap::new();
                     let index_accessor = runtime.block_on(index.read());
                     for tenant_id in updated_tenants {

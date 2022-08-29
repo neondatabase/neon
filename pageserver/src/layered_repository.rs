@@ -20,7 +20,6 @@ use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::num::NonZeroU64;
@@ -399,11 +398,12 @@ impl Repository {
 
     pub fn init_attach_timelines(
         &self,
-        timelines: HashSet<(ZTimelineId, TimelineMetadata)>,
+        timelines: Vec<(ZTimelineId, TimelineMetadata)>,
     ) -> anyhow::Result<()> {
+        let sorted_timelines = tree_sort_timelines(timelines)?;
         let mut timelines_accessor = self.timelines.lock().unwrap();
 
-        for (timeline_id, metadata) in timelines {
+        for (timeline_id, metadata) in sorted_timelines {
             let timeline = self
                 .initialize_new_timeline(timeline_id, metadata, &mut timelines_accessor)
                 .with_context(|| format!("Failed to initialize timeline {timeline_id}"))?;
@@ -426,6 +426,49 @@ impl Repository {
     pub fn get_remote_index(&self) -> &RemoteIndex {
         &self.remote_index
     }
+}
+
+/// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),
+/// perform a topological sort, so that the parent of each timeline comes
+/// before the children.
+fn tree_sort_timelines(
+    timelines: Vec<(ZTimelineId, TimelineMetadata)>,
+) -> Result<Vec<(ZTimelineId, TimelineMetadata)>> {
+    let mut result = Vec::with_capacity(timelines.len());
+
+    let mut now = Vec::with_capacity(timelines.len());
+    // (ancestor, children)
+    let mut later: HashMap<ZTimelineId, Vec<(ZTimelineId, TimelineMetadata)>> =
+        HashMap::with_capacity(timelines.len());
+
+    for (timeline_id, metadata) in timelines {
+        if let Some(ancestor_id) = metadata.ancestor_timeline() {
+            let children = later.entry(ancestor_id).or_default();
+            children.push((timeline_id, metadata));
+        } else {
+            now.push((timeline_id, metadata));
+        }
+    }
+
+    while let Some((timeline_id, metadata)) = now.pop() {
+        result.push((timeline_id, metadata));
+        // All children of this can be loaded now
+        if let Some(mut children) = later.remove(&timeline_id) {
+            now.append(&mut children);
+        }
+    }
+
+    // All timelines should be visited now. Unless there were timelines with missing ancestors.
+    if !later.is_empty() {
+        for (missing_id, orphan_ids) in later {
+            for (orphan_id, _) in orphan_ids {
+                error!("could not load timeline {orphan_id} because its ancestor timeline {missing_id} could not be loaded");
+            }
+        }
+        bail!("could not load tenant because some timelines are missing ancestors");
+    }
+
+    Ok(result)
 }
 
 /// Private functions
@@ -534,8 +577,8 @@ impl Repository {
                 timelines
                     .get(&ancestor_timeline_id)
                     .cloned()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
+                    .with_context(|| {
+                        format!(
                         "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
                     )
                     })?,
@@ -556,11 +599,9 @@ impl Repository {
             self.upload_layers,
         ));
 
-        if new_disk_consistent_lsn.is_valid() {
-            new_timeline
-                .load_layer_map(new_disk_consistent_lsn)
-                .context("failed to load layermap")?;
-        }
+        new_timeline
+            .load_layer_map(new_disk_consistent_lsn)
+            .context("failed to load layermap")?;
 
         crate::tenant_mgr::try_send_timeline_update(LocalTimelineUpdate::Attach {
             id: ZTenantTimelineId::new(self.tenant_id(), new_timeline_id),
@@ -974,7 +1015,7 @@ pub mod repo_harness {
                 false,
             );
             // populate repo with locally available timelines
-            let mut timelines_to_load = HashSet::new();
+            let mut timelines_to_load = Vec::new();
             for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
                 .expect("should be able to read timelines dir")
             {
@@ -986,7 +1027,7 @@ pub mod repo_harness {
                     .to_string_lossy()
                     .parse()?;
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
-                timelines_to_load.insert((timeline_id, timeline_metadata));
+                timelines_to_load.push((timeline_id, timeline_metadata));
             }
             repo.init_attach_timelines(timelines_to_load)?;
 
@@ -1680,11 +1721,11 @@ mod tests {
                 if lsn.0 == 0 {
                     continue;
                 }
-                println!("chekcking [{}][{}] at {}", idx, blknum, lsn);
+                println!("checking [{idx}][{blknum}] at {lsn}");
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, *lsn)?,
-                    TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))
+                    TEST_IMG(&format!("{idx} {blknum} at {lsn}"))
                 );
             }
         }

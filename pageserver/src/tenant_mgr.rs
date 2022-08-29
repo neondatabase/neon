@@ -14,7 +14,7 @@ use crate::{thread_mgr, timelines, walreceiver};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -189,7 +189,7 @@ impl std::fmt::Debug for LocalTimelineUpdate {
 pub fn attach_downloaded_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
-    sync_status_updates: HashMap<ZTenantId, HashSet<(ZTimelineId, TimelineMetadata)>>,
+    sync_status_updates: HashMap<ZTenantId, Vec<(ZTimelineId, TimelineMetadata)>>,
 ) {
     if sync_status_updates.is_empty() {
         debug!("No sync status updates to apply");
@@ -505,14 +505,14 @@ fn init_local_repository(
     local_timeline_init_statuses: HashMap<ZTimelineId, LocalTimelineInitStatus>,
     remote_index: &RemoteIndex,
 ) -> anyhow::Result<(), anyhow::Error> {
-    let mut timelines_to_attach = HashSet::new();
+    let mut timelines_to_attach = Vec::new();
     for (timeline_id, init_status) in local_timeline_init_statuses {
         match init_status {
             LocalTimelineInitStatus::LocallyComplete => {
                 debug!("timeline {timeline_id} for tenant {tenant_id} is locally complete, registering it in repository");
                 let metadata = check_broken_timeline(conf, tenant_id, timeline_id)
                     .context("found broken timeline")?;
-                timelines_to_attach.insert((timeline_id, metadata));
+                timelines_to_attach.push((timeline_id, metadata));
             }
             LocalTimelineInitStatus::NeedsSync => {
                 debug!(
