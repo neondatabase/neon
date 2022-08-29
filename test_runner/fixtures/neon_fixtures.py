@@ -2646,6 +2646,10 @@ def fork_at_current_lsn(
     ancestor_branch_name: Optional[str] = None,
     tenant_id: Optional[uuid.UUID] = None,
 ) -> uuid.UUID:
-    """Create new branch for current tenant/timeline on the last LSN. Before branch creation this function enforce that LSN is replayed by pagserver"""
+    """
+    Create new branch at the last LSN of an existing branch.
+    The "last LSN" is taken from the given Postgres instance. The pageserver will wait for all the
+    the WAL up to that LSN to arrive in the pageserver before creating the branch.
+    """
     current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
