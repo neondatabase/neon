@@ -2,7 +2,7 @@
 //! Timeline management code
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 
 use std::{
     fs,
@@ -19,15 +19,10 @@ use utils::{
 };
 
 use crate::import_datadir;
+use crate::layered_repository::{Repository, Timeline};
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
-use crate::{
-    config::PageServerConf, storage_sync::index::RemoteIndex, tenant_config::TenantConfOpt,
-};
-use crate::{
-    layered_repository::{Repository, Timeline},
-    walredo::WalRedoManager,
-};
+use crate::{config::PageServerConf, tenant_config::TenantConfOpt};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PointInTime {
@@ -35,19 +30,16 @@ pub struct PointInTime {
     pub lsn: Lsn,
 }
 
-pub fn create_repo(
+pub fn create_repository_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    remote_index: RemoteIndex,
-) -> Result<Arc<Repository>> {
+) -> Result<bool> {
     let repo_dir = conf.tenant_path(&tenant_id);
-    ensure!(
-        !repo_dir.exists(),
-        "cannot create new tenant repo: '{}' directory already exists",
-        tenant_id
-    );
+    if repo_dir.exists() {
+        debug!("cannot create new tenant repo: '{tenant_id}' directory already exists");
+        return Ok(false);
+    }
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe_dir::create_dir_all(&repo_dir)
@@ -58,14 +50,7 @@ pub fn create_repo(
     // Save tenant's config
     Repository::persist_tenant_config(conf, tenant_id, tenant_conf)?;
 
-    Ok(Arc::new(Repository::new(
-        conf,
-        tenant_conf,
-        wal_redo_manager,
-        tenant_id,
-        remote_index,
-        conf.remote_storage_config.is_some(),
-    )))
+    Ok(true)
 }
 
 // Create the cluster temporarily in 'initdbpath' directory inside the repository

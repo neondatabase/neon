@@ -209,7 +209,7 @@ pub fn attach_downloaded_tenants(
                 continue;
             }
         };
-        match attach_downloaded_tenant(&repo, downloaded_timelines) {
+        match attach_tenant_timelines(&repo, downloaded_timelines) {
             Ok(()) => info!("successfully applied sync status updates for tenant {tenant_id}"),
             Err(e) => error!(
                 "Failed to apply timeline sync timeline status updates for tenant {tenant_id}: {e:?}"
@@ -267,27 +267,35 @@ pub fn create_tenant_repository(
     tenant_id: ZTenantId,
     remote_index: RemoteIndex,
 ) -> anyhow::Result<Option<ZTenantId>> {
-    match tenants_state::write_tenants().entry(tenant_id) {
+    Ok(match tenants_state::write_tenants().entry(tenant_id) {
         Entry::Occupied(_) => {
-            debug!("tenant {tenant_id} already exists");
-            Ok(None)
+            debug!("tenant {tenant_id} already exists in memory");
+            None
         }
         Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            let repo = timelines::create_repo(
-                conf,
-                tenant_conf,
-                tenant_id,
-                wal_redo_manager,
-                remote_index,
-            )?;
-            v.insert(Tenant {
-                state: TenantState::Idle,
-                repo,
-            });
-            Ok(Some(tenant_id))
+            let repo_files_created =
+                timelines::create_repository_files(conf, tenant_conf, tenant_id)?;
+
+            if repo_files_created {
+                v.insert(Tenant {
+                    state: TenantState::Idle,
+                    repo: Arc::new(Repository::new(
+                        conf,
+                        tenant_conf,
+                        wal_redo_manager,
+                        tenant_id,
+                        remote_index,
+                        conf.remote_storage_config.is_some(),
+                    )),
+                });
+                Some(tenant_id)
+            } else {
+                debug!("tenant {tenant_id} directory already exist on disk");
+                None
+            }
         }
-    }
+    })
 }
 
 pub fn update_tenant_config(
@@ -559,12 +567,12 @@ fn init_local_repository(
     // Lets fail here loudly to be on the safe side.
     // XXX: It may be a better api to actually distinguish between repository startup
     //   and processing of newly downloaded timelines.
-    attach_downloaded_tenant(&repo, timelines_to_attach)
+    attach_tenant_timelines(&repo, timelines_to_attach)
         .with_context(|| format!("Failed to bootstrap timelines for tenant {tenant_id}"))?;
     Ok(())
 }
 
-fn attach_downloaded_tenant(
+fn attach_tenant_timelines(
     repo: &Repository,
     downloaded_timelines: HashSet<ZTimelineId>,
 ) -> anyhow::Result<()> {
