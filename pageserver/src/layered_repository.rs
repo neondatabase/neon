@@ -38,6 +38,7 @@ use crate::tenant_config::{TenantConf, TenantConfOpt};
 use crate::repository::GcResult;
 use crate::tenant_mgr::LocalTimelineUpdate;
 use crate::thread_mgr;
+use crate::timeline_metrics::STORAGE_TIME;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 
@@ -301,7 +302,7 @@ impl Repository {
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
-        timeline::STORAGE_TIME
+        STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
