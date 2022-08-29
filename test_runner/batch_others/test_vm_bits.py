@@ -1,5 +1,5 @@
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 
 
 #
@@ -33,7 +33,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("UPDATE vmtest_update SET id = 5000 WHERE id = 1")
 
     # Branch at this point, to test that later
-    env.neon_cli.create_branch("test_vm_bit_clear_new", "test_vm_bit_clear")
+    fork_at_current_lsn(env, pg, "test_vm_bit_clear_new", "test_vm_bit_clear")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
