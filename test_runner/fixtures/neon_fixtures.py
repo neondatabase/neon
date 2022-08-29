@@ -2643,7 +2643,7 @@ def fork_at_current_lsn(
     env: NeonEnv,
     pg: Postgres,
     new_branch_name: str = DEFAULT_BRANCH_NAME,
-    ancestor_branch_name: Optional[str] = None,
+    ancestor_branch_name: str,
     tenant_id: Optional[uuid.UUID] = None,
 ) -> uuid.UUID:
     """
