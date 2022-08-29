@@ -1,10 +1,5 @@
 import time
-from contextlib import closing
-
-import psycopg2.extras
-import pytest
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, NeonPageserverApiException
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 #
