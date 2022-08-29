@@ -558,7 +558,7 @@ zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, 
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenPageLSN(lsn);
+	SetLastWrittenPageLSN(lsn, reln->smgr_rnode.node.relNode);
 }
 
 
@@ -603,7 +603,7 @@ zm_adjust_lsn(XLogRecPtr lsn)
  * Return LSN for requesting pages and number of blocks from page server
  */
 static XLogRecPtr
-zenith_get_request_lsn(bool *latest)
+zenith_get_request_lsn(bool *latest, Oid rnode)
 {
 	XLogRecPtr	lsn;
 
@@ -630,7 +630,7 @@ zenith_get_request_lsn(bool *latest)
 		 * so our request cannot concern those.
 		 */
 		*latest = true;
-		lsn = GetLastWrittenPageLSN();
+		lsn = GetLastWrittenPageLSN(rnode);
 		Assert(lsn != InvalidXLogRecPtr);
 		elog(DEBUG1, "zenith_get_request_lsn GetLastWrittenPageLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
@@ -716,7 +716,7 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node.relNode);
 	{
 		ZenithExistsRequest request = {
 			.req.tag = T_ZenithExistsRequest,
@@ -1079,7 +1079,7 @@ zenith_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node.relNode);
 	zenith_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
@@ -1284,7 +1284,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node.relNode);
 	{
 		ZenithNblocksRequest request = {
 			.req.tag = T_ZenithNblocksRequest,
@@ -1344,7 +1344,7 @@ zenith_dbsize(Oid dbNode)
 	XLogRecPtr request_lsn;
 	bool		latest;
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, InvalidOid);
 	{
 		ZenithDbSizeRequest request = {
 			.req.tag = T_ZenithDbSizeRequest,
@@ -1431,7 +1431,7 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 */
 	XLogFlush(lsn);
 
-	SetLastWrittenPageLSN(lsn);
+	SetLastWrittenPageLSN(lsn, reln->smgr_rnode.node.relNode);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
