@@ -498,17 +498,30 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
-                    Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
+        // let cached_page_img = match self.lookup_cached_page(&key, lsn) {
+        //     Some((cached_lsn, cached_img)) => {
+        //         match cached_lsn.cmp(&lsn) {
+        //             Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
+        //             Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+        //             Ordering::Greater => panic!(), // the returned lsn should never be after the requested lsn
+        //         }
+        //         Some((cached_lsn, cached_img))
+        //     }
+        //     None => None,
+        // };
+        let cached_page_img = None;
+
+        // HACK see if finding reconstruct data is a bottleneck
+        for _ in 0..10 {
+            let mut reconstruct_state = ValueReconstructState {
+                records: Vec::new(),
+                img: None,
+            };
+
+            self.get_reconstruct_data(key, lsn, &mut reconstruct_state)?;
+
+            self.reconstruct_value(key, lsn, reconstruct_state);
+        }
 
         let mut reconstruct_state = ValueReconstructState {
             records: Vec::new(),

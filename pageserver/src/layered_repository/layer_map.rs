@@ -13,7 +13,7 @@
 use crate::layered_repository::inmemory_layer::InMemoryLayer;
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
-use crate::repository::Key;
+use crate::repository::{Key, key_range_size};
 use anyhow::Result;
 use metrics::{register_int_gauge, IntGauge};
 use once_cell::sync::Lazy;
@@ -337,6 +337,13 @@ impl LayerMap {
             if !range_eq(key_range, &(Key::MIN..Key::MAX))
                 && range_eq(&l.get_key_range(), &(Key::MIN..Key::MAX))
             {
+                continue;
+            }
+
+            // HACK ignore extremely sparse deltas, just to measure effect on init
+            let image_range_size = key_range_size(key_range);
+            let delta_range_size = key_range_size(&l.get_key_range());
+            if delta_range_size > 5 * image_range_size {
                 continue;
             }
 
