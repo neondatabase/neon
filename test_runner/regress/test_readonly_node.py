@@ -1,3 +1,6 @@
+import time
+from uuid import UUID
+
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_for_last_record_lsn
@@ -99,7 +102,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         env.postgres.create_start(
             branch_name="test_readonly_node", node_name="test_readonly_node_preinitdb", lsn="0/42"
         )
-
 
 
 # Similar test, but with more data, and we force checkpoints
