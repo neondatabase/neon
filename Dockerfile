@@ -11,13 +11,13 @@ ARG PG_VERSION=v14
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
-COPY --chown=nonroot vendor/postgres vendor/postgres
+COPY --chown=nonroot vendor/postgres-${PG_VERSION} vendor/postgres-${PG_VERSION}
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
 RUN set -e \
-    && mold -run make -j $(nproc) -s neon-pg-ext \
+    && mold -run make -j $(nproc) -s neon-pg-ext-${PG_VERSION} \
     && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
