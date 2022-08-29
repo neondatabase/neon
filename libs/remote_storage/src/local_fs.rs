@@ -5,7 +5,6 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    borrow::Cow,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -113,13 +112,10 @@ impl RemoteStorage for LocalFs {
 
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix),
-            None => Cow::Borrowed(&self.storage_root),
-        };
-        get_all_files(path.as_ref(), false).await
+        let path = prefix.unwrap_or(&self.storage_root);
+        get_all_files(path, false).await
     }
 
     async fn upload(

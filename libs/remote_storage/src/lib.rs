@@ -71,7 +71,7 @@ pub trait RemoteStorage: Send + Sync {
     /// so this method doesnt need to.
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
@@ -161,6 +161,13 @@ impl GenericRemoteStorage {
                     s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 S3Bucket::new(s3_config, working_directory).map(GenericRemoteStorage::S3)
             }
+        }
+    }
+
+    pub fn as_local(&self) -> Option<&LocalFs> {
+        match self {
+            Self::Local(local_fs) => Some(local_fs),
+            _ => None,
         }
     }
 }

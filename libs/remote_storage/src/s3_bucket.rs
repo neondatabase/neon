@@ -316,11 +316,11 @@ impl RemoteStorage for S3Bucket {
     /// Note: it wont include empty "directories"
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
-            .map(|p| p.0)
+            .map(|p| p.0.clone())
             .or_else(|| self.prefix_in_bucket.clone())
             .map(|mut p| {
                 // required to end with a separator

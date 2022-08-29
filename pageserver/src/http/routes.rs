@@ -35,7 +35,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
     allowlist_routes: Vec<Uri>,
-    remote_storage: Option<GenericRemoteStorage>,
+    remote_storage: Option<Arc<GenericRemoteStorage>>,
 }
 
 impl State {
@@ -43,20 +43,12 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_index: RemoteIndex,
+        remote_storage: Option<Arc<GenericRemoteStorage>>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
-        // Note that this remote storage is created separately from the main one in the sync_loop.
-        // It's fine since it's stateless and some code duplication saves us from bloating the code around with generics.
-        let remote_storage = conf
-            .remote_storage_config
-            .as_ref()
-            .map(|storage_config| GenericRemoteStorage::new(conf.workdir.clone(), storage_config))
-            .transpose()
-            .context("Failed to init generic remote storage")?;
-
         Ok(Self {
             conf,
             auth,
@@ -448,16 +440,8 @@ async fn gather_tenant_timelines_index_parts(
     tenant_id: ZTenantId,
 ) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
     let index_parts = match state.remote_storage.as_ref() {
-        Some(GenericRemoteStorage::Local(local_storage)) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, local_storage, tenant_id)
-                .await
-        }
-        // FIXME here s3 storage contains its own limits, that are separate from sync storage thread ones
-        //       because it is a different instance. We can move this limit to some global static
-        //       or use one instance everywhere.
-        Some(GenericRemoteStorage::S3(s3_storage)) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, s3_storage, tenant_id)
-                .await
+        Some(storage) => {
+            storage_sync::gather_tenant_timelines_index_parts(state.conf, storage, tenant_id).await
         }
         None => return Ok(None),
     }
@@ -714,6 +698,7 @@ pub fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
+    remote_storage: Option<Arc<GenericRemoteStorage>>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -730,7 +715,8 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_index).context("Failed to initialize router state")?,
+            State::new(conf, auth, remote_index, remote_storage)
+                .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", status_handler)
         .get("/v1/tenant", tenant_list_handler)

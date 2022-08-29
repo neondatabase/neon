@@ -12,6 +12,7 @@ use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use anyhow::Context;
+use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -131,7 +132,10 @@ impl fmt::Display for TenantState {
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the repository once download is completed.
-pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIndex> {
+pub fn init_tenant_mgr(
+    conf: &'static PageServerConf,
+    remote_storage: Option<Arc<GenericRemoteStorage>>,
+) -> anyhow::Result<RemoteIndex> {
     let (timeline_updates_sender, timeline_updates_receiver) =
         mpsc::unbounded_channel::<LocalTimelineUpdate>();
     tenants_state::set_timeline_update_sender(timeline_updates_sender)?;
@@ -140,7 +144,7 @@ pub fn init_tenant_mgr(conf: &'static PageServerConf) -> anyhow::Result<RemoteIn
     let SyncStartupData {
         remote_index,
         local_timeline_init_statuses,
-    } = storage_sync::start_local_timeline_sync(conf)
+    } = storage_sync::start_local_timeline_sync(conf, remote_storage)
         .context("Failed to set up local files sync with external storage")?;
 
     for (tenant_id, local_timeline_init_statuses) in local_timeline_init_statuses {
