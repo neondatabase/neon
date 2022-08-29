@@ -33,7 +33,11 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.2.3.tar.gz && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     cd extensions/postgis && \
     make clean && \
-    make -j $(getconf _NPROCESSORS_ONLN) install
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_raster.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control
 
 # Build plv8
 FROM build-deps AS plv8-build
@@ -54,7 +58,8 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.3.tar.gz && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make && \
     make install && \
-    rm -rf /plv8-*
+    rm -rf /plv8-* && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control
 
 # compile neon extensions
 FROM build-deps AS neon-pg-ext-build
