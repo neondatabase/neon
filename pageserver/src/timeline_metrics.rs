@@ -271,12 +271,6 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
             .unwrap()
     }
-
-    pub fn smgr_query_time(&self, op: &str) -> metrics::Histogram {
-        return SMGR_QUERY_TIME
-            .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
-            .unwrap();
-    }
 }
 
 impl Drop for TimelineMetrics {
