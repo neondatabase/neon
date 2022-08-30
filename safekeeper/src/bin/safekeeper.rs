@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
                 .help(formatcp!("http endpoint address for metrics on ip:port (default: {DEFAULT_HTTP_LISTEN_ADDR})")),
         )
         // FIXME this argument is no longer needed since pageserver address is forwarded from compute.
-        // However because this argument is in use by console's e2e tests lets keep it for now and remove separately.
+        // However because this argument is in use by console's e2e tests let's keep it for now and remove separately.
         // So currently it is a noop.
         .arg(
             Arg::new("pageserver")

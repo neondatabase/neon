@@ -234,11 +234,11 @@ pub(super) async fn download_timeline_layers<'a>(
 
     let mut download_tasks = layers_to_download
         .into_iter()
-        .map(|layer_desination_path| async move {
-            if layer_desination_path.exists() {
+        .map(|layer_destination_path| async move {
+            if layer_destination_path.exists() {
                 debug!(
                     "Layer already exists locally, skipping download: {}",
-                    layer_desination_path.display()
+                    layer_destination_path.display()
                 );
             } else {
                 // Perform a rename inspired by durable_rename from file_utils.c.
@@ -252,7 +252,7 @@ pub(super) async fn download_timeline_layers<'a>(
                 // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
                 // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
                 let temp_file_path =
-                    path_with_suffix_extension(&layer_desination_path, TEMP_DOWNLOAD_EXTENSION);
+                    path_with_suffix_extension(&layer_destination_path, TEMP_DOWNLOAD_EXTENSION);
 
                 let mut destination_file =
                     fs::File::create(&temp_file_path).await.with_context(|| {
@@ -262,7 +262,7 @@ pub(super) async fn download_timeline_layers<'a>(
                         )
                     })?;
 
-                let mut layer_download = download_storage_object(storage, &layer_desination_path)
+                let mut layer_download = download_storage_object(storage, &layer_destination_path)
                     .await
                     .with_context(|| {
                         format!(
@@ -284,9 +284,9 @@ pub(super) async fn download_timeline_layers<'a>(
                 // that have not yet completed. To ensure that a file is closed immediately when it is dropped,
                 // you should call flush before dropping it.
                 //
-                // From the tokio code I see that it waits for pending operations to complete. There shouldt be any because
-                // we assume that `destination_file` file is fully written. I e there is no pending .write(...).await operations.
-                // But for additional safety lets check/wait for any pending operations.
+                // From the tokio code I see that it waits for pending operations to complete. There shouldn't be any because
+                // we assume that `destination_file` file is fully written. I.e there is no pending .write(...).await operations.
+                // But for additional safety let's check/wait for any pending operations.
                 destination_file.flush().await.with_context(|| {
                     format!(
                         "failed to flush source file at {}",
@@ -307,16 +307,16 @@ pub(super) async fn download_timeline_layers<'a>(
                     anyhow::bail!("remote-storage-download-pre-rename failpoint triggered")
                 });
 
-                fs::rename(&temp_file_path, &layer_desination_path).await?;
+                fs::rename(&temp_file_path, &layer_destination_path).await?;
 
-                fsync_path(&layer_desination_path).await.with_context(|| {
+                fsync_path(&layer_destination_path).await.with_context(|| {
                     format!(
                         "Cannot fsync layer destination path {}",
-                        layer_desination_path.display(),
+                        layer_destination_path.display(),
                     )
                 })?;
             }
-            Ok::<_, anyhow::Error>(layer_desination_path)
+            Ok::<_, anyhow::Error>(layer_destination_path)
         })
         .collect::<FuturesUnordered<_>>();
 

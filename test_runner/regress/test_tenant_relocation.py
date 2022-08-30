@@ -170,7 +170,7 @@ def check_timeline_attached(
     new_timeline_detail = assert_timeline_local(new_pageserver_http_client, tenant_id, timeline_id)
 
     # when load is active these checks can break because lsns are not static
-    # so lets check with some margin
+    # so let's check with some margin
     assert_abs_margin_ratio(
         lsn_from_hex(new_timeline_detail["local"]["disk_consistent_lsn"]),
         lsn_from_hex(old_timeline_detail["local"]["disk_consistent_lsn"]),

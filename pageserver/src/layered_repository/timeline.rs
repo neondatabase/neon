@@ -379,7 +379,7 @@ pub struct Timeline {
     // It is needed in checks when we want to error on some operations
     // when they are requested for pre-initdb lsn.
     // It can be unified with latest_gc_cutoff_lsn under some "first_valid_lsn",
-    // though lets keep them both for better error visibility.
+    // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?

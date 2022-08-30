@@ -46,7 +46,7 @@ impl ResponseErrorMessageExt for Response {
             return Ok(self);
         }
 
-        // reqwest do not export it's error construction utility functions, so lets craft the message ourselves
+        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
         let url = self.url().to_owned();
         Err(SafekeeperHttpError::Response(
             match self.json::<HttpErrorBody>() {
