@@ -529,7 +529,7 @@ impl Timeline {
             // release the lock before removing
         }
         let _enter =
-            info_span!("", timeline = %self.zttid.tenant_id, tenant = %self.zttid.timeline_id)
+            info_span!("", tenant = %self.zttid.tenant_id, timeline = %self.zttid.timeline_id)
                 .entered();
         remover(horizon_segno - 1)?;
         self.mutex.lock().unwrap().last_removed_segno = horizon_segno;
@@ -626,7 +626,7 @@ impl GlobalTimelines {
         zttid: ZTenantTimelineId,
         create: bool,
     ) -> Result<Arc<Timeline>> {
-        let _enter = info_span!("", timeline = %zttid.tenant_id).entered();
+        let _enter = info_span!("", timeline = %zttid.timeline_id).entered();
 
         let mut state = TIMELINES_STATE.lock().unwrap();
 
