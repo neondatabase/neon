@@ -1,4 +1,5 @@
 /target
+/bindings/python/neon-dev-utils/target
 /tmp_check
 /tmp_install
 /tmp_check_cli

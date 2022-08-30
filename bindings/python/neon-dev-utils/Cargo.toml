@@ -1,0 +1,16 @@
+[package]
+name = "neon-dev-utils"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "neon_dev_utils"
+# "cdylib" is necessary to produce a shared library for Python to import from.
+#
+# Downstream Rust code (including code in `bin/`, `examples/`, and `tests/`) will not be able
+# to `use string_sum;` unless the "rlib" or "lib" crate type is also included, e.g.:
+# crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.15.1", features = ["extension-module"] }

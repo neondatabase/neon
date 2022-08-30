@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "neon-dev-utils"
+version = "0.1.0"
+description = "Python bindings for common neon development utils"
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+[tool.poetry.dev-dependencies]
+maturin = "^0.13.2"
+
+[build-system]
+requires = ["maturin>=0.13.2", "poetry-core>=1.0.0"]
+build-backend = "maturin"
