@@ -149,7 +149,7 @@ runs:
         fi
 
     - name: Upload Allure results
-      if: ${{ always() && (inputs.test_selection == 'batch_others' || inputs.test_selection == 'batch_pg_regress') }}
+      if: ${{ always() && (inputs.test_selection == 'regress') }}
       uses: ./.github/actions/allure-report
       with:
         action: store

@@ -15,12 +15,22 @@ Prerequisites:
 
 ### Test Organization
 
-The tests are divided into a few batches, such that each batch takes roughly
-the same amount of time. The batches can be run in parallel, to minimize total
-runtime. Currently, there are only two batches:
+Regression tests are in the 'regress' directory. They can be run in
+parallel to minimize total runtime. Most regression test sets up their
+environment with its own pageservers and safekeepers (but see
+`TEST_SHARED_FIXTURES`).
 
-- test_batch_pg_regress: Runs PostgreSQL regression tests
-- test_others: All other tests
+'pg_clients' contains tests for connecting with various client
+libraries. Each client test uses a Dockerfile that pulls an image that
+contains the client, and connects to PostgreSQL with it. The client
+tests can be run against an existing PostgreSQL or Neon installation.
+
+'performance' contains performance regression tests. Each test
+exercises a particular scenario or workload, and outputs
+measurements. They should be run serially, to avoid the tests
+interfering with the performance of each other. Some performance tests
+set up their own Neon environment, while others can be run against an
+existing PostgreSQL or Neon environment.
 
 ### Running the tests
 

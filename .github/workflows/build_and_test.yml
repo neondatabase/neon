@@ -206,7 +206,7 @@ jobs:
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
-  pg_regress-tests:
+  regress-tests:
     runs-on: dev
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -224,42 +224,13 @@ jobs:
           submodules: true
           fetch-depth: 2
 
-      - name: Pytest regress tests
+      - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ matrix.build_type }}
           rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: batch_pg_regress
+          test_selection: regress
           needs_postgres_source: true
-
-      - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
-        uses: ./.github/actions/save-coverage-data
-
-  other-tests:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ build-neon ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
-
-      - name: Pytest other tests
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: batch_others
           run_with_real_s3: true
           real_s3_bucket: ci-tests-s3
           real_s3_region: us-west-2
@@ -307,7 +278,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ other-tests, pg_regress-tests ]
+    needs: [ regress-tests ]
     if: always()
     strategy:
       fail-fast: false
@@ -330,7 +301,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ other-tests, pg_regress-tests ]
+    needs: [ regress-tests ]
     strategy:
       fail-fast: false
       matrix:
@@ -587,7 +558,7 @@ jobs:
     #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, other-tests, pg_regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -642,7 +613,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag, other-tests, pg_regress-tests ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'

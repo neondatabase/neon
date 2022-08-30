@@ -1077,7 +1077,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
-            // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
+            // FIXME: This is just for tests. See test_runner/regress/test_gc.py.
             // This probably should require special authentication or a global flag to
             // enable, I don't think we want to or need to allow regular clients to invoke
             // GC.

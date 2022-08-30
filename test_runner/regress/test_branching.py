@@ -62,10 +62,11 @@ def test_branching_with_pgbench(
         time.sleep(delay)
         log.info(f"Sleep {delay}s")
 
-        # If the number of concurrent threads exceeds a threshold,
-        # wait for all the threads to finish before spawning a new one.
-        # Because tests defined in `batch_others` are run concurrently in CI,
-        # we want to avoid the situation that one test exhausts resources for other tests.
+        # If the number of concurrent threads exceeds a threshold, wait for
+        # all the threads to finish before spawning a new one. Because the
+        # regression tests in this directory are run concurrently in CI, we
+        # want to avoid the situation that one test exhausts resources for
+        # other tests.
         if len(threads) >= thread_limit:
             for thread in threads:
                 thread.join()
