@@ -10,14 +10,14 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{TimelineMetrics, STORAGE_IO_TIME};
+use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::{RwLock, RwLockWriteGuard};
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -53,7 +53,8 @@ pub struct VirtualFile {
     pub path: PathBuf,
     open_options: OpenOptions,
 
-    metrics: Arc<TimelineMetrics>,
+    tenantid: String,
+    timelineid: String,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -206,9 +207,8 @@ impl VirtualFile {
             timelineid = "*".to_string();
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
-        let metrics = Arc::new(TimelineMetrics::new(&tenantid, &timelineid));
-        let file = metrics
-            .storage_io_time("open")
+        let file = STORAGE_IO_TIME
+            .with_label_values(&["open", &tenantid, &timelineid])
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -226,7 +226,8 @@ impl VirtualFile {
             pos: 0,
             path: path.to_path_buf(),
             open_options: reopen_options,
-            metrics,
+            tenantid,
+            timelineid,
         };
 
         slot_guard.file.replace(file);
@@ -265,9 +266,8 @@ impl VirtualFile {
                         if let Some(file) = &slot_guard.file {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
-                            return Ok(self
-                                .metrics
-                                .storage_io_time(op)
+                            return Ok(STORAGE_IO_TIME
+                                .with_label_values(&[op, &self.tenantid, &self.timelineid])
                                 .observe_closure_duration(|| func(file)));
                         }
                     }
@@ -293,9 +293,8 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot();
 
         // Open the physical file
-        let file = self
-            .metrics
-            .storage_io_time("open")
+        let file = STORAGE_IO_TIME
+            .with_label_values(&["open", &self.tenantid, &self.timelineid])
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
@@ -308,9 +307,8 @@ impl VirtualFile {
         // XXX: `parking_lot::RwLock` can enable such downgrades, yet its implementation is fair and
         // may deadlock on subsequent read calls.
         // Simply replacing all `RwLock` in project causes deadlocks, so use it sparingly.
-        let result = self
-            .metrics
-            .storage_io_time(op)
+        let result = STORAGE_IO_TIME
+            .with_label_values(&[op, &self.tenantid, &self.timelineid])
             .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -338,8 +336,8 @@ impl Drop for VirtualFile {
             // we group close time by tenantid/timelineid.
             // At allows to compare number/time of "normal" file closes
             // with file eviction.
-            self.metrics
-                .storage_io_time("close")
+            STORAGE_IO_TIME
+                .with_label_values(&["close", &self.tenantid, &self.timelineid])
                 .observe_closure_duration(|| slot_guard.file.take());
         }
     }
@@ -400,7 +398,9 @@ impl FileExt for VirtualFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
-            self.metrics.storage_io_size("read").add(size as i64);
+            STORAGE_IO_SIZE
+                .with_label_values(&["read", &self.tenantid, &self.timelineid])
+                .add(size as i64);
         }
         result
     }
@@ -408,7 +408,9 @@ impl FileExt for VirtualFile {
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("write", |file| file.write_at(buf, offset))?;
         if let Ok(size) = result {
-            self.metrics.storage_io_size("write").add(size as i64);
+            STORAGE_IO_SIZE
+                .with_label_values(&["write", &self.tenantid, &self.timelineid])
+                .add(size as i64);
         }
         result
     }

@@ -268,18 +268,6 @@ impl TimelineMetrics {
             persistent_bytes_written,
         }
     }
-
-    pub fn storage_io_time(&self, op: &str) -> metrics::Histogram {
-        STORAGE_IO_TIME
-            .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
-            .unwrap()
-    }
-
-    pub fn storage_io_size(&self, op: &str) -> GenericGauge<metrics::core::AtomicI64> {
-        STORAGE_IO_SIZE
-            .get_metric_with_label_values(&[op, &self.tenant_id, &self.timeline_id])
-            .unwrap()
-    }
 }
 
 impl Drop for TimelineMetrics {
