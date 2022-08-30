@@ -5,7 +5,6 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    borrow::Cow,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -18,15 +17,9 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectName};
+use crate::{path_with_suffix_extension, Download, DownloadError};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
-
-impl RemoteObjectName for PathBuf {
-    fn object_name(&self) -> Option<&str> {
-        self.file_stem().and_then(|n| n.to_str())
-    }
-}
 
 pub struct LocalFs {
     working_directory: PathBuf,
@@ -113,13 +106,10 @@ impl RemoteStorage for LocalFs {
 
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix),
-            None => Cow::Borrowed(&self.storage_root),
-        };
-        get_all_files(path.as_ref(), false).await
+        let path = prefix.unwrap_or(&self.storage_root);
+        get_all_files(path, false).await
     }
 
     async fn upload(
