@@ -1,6 +1,6 @@
 [submodule "vendor/postgres-v14"]
 	path = vendor/postgres-v14
-	url = https://github.com/zenithdb/postgres
+	url = https://github.com/neondatabase/postgres.git
 	branch = main
 [submodule "vendor/postgres-v15"]
 	path = vendor/postgres-v15
