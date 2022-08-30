@@ -47,17 +47,9 @@ pub(super) async fn upload_index_part(
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME)
         .with_extension(IndexPart::FILE_EXTENSION);
-    match storage {
-        GenericRemoteStorage::Local(storage) => {
-            upload_storage_object(storage, index_part_bytes, index_part_size, &index_part_path)
-                .await
-        }
-        GenericRemoteStorage::S3(storage) => {
-            upload_storage_object(storage, index_part_bytes, index_part_size, &index_part_path)
-                .await
-        }
-    }
-    .with_context(|| format!("Failed to upload index part for '{sync_id}'"))
+    upload_storage_object(storage, index_part_bytes, index_part_size, &index_part_path)
+        .await
+        .with_context(|| format!("Failed to upload index part for '{sync_id}'"))
 }
 
 /// Timeline upload result, with extra data, needed for uploading.
@@ -139,16 +131,10 @@ pub(super) async fn upload_timeline_layers<'a>(
                 .map_err(UploadError::Other)?
                 .len() as usize;
 
-            let upload_result = match storage {
-                GenericRemoteStorage::Local(storage) => {
-                    upload_storage_object(storage, source_file, source_size, &source_path).await
-                }
-                GenericRemoteStorage::S3(storage) => {
-                    upload_storage_object(storage, source_file, source_size, &source_path).await
-                }
-            }
-            .with_context(|| format!("Failed to upload layer file for {sync_id}"));
-            match upload_result {
+            match upload_storage_object(storage, source_file, source_size, &source_path)
+                .await
+                .with_context(|| format!("Failed to upload layer file for {sync_id}"))
+            {
                 Ok(()) => Ok(source_path),
                 Err(e) => Err(UploadError::MissingLocalFile(source_path, e)),
             }
@@ -207,33 +193,49 @@ pub(super) async fn upload_timeline_layers<'a>(
     }
 }
 
-async fn upload_storage_object<P, S>(
-    storage: &S,
+async fn upload_storage_object(
+    storage: &GenericRemoteStorage,
     from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
     from_size_bytes: usize,
     from_path: &Path,
-) -> anyhow::Result<()>
-where
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
-    let target_storage_path = storage.remote_object_id(from_path).with_context(|| {
-        format!(
-            "Failed to get the storage path for source local path '{}'",
-            from_path.display()
-        )
-    })?;
-
-    storage
-        .upload(from, from_size_bytes, &target_storage_path, None)
-        .await
-        .with_context(|| {
+) -> anyhow::Result<()> {
+    async fn do_upload_storage_object<P, S>(
+        storage: &S,
+        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        from_size_bytes: usize,
+        from_path: &Path,
+    ) -> anyhow::Result<()>
+    where
+        P: std::fmt::Debug + Send + Sync + 'static,
+        S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+    {
+        let target_storage_path = storage.remote_object_id(from_path).with_context(|| {
             format!(
-                "Failed to upload from '{}' to storage path '{:?}'",
-                from_path.display(),
-                target_storage_path
+                "Failed to get the storage path for source local path '{}'",
+                from_path.display()
             )
-        })
+        })?;
+
+        storage
+            .upload(from, from_size_bytes, &target_storage_path, None)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to upload from '{}' to storage path '{:?}'",
+                    from_path.display(),
+                    target_storage_path
+                )
+            })
+    }
+
+    match storage {
+        GenericRemoteStorage::Local(storage) => {
+            do_upload_storage_object(storage, from, from_size_bytes, from_path).await
+        }
+        GenericRemoteStorage::S3(storage) => {
+            do_upload_storage_object(storage, from, from_size_bytes, from_path).await
+        }
+    }
 }
 
 enum UploadError {
