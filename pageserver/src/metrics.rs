@@ -1,4 +1,4 @@
-use metrics::core::{AtomicU64, GenericCounter, GenericGauge};
+use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
     register_histogram_vec, register_int_counter_vec, register_int_gauge_vec,
     register_uint_gauge_vec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
@@ -211,7 +211,7 @@ pub struct TimelineMetrics {
 }
 
 impl TimelineMetrics {
-    pub fn new(tenant_id: &String, timeline_id: &String) -> Self {
+    pub fn new(tenant_id: &str, timeline_id: &str) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
         let reconstruct_time_histo = RECONSTRUCT_TIME
