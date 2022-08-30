@@ -253,6 +253,7 @@ jobs:
           real_s3_region: us-west-2
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
@@ -308,10 +309,27 @@ jobs:
           submodules: false
 
       - name: Create Allure report
+        id: create-allure-report
         uses: ./.github/actions/allure-report
         with:
           action: generate
           build_type: ${{ matrix.build_type }}
+
+      - name: Store Allure test stat in the DB
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+        shell: bash -euxo pipefail {0}
+        run: |
+          curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
+          ./scripts/pysync
+
+          # Workaround for https://github.com/neondatabase/cloud/issues/2188
+          psql "$TEST_RESULT_CONNSTR" -c "SELECT 1;" || sleep 10
+
+          DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
     runs-on: dev

@@ -11,6 +11,10 @@ inputs:
   test_selection:
     description: '`test_selector` from run-python-test-set action'
     required: false
+outputs:
+  report-url:
+    description: 'Allure report URL'
+    value: ${{ steps.generate-report.outputs.report-url }}
 
 runs:
   using: "composite"
@@ -182,7 +186,7 @@ runs:
         aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
-        echo "::set-output name=REPORT_URL::${REPORT_URL}"
+        echo "::set-output name=report-url::${REPORT_URL}"
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}
@@ -200,7 +204,7 @@ runs:
     - uses: actions/github-script@v6
       if: ${{ inputs.action == 'generate' && always() }}
       env:
-        REPORT_URL: ${{ steps.generate-report.outputs.REPORT_URL }}
+        REPORT_URL: ${{ steps.generate-report.outputs.report-url }}
         BUILD_TYPE: ${{ inputs.build_type }}
         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       with:
