@@ -10,8 +10,7 @@ use std::{
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use remote_storage::{
-    path_with_suffix_extension, Download, DownloadError, GenericRemoteStorage, RemoteObjectName,
-    RemoteStorage,
+    path_with_suffix_extension, Download, DownloadError, GenericRemoteStorage, RemoteStorage,
 };
 use tokio::{
     fs,
@@ -119,15 +118,9 @@ pub async fn gather_tenant_timelines_index_parts(
     tenant_id: ZTenantId,
 ) -> anyhow::Result<HashMap<ZTimelineId, IndexPart>> {
     let tenant_path = conf.timelines_path(&tenant_id);
-    let timeline_sync_ids = match storage {
-        GenericRemoteStorage::Local(storage) => {
-            get_timeline_sync_ids(storage, &tenant_path, tenant_id).await
-        }
-        GenericRemoteStorage::S3(storage) => {
-            get_timeline_sync_ids(storage, &tenant_path, tenant_id).await
-        }
-    }
-    .with_context(|| format!("Failed to list timeline sync ids for tenat {tenant_id}"))?;
+    let timeline_sync_ids = get_timeline_sync_ids(storage, &tenant_path, tenant_id)
+        .await
+        .with_context(|| format!("Failed to list timeline sync ids for tenat {tenant_id}"))?;
 
     match download_index_parts(conf, storage, timeline_sync_ids)
         .await
@@ -403,13 +396,71 @@ async fn download_storage_object(
     }
 }
 
-async fn get_timeline_sync_ids<P, S>(
-    storage: &S,
+async fn get_timeline_sync_ids(
+    storage: &GenericRemoteStorage,
     tenant_path: &Path,
     tenant_id: ZTenantId,
-) -> anyhow::Result<HashSet<ZTenantTimelineId>>
+) -> anyhow::Result<HashSet<ZTenantTimelineId>> {
+    let timeline_ids: Vec<ZTimelineId> = match storage {
+        GenericRemoteStorage::Local(storage) => list_prefixes(storage, tenant_path)
+            .await?
+            .into_iter()
+            .map(|timeline_directory_path| {
+                timeline_directory_path
+                    .file_stem()
+                    .with_context(|| {
+                        format!(
+                            "Failed to get timeline id string from file '{}'",
+                            timeline_directory_path.display()
+                        )
+                    })?
+                    .to_string_lossy()
+                    .as_ref()
+                    .parse()
+                    .with_context(|| {
+                        format!(
+                            "failed to parse directory name '{}' as timeline id",
+                            timeline_directory_path.display()
+                        )
+                    })
+            })
+            .collect::<anyhow::Result<_>>(),
+        GenericRemoteStorage::S3(storage) => list_prefixes(storage, tenant_path)
+            .await?
+            .into_iter()
+            .map(|s3_path| {
+                s3_path
+                    .object_name()
+                    .with_context(|| {
+                        format!("Failed to get object name out of S3 path {s3_path:?}")
+                    })?
+                    .parse()
+                    .with_context(|| {
+                        format!("failed to parse object name '{s3_path:?}' as timeline id")
+                    })
+            })
+            .collect::<anyhow::Result<_>>(),
+    }
+    .with_context(|| {
+        format!("Tenant {tenant_id} has at least one incorrect timeline subdirectory")
+    })?;
+
+    if timeline_ids.is_empty() {
+        anyhow::bail!("no timelines found on the remote storage for tenant {tenant_id}")
+    }
+
+    Ok(timeline_ids
+        .into_iter()
+        .map(|timeline_id| ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        })
+        .collect())
+}
+
+async fn list_prefixes<P, S>(storage: &S, tenant_path: &Path) -> anyhow::Result<Vec<P>>
 where
-    P: RemoteObjectName + std::fmt::Debug + Send + Sync + 'static,
+    P: std::fmt::Debug + Send + Sync + 'static,
     S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
 {
     let tenant_storage_path = storage.remote_object_id(tenant_path).with_context(|| {
@@ -419,37 +470,14 @@ where
         )
     })?;
 
-    let timelines = storage
+    storage
         .list_prefixes(Some(&tenant_storage_path))
         .await
         .with_context(|| {
             format!(
                 "Failed to list tenant storage path {tenant_storage_path:?} to get remote timelines to download"
             )
-        })?;
-
-    if timelines.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage")
-    }
-
-    let mut sync_ids = HashSet::new();
-
-    for timeline_remote_storage_key in timelines {
-        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
-            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
-        })?;
-
-        let timeline_id: ZTimelineId = object_name.parse().with_context(|| {
-            format!("failed to parse object name into timeline id '{object_name}'")
-        })?;
-
-        sync_ids.insert(ZTenantTimelineId {
-            tenant_id,
-            timeline_id,
-        });
-    }
-
-    Ok(sync_ids)
+        })
 }
 
 async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
