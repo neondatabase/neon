@@ -121,7 +121,7 @@ pub enum AuthInfo {
 #[must_use]
 pub(super) struct Api<'a> {
     endpoint: &'a ApiUrl,
-    creds: &'a ClientCredentials,
+    creds: &'a ClientCredentials<'a>,
 }
 
 impl<'a> Api<'a> {
@@ -143,7 +143,7 @@ impl<'a> Api<'a> {
         url.path_segments_mut().push("proxy_get_role_secret");
         url.query_pairs_mut()
             .append_pair("project", self.creds.project().expect("impossible"))
-            .append_pair("role", &self.creds.user);
+            .append_pair("role", self.creds.user);
 
         // TODO: use a proper logger
         println!("cplane request: {url}");
@@ -187,8 +187,8 @@ impl<'a> Api<'a> {
         config
             .host(host)
             .port(port)
-            .dbname(&self.creds.dbname)
-            .user(&self.creds.user);
+            .dbname(self.creds.dbname)
+            .user(self.creds.user);
 
         Ok(config)
     }

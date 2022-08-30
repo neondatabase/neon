@@ -1,9 +1,11 @@
 use crate::{cancellation::CancelClosure, error::UserFacingError};
 use futures::TryFutureExt;
+use itertools::Itertools;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
+use utils::pq_proto::StartupMessageParams;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -110,7 +112,42 @@ pub struct PostgresConnection {
 
 impl NodeInfo {
     /// Connect to a corresponding compute node.
-    pub async fn connect(&self) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+    pub async fn connect(
+        mut self,
+        params: &StartupMessageParams,
+    ) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+        if let Some(options) = params.options_raw() {
+            // We must drop all proxy-specific parameters.
+            #[allow(unstable_name_collisions)]
+            let options: String = options
+                .filter(|opt| !opt.starts_with("project="))
+                .intersperse(" ") // TODO: use impl from std once it's stabilized
+                .collect();
+
+            self.config.options(&options);
+        }
+
+        if let Some(app_name) = params.get("application_name") {
+            self.config.application_name(app_name);
+        }
+
+        if let Some(replication) = params.get("replication") {
+            use tokio_postgres::config::ReplicationMode;
+            match replication {
+                "true" | "on" | "yes" | "1" => {
+                    self.config.replication_mode(ReplicationMode::Physical);
+                }
+                "database" => {
+                    self.config.replication_mode(ReplicationMode::Logical);
+                }
+                _other => {}
+            }
+        }
+
+        // TODO: extend the list of the forwarded startup parameters.
+        // Currently, tokio-postgres doesn't allow us to pass
+        // arbitrary parameters, but the ones above are a good start.
+
         let (socket_addr, mut stream) = self
             .connect_raw()
             .await

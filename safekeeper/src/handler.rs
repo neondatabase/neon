@@ -11,7 +11,6 @@ use anyhow::{bail, Context, Result};
 
 use postgres_ffi::PG_TLI;
 use regex::Regex;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::info;
 use utils::{
@@ -67,18 +66,22 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // ztenant id and ztimeline id are passed in connection string params
     fn startup(&mut self, _pgb: &mut PostgresBackend, sm: &FeStartupPacket) -> Result<()> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
-            self.ztenantid = match params.get("ztenantid") {
-                Some(z) => Some(ZTenantId::from_str(z)?), // just curious, can I do that from .map?
-                _ => None,
-            };
-
-            self.ztimelineid = match params.get("ztimelineid") {
-                Some(z) => Some(ZTimelineId::from_str(z)?),
-                _ => None,
-            };
+            if let Some(options) = params.options_raw() {
+                for opt in options {
+                    match opt.split_once('=') {
+                        Some(("ztenantid", value)) => {
+                            self.ztenantid = Some(value.parse()?);
+                        }
+                        Some(("ztimelineid", value)) => {
+                            self.ztimelineid = Some(value.parse()?);
+                        }
+                        _ => continue,
+                    }
+                }
+            }
 
             if let Some(app_name) = params.get("application_name") {
-                self.appname = Some(app_name.clone());
+                self.appname = Some(app_name.to_owned());
             }
 
             Ok(())

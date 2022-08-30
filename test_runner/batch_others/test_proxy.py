@@ -134,12 +134,8 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
 
 
 # Pass extra options to the server.
-#
-# Currently, proxy eats the extra connection options, so this fails.
-# See https://github.com/neondatabase/neon/issues/1287
-@pytest.mark.xfail
 def test_proxy_options(static_proxy):
-    with static_proxy.connect(options="-cproxytest.option=value") as conn:
+    with static_proxy.connect(options="project=irrelevant -cproxytest.option=value") as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW proxytest.option")
             value = cur.fetchall()[0][0]
