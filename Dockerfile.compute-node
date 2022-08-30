@@ -52,12 +52,12 @@ RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.lis
     apt update && \
     apt install -y --no-install-recommends -t testing binutils
 
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.3.tar.gz && \
-    tar xvzf v3.1.3.tar.gz && \
-    cd plv8-3.1.3 && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
+    tar xvzf v3.1.4.tar.gz && \
+    cd plv8-3.1.4 && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
-    make && \
-    make install && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control
 
