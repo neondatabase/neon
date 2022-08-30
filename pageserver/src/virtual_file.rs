@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::timeline_metrics::{TimelineMetrics, STORAGE_IO_TIME};
+use crate::metrics::{TimelineMetrics, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};

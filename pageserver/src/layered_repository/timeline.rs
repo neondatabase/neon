@@ -30,11 +30,11 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::reltag::RelTag;
 use crate::tenant_config::TenantConfOpt;
-use crate::timeline_metrics::TimelineMetrics;
 
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 use utils::{

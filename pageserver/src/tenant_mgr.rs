@@ -9,7 +9,6 @@ use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
 use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
 use crate::tenant_config::TenantConfOpt;
 use crate::thread_mgr::ThreadKind;
-use crate::timeline_metrics::remove_tenant_metrics;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use anyhow::Context;

@@ -35,10 +35,10 @@ use crate::config::PageServerConf;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
+use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
 use crate::tenant_mgr::LocalTimelineUpdate;
 use crate::thread_mgr;
-use crate::timeline_metrics::STORAGE_TIME;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 

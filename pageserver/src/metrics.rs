@@ -94,13 +94,13 @@ static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static CURRENT_LOGICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
+static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
         "pageserver_current_logical_size",
         "Current logical size grouped by timeline",
         &["tenant_id", "timeline_id"]
     )
-    .expect("failed to define a metric")
+    .expect("failed to define current logical size metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
@@ -181,6 +181,15 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_live_connections",
+        "Number of live network connections",
+        &["pageserver_connection_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 #[derive(Debug)]
 pub struct TimelineMetrics {
     tenant_id: String,
@@ -196,7 +205,7 @@ pub struct TimelineMetrics {
     pub wait_lsn_time_histo: Histogram,
     pub current_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
-    pub current_logical_size_gauge: IntGauge,
+    pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
 }

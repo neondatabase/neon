@@ -31,13 +31,13 @@ use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
 use crate::layered_repository::Timeline;
+use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
-use crate::timeline_metrics::SMGR_QUERY_TIME;
 use crate::CheckpointConfig;
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
@@ -373,7 +373,7 @@ fn page_service_conn_main(
     // Immediately increment the gauge, then create a job to decrement it on thread exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
-    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
+    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
