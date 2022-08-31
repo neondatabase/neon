@@ -150,7 +150,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Condvar, Mutex},
 };
 
 use anyhow::{anyhow, bail, Context};
@@ -222,7 +222,7 @@ pub struct SyncStartupData {
 /// Along with that, scans tenant files local and remote (if the sync gets enabled) to check the initial timeline states.
 pub fn start_local_timeline_sync(
     config: &'static PageServerConf,
-    storage: Option<Arc<GenericRemoteStorage>>,
+    storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<SyncStartupData> {
     let local_timeline_files = local_tenant_timeline_files(config)
         .context("Failed to collect local tenant timeline files")?;
@@ -766,7 +766,7 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
 pub(super) fn spawn_storage_sync_thread(
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
-    storage: Arc<GenericRemoteStorage>,
+    storage: GenericRemoteStorage,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) -> anyhow::Result<SyncStartupData> {
@@ -825,12 +825,12 @@ pub(super) fn spawn_storage_sync_thread(
 fn storage_sync_loop(
     runtime: Runtime,
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
 ) {
     info!("Starting remote storage sync loop");
     loop {
-        let loop_storage = Arc::clone(&storage);
+        let loop_storage = storage.clone();
 
         let (batched_tasks, remaining_queue_length) = sync_queue.next_task_batch();
 
@@ -939,7 +939,7 @@ enum UploadStatus {
 async fn process_batches(
     conf: &'static PageServerConf,
     max_sync_errors: NonZeroU32,
-    storage: Arc<GenericRemoteStorage>,
+    storage: GenericRemoteStorage,
     index: &RemoteIndex,
     batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
     sync_queue: &SyncQueue,
@@ -947,7 +947,7 @@ async fn process_batches(
     let mut sync_results = batched_tasks
         .into_iter()
         .map(|(sync_id, batch)| {
-            let storage = Arc::clone(&storage);
+            let storage = storage.clone();
             let index = index.clone();
             async move {
                 let state_update = process_sync_task_batch(
@@ -981,7 +981,7 @@ async fn process_batches(
 
 async fn process_sync_task_batch(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (GenericRemoteStorage, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
     sync_id: ZTenantTimelineId,
     batch: SyncTaskBatch,
@@ -1009,7 +1009,7 @@ async fn process_sync_task_batch(
                     ControlFlow::Continue(()) => {
                         upload_timeline_data(
                             conf,
-                            (storage.as_ref(), &index, sync_queue),
+                            (&storage, &index, sync_queue),
                             current_remote_timeline.as_ref(),
                             sync_id,
                             upload_data,
@@ -1020,7 +1020,7 @@ async fn process_sync_task_batch(
                     }
                     ControlFlow::Break(()) => match update_remote_data(
                         conf,
-                        storage.as_ref(),
+                        &storage,
                         &index,
                         sync_id,
                         RemoteDataUpdate::Upload {
@@ -1053,7 +1053,7 @@ async fn process_sync_task_batch(
                     ControlFlow::Continue(()) => {
                         return download_timeline_data(
                             conf,
-                            (storage.as_ref(), &index, sync_queue),
+                            (&storage, &index, sync_queue),
                             current_remote_timeline.as_ref(),
                             sync_id,
                             download_data,
@@ -1086,7 +1086,7 @@ async fn process_sync_task_batch(
                     ControlFlow::Continue(()) => {
                         delete_timeline_data(
                             conf,
-                            (storage.as_ref(), &index, sync_queue),
+                            (&storage, &index, sync_queue),
                             sync_id,
                             delete_data,
                             sync_start,
@@ -1098,7 +1098,7 @@ async fn process_sync_task_batch(
                     ControlFlow::Break(()) => {
                         if let Err(e) = update_remote_data(
                             conf,
-                            storage.as_ref(),
+                            &storage,
                             &index,
                             sync_id,
                             RemoteDataUpdate::Delete(&delete_data.data.deleted_layers),

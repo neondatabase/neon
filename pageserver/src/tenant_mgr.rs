@@ -134,7 +134,7 @@ impl fmt::Display for TenantState {
 /// are scheduled for download and added to the repository once download is completed.
 pub fn init_tenant_mgr(
     conf: &'static PageServerConf,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RemoteIndex> {
     let (timeline_updates_sender, timeline_updates_receiver) =
         mpsc::unbounded_channel::<LocalTimelineUpdate>();
