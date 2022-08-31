@@ -27,7 +27,7 @@ prometheus-client = "^0.14.1"
 pytest-timeout = "^2.1.0"
 Werkzeug = "2.1.2"
 pytest-order = "^1.0.1"
-allure-pytest = "^2.9.45"
+allure-pytest = "^2.10.0"
 pytest-asyncio = "^0.19.0"
 
 [tool.poetry.dev-dependencies]

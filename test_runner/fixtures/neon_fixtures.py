@@ -6,12 +6,10 @@ import enum
 import filecmp
 import json
 import os
-import pathlib
 import re
 import shutil
 import socket
 import subprocess
-import tarfile
 import tempfile
 import textwrap
 import time
@@ -22,7 +20,6 @@ from enum import Flag, auto
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union, cast
 
-import allure  # type: ignore
 import asyncpg
 import backoff  # type: ignore
 import boto3
@@ -38,7 +35,14 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 
-from .utils import etcd_path, get_self_dir, lsn_from_hex, lsn_to_hex, subprocess_capture
+from .utils import (
+    allure_attach_from_dir,
+    etcd_path,
+    get_self_dir,
+    lsn_from_hex,
+    lsn_to_hex,
+    subprocess_capture,
+)
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -99,7 +103,7 @@ def pytest_configure(config):
         top_output_dir = env_test_output
     else:
         top_output_dir = os.path.join(base_dir, DEFAULT_OUTPUT_DIR)
-    pathlib.Path(top_output_dir).mkdir(exist_ok=True)
+    Path(top_output_dir).mkdir(exist_ok=True)
 
     # Find the postgres installation.
     global pg_distrib_dir
@@ -234,11 +238,12 @@ def default_broker(request: Any, port_distributor: PortDistributor):
     client_port = port_distributor.get_port()
     # multiple pytest sessions could get launched in parallel, get them different datadirs
     etcd_datadir = os.path.join(get_test_output_dir(request), f"etcd_datadir_{client_port}")
-    pathlib.Path(etcd_datadir).mkdir(exist_ok=True, parents=True)
+    Path(etcd_datadir).mkdir(exist_ok=True, parents=True)
 
     broker = Etcd(datadir=etcd_datadir, port=client_port, peer_port=port_distributor.get_port())
     yield broker
     broker.stop()
+    allure_attach_from_dir(Path(etcd_datadir))
 
 
 @pytest.fixture(scope="session")
@@ -1882,7 +1887,7 @@ class Postgres(PgProtocol):
         self.env.neon_cli.pg_create(
             branch_name, node_name=self.node_name, tenant_id=self.tenant_id, lsn=lsn, port=self.port
         )
-        path = pathlib.Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
+        path = Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -1913,7 +1918,7 @@ class Postgres(PgProtocol):
     def pg_data_dir_path(self) -> str:
         """Path to data directory"""
         assert self.node_name
-        path = pathlib.Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
+        path = Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -2289,7 +2294,7 @@ class Etcd:
             log.debug(f"etcd is already running on port {self.port}")
             return
 
-        pathlib.Path(self.datadir).mkdir(exist_ok=True)
+        Path(self.datadir).mkdir(exist_ok=True)
 
         if not self.binary_path.is_file():
             raise RuntimeError(f"etcd broker binary '{self.binary_path}' is not a file")
@@ -2329,24 +2334,14 @@ class Etcd:
             self.handle.wait()
 
 
-def get_test_output_dir(request: Any) -> pathlib.Path:
+def get_test_output_dir(request: Any) -> Path:
     """Compute the working directory for an individual test."""
     test_name = request.node.name
-    test_dir = pathlib.Path(top_output_dir) / test_name.replace("/", "-")
+    test_dir = Path(top_output_dir) / test_name.replace("/", "-")
     log.info(f"get_test_output_dir is {test_dir}")
     # make mypy happy
-    assert isinstance(test_dir, pathlib.Path)
+    assert isinstance(test_dir, Path)
     return test_dir
-
-
-ATTACHMENT_SUFFIXES = frozenset(
-    (
-        ".log",
-        ".stderr",
-        ".stdout",
-        ".diffs",
-    )
-)
 
 
 # This is autouse, so the test output directory always gets created, even
@@ -2359,7 +2354,7 @@ ATTACHMENT_SUFFIXES = frozenset(
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: Any) -> Iterator[pathlib.Path]:
+def test_output_dir(request: Any) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     # one directory per test
@@ -2370,23 +2365,7 @@ def test_output_dir(request: Any) -> Iterator[pathlib.Path]:
 
     yield test_dir
 
-    for attachment in test_dir.glob("**/*"):
-        if attachment.suffix in ATTACHMENT_SUFFIXES:
-            source = str(attachment)
-            name = str(attachment.relative_to(test_dir))
-            attachment_type = "text/plain"
-            extension = attachment.suffix.removeprefix(".")
-
-            # compress files larger than 1Mb, they're hardly readable in a browser
-            if attachment.stat().st_size > 1024 * 1024:
-                source = f"{attachment}.tar.gz"
-                with tarfile.open(source, "w:gz") as tar:
-                    tar.add(attachment, arcname=attachment.name)
-                name = f"{name}.tar.gz"
-                attachment_type = "application/gzip"
-                extension = "tar.gz"
-
-            allure.attach.file(source, name, attachment_type, extension)
+    allure_attach_from_dir(test_dir)
 
 
 SKIP_DIRS = frozenset(
@@ -2439,7 +2418,7 @@ def should_skip_file(filename: str) -> bool:
 #
 # Test helpers
 #
-def list_files_to_compare(pgdata_dir: pathlib.Path):
+def list_files_to_compare(pgdata_dir: Path):
     pgdata_files = []
     for root, _file, filenames in os.walk(pgdata_dir):
         for filename in filenames:
@@ -2492,7 +2471,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
 
     # list files we're going to compare
     assert pg.pgdata_dir
-    pgdata_files = list_files_to_compare(pathlib.Path(pg.pgdata_dir))
+    pgdata_files = list_files_to_compare(Path(pg.pgdata_dir))
     restored_files = list_files_to_compare(restored_dir_path)
 
     # check that file sets are equal
