@@ -164,6 +164,102 @@ impl GenericRemoteStorage {
             _ => None,
         }
     }
+
+    /// Takes storage object contents and its size and uploads to remote storage,
+    /// mapping `from_path` to the corresponding remote object id in the storage.
+    ///
+    /// The storage object does not have to be present on the `from_path`,
+    /// this path is used for the remote object id conversion only.
+    pub async fn upload_storage_object(
+        &self,
+        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        from_size_bytes: usize,
+        from_path: &Path,
+    ) -> anyhow::Result<()> {
+        async fn do_upload_storage_object<P, S>(
+            storage: &S,
+            from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+            from_size_bytes: usize,
+            from_path: &Path,
+        ) -> anyhow::Result<()>
+        where
+            P: std::fmt::Debug + Send + Sync + 'static,
+            S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+        {
+            let target_storage_path = storage.remote_object_id(from_path).with_context(|| {
+                format!(
+                    "Failed to get the storage path for source local path '{}'",
+                    from_path.display()
+                )
+            })?;
+
+            storage
+                .upload(from, from_size_bytes, &target_storage_path, None)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to upload from '{}' to storage path '{:?}'",
+                        from_path.display(),
+                        target_storage_path
+                    )
+                })
+        }
+
+        match self {
+            GenericRemoteStorage::Local(storage) => {
+                do_upload_storage_object(storage, from, from_size_bytes, from_path).await
+            }
+            GenericRemoteStorage::S3(storage) => {
+                do_upload_storage_object(storage, from, from_size_bytes, from_path).await
+            }
+        }
+    }
+
+    /// Downloads the storage object into the `to_path` provided.
+    /// `byte_range` could be specified to dowload only a part of the file, if needed.
+    pub async fn download_storage_object(
+        &self,
+        byte_range: Option<(u64, Option<u64>)>,
+        to_path: &Path,
+    ) -> Result<Download, DownloadError> {
+        async fn do_download_storage_object<P, S>(
+            storage: &S,
+            byte_range: Option<(u64, Option<u64>)>,
+            to_path: &Path,
+        ) -> Result<Download, DownloadError>
+        where
+            P: std::fmt::Debug + Send + Sync + 'static,
+            S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
+        {
+            let remote_object_path = storage
+                .remote_object_id(to_path)
+                .with_context(|| {
+                    format!(
+                        "Failed to get the storage path for target local path '{}'",
+                        to_path.display()
+                    )
+                })
+                .map_err(DownloadError::BadInput)?;
+
+            match byte_range {
+                Some((start, end)) => {
+                    storage
+                        .download_byte_range(&remote_object_path, start, end)
+                        .await
+                }
+                None => storage.download(&remote_object_path).await,
+            }
+        }
+
+        match self {
+            GenericRemoteStorage::Local(storage) => {
+                do_download_storage_object(storage, byte_range, to_path).await
+            }
+            GenericRemoteStorage::S3(storage) => {
+                do_download_storage_object(storage, byte_range, to_path).await
+            }
+        }
+    }
 }
 
 /// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
