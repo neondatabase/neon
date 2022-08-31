@@ -1,7 +1,6 @@
 import os
 import pathlib
 import random
-import shutil
 import signal
 import subprocess
 import sys
@@ -481,13 +480,6 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_s3_wal_replay")
 
-    env.pageserver.stop()
-    pageserver_tenants_dir = os.path.join(env.repo_dir, "tenants")
-    pageserver_fresh_copy = os.path.join(env.repo_dir, "tenants_fresh")
-    log.info(f"Creating a copy of pageserver in a fresh state at {pageserver_fresh_copy}")
-    shutil.copytree(pageserver_tenants_dir, pageserver_fresh_copy)
-    env.pageserver.start()
-
     pg = env.postgres.create_start("test_s3_wal_replay")
 
     # learn neon timeline from compute
@@ -525,25 +517,19 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
             last_lsn = query_scalar(cur, "SELECT pg_current_wal_flush_lsn()")
 
-    pageserver_lsn = env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["local"][
-        "last_record_lsn"
-    ]
+    ps_cli = env.pageserver.http_client()
+    pageserver_lsn = ps_cli.timeline_detail(tenant_id, timeline_id)["local"]["last_record_lsn"]
     lag = Lsn(last_lsn) - Lsn(pageserver_lsn)
     log.info(
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
     )
 
-    # replace pageserver with a fresh copy
     pg.stop_and_destroy()
-    env.pageserver.stop()
 
-    log.info(f"Removing current pageserver state at {pageserver_tenants_dir}")
-    shutil.rmtree(pageserver_tenants_dir)
-    log.info(f"Copying fresh pageserver state from {pageserver_fresh_copy}")
-    shutil.move(pageserver_fresh_copy, pageserver_tenants_dir)
+    # recreate timeline on pageserver from scratch
+    ps_cli.timeline_delete(tenant_id, timeline_id)
+    ps_cli.timeline_create(tenant_id, timeline_id)
 
-    # start pageserver and wait for replay
-    env.pageserver.start()
     wait_lsn_timeout = 60 * 3
     started_at = time.time()
     last_debug_print = 0.0
