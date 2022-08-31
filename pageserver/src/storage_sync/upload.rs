@@ -34,7 +34,11 @@ pub(super) async fn upload_index_part(
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     storage
-        .upload_storage_object(index_part_bytes, index_part_size, &index_part_path)
+        .upload_storage_object(
+            Box::new(index_part_bytes),
+            index_part_size,
+            &index_part_path,
+        )
         .await
         .with_context(|| format!("Failed to upload index part for '{sync_id}'"))
 }
@@ -119,7 +123,7 @@ pub(super) async fn upload_timeline_layers<'a>(
                 .len() as usize;
 
             match storage
-                .upload_storage_object(source_file, source_size, &source_path)
+                .upload_storage_object(Box::new(source_file), source_size, &source_path)
                 .await
                 .with_context(|| format!("Failed to upload layer file for {sync_id}"))
             {
@@ -214,8 +218,8 @@ mod tests {
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a", "b"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
-            tempdir()?.path().to_owned(),
+        let storage = GenericRemoteStorage::new(LocalFs::new(
+            tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
         )?);
         let local_storage = storage.as_local().unwrap();
@@ -302,7 +306,7 @@ mod tests {
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let layer_files = ["a1", "b1"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -395,7 +399,7 @@ mod tests {
         let harness = RepoHarness::create("test_upload_index_part")?;
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -431,13 +435,13 @@ mod tests {
 
         let index_part_path = storage_files.first().unwrap();
         assert_eq!(
-            index_part_path.file_name().and_then(|name| name.to_str()),
+            index_part_path.object_name(),
             Some(IndexPart::FILE_NAME),
             "Remote index part should have the correct name"
         );
-
-        let remote_index_part: IndexPart =
-            serde_json::from_slice(&fs::read(&index_part_path).await?)?;
+        let remote_index_part: IndexPart = serde_json::from_slice(
+            &fs::read(local_storage.resolve_in_storage(index_part_path)?).await?,
+        )?;
         assert_eq!(
             index_part, remote_index_part,
             "Remote index part should match the local one"

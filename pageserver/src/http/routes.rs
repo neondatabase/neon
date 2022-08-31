@@ -34,7 +34,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
     allowlist_routes: Vec<Uri>,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<GenericRemoteStorage>,
 }
 
 impl State {
@@ -42,7 +42,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_index: RemoteIndex,
-        remote_storage: Option<Arc<GenericRemoteStorage>>,
+        remote_storage: Option<GenericRemoteStorage>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -659,7 +659,7 @@ pub fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");

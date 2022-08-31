@@ -127,7 +127,8 @@ async fn wal_backup_launcher_main_loop(
     let conf_ = conf.clone();
     REMOTE_STORAGE.get_or_init(|| {
         conf_.remote_storage.as_ref().map(|c| {
-            GenericRemoteStorage::new(conf_.workdir, c).expect("failed to create remote storage")
+            GenericRemoteStorage::from_config(conf_.workdir, c)
+                .expect("failed to create remote storage")
         })
     });
 
@@ -417,7 +418,11 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
 async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
-    let storage = REMOTE_STORAGE.get().expect("failed to get remote storage");
+    let storage = REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap();
 
     let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
         format!(
@@ -427,9 +432,7 @@ async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
     })?);
 
     storage
-        .as_ref()
-        .expect("Storage should be initialized by launcher at this point.")
-        .upload_storage_object(file, size, source_file)
+        .upload_storage_object(Box::new(file), size, source_file)
         .await
 }
 

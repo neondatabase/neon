@@ -1,7 +1,7 @@
 //! Main entry point for the Page Server executable.
 
 use remote_storage::GenericRemoteStorage;
-use std::{env, ops::ControlFlow, path::Path, str::FromStr, sync::Arc};
+use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -302,11 +302,13 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     let remote_storage = conf
         .remote_storage_config
         .as_ref()
-        .map(|storage_config| GenericRemoteStorage::new(conf.workdir.clone(), storage_config))
+        .map(|storage_config| {
+            GenericRemoteStorage::from_config(conf.workdir.clone(), storage_config)
+        })
         .transpose()
-        .context("Failed to init generic remote storage")?
-        .map(Arc::new);
-    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.as_ref().map(Arc::clone))?;
+        .context("Failed to init generic remote storage")?;
+
+    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.clone())?;
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
