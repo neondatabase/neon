@@ -1,6 +1,7 @@
 ARG TAG=pinned
-ARG POSTGIS_VERSION=3.2.3
-ARG PLV8_VERSION=3.1.4
+# apparently, ARGs don't get replaced in RUN commands in kaniko
+# ARG POSTGIS_VERSION=3.3.0
+# ARG PLV8_VERSION=3.1.4
 
 FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
@@ -26,9 +27,9 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
     apt install -y gdal-bin libgdal-dev libprotobuf-c-dev protobuf-c-compiler xsltproc wget
 
-RUN wget https://download.osgeo.org/postgis/source/postgis-$POSTGIS_VERSION.tar.gz && \
-    tar xvzf postgis-$POSTGIS_VERSION.tar.gz && \
-    cd postgis-$POSTGIS_VERSION && \
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.0.tar.gz && \
+    tar xvzf postgis-3.3.0.tar.gz && \
+    cd postgis-3.3.0 && \
     ./autogen.sh && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     ./configure && \
@@ -54,9 +55,9 @@ RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.lis
     apt update && \
     apt install -y --no-install-recommends -t testing binutils
 
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v$PLV8_VERSION.tar.gz && \
-    tar xvzf v$PLV8_VERSION.tar.gz && \
-    cd plv8-$PLV8_VERSION && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
+    tar xvzf v3.1.4.tar.gz && \
+    cd plv8-3.1.4 && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
