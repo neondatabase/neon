@@ -13,20 +13,14 @@
 use crate::layered_repository::inmemory_layer::InMemoryLayer;
 use crate::layered_repository::storage_layer::Layer;
 use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
+use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use anyhow::Result;
-use metrics::{register_int_gauge, IntGauge};
-use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
-
-static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
-        .expect("failed to define a metric")
-});
 
 ///
 /// LayerMap tracks what layers exist on a timeline.

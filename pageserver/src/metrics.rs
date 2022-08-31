@@ -1,8 +1,8 @@
 use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec,
-    register_uint_gauge_vec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec, Histogram, HistogramVec,
+    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -188,6 +188,121 @@ pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
         &["pageserver_connection_kind"]
     )
     .expect("failed to define a metric")
+});
+
+pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
+        .expect("failed to define a metric")
+});
+
+pub static REMAINING_SYNC_ITEMS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_remote_storage_remaining_sync_items",
+        "Number of storage sync items left in the queue"
+    )
+    .expect("failed to register pageserver remote storage remaining sync items int gauge")
+});
+
+pub static IMAGE_SYNC_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_remote_storage_image_sync_seconds",
+        "Time took to synchronize (download or upload) a whole pageserver image. \
+        Grouped by tenant and timeline ids, `operation_kind` (upload|download) and `status` (success|failure)",
+        &["tenant_id", "timeline_id", "operation_kind", "status"],
+        vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 3.0, 10.0, 20.0]
+    )
+    .expect("failed to register pageserver image sync time histogram vec")
+});
+
+pub static REMOTE_INDEX_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_remote_storage_remote_index_uploads_total",
+        "Number of remote index uploads",
+        &["tenant_id", "timeline_id"],
+    )
+    .expect("failed to register pageserver remote index upload vec")
+});
+
+pub static NO_LAYERS_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_remote_storage_no_layers_uploads_total",
+        "Number of skipped uploads due to no layers",
+        &["tenant_id", "timeline_id"],
+    )
+    .expect("failed to register pageserver no layers upload vec")
+});
+
+pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_tenant_task_events",
+        "Number of task start/stop/fail events.",
+        &["event"],
+    )
+    .expect("Failed to register tenant_task_events metric")
+});
+
+// Metrics collected on WAL redo operations
+//
+// We collect the time spent in actual WAL redo ('redo'), and time waiting
+// for access to the postgres process ('wait') since there is only one for
+// each tenant.
+
+/// Time buckets are small because we want to be able to measure the
+/// smallest redo processing times. These buckets allow us to measure down
+/// to 5us, which equates to 200'000 pages/sec, which equates to 1.6GB/sec.
+/// This is much better than the previous 5ms aka 200 pages/sec aka 1.6MB/sec.
+macro_rules! redo_histogram_time_buckets {
+    () => {
+        vec![
+            0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
+            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000,
+        ]
+    };
+}
+
+/// While we're at it, also measure the amount of records replayed in each
+/// operation. We have a global 'total replayed' counter, but that's not
+/// as useful as 'what is the skew for how many records we replay in one
+/// operation'.
+macro_rules! redo_histogram_count_buckets {
+    () => {
+        vec![0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
+    };
+}
+
+pub static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_seconds",
+        "Time spent on WAL redo",
+        redo_histogram_time_buckets!()
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_wait_seconds",
+        "Time spent waiting for access to the WAL redo process",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_records_histogram",
+        "Histogram of number of records replayed per redo",
+        redo_histogram_count_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_replayed_wal_records_total",
+        "Number of WAL records replayed in WAL redo process"
+    )
+    .unwrap()
 });
 
 #[derive(Debug)]

@@ -5,27 +5,18 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use crate::metrics::TENANT_TASK_EVENTS;
 use crate::tenant_mgr::TenantState;
 use crate::thread_mgr::ThreadKind;
 use crate::{tenant_mgr, thread_mgr};
 use anyhow::{self, Context};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use metrics::{register_int_counter_vec, IntCounterVec};
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::*;
 use utils::zid::ZTenantId;
-
-static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_tenant_task_events",
-        "Number of task start/stop/fail events.",
-        &["event"],
-    )
-    .expect("Failed to register tenant_task_events metric")
-});
 
 ///
 /// Compaction task's main loop
