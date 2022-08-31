@@ -9,9 +9,7 @@ use std::{
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use remote_storage::{
-    path_with_suffix_extension, DownloadError, GenericRemoteStorage, RemoteStorage,
-};
+use remote_storage::{path_with_suffix_extension, DownloadError, GenericRemoteStorage};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -371,68 +369,6 @@ async fn get_timeline_sync_ids(
     tenant_path: &Path,
     tenant_id: ZTenantId,
 ) -> anyhow::Result<HashSet<ZTenantTimelineId>> {
-    let timeline_ids: Vec<ZTimelineId> = match storage {
-        GenericRemoteStorage::Local(storage) => list_prefixes(storage, tenant_path)
-            .await?
-            .into_iter()
-            .map(|timeline_directory_path| {
-                timeline_directory_path
-                    .file_stem()
-                    .with_context(|| {
-                        format!(
-                            "Failed to get timeline id string from file '{}'",
-                            timeline_directory_path.display()
-                        )
-                    })?
-                    .to_string_lossy()
-                    .as_ref()
-                    .parse()
-                    .with_context(|| {
-                        format!(
-                            "failed to parse directory name '{}' as timeline id",
-                            timeline_directory_path.display()
-                        )
-                    })
-            })
-            .collect::<anyhow::Result<_>>(),
-        GenericRemoteStorage::S3(storage) => list_prefixes(storage, tenant_path)
-            .await?
-            .into_iter()
-            .map(|s3_path| {
-                s3_path
-                    .object_name()
-                    .with_context(|| {
-                        format!("Failed to get object name out of S3 path {s3_path:?}")
-                    })?
-                    .parse()
-                    .with_context(|| {
-                        format!("failed to parse object name '{s3_path:?}' as timeline id")
-                    })
-            })
-            .collect::<anyhow::Result<_>>(),
-    }
-    .with_context(|| {
-        format!("Tenant {tenant_id} has at least one incorrect timeline subdirectory")
-    })?;
-
-    if timeline_ids.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage for tenant {tenant_id}")
-    }
-
-    Ok(timeline_ids
-        .into_iter()
-        .map(|timeline_id| ZTenantTimelineId {
-            tenant_id,
-            timeline_id,
-        })
-        .collect())
-}
-
-async fn list_prefixes<P, S>(storage: &S, tenant_path: &Path) -> anyhow::Result<Vec<P>>
-where
-    P: std::fmt::Debug + Send + Sync + 'static,
-    S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-{
     let tenant_storage_path = storage.remote_object_id(tenant_path).with_context(|| {
         format!(
             "Failed to get tenant storage path for local path '{}'",
@@ -440,14 +376,37 @@ where
         )
     })?;
 
-    storage
+    let timelines = storage
         .list_prefixes(Some(&tenant_storage_path))
         .await
         .with_context(|| {
             format!(
                 "Failed to list tenant storage path {tenant_storage_path:?} to get remote timelines to download"
             )
-        })
+        })?;
+
+    if timelines.is_empty() {
+        anyhow::bail!("no timelines found on the remote storage")
+    }
+
+    let mut sync_ids = HashSet::new();
+
+    for timeline_remote_storage_key in timelines {
+        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
+        })?;
+
+        let timeline_id: ZTimelineId = object_name.parse().with_context(|| {
+            format!("failed to parse object name into timeline id '{object_name}'")
+        })?;
+
+        sync_ids.insert(ZTenantTimelineId {
+            tenant_id,
+            timeline_id,
+        });
+    }
+
+    Ok(sync_ids)
 }
 
 async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
@@ -459,6 +418,7 @@ mod tests {
     use std::{
         collections::{BTreeSet, HashSet},
         num::NonZeroUsize,
+        path::PathBuf,
     };
 
     use remote_storage::{LocalFs, RemoteStorage};
@@ -482,7 +442,7 @@ mod tests {
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "layer_to_skip", "layer_to_keep_locally"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -494,7 +454,8 @@ mod tests {
             create_local_timeline(&harness, TIMELINE_ID, &layer_files, metadata.clone()).await?;
 
         for local_path in timeline_upload.layers_to_upload {
-            let remote_path = local_storage.remote_object_id(&local_path)?;
+            let remote_path =
+                local_storage.resolve_in_storage(&storage.remote_object_id(&local_path)?)?;
             let remote_parent_dir = remote_path.parent().unwrap();
             if !remote_parent_dir.exists() {
                 fs::create_dir_all(&remote_parent_dir).await?;
@@ -580,7 +541,7 @@ mod tests {
         let harness = RepoHarness::create("download_timeline_negatives")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -639,7 +600,7 @@ mod tests {
         let harness = RepoHarness::create("test_download_index_part")?;
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let storage = GenericRemoteStorage::new(LocalFs::new(
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
@@ -663,9 +624,10 @@ mod tests {
         let local_index_part_path =
             metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
                 .with_file_name(IndexPart::FILE_NAME);
-        let storage_path = local_storage.remote_object_id(&local_index_part_path)?;
-        fs::create_dir_all(storage_path.parent().unwrap()).await?;
-        fs::write(&storage_path, serde_json::to_vec(&index_part)?).await?;
+        let index_part_remote_id = local_storage.remote_object_id(&local_index_part_path)?;
+        let index_part_local_path = PathBuf::from(String::from(index_part_remote_id));
+        fs::create_dir_all(index_part_local_path.parent().unwrap()).await?;
+        fs::write(&index_part_local_path, serde_json::to_vec(&index_part)?).await?;
 
         let downloaded_index_part = download_index_part(harness.conf, &storage, sync_id).await?;
 
