@@ -1,6 +1,7 @@
 //! Main entry point for the Page Server executable.
 
-use std::{env, ops::ControlFlow, path::Path, str::FromStr};
+use remote_storage::GenericRemoteStorage;
+use std::{env, ops::ControlFlow, path::Path, str::FromStr, sync::Arc};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -298,7 +299,14 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    let remote_index = tenant_mgr::init_tenant_mgr(conf)?;
+    let remote_storage = conf
+        .remote_storage_config
+        .as_ref()
+        .map(|storage_config| GenericRemoteStorage::new(conf.workdir.clone(), storage_config))
+        .transpose()
+        .context("Failed to init generic remote storage")?
+        .map(Arc::new);
+    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.as_ref().map(Arc::clone))?;
 
     // Spawn a new thread for the http endpoint
     // bind before launching separate thread so the error reported before startup exits
@@ -310,7 +318,7 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
         "http_endpoint_thread",
         true,
         move || {
-            let router = http::make_router(conf, auth_cloned, remote_index)?;
+            let router = http::make_router(conf, auth_cloned, remote_index, remote_storage)?;
             endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
         },
     )?;

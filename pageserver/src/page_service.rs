@@ -17,24 +17,24 @@ use std::io::{self, Read};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::Arc;
 use tracing::*;
 use utils::{
     auth::{self, Claims, JwtAuth, Scope},
     lsn::Lsn,
     postgres_backend::{self, is_socket_read_timed_out, AuthType, PostgresBackend},
     pq_proto::{BeMessage, FeMessage, RowDescriptor, SINGLE_COL_ROWDESC},
+    simple_rcu::RcuReadGuard,
     zid::{ZTenantId, ZTimelineId},
 };
 
 use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
-use crate::pgdatadir_mapping::{DatadirTimeline, LsnForTimestamp};
+use crate::layered_repository::Timeline;
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
-use crate::repository::Repository;
-use crate::repository::Timeline;
 use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
@@ -495,22 +495,22 @@ impl PageServerHandler {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_exists", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_rel_exists_request(timeline.as_ref(), &req)
+                                    self.handle_get_rel_exists_request(&timeline, &req)
                                 }),
                             PagestreamFeMessage::Nblocks(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_rel_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_nblocks_request(timeline.as_ref(), &req)
+                                    self.handle_get_nblocks_request(&timeline, &req)
                                 }),
                             PagestreamFeMessage::GetPage(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_get_page_at_lsn_request(timeline.as_ref(), &req)
+                                    self.handle_get_page_at_lsn_request(&timeline, &req)
                                 }),
                             PagestreamFeMessage::DbSize(req) => SMGR_QUERY_TIME
                                 .with_label_values(&["get_db_size", &tenant_id, &timeline_id])
                                 .observe_closure_duration(|| {
-                                    self.handle_db_size_request(timeline.as_ref(), &req)
+                                    self.handle_db_size_request(&timeline, &req)
                                 }),
                         };
 
@@ -636,11 +636,11 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
-    fn wait_or_get_last_lsn<T: DatadirTimeline>(
-        timeline: &T,
+    fn wait_or_get_last_lsn(
+        timeline: &Timeline,
         mut lsn: Lsn,
         latest: bool,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
+        latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
     ) -> Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
@@ -684,9 +684,9 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    fn handle_get_rel_exists_request<T: DatadirTimeline>(
+    fn handle_get_rel_exists_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamExistsRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_rel_exists", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -701,9 +701,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_nblocks_request<T: DatadirTimeline>(
+    fn handle_get_nblocks_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamNblocksRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_nblocks", rel = %req.rel, req_lsn = %req.lsn).entered();
@@ -717,9 +717,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_db_size_request<T: DatadirTimeline>(
+    fn handle_db_size_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_db_size", dbnode = %req.dbnode, req_lsn = %req.lsn).entered();
@@ -735,9 +735,9 @@ impl PageServerHandler {
         }))
     }
 
-    fn handle_get_page_at_lsn_request<T: DatadirTimeline>(
+    fn handle_get_page_at_lsn_request(
         &self,
-        timeline: &T,
+        timeline: &Timeline,
         req: &PagestreamGetPageRequest,
     ) -> Result<PagestreamBeMessage> {
         let _enter = info_span!("get_page", rel = %req.rel, blkno = &req.blkno, req_lsn = %req.lsn)
@@ -745,7 +745,7 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
         /*
-        // Add a 1s delay to some requests. The delayed causes the requests to
+        // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
         use rand::Rng;
         if rand::thread_rng().gen::<u8>() < 5 {
@@ -1077,7 +1077,7 @@ impl postgres_backend::Handler for PageServerHandler {
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("do_gc ") {
             // Run GC immediately on given timeline.
-            // FIXME: This is just for tests. See test_runner/batch_others/test_gc.py.
+            // FIXME: This is just for tests. See test_runner/regress/test_gc.py.
             // This probably should require special authentication or a global flag to
             // enable, I don't think we want to or need to allow regular clients to invoke
             // GC.

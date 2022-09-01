@@ -129,9 +129,9 @@ pub struct LocalTimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
-    pub current_logical_size: Option<usize>, // is None when timeline is Unloaded
-    pub current_physical_size: Option<u64>,  // is None when timeline is Unloaded
-    pub current_logical_size_non_incremental: Option<usize>,
+    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
+    pub current_logical_size_non_incremental: Option<u64>,
     pub current_physical_size_non_incremental: Option<u64>,
     pub timeline_state: LocalTimelineState,
 
@@ -150,6 +150,9 @@ pub struct RemoteTimelineInfo {
     pub awaits_download: bool,
 }
 
+///
+/// This represents the output of the "timeline_detail" API call.
+///
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {

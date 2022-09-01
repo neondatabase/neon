@@ -127,7 +127,7 @@ impl<T, E> BackendType<Result<T, E>> {
     }
 }
 
-impl BackendType<ClientCredentials> {
+impl BackendType<ClientCredentials<'_>> {
     /// Authenticate the client via the requested backend, possibly using credentials.
     pub async fn authenticate(
         mut self,
@@ -149,7 +149,7 @@ impl BackendType<ClientCredentials> {
 
                 // Finally we may finish the initialization of `creds`.
                 // TODO: add missing type safety to ClientCredentials.
-                creds.project = Some(payload.project);
+                creds.project = Some(payload.project.into());
 
                 let mut config = match &self {
                     Console(creds) => {

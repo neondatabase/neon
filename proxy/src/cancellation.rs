@@ -95,7 +95,7 @@ impl<'a> Session<'a> {
 
     /// Store the cancel token for the given session.
     /// This enables query cancellation in [`crate::proxy::handshake`].
-    pub fn enable_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
+    pub fn enable_query_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
         self.cancel_map
             .0
             .lock()

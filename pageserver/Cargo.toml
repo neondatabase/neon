@@ -15,7 +15,7 @@ failpoints = ["fail/failpoints"]
 chrono = "0.4.19"
 rand = "0.8.3"
 regex = "1.4.5"
-bytes = { version = "1.0.1", features = ['serde'] }
+bytes = "1.0.1"
 byteorder = "1.4.3"
 futures = "0.3.13"
 hex = "0.4.3"

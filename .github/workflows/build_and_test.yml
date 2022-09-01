@@ -95,11 +95,11 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES=""
-            CARGO_FLAGS=""
+            CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features profiling"
-            CARGO_FLAGS="--release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -121,8 +121,8 @@ jobs:
             target/
           # Fall back to older versions of the key, if no cache for current Cargo.lock was found
           key: |
-            v6-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
-            v6-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
+            v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+            v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
       - name: Cache postgres build
         id: cache_pg
@@ -134,6 +134,10 @@ jobs:
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
         run: mold -run make postgres -j$(nproc)
+        shell: bash -euxo pipefail {0}
+
+      - name: Build neon extensions
+        run: mold -run make neon-pg-ext -j$(nproc)
         shell: bash -euxo pipefail {0}
 
       - name: Run cargo build
@@ -202,7 +206,7 @@ jobs:
         if: matrix.build_type == 'debug'
         uses: ./.github/actions/save-coverage-data
 
-  pg_regress-tests:
+  regress-tests:
     runs-on: dev
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -220,42 +224,13 @@ jobs:
           submodules: true
           fetch-depth: 2
 
-      - name: Pytest regress tests
+      - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ matrix.build_type }}
           rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: batch_pg_regress
+          test_selection: regress
           needs_postgres_source: true
-
-      - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
-        uses: ./.github/actions/save-coverage-data
-
-  other-tests:
-    runs-on: dev
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-    needs: [ build-neon ]
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 2
-
-      - name: Pytest other tests
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ matrix.build_type }}
-          rust_toolchain: ${{ matrix.rust_toolchain }}
-          test_selection: batch_others
           run_with_real_s3: true
           real_s3_bucket: ci-tests-s3
           real_s3_region: us-west-2
@@ -298,12 +273,35 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
+  merge-allure-report:
+    runs-on: dev
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+    needs: [ regress-tests, benchmarks ]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug, release ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: false
+
+      - name: Create Allure report
+        uses: ./.github/actions/allure-report
+        with:
+          action: generate
+          build_type: ${{ matrix.build_type }}
+
   coverage-report:
     runs-on: dev
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ other-tests, pg_regress-tests ]
+    needs: [ regress-tests ]
     strategy:
       fail-fast: false
       matrix:
@@ -325,7 +323,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git/
             target/
-          key: v5-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
+          key: v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -460,19 +458,18 @@ jobs:
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Kaniko build compute node
-        working-directory: ./vendor/postgres/
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+      - name: Kaniko build compute node with extensions
+        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-tools-image, compute-node-image ]
+    needs: [ neon-image, compute-node-image, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
       fail-fast: false
       matrix:
-        name: [ neon, compute-tools, compute-node ]
+        name: [ neon, compute-node, compute-tools ]
 
     steps:
       - name: Promote image to latest
@@ -489,18 +486,6 @@ jobs:
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
-          
-#      - name: Get build tag
-#        run: |
-#          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-#            echo "::set-output name=tag::$(git rev-list --count HEAD)"
-#          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-#            echo "::set-output name=tag::release-$(git rev-list --count HEAD)"
-#          else
-#            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release' "
-#            echo "::set-output name=tag::$GITHUB_RUN_ID"
-#          fi
-#        id: build-tag
 
       - name: Configure ECR login
         run: |
@@ -516,6 +501,9 @@ jobs:
       - name: Pull compute node image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest compute-node
 
+      - name: Pull rust image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
+
       - name: Configure docker login
         run: |
           # ECR Credential Helper & Docker Hub don't work together in config, hence reset
@@ -530,6 +518,9 @@ jobs:
 
       - name: Push compute node image to Docker Hub
         run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
+
+      - name: Push rust image to Docker Hub
+        run: crane push rust neondatabase/rust:pinned
 
       - name: Add latest tag to images
         if: |
@@ -567,7 +558,7 @@ jobs:
     #container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, calculate-deploy-targets, tag ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'
@@ -622,7 +613,7 @@ jobs:
     runs-on: dev
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
-    needs: [ push-docker-hub, calculate-deploy-targets, tag ]
+    needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
       github.event_name != 'workflow_dispatch'

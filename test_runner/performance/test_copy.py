@@ -1,10 +1,7 @@
 from contextlib import closing
-from fixtures.neon_fixtures import NeonEnv
-from fixtures.log_helper import log
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
 from io import BufferedReader, RawIOBase
-from itertools import repeat
+
+from fixtures.compare_fixtures import PgCompare
 
 
 class CopyTestData(RawIOBase):
@@ -27,9 +24,9 @@ class CopyTestData(RawIOBase):
             self.rownum += 1
 
         # Number of bytes to read in this call
-        l = min(len(self.linebuf) - self.ptr, len(b))
+        l = min(len(self.linebuf) - self.ptr, len(b))  # noqa: E741
 
-        b[:l] = self.linebuf[self.ptr:(self.ptr + l)]
+        b[:l] = self.linebuf[self.ptr : (self.ptr + l)]
         self.ptr += l
         return l
 
@@ -52,19 +49,19 @@ def test_copy(neon_with_baseline: PgCompare):
             # Load data with COPY, recording the time and I/O it takes.
             #
             # Since there's no data in the table previously, this extends it.
-            with env.record_pageserver_writes('copy_extend_pageserver_writes'):
-                with env.record_duration('copy_extend'):
-                    cur.copy_from(copy_test_data(1000000), 'copytest')
+            with env.record_pageserver_writes("copy_extend_pageserver_writes"):
+                with env.record_duration("copy_extend"):
+                    cur.copy_from(copy_test_data(1000000), "copytest")
                     env.flush()
 
             # Delete most rows, and VACUUM to make the space available for reuse.
-            with env.record_pageserver_writes('delete_pageserver_writes'):
-                with env.record_duration('delete'):
+            with env.record_pageserver_writes("delete_pageserver_writes"):
+                with env.record_duration("delete"):
                     cur.execute("delete from copytest where i % 100 <> 0;")
                     env.flush()
 
-            with env.record_pageserver_writes('vacuum_pageserver_writes'):
-                with env.record_duration('vacuum'):
+            with env.record_pageserver_writes("vacuum_pageserver_writes"):
+                with env.record_duration("vacuum"):
                     cur.execute("vacuum copytest")
                     env.flush()
 
@@ -72,9 +69,9 @@ def test_copy(neon_with_baseline: PgCompare):
             # by the VACUUM.
             #
             # This will also clear all the VM bits.
-            with env.record_pageserver_writes('copy_reuse_pageserver_writes'):
-                with env.record_duration('copy_reuse'):
-                    cur.copy_from(copy_test_data(1000000), 'copytest')
+            with env.record_pageserver_writes("copy_reuse_pageserver_writes"):
+                with env.record_duration("copy_reuse"):
+                    cur.copy_from(copy_test_data(1000000), "copytest")
                     env.flush()
 
             env.report_peak_memory_use()

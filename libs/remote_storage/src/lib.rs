@@ -42,19 +42,13 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
-pub trait RemoteObjectName {
-    // Needed to retrieve last component for RemoteObjectId.
-    // In other words a file name
-    fn object_name(&self) -> Option<&str>;
-}
-
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync {
     /// A way to uniquely reference a file in the remote storage.
-    type RemoteObjectId: RemoteObjectName;
+    type RemoteObjectId;
 
     /// Attempts to derive the storage path out of the local path, if the latter is correct.
     fn remote_object_id(&self, local_path: &Path) -> anyhow::Result<Self::RemoteObjectId>;
@@ -71,7 +65,7 @@ pub trait RemoteStorage: Send + Sync {
     /// so this method doesnt need to.
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
@@ -161,6 +155,13 @@ impl GenericRemoteStorage {
                     s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 S3Bucket::new(s3_config, working_directory).map(GenericRemoteStorage::S3)
             }
+        }
+    }
+
+    pub fn as_local(&self) -> Option<&LocalFs> {
+        match self {
+            Self::Local(local_fs) => Some(local_fs),
+            _ => None,
         }
     }
 }

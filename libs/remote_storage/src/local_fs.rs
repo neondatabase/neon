@@ -5,7 +5,6 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    borrow::Cow,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -18,15 +17,9 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectName};
+use crate::{path_with_suffix_extension, Download, DownloadError};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
-
-impl RemoteObjectName for PathBuf {
-    fn object_name(&self) -> Option<&str> {
-        self.file_stem().and_then(|n| n.to_str())
-    }
-}
 
 pub struct LocalFs {
     working_directory: PathBuf,
@@ -113,13 +106,10 @@ impl RemoteStorage for LocalFs {
 
     async fn list_prefixes(
         &self,
-        prefix: Option<Self::RemoteObjectId>,
+        prefix: Option<&Self::RemoteObjectId>,
     ) -> anyhow::Result<Vec<Self::RemoteObjectId>> {
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix),
-            None => Cow::Borrowed(&self.storage_root),
-        };
-        get_all_files(path.as_ref(), false).await
+        let path = prefix.unwrap_or(&self.storage_root);
+        get_all_files(path, false).await
     }
 
     async fn upload(
@@ -150,8 +140,7 @@ impl RemoteStorage for LocalFs {
         );
 
         let from_size_bytes = from_size_bytes as u64;
-        // Require to read 1 byte more than the expected to check later, that the stream and its size match.
-        let mut buffer_to_read = from.take(from_size_bytes + 1);
+        let mut buffer_to_read = from.take(from_size_bytes);
 
         let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
@@ -162,17 +151,15 @@ impl RemoteStorage for LocalFs {
                 )
             })?;
 
+        if bytes_read < from_size_bytes {
+            bail!("Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes");
+        }
+        // Check if there is any extra data after the given size.
+        let mut from = buffer_to_read.into_inner();
+        let extra_read = from.read(&mut [1]).await?;
         ensure!(
-            bytes_read == from_size_bytes,
-            "Provided stream has actual size {} fthat is smaller than the given stream size {}",
-            bytes_read,
-            from_size_bytes
-        );
-
-        ensure!(
-            buffer_to_read.read(&mut [0]).await? == 0,
-            "Provided stream has bigger size than the given stream size {}",
-            from_size_bytes
+            extra_read == 0,
+            "Provided stream was larger than expected: expected {from_size_bytes} bytes",
         );
 
         destination.flush().await.with_context(|| {
@@ -605,6 +592,34 @@ mod fs_tests {
             vec![target_path_1.clone(), target_path_2.clone()],
             "Should list a two different files after second upload"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_file_negatives() -> anyhow::Result<()> {
+        let storage = create_storage()?;
+
+        let id = storage.remote_object_id(&storage.working_directory.join("dummy"))?;
+        let content = std::io::Cursor::new(b"12345");
+
+        // Check that you get an error if the size parameter doesn't match the actual
+        // size of the stream.
+        storage
+            .upload(content.clone(), 0, &id, None)
+            .await
+            .expect_err("upload with zero size succeeded");
+        storage
+            .upload(content.clone(), 4, &id, None)
+            .await
+            .expect_err("upload with too short size succeeded");
+        storage
+            .upload(content.clone(), 6, &id, None)
+            .await
+            .expect_err("upload with too large size succeeded");
+
+        // Correct size is 5, this should succeed.
+        storage.upload(content, 5, &id, None).await?;
 
         Ok(())
     }

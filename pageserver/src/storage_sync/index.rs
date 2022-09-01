@@ -210,7 +210,7 @@ impl RemoteTimelineIndex {
 }
 
 /// Restored index part data about the timeline, stored in the remote index.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone)]
 pub struct RemoteTimeline {
     timeline_layers: HashSet<PathBuf>,
     missing_layers: HashSet<PathBuf>,
@@ -341,7 +341,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
 
     #[test]
     fn index_part_conversion() {

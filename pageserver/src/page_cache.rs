@@ -45,6 +45,7 @@ use std::{
     },
 };
 
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use tracing::error;
 use utils::{
@@ -342,7 +343,7 @@ impl PageCache {
         key: Key,
         lsn: Lsn,
         img: &[u8],
-    ) {
+    ) -> anyhow::Result<()> {
         let cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
@@ -352,7 +353,7 @@ impl PageCache {
             lsn,
         };
 
-        match self.lock_for_write(&cache_key) {
+        match self.lock_for_write(&cache_key)? {
             WriteBufResult::Found(write_guard) => {
                 // We already had it in cache. Another thread must've put it there
                 // concurrently. Check that it had the same contents that we
@@ -364,17 +365,19 @@ impl PageCache {
                 write_guard.mark_valid();
             }
         }
+
+        Ok(())
     }
 
     // Section 1.2: Public interface functions for working with Ephemeral pages.
 
-    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
-    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> WriteBufResult {
+    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<WriteBufResult> {
         let cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_write(&cache_key)
@@ -402,7 +405,7 @@ impl PageCache {
 
     // Section 1.3: Public interface functions for working with immutable file pages.
 
-    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> ReadBufResult {
+    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
@@ -495,15 +498,16 @@ impl PageCache {
     /// }
     /// ```
     ///
-    fn lock_for_read(&self, cache_key: &mut CacheKey) -> ReadBufResult {
+    fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
-                return ReadBufResult::Found(read_guard);
+                return Ok(ReadBufResult::Found(read_guard));
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self.find_victim();
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -526,10 +530,10 @@ impl PageCache {
             inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
-            return ReadBufResult::NotFound(PageWriteGuard {
+            return Ok(ReadBufResult::NotFound(PageWriteGuard {
                 inner,
                 valid: false,
-            });
+            }));
         }
     }
 
@@ -556,15 +560,16 @@ impl PageCache {
     ///
     /// Similar to lock_for_read(), but the returned buffer is write-locked and
     /// may be modified by the caller even if it's already found in the cache.
-    fn lock_for_write(&self, cache_key: &CacheKey) -> WriteBufResult {
+    fn lock_for_write(&self, cache_key: &CacheKey) -> anyhow::Result<WriteBufResult> {
         loop {
             // First check if the key already exists in the cache.
             if let Some(write_guard) = self.try_lock_for_write(cache_key) {
-                return WriteBufResult::Found(write_guard);
+                return Ok(WriteBufResult::Found(write_guard));
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self.find_victim();
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -587,10 +592,10 @@ impl PageCache {
             inner.dirty = false;
             slot.usage_count.store(1, Ordering::Relaxed);
 
-            return WriteBufResult::NotFound(PageWriteGuard {
+            return Ok(WriteBufResult::NotFound(PageWriteGuard {
                 inner,
                 valid: false,
-            });
+            }));
         }
     }
 
@@ -754,7 +759,7 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    fn find_victim(&self) -> (usize, RwLockWriteGuard<SlotInner>) {
+    fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -767,7 +772,7 @@ impl PageCache {
                 let mut inner = match slot.inner.try_write() {
                     Ok(inner) => inner,
                     Err(TryLockError::Poisoned(err)) => {
-                        panic!("buffer lock was poisoned: {:?}", err)
+                        anyhow::bail!("buffer lock was poisoned: {err:?}")
                     }
                     Err(TryLockError::WouldBlock) => {
                         // If we have looped through the whole buffer pool 10 times
@@ -777,7 +782,7 @@ impl PageCache {
                         // there are buffers in the pool. In practice, with a reasonably
                         // large buffer pool it really shouldn't happen.
                         if iters > iter_limit {
-                            panic!("could not find a victim buffer to evict");
+                            anyhow::bail!("exceeded evict iter limit");
                         }
                         continue;
                     }
@@ -804,7 +809,7 @@ impl PageCache {
                     inner.dirty = false;
                     inner.key = None;
                 }
-                return (slot_idx, inner);
+                return Ok((slot_idx, inner));
             }
         }
     }

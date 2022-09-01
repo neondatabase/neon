@@ -20,11 +20,7 @@ use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
 use crate::{
-    layered_repository::WalReceiverInfo,
-    pgdatadir_mapping::DatadirTimeline,
-    repository::{Repository, Timeline},
-    tenant_mgr,
-    walingest::WalIngest,
+    layered_repository::WalReceiverInfo, tenant_mgr, walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
 use postgres_ffi::v14::waldecoder::WalStreamDecoder;
@@ -67,7 +63,7 @@ pub async fn handle_walreceiver_connection(
     )
     .await
     .context("Timed out while waiting for walreceiver connection to open")?
-    .context("Failed to open walreceiver conection")?;
+    .context("Failed to open walreceiver connection")?;
 
     info!("connected!");
     let mut connection_status = WalConnectionStatus {

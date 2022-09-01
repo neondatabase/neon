@@ -56,7 +56,7 @@ enum ProxyAuthResponse {
     NotReady { ready: bool }, // TODO: get rid of `ready`
 }
 
-impl ClientCredentials {
+impl ClientCredentials<'_> {
     fn is_existing_user(&self) -> bool {
         self.user.ends_with("@zenith")
     }
@@ -64,15 +64,15 @@ impl ClientCredentials {
 
 async fn authenticate_proxy_client(
     auth_endpoint: &reqwest::Url,
-    creds: &ClientCredentials,
+    creds: &ClientCredentials<'_>,
     md5_response: &str,
     salt: &[u8; 4],
     psql_session_id: &str,
 ) -> Result<DatabaseInfo, LegacyAuthError> {
     let mut url = auth_endpoint.clone();
     url.query_pairs_mut()
-        .append_pair("login", &creds.user)
-        .append_pair("database", &creds.dbname)
+        .append_pair("login", creds.user)
+        .append_pair("database", creds.dbname)
         .append_pair("md5response", md5_response)
         .append_pair("salt", &hex::encode(salt))
         .append_pair("psql_session_id", psql_session_id);
@@ -103,7 +103,7 @@ async fn authenticate_proxy_client(
 async fn handle_existing_user(
     auth_endpoint: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    creds: &ClientCredentials,
+    creds: &ClientCredentials<'_>,
 ) -> auth::Result<compute::NodeInfo> {
     let psql_session_id = super::link::new_psql_session_id();
     let md5_salt = rand::random();
@@ -136,7 +136,7 @@ async fn handle_existing_user(
 pub async fn handle_user(
     auth_endpoint: &reqwest::Url,
     auth_link_uri: &reqwest::Url,
-    creds: &ClientCredentials,
+    creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
 ) -> auth::Result<compute::NodeInfo> {
     if creds.is_existing_user() {

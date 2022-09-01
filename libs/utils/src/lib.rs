@@ -8,6 +8,9 @@ pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive
 pub mod seqwait;
 
+/// A simple Read-Copy-Update implementation.
+pub mod simple_rcu;
+
 /// append only ordered map implemented with a Vec
 pub mod vec_map;
 
