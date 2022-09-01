@@ -50,7 +50,7 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::repository::{GcResult, RepositoryTimeline};
+use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::thread_mgr;
 use crate::walreceiver::IS_WAL_RECEIVER;
@@ -164,72 +164,6 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-#[derive(Clone)]
-pub enum LayeredTimelineEntry {
-    Loaded(Arc<Timeline>),
-    Unloaded {
-        id: ZTimelineId,
-        metadata: TimelineMetadata,
-    },
-}
-
-impl LayeredTimelineEntry {
-    fn timeline_id(&self) -> ZTimelineId {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline.timeline_id,
-            LayeredTimelineEntry::Unloaded { id, .. } => *id,
-        }
-    }
-
-    pub fn ancestor_timeline_id(&self) -> Option<ZTimelineId> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => {
-                timeline.ancestor_timeline.as_ref().map(|t| t.timeline_id())
-            }
-            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_timeline(),
-        }
-    }
-
-    pub fn ancestor_lsn(&self) -> Lsn {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline.ancestor_lsn,
-            LayeredTimelineEntry::Unloaded { metadata, .. } => metadata.ancestor_lsn(),
-        }
-    }
-
-    fn ensure_loaded(&self) -> anyhow::Result<&Arc<Timeline>> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => Ok(timeline),
-            LayeredTimelineEntry::Unloaded { .. } => {
-                anyhow::bail!("timeline is unloaded")
-            }
-        }
-    }
-
-    pub fn layer_removal_guard(&self) -> Result<Option<MutexGuard<()>>, anyhow::Error> {
-        match self {
-            LayeredTimelineEntry::Loaded(timeline) => timeline
-                .layer_removal_cs
-                .try_lock()
-                .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
-                .map(Some),
-
-            LayeredTimelineEntry::Unloaded { .. } => Ok(None),
-        }
-    }
-}
-
-impl From<LayeredTimelineEntry> for RepositoryTimeline<Timeline> {
-    fn from(entry: LayeredTimelineEntry) -> Self {
-        match entry {
-            LayeredTimelineEntry::Loaded(timeline) => RepositoryTimeline::Loaded(timeline as _),
-            LayeredTimelineEntry::Unloaded { metadata, .. } => {
-                RepositoryTimeline::Unloaded { metadata }
-            }
-        }
-    }
-}
-
 struct TimelineMetrics {
     pub reconstruct_time_histo: Histogram,
     pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
@@ -342,7 +276,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<LayeredTimelineEntry>,
+    ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -566,7 +500,7 @@ impl Timeline {
     pub fn get_ancestor_timeline_id(&self) -> Option<ZTimelineId> {
         self.ancestor_timeline
             .as_ref()
-            .map(LayeredTimelineEntry::timeline_id)
+            .map(|ancestor| ancestor.timeline_id)
     }
 
     /// Lock and get timeline's GC cuttof
@@ -781,7 +715,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<LayeredTimelineEntry>,
+        ancestor: Option<Arc<Timeline>>,
         timeline_id: ZTimelineId,
         tenant_id: ZTenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -936,6 +870,12 @@ impl Timeline {
         timer.stop_and_record();
 
         Ok(())
+    }
+
+    pub fn layer_removal_guard(&self) -> Result<MutexGuard<()>, anyhow::Error> {
+        self.layer_removal_cs
+            .try_lock()
+            .map_err(|e| anyhow::anyhow!("cannot lock compaction critical section {e}"))
     }
 
     /// Retrieve current logical size of the timeline.
@@ -1204,24 +1144,13 @@ impl Timeline {
     }
 
     fn get_ancestor_timeline(&self) -> Result<Arc<Timeline>> {
-        let ancestor = self
-            .ancestor_timeline
-            .as_ref()
-            .with_context(|| {
-                format!(
-                    "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                    self.timeline_id,
-                    self.get_ancestor_timeline_id(),
-                )
-            })?
-            .ensure_loaded()
-            .with_context(|| {
-                format!(
-                    "Ancestor timeline is not loaded. Timeline id: {} Ancestor id {:?}",
-                    self.timeline_id,
-                    self.get_ancestor_timeline_id(),
-                )
-            })?;
+        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
+            format!(
+                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
+                self.timeline_id,
+                self.get_ancestor_timeline_id(),
+            )
+        })?;
         Ok(Arc::clone(ancestor))
     }
 
@@ -1251,7 +1180,9 @@ impl Timeline {
             layer = Arc::clone(open_layer);
         } else {
             // No writeable layer yet. Create one.
-            let start_lsn = layers.next_open_layer_at.unwrap();
+            let start_lsn = layers
+                .next_open_layer_at
+                .context("No next open layer found")?;
 
             trace!(
                 "creating layer for write at {}/{} for record at {}",
@@ -1496,7 +1427,7 @@ impl Timeline {
             let ancestor_timelineid = self
                 .ancestor_timeline
                 .as_ref()
-                .map(LayeredTimelineEntry::timeline_id);
+                .map(|ancestor| ancestor.timeline_id);
 
             let metadata = TimelineMetadata::new(
                 disk_consistent_lsn,

@@ -11,8 +11,7 @@ use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
     TimelineCreateRequest,
 };
-use crate::layered_repository::{metadata::TimelineMetadata, Timeline};
-use crate::repository::{LocalTimelineState, RepositoryTimeline};
+use crate::layered_repository::Timeline;
 use crate::storage_sync;
 use crate::storage_sync::index::{RemoteIndex, RemoteTimeline};
 use crate::tenant_config::TenantConfOpt;
@@ -74,7 +73,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
 
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
 
-fn local_timeline_info_from_loaded_timeline(
+fn local_timeline_info_from_timeline(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
@@ -105,7 +104,6 @@ fn local_timeline_info_from_loaded_timeline(
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        timeline_state: LocalTimelineState::Loaded,
         current_logical_size: Some(
             timeline
                 .get_current_logical_size()
@@ -129,61 +127,20 @@ fn local_timeline_info_from_loaded_timeline(
     Ok(info)
 }
 
-fn local_timeline_info_from_unloaded_timeline(metadata: &TimelineMetadata) -> LocalTimelineInfo {
-    LocalTimelineInfo {
-        ancestor_timeline_id: metadata.ancestor_timeline(),
-        ancestor_lsn: {
-            match metadata.ancestor_lsn() {
-                Lsn(0) => None,
-                lsn @ Lsn(_) => Some(lsn),
-            }
-        },
-        disk_consistent_lsn: metadata.disk_consistent_lsn(),
-        last_record_lsn: metadata.disk_consistent_lsn(),
-        prev_record_lsn: metadata.prev_record_lsn(),
-        latest_gc_cutoff_lsn: metadata.latest_gc_cutoff_lsn(),
-        timeline_state: LocalTimelineState::Unloaded,
-        current_logical_size: None,
-        current_physical_size: None,
-        current_logical_size_non_incremental: None,
-        current_physical_size_non_incremental: None,
-        wal_source_connstr: None,
-        last_received_msg_lsn: None,
-        last_received_msg_ts: None,
-    }
-}
-
-fn local_timeline_info_from_repo_timeline(
-    repo_timeline: &RepositoryTimeline<Timeline>,
-    include_non_incremental_logical_size: bool,
-    include_non_incremental_physical_size: bool,
-) -> anyhow::Result<LocalTimelineInfo> {
-    match repo_timeline {
-        RepositoryTimeline::Loaded(timeline) => local_timeline_info_from_loaded_timeline(
-            timeline,
-            include_non_incremental_logical_size,
-            include_non_incremental_physical_size,
-        ),
-        RepositoryTimeline::Unloaded { metadata } => {
-            Ok(local_timeline_info_from_unloaded_timeline(metadata))
-        }
-    }
-}
-
 fn list_local_timelines(
     tenant_id: ZTenantId,
     include_non_incremental_logical_size: bool,
     include_non_incremental_physical_size: bool,
 ) -> Result<Vec<(ZTimelineId, LocalTimelineInfo)>> {
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
-        .with_context(|| format!("Failed to get repo for tenant {}", tenant_id))?;
+        .with_context(|| format!("Failed to get repo for tenant {tenant_id}"))?;
     let repo_timelines = repo.list_timelines();
 
     let mut local_timeline_info = Vec::with_capacity(repo_timelines.len());
     for (timeline_id, repository_timeline) in repo_timelines {
         local_timeline_info.push((
             timeline_id,
-            local_timeline_info_from_repo_timeline(
+            local_timeline_info_from_timeline(
                 &repository_timeline,
                 include_non_incremental_logical_size,
                 include_non_incremental_physical_size,
@@ -214,12 +171,12 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             request_data.ancestor_timeline_id.map(ZTimelineId::from),
             request_data.ancestor_start_lsn,
         ) {
-            Ok(Some((new_timeline_id, new_timeline))) => {
+            Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
-                let local_info = local_timeline_info_from_loaded_timeline(&new_timeline, false, false)?;
+                let local_info = local_timeline_info_from_timeline(&new_timeline, false, false)?;
                 Ok(Some(TimelineInfo {
                     tenant_id,
-                    timeline_id: new_timeline_id,
+                    timeline_id: new_timeline.timeline_id,
                     local: Some(local_info),
                     remote: None,
                 }))
@@ -311,7 +268,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
                 repo.get_timeline(timeline_id)
                     .as_ref()
                     .map(|timeline| {
-                        local_timeline_info_from_repo_timeline(
+                        local_timeline_info_from_timeline(
                             timeline,
                             include_non_incremental_logical_size,
                             include_non_incremental_physical_size,

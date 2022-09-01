@@ -8,7 +8,6 @@ use utils::{
 };
 
 // These enums are used in the API response fields.
-use crate::repository::LocalTimelineState;
 use crate::tenant_mgr::TenantState;
 
 #[serde_as]
@@ -133,7 +132,6 @@ pub struct LocalTimelineInfo {
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
     pub current_physical_size_non_incremental: Option<u64>,
-    pub timeline_state: LocalTimelineState,
 
     pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]

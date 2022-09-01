@@ -132,7 +132,7 @@ pub async fn handle_walreceiver_connection(
     let (repo, timeline) = tokio::task::spawn_blocking(move || {
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)
             .with_context(|| format!("no repository found for tenant {tenant_id}"))?;
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, timeline_id)
+        let timeline = repo.get_timeline(timeline_id)
             .with_context(|| {
                 format!("local timeline {timeline_id} not found for tenant {tenant_id}")
             })?;
