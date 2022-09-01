@@ -194,7 +194,7 @@ pageserver_send(ZenithRequest *request)
 	 * practice, our requests are small enough to always fit in the output
 	 * and TCP buffer.
 	 */
-	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0 || PQflush(pageserver_conn))
+	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
 		char* msg = PQerrorMessage(pageserver_conn);
 		pageserver_disconnect();
@@ -205,7 +205,6 @@ pageserver_send(ZenithRequest *request)
 	if (message_level_is_interesting(PageStoreTrace))
 	{
 		char	   *msg = zm_to_string((ZenithMessage *) request);
-
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
@@ -217,30 +216,37 @@ pageserver_receive(void)
 	StringInfoData resp_buff;
 	ZenithResponse *resp;
 
-
-	/* read response */
-	resp_buff.len = call_PQgetCopyData(pageserver_conn, &resp_buff.data);
-	resp_buff.cursor = 0;
-
-	if (resp_buff.len < 0)
+	PG_TRY();
 	{
-		char* msg = PQerrorMessage(pageserver_conn);
+		/* read response */
+		resp_buff.len = call_PQgetCopyData(pageserver_conn, &resp_buff.data);
+		resp_buff.cursor = 0;
+
+		if (resp_buff.len < 0)
+		{
+			if (resp_buff.len == -1)
+				neon_log(ERROR, "end of COPY");
+			else if (resp_buff.len == -2)
+				neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+		}
+		resp = zm_unpack_response(&resp_buff);
+		PQfreemem(resp_buff.data);
+
+		if (message_level_is_interesting(PageStoreTrace))
+		{
+			char	   *msg = zm_to_string((ZenithMessage *) resp);
+
+			neon_log(PageStoreTrace, "got response: %s", msg);
+			pfree(msg);
+		}
+	}
+	PG_CATCH();
+	{
 		pageserver_disconnect();
-		if (resp_buff.len == -1)
-			neon_log(ERROR, "end of COPY");
-		else if (resp_buff.len == -2)
-			neon_log(ERROR, "could not read COPY data: %s", msg);
+		PG_RE_THROW();
 	}
-	resp = zm_unpack_response(&resp_buff);
-	PQfreemem(resp_buff.data);
+	PG_END_TRY();
 
-	if (message_level_is_interesting(PageStoreTrace))
-	{
-		char	   *msg = zm_to_string((ZenithMessage *) resp);
-
-		neon_log(PageStoreTrace, "got response: %s", msg);
-		pfree(msg);
-	}
 	return (ZenithResponse *) resp;
 }
 

@@ -1485,7 +1485,7 @@ zenith_dbsize(Oid dbNode)
 			.dbNode = dbNode,
 		};
 
-		resp = page_server->request((ZenithRequest *) &request);
+		resp = page_server_request(&request);
 	}
 
 	switch (resp->tag)
