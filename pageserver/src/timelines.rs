@@ -108,7 +108,7 @@ fn bootstrap_timeline(
     tenantid: ZTenantId,
     tli: ZTimelineId,
     repo: &Repository,
-) -> Result<()> {
+) -> Result<Arc<Timeline>> {
     let initdb_path = conf
         .tenant_path(&tenantid)
         .join(format!("tmp-timeline-{}", tli));
@@ -141,7 +141,7 @@ fn bootstrap_timeline(
     // Remove temp dir. We don't need it anymore
     fs::remove_dir_all(pgdata_path)?;
 
-    Ok(())
+    Ok(timeline)
 }
 
 ///
@@ -159,7 +159,7 @@ pub(crate) fn create_timeline(
     new_timeline_id: Option<ZTimelineId>,
     ancestor_timeline_id: Option<ZTimelineId>,
     mut ancestor_start_lsn: Option<Lsn>,
-) -> Result<Option<(ZTimelineId, Arc<Timeline>)>> {
+) -> Result<Option<Arc<Timeline>>> {
     let new_timeline_id = new_timeline_id.unwrap_or_else(ZTimelineId::generate);
     let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
 
@@ -168,11 +168,11 @@ pub(crate) fn create_timeline(
         return Ok(None);
     }
 
-    match ancestor_timeline_id {
+    let loaded_timeline = match ancestor_timeline_id {
         Some(ancestor_timeline_id) => {
             let ancestor_timeline = repo
-                .get_timeline_load(ancestor_timeline_id)
-                .context("Cannot branch off the timeline that's not present locally")?;
+                .get_timeline(ancestor_timeline_id)
+                .context("Cannot branch off the timeline that's not present in pageserver")?;
 
             if let Some(lsn) = ancestor_start_lsn.as_mut() {
                 // Wait for the WAL to arrive and be processed on the parent branch up
@@ -201,8 +201,5 @@ pub(crate) fn create_timeline(
         None => bootstrap_timeline(conf, tenant_id, new_timeline_id, repo.as_ref())?,
     };
 
-    // load the timeline into memory
-    let loaded_timeline = tenant_mgr::get_local_timeline_with_load(tenant_id, new_timeline_id)?;
-
-    Ok(Some((new_timeline_id, loaded_timeline)))
+    Ok(Some(loaded_timeline))
 }

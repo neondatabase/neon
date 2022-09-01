@@ -1,4 +1,3 @@
-use crate::layered_repository::metadata::TimelineMetadata;
 use crate::walrecord::ZenithWalRecord;
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
@@ -6,7 +5,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{AddAssign, Range};
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -173,30 +171,6 @@ impl Value {
             Value::WalRecord(rec) => rec.will_init(),
         }
     }
-}
-
-/// A timeline, that belongs to the current repository.
-pub enum RepositoryTimeline<T> {
-    /// Timeline, with its files present locally in pageserver's working directory.
-    /// Loaded into pageserver's memory and ready to be used.
-    Loaded(Arc<T>),
-
-    /// All the data is available locally, but not loaded into memory, so loading have to be done before actually using the timeline
-    Unloaded {
-        // It is ok to keep metadata here, because it is not changed when timeline is unloaded.
-        // FIXME can s3 sync actually change it? It can change it when timeline is in awaiting download state.
-        //  but we currently do not download something for the timeline once it is local (even if there are new checkpoints) is it correct?
-        // also it is not that good to keep TimelineMetadata here, because it is layered repo implementation detail
-        metadata: TimelineMetadata,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LocalTimelineState {
-    // timeline is loaded into memory (with layer map and all the bits),
-    Loaded,
-    // timeline is on disk locally and ready to be loaded into memory.
-    Unloaded,
 }
 
 ///

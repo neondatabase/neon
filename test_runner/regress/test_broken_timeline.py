@@ -68,9 +68,11 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     # But all others are broken
 
-    # First timeline would fail instantly due to corrupt metadata file
+    # First timeline would not get loaded into pageserver due to corrupt metadata file
     (_tenant, _timeline, pg) = tenant_timelines[1]
-    with pytest.raises(Exception, match="Cannot load local timeline") as err:
+    with pytest.raises(
+        Exception, match=f"Could not get timeline {timeline1} in tenant {tenant1}"
+    ) as err:
         pg.start()
     log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
 

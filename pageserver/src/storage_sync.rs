@@ -903,8 +903,10 @@ fn storage_sync_loop(
                         "Sync loop step completed, {} new tenant state update(s)",
                         updated_tenants.len()
                     );
-                    let mut sync_status_updates: HashMap<ZTenantId, HashSet<ZTimelineId>> =
-                        HashMap::new();
+                    let mut timelines_to_attach: HashMap<
+                        ZTenantId,
+                        Vec<(ZTimelineId, TimelineMetadata)>,
+                    > = HashMap::new();
                     let index_accessor = runtime.block_on(index.read());
                     for tenant_id in updated_tenants {
                         let tenant_entry = match index_accessor.tenant_entry(&tenant_id) {
@@ -930,13 +932,18 @@ fn storage_sync_loop(
                             // and register them all at once in a repository for download
                             // to be submitted in a single operation to repository
                             // so it can apply them at once to internal timeline map.
-                            sync_status_updates
-                                .insert(tenant_id, tenant_entry.keys().copied().collect());
+                            timelines_to_attach.insert(
+                                tenant_id,
+                                tenant_entry
+                                    .iter()
+                                    .map(|(&id, entry)| (id, entry.metadata.clone()))
+                                    .collect(),
+                            );
                         }
                     }
                     drop(index_accessor);
                     // Batch timeline download registration to ensure that the external registration code won't block any running tasks before.
-                    attach_downloaded_tenants(conf, &index, sync_status_updates);
+                    attach_downloaded_tenants(conf, &index, timelines_to_attach);
                 }
             }
             ControlFlow::Break(()) => {

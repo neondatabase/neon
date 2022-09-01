@@ -457,18 +457,18 @@ impl PageServerHandler {
     fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
-        timelineid: ZTimelineId,
-        tenantid: ZTenantId,
+        timeline_id: ZTimelineId,
+        tenant_id: ZTenantId,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("pagestream", timeline = %timelineid, tenant = %tenantid).entered();
+        let _enter =
+            info_span!("pagestream", timeline = %timeline_id, tenant = %tenant_id).entered();
 
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
-        thread_mgr::associate_with(Some(tenantid), Some(timelineid));
+        thread_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Check that the timeline exists
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-            .context("Cannot load local timeline")?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
         /* switch client to COPYBOTH */
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -488,8 +488,8 @@ impl PageServerHandler {
                         };
 
                         let zenith_fe_msg = PagestreamFeMessage::parse(copy_data_bytes)?;
-                        let tenant_id = tenantid.to_string();
-                        let timeline_id = timelineid.to_string();
+                        let tenant_id = tenant_id.to_string();
+                        let timeline_id = timeline_id.to_string();
 
                         let response = match zenith_fe_msg {
                             PagestreamFeMessage::Exists(req) => SMGR_QUERY_TIME
@@ -599,7 +599,9 @@ impl PageServerHandler {
             info_span!("import wal", timeline = %timeline_id, tenant = %tenant_id).entered();
 
         let repo = tenant_mgr::get_repository_for_tenant(tenant_id)?;
-        let timeline = repo.get_timeline_load(timeline_id)?;
+        let timeline = repo
+            .get_timeline(timeline_id)
+            .with_context(|| format!("Timeline {timeline_id} was not found"))?;
         ensure!(timeline.get_last_record_lsn() == start_lsn);
 
         // TODO leave clean state on error. For now you can use detach to clean
@@ -762,19 +764,18 @@ impl PageServerHandler {
     fn handle_basebackup_request(
         &self,
         pgb: &mut PostgresBackend,
-        timelineid: ZTimelineId,
+        timeline_id: ZTimelineId,
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
-        tenantid: ZTenantId,
+        tenant_id: ZTenantId,
         full_backup: bool,
     ) -> anyhow::Result<()> {
-        let span = info_span!("basebackup", timeline = %timelineid, tenant = %tenantid, lsn = field::Empty);
+        let span = info_span!("basebackup", timeline = %timeline_id, tenant = %tenant_id, lsn = field::Empty);
         let _enter = span.enter();
         info!("starting");
 
         // check that the timeline exists
-        let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-            .context("Cannot load local timeline")?;
+        let timeline = get_local_timeline(tenant_id, timeline_id)?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             timeline
@@ -906,12 +907,11 @@ impl postgres_backend::Handler for PageServerHandler {
                 "invalid param number for get_last_record_rlsn command"
             );
 
-            let tenantid = ZTenantId::from_str(params[0])?;
-            let timelineid = ZTimelineId::from_str(params[1])?;
+            let tenant_id = ZTenantId::from_str(params[0])?;
+            let timeline_id = ZTimelineId::from_str(params[1])?;
 
-            self.check_permission(Some(tenantid))?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
+            self.check_permission(Some(tenant_id))?;
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -1134,10 +1134,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("Invalid compact: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Couldn't load timeline")?;
+            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
             timeline.compact()?;
 
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
@@ -1152,11 +1151,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid checkpoint command: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
+            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             // Checkpoint the timeline and also compact it (due to `CheckpointConfig::Forced`).
             timeline.checkpoint(CheckpointConfig::Forced)?;
@@ -1172,10 +1169,9 @@ impl postgres_backend::Handler for PageServerHandler {
                 .captures(query_string)
                 .with_context(|| format!("invalid get_lsn_by_timestamp: '{}'", query_string))?;
 
-            let tenantid = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
-            let timelineid = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
-            let timeline = tenant_mgr::get_local_timeline_with_load(tenantid, timelineid)
-                .context("Cannot load local timeline")?;
+            let tenant_id = ZTenantId::from_str(caps.get(1).unwrap().as_str())?;
+            let timeline_id = ZTimelineId::from_str(caps.get(2).unwrap().as_str())?;
+            let timeline = get_local_timeline(tenant_id, timeline_id)?;
 
             let timestamp = humantime::parse_rfc3339(caps.get(3).unwrap().as_str())?;
             let timestamp_pg = to_pg_timestamp(timestamp);
@@ -1199,6 +1195,15 @@ impl postgres_backend::Handler for PageServerHandler {
 
         Ok(())
     }
+}
+
+fn get_local_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Result<Arc<Timeline>> {
+    tenant_mgr::get_repository_for_tenant(tenant_id)
+        .and_then(|repo| {
+            repo.get_timeline(timeline_id)
+                .context("No timeline in tenant's repository")
+        })
+        .with_context(|| format!("Could not get timeline {timeline_id} in tenant {tenant_id}"))
 }
 
 ///
