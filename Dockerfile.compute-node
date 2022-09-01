@@ -143,8 +143,9 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # GLIBC 2.34 for plv8.
 #     Debian bullseye provides GLIBC 2.31, so we install the library from testing
 #
-# Lastly, link compute_ctl into zenith_ctl while we're at it, so that we don't actually 
-RUNRUN apt update &&  \
+# Lastly, link compute_ctl into zenith_ctl while we're at it,
+# so that we don't need to put this in another layer.
+RUN apt update &&  \
     apt install --no-install-recommends -y \
         libreadline8 \
         libossp-uuid16 \
@@ -152,13 +153,13 @@ RUNRUN apt update &&  \
         libgdal28 \
         libproj19 \
         libprotobuf-c1 && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    echo "Installing GLIBC 2.34" \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    echo "Installing GLIBC 2.34" && \
     echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
     echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
     apt update && \
     apt install -y --no-install-recommends -t testing libc6 && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     ln /usr/local/bin/compute_ctl /usr/local/bin/zenith_ctl
 
 USER postgres
