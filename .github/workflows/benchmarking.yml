@@ -179,6 +179,8 @@ jobs:
       env:
         PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
         BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Benchmark simple-update
       uses: ./.github/actions/run-python-test-set
