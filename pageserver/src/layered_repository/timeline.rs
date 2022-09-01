@@ -2046,14 +2046,14 @@ impl Timeline {
         //
         // The GC cutoff should only ever move forwards.
         {
-            let write_guard = self.latest_gc_cutoff_lsn.write();
+            let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
             ensure!(
                 *write_guard <= new_gc_cutoff,
                 "Cannot move GC cutoff LSN backwards (was {}, new {})",
                 *write_guard,
                 new_gc_cutoff
             );
-            write_guard.store(new_gc_cutoff);
+            write_guard.store_and_unlock(new_gc_cutoff).wait();
         }
 
         info!("GC starting");
