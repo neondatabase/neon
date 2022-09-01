@@ -1,7 +1,6 @@
 import pathlib
 import subprocess
 from typing import Optional
-from uuid import UUID, uuid4
 
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
@@ -12,7 +11,7 @@ from fixtures.neon_fixtures import (
     pg_distrib_dir,
     wait_until,
 )
-from fixtures.utils import lsn_from_hex
+from fixtures.types import Lsn, ZTenantId, ZTimelineId
 
 
 # test that we cannot override node id after init
@@ -61,39 +60,39 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv):
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(client: NeonPageserverHttpClient, initial_tenant: UUID):
+def check_client(client: NeonPageserverHttpClient, initial_tenant: ZTenantId):
     client.check_status()
 
     # check initial tenant is there
-    assert initial_tenant.hex in {t["id"] for t in client.tenant_list()}
+    assert initial_tenant in {ZTenantId(t["id"]) for t in client.tenant_list()}
 
     # create new tenant and check it is also there
-    tenant_id = uuid4()
+    tenant_id = ZTenantId.generate()
     client.tenant_create(tenant_id)
-    assert tenant_id.hex in {t["id"] for t in client.tenant_list()}
+    assert tenant_id in {ZTenantId(t["id"]) for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) == 0, "initial tenant should not have any timelines"
 
     # create timeline
-    timeline_id = uuid4()
+    timeline_id = ZTimelineId.generate()
     client.timeline_create(tenant_id=tenant_id, new_timeline_id=timeline_id)
 
     timelines = client.timeline_list(tenant_id)
     assert len(timelines) > 0
 
     # check it is there
-    assert timeline_id.hex in {b["timeline_id"] for b in client.timeline_list(tenant_id)}
+    assert timeline_id in {ZTimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)}
     for timeline in timelines:
-        timeline_id_str = str(timeline["timeline_id"])
+        timeline_id = ZTimelineId(timeline["timeline_id"])
         timeline_details = client.timeline_detail(
             tenant_id=tenant_id,
-            timeline_id=UUID(timeline_id_str),
+            timeline_id=timeline_id,
             include_non_incremental_logical_size=True,
         )
 
-        assert timeline_details["tenant_id"] == tenant_id.hex
-        assert timeline_details["timeline_id"] == timeline_id_str
+        assert ZTenantId(timeline_details["tenant_id"]) == tenant_id
+        assert ZTimelineId(timeline_details["timeline_id"]) == timeline_id
 
         local_timeline_details = timeline_details.get("local")
         assert local_timeline_details is not None
@@ -122,10 +121,10 @@ def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
 
 def expect_updated_msg_lsn(
     client: NeonPageserverHttpClient,
-    tenant_id: UUID,
-    timeline_id: UUID,
-    prev_msg_lsn: Optional[int],
-) -> int:
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+    prev_msg_lsn: Optional[Lsn],
+) -> Lsn:
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
     # a successful `timeline_details` response must contain the below fields
@@ -138,7 +137,7 @@ def expect_updated_msg_lsn(
         local_timeline_details["last_received_msg_lsn"] is not None
     ), "the last received message's LSN is empty"
 
-    last_msg_lsn = lsn_from_hex(local_timeline_details["last_received_msg_lsn"])
+    last_msg_lsn = Lsn(local_timeline_details["last_received_msg_lsn"])
     assert (
         prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
     ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \

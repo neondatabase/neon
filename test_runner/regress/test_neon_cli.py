@@ -1,4 +1,3 @@
-import uuid
 from typing import cast
 
 import requests
@@ -8,10 +7,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonPageserverHttpClient,
 )
+from fixtures.types import ZTenantId, ZTimelineId
 
 
 def helper_compare_timeline_list(
-    pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv, initial_tenant: uuid.UUID
+    pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv, initial_tenant: ZTenantId
 ):
     """
     Compare timelines list returned by CLI and directly via API.
@@ -20,7 +20,7 @@ def helper_compare_timeline_list(
 
     timelines_api = sorted(
         map(
-            lambda t: cast(str, t["timeline_id"]),
+            lambda t: ZTimelineId(t["timeline_id"]),
             pageserver_http_client.timeline_list(initial_tenant),
         )
     )
@@ -52,8 +52,8 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
     # Check that all new branches are visible via CLI
     timelines_cli = [timeline_id for (_, timeline_id) in env.neon_cli.list_timelines()]
 
-    assert main_timeline_id.hex in timelines_cli
-    assert nested_timeline_id.hex in timelines_cli
+    assert main_timeline_id in timelines_cli
+    assert nested_timeline_id in timelines_cli
 
 
 def helper_compare_tenant_list(pageserver_http_client: NeonPageserverHttpClient, env: NeonEnv):
@@ -85,11 +85,11 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     res = env.neon_cli.list_tenants()
-    tenants = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
+    tenants = sorted(map(lambda t: ZTenantId(t.split()[0]), res.stdout.splitlines()))
 
-    assert env.initial_tenant.hex in tenants
-    assert tenant1.hex in tenants
-    assert tenant2.hex in tenants
+    assert env.initial_tenant in tenants
+    assert tenant1 in tenants
+    assert tenant2 in tenants
 
 
 def test_cli_tenant_create(neon_simple_env: NeonEnv):

@@ -61,17 +61,6 @@ def global_counter() -> int:
     return _global_counter
 
 
-def lsn_to_hex(num: int) -> str:
-    """Convert lsn from int to standard hex notation."""
-    return "{:X}/{:X}".format(num >> 32, num & 0xFFFFFFFF)
-
-
-def lsn_from_hex(lsn_hex: str) -> int:
-    """Convert lsn from hex notation to int."""
-    l, r = lsn_hex.split("/")
-    return (int(l, 16) << 32) + int(r, 16)
-
-
 def print_gc_result(row):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(

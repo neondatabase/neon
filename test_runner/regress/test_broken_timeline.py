@@ -5,7 +5,7 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
-from fixtures.utils import query_scalar
+from fixtures.types import ZTenantId, ZTimelineId
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -15,19 +15,15 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    tenant_timelines: List[Tuple[str, str, Postgres]] = []
+    tenant_timelines: List[Tuple[ZTenantId, ZTimelineId, Postgres]] = []
 
     for n in range(4):
-        tenant_id_uuid, timeline_id_uuid = env.neon_cli.create_tenant()
-        tenant_id = tenant_id_uuid.hex
-        timeline_id = timeline_id_uuid.hex
+        tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-        pg = env.postgres.create_start("main", tenant_id=tenant_id_uuid)
+        pg = env.postgres.create_start("main", tenant_id=tenant_id)
         with pg.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
-
-            timeline_id = query_scalar(cur, "SHOW neon.timeline_id")
         pg.stop()
         tenant_timelines.append((tenant_id, timeline_id, pg))
 
@@ -109,5 +105,5 @@ def test_fix_broken_timelines_on_startup(neon_simple_env: NeonEnv):
     env.neon_cli.pageserver_start()
 
     # Check that tenant with "broken" timeline is not loaded.
-    with pytest.raises(Exception, match=f"Failed to get repo for tenant {tenant_id.hex}"):
+    with pytest.raises(Exception, match=f"Failed to get repo for tenant {tenant_id}"):
         env.neon_cli.list_timelines(tenant_id)

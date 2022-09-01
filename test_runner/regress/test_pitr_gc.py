@@ -3,6 +3,7 @@ from contextlib import closing
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.types import ZTimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -24,7 +25,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     main_pg_conn = pgmain.connect()
     main_cur = main_pg_conn.cursor()
-    timeline = query_scalar(main_cur, "SHOW neon.timeline_id")
+    timeline = ZTimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
     # Create table
     main_cur.execute("CREATE TABLE foo (t text)")
@@ -57,9 +58,9 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     # run GC
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            pscur.execute(f"compact {env.initial_tenant.hex} {timeline}")
+            pscur.execute(f"compact {env.initial_tenant} {timeline}")
             # perform aggressive GC. Data still should be kept because of the PITR setting.
-            pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
+            pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
             row = pscur.fetchone()
             print_gc_result(row)
 

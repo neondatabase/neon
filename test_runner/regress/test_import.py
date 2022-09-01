@@ -5,7 +5,6 @@ import shutil
 import tarfile
 from contextlib import closing
 from pathlib import Path
-from uuid import UUID, uuid4
 
 import pytest
 from fixtures.log_helper import log
@@ -18,7 +17,8 @@ from fixtures.neon_fixtures import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.utils import lsn_from_hex, subprocess_capture
+from fixtures.types import Lsn, ZTenantId, ZTimelineId
+from fixtures.utils import subprocess_capture
 
 
 @pytest.mark.timeout(600)
@@ -69,8 +69,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
 
     node_name = "import_from_vanilla"
-    tenant = uuid4()
-    timeline = uuid4()
+    tenant = ZTenantId.generate()
+    timeline = ZTimelineId.generate()
 
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
@@ -83,9 +83,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 "timeline",
                 "import",
                 "--tenant-id",
-                tenant.hex,
+                str(tenant),
                 "--timeline-id",
-                timeline.hex,
+                str(timeline),
                 "--node-name",
                 node_name,
                 "--base-lsn",
@@ -112,8 +112,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     import_tar(base_tar, wal_tar)
 
     # Wait for data to land in s3
-    wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(end_lsn))
-    wait_for_upload(client, tenant, timeline, lsn_from_hex(end_lsn))
+    wait_for_last_record_lsn(client, tenant, timeline, Lsn(end_lsn))
+    wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
@@ -173,7 +173,7 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     assert cnt_seg_files > 0
 
 
-def _generate_data(num_rows: int, pg: Postgres) -> str:
+def _generate_data(num_rows: int, pg: Postgres) -> Lsn:
     """Generate a table with `num_rows` rows.
 
     Returns:
@@ -191,10 +191,12 @@ def _generate_data(num_rows: int, pg: Postgres) -> str:
             cur.execute("SELECT pg_current_wal_insert_lsn()")
             res = cur.fetchone()
             assert res is not None and isinstance(res[0], str)
-            return res[0]
+            return Lsn(res[0])
 
 
-def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timeline: UUID) -> str:
+def _import(
+    expected_num_rows: int, lsn: Lsn, env: NeonEnv, pg_bin: PgBin, timeline: ZTimelineId
+) -> str:
     """Test importing backup data to the pageserver.
 
     Args:
@@ -210,7 +212,7 @@ def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timel
     psql_env = {"LD_LIBRARY_PATH": os.path.join(str(pg_distrib_dir), "lib")}
 
     # Get a fullbackup from pageserver
-    query = f"fullbackup { env.initial_tenant.hex} {timeline.hex} {lsn}"
+    query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     tar_output_file = result_basepath + ".stdout"
@@ -228,7 +230,7 @@ def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timel
 
     # Import using another tenantid, because we use the same pageserver.
     # TODO Create another pageserver to make test more realistic.
-    tenant = uuid4()
+    tenant = ZTenantId.generate()
 
     # Import to pageserver
     node_name = "import_from_pageserver"
@@ -239,28 +241,28 @@ def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timel
             "timeline",
             "import",
             "--tenant-id",
-            tenant.hex,
+            str(tenant),
             "--timeline-id",
-            timeline.hex,
+            str(timeline),
             "--node-name",
             node_name,
             "--base-lsn",
-            lsn,
+            str(lsn),
             "--base-tarfile",
             os.path.join(tar_output_file),
         ]
     )
 
     # Wait for data to land in s3
-    wait_for_last_record_lsn(client, tenant, timeline, lsn_from_hex(lsn))
-    wait_for_upload(client, tenant, timeline, lsn_from_hex(lsn))
+    wait_for_last_record_lsn(client, tenant, timeline, lsn)
+    wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
     pg = env.postgres.create_start(node_name, tenant_id=tenant)
     assert pg.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
-    query = f"fullbackup { tenant.hex} {timeline.hex} {lsn}"
+    query = f"fullbackup { tenant} {timeline} {lsn}"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
     result_basepath = pg_bin.run_capture(cmd, env=psql_env)
     new_tar_output_file = result_basepath + ".stdout"
@@ -272,6 +274,6 @@ def _import(expected_num_rows: int, lsn: str, env: NeonEnv, pg_bin: PgBin, timel
     # Check that gc works
     psconn = env.pageserver.connect()
     pscur = psconn.cursor()
-    pscur.execute(f"do_gc {tenant.hex} {timeline.hex} 0")
+    pscur.execute(f"do_gc {tenant} {timeline} 0")
 
     return tar_output_file

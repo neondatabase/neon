@@ -41,7 +41,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     probe_timestamp = tbl[-1][1] + timedelta(hours=1)
     result = query_scalar(
         ps_cur,
-        f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
+        f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
     )
     assert result == "future"
 
@@ -49,7 +49,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     probe_timestamp = tbl[0][1] - timedelta(hours=10)
     result = query_scalar(
         ps_cur,
-        f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
+        f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
     )
     assert result == "past"
 
@@ -60,7 +60,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Call get_lsn_by_timestamp to get the LSN
         lsn = query_scalar(
             ps_cur,
-            f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
+            f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
         )
 
         # Launch a new read-only node at that LSN, and check that only the rows

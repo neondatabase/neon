@@ -1,14 +1,13 @@
 import asyncio
 import random
 import time
-import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
 import asyncpg
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres, Safekeeper
-from fixtures.utils import lsn_from_hex, lsn_to_hex
+from fixtures.types import Lsn, ZTenantId, ZTimelineId
 
 log = getLogger("root.safekeeper_async")
 
@@ -104,9 +103,9 @@ async def run_random_worker(stats: WorkerStats, pg: Postgres, worker_id, n_accou
 
 async def wait_for_lsn(
     safekeeper: Safekeeper,
-    tenant_id: str,
-    timeline_id: str,
-    wait_lsn: str,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
+    wait_lsn: Lsn,
     polling_interval=1,
     timeout=60,
 ):
@@ -124,7 +123,7 @@ async def wait_for_lsn(
         f"Safekeeper at port {safekeeper.port.pg} has flush_lsn {flush_lsn}, waiting for lsn {wait_lsn}"
     )
 
-    while lsn_from_hex(wait_lsn) > lsn_from_hex(flush_lsn):
+    while wait_lsn > flush_lsn:
         elapsed = time.time() - started_at
         if elapsed > timeout:
             raise RuntimeError(
@@ -156,8 +155,8 @@ async def run_restarts_under_load(
     test_timeout_at = time.monotonic() + 5 * 60
 
     pg_conn = await pg.connect_async()
-    tenant_id = await pg_conn.fetchval("show neon.tenant_id")
-    timeline_id = await pg_conn.fetchval("show neon.timeline_id")
+    tenant_id = ZTenantId(await pg_conn.fetchval("show neon.tenant_id"))
+    timeline_id = ZTimelineId(await pg_conn.fetchval("show neon.timeline_id"))
 
     bank = BankClient(pg_conn, n_accounts=n_accounts, init_amount=init_amount)
     # create tables and initial balances
@@ -176,14 +175,15 @@ async def run_restarts_under_load(
         victim = acceptors[victim_idx]
         victim.stop()
 
-        flush_lsn = await pg_conn.fetchval("SELECT pg_current_wal_flush_lsn()")
-        flush_lsn = lsn_to_hex(flush_lsn)
+        flush_lsn = Lsn(await pg_conn.fetchval("SELECT pg_current_wal_flush_lsn()"))
         log.info(f"Postgres flush_lsn {flush_lsn}")
 
-        pageserver_lsn = env.pageserver.http_client().timeline_detail(
-            uuid.UUID(tenant_id), uuid.UUID((timeline_id))
-        )["local"]["last_record_lsn"]
-        sk_ps_lag = lsn_from_hex(flush_lsn) - lsn_from_hex(pageserver_lsn)
+        pageserver_lsn = Lsn(
+            env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["local"][
+                "last_record_lsn"
+            ]
+        )
+        sk_ps_lag = flush_lsn - pageserver_lsn
         log.info(f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
 
         # Wait until alive safekeepers catch up with postgres
