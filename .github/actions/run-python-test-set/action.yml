@@ -24,7 +24,7 @@ inputs:
     required: false
     default: 'true'
   save_perf_report:
-    description: 'Whether to upload the performance report'
+    description: 'Whether to upload the performance report, if true PERF_TEST_RESULT_CONNSTR env variable should be set'
     required: false
     default: 'false'
   run_with_real_s3:
