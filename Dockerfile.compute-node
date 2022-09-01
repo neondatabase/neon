@@ -79,7 +79,7 @@ FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && cargo build --locked --release
+RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-lto
 
 # Put it all together into the final image
 FROM debian:bullseye-slim
@@ -94,7 +94,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 # TODO: Check if we can make the extension setup more modular versus a linear build
 # currently plv8-build copies the output /usr/local/pgsql from postgis-build, etc#
 COPY --from=neon-pg-ext-build --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
 RUN apt update &&  \
     apt install -y \

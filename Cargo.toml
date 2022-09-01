@@ -15,6 +15,59 @@ members = [
 # Besides, debug info should not affect the performance.
 debug = true
 
+[profile.release-line-debug]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+[profile.release-line-debug-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+lto = true
+
+[profile.release-line-debug-size]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+[profile.release-line-debug-zize]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+[profile.release-line-debug-size-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+lto = true
+[profile.release-line-debug-zize-lto]
+inherits = "release"
+debug = 1 # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+lto = true
+
+[profile.release-no-debug]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+
+[profile.release-no-debug-size]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+[profile.release-no-debug-zize]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+
+[profile.release-no-debug-size-lto]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "s"
+lto = true
+
+[profile.release-no-debug-zize-lto]
+inherits = "release"
+debug = false # true = 2 = all symbols, 1 = line only
+opt-level = "z"
+lto = true
+
+
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 [patch.crates-io]
