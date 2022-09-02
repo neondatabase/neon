@@ -2,7 +2,6 @@ ARG TAG=pinned
 # apparently, ARGs don't get replaced in RUN commands in kaniko
 # ARG POSTGIS_VERSION=3.3.0
 # ARG PLV8_VERSION=3.1.4
-ARG PG_VERSION='v14'
 
 #
 # Layer "build-deps"
@@ -17,6 +16,7 @@ RUN apt update &&  \
 # Build Postgres from the neon postgres repository.
 #
 FROM build-deps AS pg-build
+ARG PG_VERSION=v14
 COPY vendor/postgres-${PG_VERSION} postgres
 RUN cd postgres && \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \

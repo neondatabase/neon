@@ -11,6 +11,7 @@ ARG PG_VERSION=v14
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
+ARG PG_VERSION=v14
 COPY --chown=nonroot vendor/postgres-${PG_VERSION} vendor/postgres-${PG_VERSION}
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
@@ -36,6 +37,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
+ARG PG_VERSION=v14
 COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION}/include/postgresql/server pg_install/include/${PG_VERSION}/postgresql/server
 COPY . .
 
@@ -66,6 +68,7 @@ COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper 
 COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
 
 # v14 is default for now
+ARG PG_VERSION=v14
 COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION} /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
