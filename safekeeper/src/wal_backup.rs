@@ -437,16 +437,23 @@ pub async fn read_object(
     file_path: PathBuf,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
-    let download = REMOTE_STORAGE
+    let storage = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?
         .as_ref()
-        .context("No remote storage configured")?
+        .context("No remote storage configured")?;
+
+    info!(
+        "segment download about to start for local path {} at offset {}",
+        file_path.display(),
+        offset
+    );
+    let download = storage
         .download_storage_object(Some((offset, None)), &file_path)
         .await
         .with_context(|| {
             format!(
-                "Failed to open WAL segment download stream for local storage path {}",
+                "Failed to open WAL segment download stream for local path {}",
                 file_path.display()
             )
         })?;
