@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.utils import query_scalar
 
 
@@ -34,14 +34,16 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
-    cur.execute("SET synchronous_commit=on")
     cur.execute("INSERT INTO foo VALUES (-1)")
+
+    # Wait until WAL is received by pageserver
+    wait_for_last_flush_lsn(env, pgmain, env.initial_tenant, new_timeline_id)
 
     # Check edge cases: timestamp in the future
     probe_timestamp = tbl[-1][1] + timedelta(hours=1)
     result = query_scalar(
         ps_cur,
-        f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
+        f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
     )
     assert result == "future"
 
@@ -49,7 +51,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     probe_timestamp = tbl[0][1] - timedelta(hours=10)
     result = query_scalar(
         ps_cur,
-        f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
+        f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
     )
     assert result == "past"
 
@@ -60,7 +62,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Call get_lsn_by_timestamp to get the LSN
         lsn = query_scalar(
             ps_cur,
-            f"get_lsn_by_timestamp {env.initial_tenant} {new_timeline_id} '{probe_timestamp.isoformat()}Z'",
+            f"get_lsn_by_timestamp {env.initial_tenant.hex} {new_timeline_id.hex} '{probe_timestamp.isoformat()}Z'",
         )
 
         # Launch a new read-only node at that LSN, and check that only the rows
