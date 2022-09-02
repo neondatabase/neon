@@ -287,6 +287,7 @@ typedef struct WalproposerShmemState
 	slock_t		mutex;
 	ReplicationFeedback feedback;
 	term_t		mineLastElectedTerm;
+	pg_atomic_uint64 backpressureThrottlingTime;
 } WalproposerShmemState;
 
 /*
@@ -536,5 +537,7 @@ typedef struct WalProposerFunctionsType
  * can use it later.
  */
 extern PGDLLIMPORT WalProposerFunctionsType *WalProposerFunctions;
+
+extern uint64 BackpressureThrottlingTime(void);
 
 #endif /* __NEON_WALPROPOSER_H__ */
