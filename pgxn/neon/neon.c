@@ -40,7 +40,7 @@ void		_PG_init(void)
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
-PG_FUNCTION_INFO_V1(backpressure_throttling_times);
+PG_FUNCTION_INFO_V1(backpressure_throttling_time);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)

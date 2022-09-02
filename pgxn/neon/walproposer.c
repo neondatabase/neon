@@ -36,6 +36,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "access/xact.h"
 #include "access/xlogdefs.h"
 #include "access/xlogutils.h"
 #include "storage/latch.h"
@@ -58,6 +59,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/ps_status.h"
 #include "utils/timestamp.h"
 
 #include "neon.h"
@@ -2429,9 +2431,9 @@ static bool backpressure_throttling_impl(void)
 	set_ps_display("backpressure throttling");
 
 	elog(DEBUG2, "backpressure throttling: lag %lu", lag);
-	start = GetCurrentTimestamap();
+	start = GetCurrentTimestamp();
 	pg_usleep(BACK_PRESSURE_DELAY);
-	stop = GetCurrentTimestamap();
+	stop = GetCurrentTimestamp();
 	pg_atomic_add_fetch_u64(&walprop_shared->backpressureThrottlingTime, stop - start);
 	return true;
 }
