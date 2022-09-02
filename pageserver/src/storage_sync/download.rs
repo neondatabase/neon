@@ -486,7 +486,7 @@ mod tests {
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
-        let local_storage = storage.as_local().unwrap();
+        let local_storage: &LocalFs = (&storage).try_into().unwrap();
         let current_retries = 3;
         let metadata = dummy_metadata(Lsn(0x30));
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
@@ -643,7 +643,7 @@ mod tests {
             tempdir()?.path().to_owned(),
             harness.conf.workdir.clone(),
         )?);
-        let local_storage = storage.as_local().unwrap();
+        let local_storage: &LocalFs = (&storage).try_into().unwrap();
         let metadata = dummy_metadata(Lsn(0x30));
         let local_timeline_path = harness.timeline_path(&TIMELINE_ID);
 

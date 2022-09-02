@@ -158,13 +158,6 @@ impl GenericRemoteStorage {
         }
     }
 
-    pub fn as_local(&self) -> Option<&LocalFs> {
-        match self {
-            Self::Local(local_fs) => Some(local_fs),
-            _ => None,
-        }
-    }
-
     /// Takes storage object contents and its size and uploads to remote storage,
     /// mapping `from_path` to the corresponding remote object id in the storage.
     ///
@@ -258,6 +251,51 @@ impl GenericRemoteStorage {
             GenericRemoteStorage::S3(storage) => {
                 do_download_storage_object(storage, byte_range, to_path).await
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GenericRemoteStorageDowncastErrors {
+    NonLocalFS,
+    NonS3Bucket,
+}
+
+impl std::error::Error for GenericRemoteStorageDowncastErrors {}
+
+impl std::fmt::Display for GenericRemoteStorageDowncastErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NonLocalFS => write!(
+                f,
+                "The object of GenericRemoteStorage doesn't have an instance of LocalFS."
+            ),
+            Self::NonS3Bucket => write!(
+                f,
+                "The object of GenericRemoteStorage doesn't have an instance of S3Bucket."
+            ),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a GenericRemoteStorage> for &'a LocalFs {
+    type Error = GenericRemoteStorageDowncastErrors;
+
+    fn try_from(storage: &'a GenericRemoteStorage) -> Result<Self, Self::Error> {
+        match storage {
+            GenericRemoteStorage::Local(local_fs) => Ok(local_fs),
+            _ => Err(GenericRemoteStorageDowncastErrors::NonLocalFS),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a GenericRemoteStorage> for &'a S3Bucket {
+    type Error = GenericRemoteStorageDowncastErrors;
+
+    fn try_from(storage: &'a GenericRemoteStorage) -> Result<Self, Self::Error> {
+        match storage {
+            GenericRemoteStorage::S3(bucket) => Ok(bucket),
+            _ => Err(GenericRemoteStorageDowncastErrors::NonS3Bucket),
         }
     }
 }

@@ -172,7 +172,7 @@ mod tests {
             harness.conf.workdir.clone(),
         )?);
 
-        let local_storage = storage.as_local().unwrap();
+        let local_storage: &LocalFs = (&storage).try_into().unwrap();
 
         let current_retries = 3;
         let metadata = dummy_metadata(Lsn(0x30));
