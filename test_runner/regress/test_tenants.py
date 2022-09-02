@@ -154,7 +154,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
         samples = []
         for metric_name in ps_metrics.metrics:
             for sample in ps_metrics.query_all(
-                name=metric_name, filter=dict(tenant_id=str(tenant_id))
+                name=metric_name, filter={"tenant_id": str(tenant_id)}
             ):
                 samples.append(sample)
         return samples
