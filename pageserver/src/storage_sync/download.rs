@@ -10,7 +10,7 @@ use std::{
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use remote_storage::{
-    path_with_suffix_extension, Download, DownloadError, GenericRemoteStorage, RemoteStorage,
+    path_with_suffix_extension, DownloadError, GenericRemoteStorage, RemoteStorage,
 };
 use tokio::{
     fs,
@@ -143,7 +143,9 @@ async fn download_index_part(
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME)
         .with_extension(IndexPart::FILE_EXTENSION);
-    let mut index_part_download = download_storage_object(storage, &index_part_path).await?;
+    let mut index_part_download = storage
+        .download_storage_object(None, &index_part_path)
+        .await?;
 
     let mut index_part_bytes = Vec::new();
     io::copy(
@@ -262,7 +264,7 @@ pub(super) async fn download_timeline_layers<'a>(
                         )
                     })?;
 
-                let mut layer_download = download_storage_object(storage, &layer_destination_path)
+                let mut layer_download = storage.download_storage_object(None, &layer_destination_path)
                     .await
                     .with_context(|| {
                         format!(
@@ -362,37 +364,6 @@ pub(super) async fn download_timeline_layers<'a>(
     } else {
         info!("Successfully downloaded all layers");
         DownloadedTimeline::Successful(download_data)
-    }
-}
-
-async fn download_storage_object(
-    storage: &GenericRemoteStorage,
-    to_path: &Path,
-) -> Result<Download, DownloadError> {
-    async fn do_download_storage_object<P, S>(
-        storage: &S,
-        to_path: &Path,
-    ) -> Result<Download, DownloadError>
-    where
-        P: std::fmt::Debug + Send + Sync + 'static,
-        S: RemoteStorage<RemoteObjectId = P> + Send + Sync + 'static,
-    {
-        let remote_object_path = storage
-            .remote_object_id(to_path)
-            .with_context(|| {
-                format!(
-                    "Failed to get the storage path for target local path '{}'",
-                    to_path.display()
-                )
-            })
-            .map_err(DownloadError::BadInput)?;
-
-        storage.download(&remote_object_path).await
-    }
-
-    match storage {
-        GenericRemoteStorage::Local(storage) => do_download_storage_object(storage, to_path).await,
-        GenericRemoteStorage::S3(storage) => do_download_storage_object(storage, to_path).await,
     }
 }
 

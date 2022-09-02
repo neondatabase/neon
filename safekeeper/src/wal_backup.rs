@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use postgres_ffi::v14::xlog_utils::{XLogFileName, XLogSegNo, XLogSegNoOffsetToRecPtr};
 use postgres_ffi::PG_TLI;
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
+use remote_storage::GenericRemoteStorage;
 use tokio::fs::File;
 use tokio::runtime::Builder;
 
@@ -419,73 +419,37 @@ static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 async fn backup_object(source_file: &Path, size: usize) -> Result<()> {
     let storage = REMOTE_STORAGE.get().expect("failed to get remote storage");
 
-    let file = File::open(&source_file).await?;
+    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
+        format!(
+            "Failed to open file {} for wal backup",
+            source_file.display()
+        )
+    })?);
 
-    // Storage is initialized by launcher at this point.
-    match storage.as_ref().unwrap() {
-        GenericRemoteStorage::Local(local_storage) => {
-            let destination = local_storage.remote_object_id(source_file)?;
-
-            debug!(
-                "local upload about to start from {} to {}",
-                source_file.display(),
-                destination.display()
-            );
-            local_storage.upload(file, size, &destination, None).await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(source_file)?;
-
-            debug!(
-                "S3 upload about to start from {} to {:?}",
-                source_file.display(),
-                s3key
-            );
-            s3_storage.upload(file, size, &s3key, None).await
-        }
-    }?;
-
-    Ok(())
+    storage
+        .as_ref()
+        .expect("Storage should be initialized by launcher at this point.")
+        .upload_storage_object(file, size, source_file)
+        .await
 }
 
 pub async fn read_object(
     file_path: PathBuf,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
-    let download = match REMOTE_STORAGE
+    let download = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?
         .as_ref()
         .context("No remote storage configured")?
-    {
-        GenericRemoteStorage::Local(local_storage) => {
-            let source = local_storage.remote_object_id(&file_path)?;
-
-            info!(
-                "local download about to start from {} at offset {}",
-                source.display(),
-                offset
-            );
-            local_storage
-                .download_byte_range(&source, offset, None)
-                .await
-        }
-        GenericRemoteStorage::S3(s3_storage) => {
-            let s3key = s3_storage.remote_object_id(&file_path)?;
-
-            info!(
-                "S3 download about to start from {:?} at offset {}",
-                s3key, offset
-            );
-            s3_storage.download_byte_range(&s3key, offset, None).await
-        }
-    }
-    .with_context(|| {
-        format!(
-            "Failed to open WAL segment download stream for local storage path {}",
-            file_path.display()
-        )
-    })?;
+        .download_storage_object(Some((offset, None)), &file_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to open WAL segment download stream for local storage path {}",
+                file_path.display()
+            )
+        })?;
 
     Ok(download.download_stream)
 }
