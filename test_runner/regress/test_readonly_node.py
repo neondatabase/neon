@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
@@ -84,7 +85,9 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 
     # Check creating a node at segment boundary
     pg = env.postgres.create_start(
-        branch_name="test_readonly_node", node_name="test_branch_segment_boundary", lsn="0/3000000"
+        branch_name="test_readonly_node",
+        node_name="test_branch_segment_boundary",
+        lsn=Lsn("0/3000000"),
     )
     cur = pg.connect().cursor()
     cur.execute("SELECT 1")
@@ -94,5 +97,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
         env.postgres.create_start(
-            branch_name="test_readonly_node", node_name="test_readonly_node_preinitdb", lsn="0/42"
+            branch_name="test_readonly_node",
+            node_name="test_readonly_node_preinitdb",
+            lsn=Lsn("0/42"),
         )

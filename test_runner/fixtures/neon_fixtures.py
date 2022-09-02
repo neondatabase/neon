@@ -29,20 +29,14 @@ import pytest
 import requests
 from cached_property import cached_property
 from fixtures.log_helper import log
+from fixtures.types import Lsn, ZTenantId, ZTimelineId
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 
-from .utils import (
-    allure_attach_from_dir,
-    etcd_path,
-    get_self_dir,
-    lsn_from_hex,
-    lsn_to_hex,
-    subprocess_capture,
-)
+from .utils import allure_attach_from_dir, etcd_path, get_self_dir, subprocess_capture
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -378,7 +372,7 @@ class AuthKeys:
 
     def generate_tenant_token(self, tenant_id):
         token = jwt.encode(
-            {"scope": "tenant", "tenant_id": tenant_id}, self.priv, algorithm="RS256"
+            {"scope": "tenant", "tenant_id": str(tenant_id)}, self.priv, algorithm="RS256"
         )
 
         if isinstance(token, bytes):
@@ -759,12 +753,12 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = uuid.uuid4()
+        self.initial_tenant = ZTenantId.generate()
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
             f"""
-            default_tenant_id = '{self.initial_tenant.hex}'
+            default_tenant_id = '{self.initial_tenant}'
         """
         )
 
@@ -846,9 +840,9 @@ class NeonEnv:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join([f"localhost:{wa.port.pg}" for wa in self.safekeepers])
 
-    def timeline_dir(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Path:
+    def timeline_dir(self, tenant_id: ZTenantId, timeline_id: ZTimelineId) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
-        return self.repo_dir / "tenants" / tenant_id.hex / "timelines" / timeline_id.hex
+        return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
@@ -976,11 +970,11 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, new_tenant_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+    def tenant_create(self, new_tenant_id: Optional[ZTenantId] = None) -> ZTenantId:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                "new_tenant_id": new_tenant_id.hex if new_tenant_id else None,
+                "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
             },
         )
         self.verbose_error(res)
@@ -988,25 +982,25 @@ class NeonPageserverHttpClient(requests.Session):
             raise Exception(f"could not create tenant: already exists for id {new_tenant_id}")
         new_tenant_id = res.json()
         assert isinstance(new_tenant_id, str)
-        return uuid.UUID(new_tenant_id)
+        return ZTenantId(new_tenant_id)
 
-    def tenant_attach(self, tenant_id: uuid.UUID):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/attach")
+    def tenant_attach(self, tenant_id: ZTenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
         self.verbose_error(res)
 
-    def tenant_detach(self, tenant_id: uuid.UUID):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/detach")
+    def tenant_detach(self, tenant_id: ZTenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
         self.verbose_error(res)
 
-    def tenant_status(self, tenant_id: uuid.UUID) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}")
+    def tenant_status(self, tenant_id: ZTenantId) -> Dict[Any, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_list(self, tenant_id: uuid.UUID) -> List[Dict[str, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline")
+    def timeline_list(self, tenant_id: ZTenantId) -> List[Dict[str, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -1014,17 +1008,17 @@ class NeonPageserverHttpClient(requests.Session):
 
     def timeline_create(
         self,
-        tenant_id: uuid.UUID,
-        new_timeline_id: Optional[uuid.UUID] = None,
-        ancestor_timeline_id: Optional[uuid.UUID] = None,
-        ancestor_start_lsn: Optional[str] = None,
+        tenant_id: ZTenantId,
+        new_timeline_id: Optional[ZTimelineId] = None,
+        ancestor_timeline_id: Optional[ZTimelineId] = None,
+        ancestor_start_lsn: Optional[Lsn] = None,
     ) -> Dict[Any, Any]:
         res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline",
             json={
-                "new_timeline_id": new_timeline_id.hex if new_timeline_id else None,
-                "ancestor_start_lsn": ancestor_start_lsn,
-                "ancestor_timeline_id": ancestor_timeline_id.hex if ancestor_timeline_id else None,
+                "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
+                "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
+                "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
             },
         )
         self.verbose_error(res)
@@ -1037,8 +1031,8 @@ class NeonPageserverHttpClient(requests.Session):
 
     def timeline_detail(
         self,
-        tenant_id: uuid.UUID,
-        timeline_id: uuid.UUID,
+        tenant_id: ZTenantId,
+        timeline_id: ZTimelineId,
         include_non_incremental_logical_size: bool = False,
         include_non_incremental_physical_size: bool = False,
     ) -> Dict[Any, Any]:
@@ -1049,7 +1043,7 @@ class NeonPageserverHttpClient(requests.Session):
             params["include-non-incremental-physical-size"] = "yes"
 
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             params=params,
         )
         self.verbose_error(res)
@@ -1057,9 +1051,9 @@ class NeonPageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID):
+    def timeline_delete(self, tenant_id: ZTenantId, timeline_id: ZTimelineId):
         res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -1179,38 +1173,52 @@ class NeonCli(AbstractNeonCli):
 
     def create_tenant(
         self,
-        tenant_id: Optional[uuid.UUID] = None,
-        timeline_id: Optional[uuid.UUID] = None,
+        tenant_id: Optional[ZTenantId] = None,
+        timeline_id: Optional[ZTimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
-    ) -> Tuple[uuid.UUID, uuid.UUID]:
+    ) -> Tuple[ZTenantId, ZTimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
         if tenant_id is None:
-            tenant_id = uuid.uuid4()
+            tenant_id = ZTenantId.generate()
         if timeline_id is None:
-            timeline_id = uuid.uuid4()
+            timeline_id = ZTimelineId.generate()
         if conf is None:
             res = self.raw_cli(
-                ["tenant", "create", "--tenant-id", tenant_id.hex, "--timeline-id", timeline_id.hex]
+                [
+                    "tenant",
+                    "create",
+                    "--tenant-id",
+                    str(tenant_id),
+                    "--timeline-id",
+                    str(timeline_id),
+                ]
             )
         else:
             res = self.raw_cli(
-                ["tenant", "create", "--tenant-id", tenant_id.hex, "--timeline-id", timeline_id.hex]
+                [
+                    "tenant",
+                    "create",
+                    "--tenant-id",
+                    str(tenant_id),
+                    "--timeline-id",
+                    str(timeline_id),
+                ]
                 + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
             )
         res.check_returncode()
         return tenant_id, timeline_id
 
-    def config_tenant(self, tenant_id: uuid.UUID, conf: Dict[str, str]):
+    def config_tenant(self, tenant_id: ZTenantId, conf: Dict[str, str]):
         """
         Update tenant config.
         """
         if conf is None:
-            res = self.raw_cli(["tenant", "config", "--tenant-id", tenant_id.hex])
+            res = self.raw_cli(["tenant", "config", "--tenant-id", str(tenant_id)])
         else:
             res = self.raw_cli(
-                ["tenant", "config", "--tenant-id", tenant_id.hex]
+                ["tenant", "config", "--tenant-id", str(tenant_id)]
                 + sum(list(map(lambda kv: (["-c", kv[0] + ":" + kv[1]]), conf.items())), [])
             )
         res.check_returncode()
@@ -1221,15 +1229,15 @@ class NeonCli(AbstractNeonCli):
         return res
 
     def create_timeline(
-        self, new_branch_name: str, tenant_id: Optional[uuid.UUID] = None
-    ) -> uuid.UUID:
+        self, new_branch_name: str, tenant_id: Optional[ZTenantId] = None
+    ) -> ZTimelineId:
         cmd = [
             "timeline",
             "create",
             "--branch-name",
             new_branch_name,
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
         ]
 
         res = self.raw_cli(cmd)
@@ -1241,16 +1249,16 @@ class NeonCli(AbstractNeonCli):
         if matches is not None:
             created_timeline_id = matches.group("timeline_id")
 
-        return uuid.UUID(created_timeline_id)
+        return ZTimelineId(str(created_timeline_id))
 
-    def create_root_branch(self, branch_name: str, tenant_id: Optional[uuid.UUID] = None):
+    def create_root_branch(self, branch_name: str, tenant_id: Optional[ZTenantId] = None):
         cmd = [
             "timeline",
             "create",
             "--branch-name",
             branch_name,
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
         ]
 
         res = self.raw_cli(cmd)
@@ -1265,27 +1273,27 @@ class NeonCli(AbstractNeonCli):
         if created_timeline_id is None:
             raise Exception("could not find timeline id after `neon timeline create` invocation")
         else:
-            return uuid.UUID(created_timeline_id)
+            return ZTimelineId(created_timeline_id)
 
     def create_branch(
         self,
         new_branch_name: str = DEFAULT_BRANCH_NAME,
         ancestor_branch_name: Optional[str] = None,
-        tenant_id: Optional[uuid.UUID] = None,
-        ancestor_start_lsn: Optional[str] = None,
-    ) -> uuid.UUID:
+        tenant_id: Optional[ZTenantId] = None,
+        ancestor_start_lsn: Optional[Lsn] = None,
+    ) -> ZTimelineId:
         cmd = [
             "timeline",
             "branch",
             "--branch-name",
             new_branch_name,
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
         ]
         if ancestor_branch_name is not None:
             cmd.extend(["--ancestor-branch-name", ancestor_branch_name])
         if ancestor_start_lsn is not None:
-            cmd.extend(["--ancestor-start-lsn", ancestor_start_lsn])
+            cmd.extend(["--ancestor-start-lsn", str(ancestor_start_lsn)])
 
         res = self.raw_cli(cmd)
         res.check_returncode()
@@ -1299,9 +1307,11 @@ class NeonCli(AbstractNeonCli):
         if created_timeline_id is None:
             raise Exception("could not find timeline id after `neon timeline create` invocation")
         else:
-            return uuid.UUID(created_timeline_id)
+            return ZTimelineId(str(created_timeline_id))
 
-    def list_timelines(self, tenant_id: Optional[uuid.UUID] = None) -> List[Tuple[str, str]]:
+    def list_timelines(
+        self, tenant_id: Optional[ZTenantId] = None
+    ) -> List[Tuple[str, ZTimelineId]]:
         """
         Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
@@ -1309,18 +1319,18 @@ class NeonCli(AbstractNeonCli):
         # (L) main [b49f7954224a0ad25cc0013ea107b54b]
         # (L) ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
         res = self.raw_cli(
-            ["timeline", "list", "--tenant-id", (tenant_id or self.env.initial_tenant).hex]
+            ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
         timelines_cli = sorted(
             map(
-                lambda branch_and_id: (branch_and_id[0], branch_and_id[1]),
+                lambda branch_and_id: (branch_and_id[0], ZTimelineId(branch_and_id[1])),
                 TIMELINE_DATA_EXTRACTOR.findall(res.stdout),
             )
         )
         return timelines_cli
 
     def init(
-        self, config_toml: str, initial_timeline_id: Optional[uuid.UUID] = None
+        self, config_toml: str, initial_timeline_id: Optional[ZTimelineId] = None
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(config_toml)
@@ -1328,7 +1338,7 @@ class NeonCli(AbstractNeonCli):
 
             cmd = ["init", f"--config={tmp.name}"]
             if initial_timeline_id:
-                cmd.extend(["--timeline-id", initial_timeline_id.hex])
+                cmd.extend(["--timeline-id", str(initial_timeline_id)])
             append_pageserver_param_overrides(
                 params_to_update=cmd,
                 remote_storage=self.env.remote_storage,
@@ -1399,20 +1409,20 @@ class NeonCli(AbstractNeonCli):
         self,
         branch_name: str,
         node_name: Optional[str] = None,
-        tenant_id: Optional[uuid.UUID] = None,
-        lsn: Optional[str] = None,
+        tenant_id: Optional[ZTenantId] = None,
+        lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "pg",
             "create",
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
             "--branch-name",
             branch_name,
         ]
         if lsn is not None:
-            args.extend(["--lsn", lsn])
+            args.extend(["--lsn", str(lsn)])
         if port is not None:
             args.extend(["--port", str(port)])
         if node_name is not None:
@@ -1425,15 +1435,15 @@ class NeonCli(AbstractNeonCli):
     def pg_start(
         self,
         node_name: str,
-        tenant_id: Optional[uuid.UUID] = None,
-        lsn: Optional[str] = None,
+        tenant_id: Optional[ZTenantId] = None,
+        lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "pg",
             "start",
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
         ]
         if lsn is not None:
             args.append(f"--lsn={lsn}")
@@ -1449,7 +1459,7 @@ class NeonCli(AbstractNeonCli):
     def pg_stop(
         self,
         node_name: str,
-        tenant_id: Optional[uuid.UUID] = None,
+        tenant_id: Optional[ZTenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
@@ -1457,7 +1467,7 @@ class NeonCli(AbstractNeonCli):
             "pg",
             "stop",
             "--tenant-id",
-            (tenant_id or self.env.initial_tenant).hex,
+            str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
@@ -1856,7 +1866,7 @@ class Postgres(PgProtocol):
     """An object representing a running postgres daemon."""
 
     def __init__(
-        self, env: NeonEnv, tenant_id: uuid.UUID, port: int, check_stop_result: bool = True
+        self, env: NeonEnv, tenant_id: ZTenantId, port: int, check_stop_result: bool = True
     ):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
@@ -1872,7 +1882,7 @@ class Postgres(PgProtocol):
         self,
         branch_name: str,
         node_name: Optional[str] = None,
-        lsn: Optional[str] = None,
+        lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Postgres":
         """
@@ -1887,7 +1897,7 @@ class Postgres(PgProtocol):
         self.env.neon_cli.pg_create(
             branch_name, node_name=self.node_name, tenant_id=self.tenant_id, lsn=lsn, port=self.port
         )
-        path = Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
+        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -1918,7 +1928,7 @@ class Postgres(PgProtocol):
     def pg_data_dir_path(self) -> str:
         """Path to data directory"""
         assert self.node_name
-        path = Path("pgdatadirs") / "tenants" / self.tenant_id.hex / self.node_name
+        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -2005,7 +2015,7 @@ class Postgres(PgProtocol):
         self,
         branch_name: str,
         node_name: Optional[str] = None,
-        lsn: Optional[str] = None,
+        lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Postgres":
         """
@@ -2046,8 +2056,8 @@ class PostgresFactory:
         self,
         branch_name: str,
         node_name: Optional[str] = None,
-        tenant_id: Optional[uuid.UUID] = None,
-        lsn: Optional[str] = None,
+        tenant_id: Optional[ZTenantId] = None,
+        lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
 
@@ -2070,8 +2080,8 @@ class PostgresFactory:
         self,
         branch_name: str,
         node_name: Optional[str] = None,
-        tenant_id: Optional[uuid.UUID] = None,
-        lsn: Optional[str] = None,
+        tenant_id: Optional[ZTenantId] = None,
+        lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
 
@@ -2146,7 +2156,7 @@ class Safekeeper:
         return self
 
     def append_logical_message(
-        self, tenant_id: uuid.UUID, timeline_id: uuid.UUID, request: Dict[str, Any]
+        self, tenant_id: ZTenantId, timeline_id: ZTimelineId, request: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Send JSON_CTRL query to append LogicalMessage to WAL and modify
@@ -2156,7 +2166,7 @@ class Safekeeper:
 
         # "replication=0" hacks psycopg not to send additional queries
         # on startup, see https://github.com/psycopg/psycopg2/pull/482
-        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id.hex} ztenantid={tenant_id.hex}'"
+        connstr = f"host=localhost port={self.port.pg} replication=0 options='-c ztimelineid={timeline_id} ztenantid={tenant_id}'"
 
         with closing(psycopg2.connect(connstr)) as conn:
             # server doesn't support transactions
@@ -2181,18 +2191,18 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
-    flush_lsn: str
-    timeline_start_lsn: str
-    backup_lsn: str
-    remote_consistent_lsn: str
+    flush_lsn: Lsn
+    timeline_start_lsn: Lsn
+    backup_lsn: Lsn
+    remote_consistent_lsn: Lsn
 
 
 @dataclass
 class SafekeeperMetrics:
     # These are metrics from Prometheus which uses float64 internally.
     # As a consequence, values may differ from real original int64s.
-    flush_lsn_inexact: Dict[Tuple[str, str], int] = field(default_factory=dict)
-    commit_lsn_inexact: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    flush_lsn_inexact: Dict[Tuple[ZTenantId, ZTimelineId], int] = field(default_factory=dict)
+    commit_lsn_inexact: Dict[Tuple[ZTenantId, ZTimelineId], int] = field(default_factory=dict)
 
 
 class SafekeeperHttpClient(requests.Session):
@@ -2209,26 +2219,30 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def timeline_status(self, tenant_id: str, timeline_id: str) -> SafekeeperTimelineStatus:
+    def timeline_status(
+        self, tenant_id: ZTenantId, timeline_id: ZTimelineId
+    ) -> SafekeeperTimelineStatus:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
         res.raise_for_status()
         resj = res.json()
         return SafekeeperTimelineStatus(
             acceptor_epoch=resj["acceptor_state"]["epoch"],
-            flush_lsn=resj["flush_lsn"],
-            timeline_start_lsn=resj["timeline_start_lsn"],
-            backup_lsn=resj["backup_lsn"],
-            remote_consistent_lsn=resj["remote_consistent_lsn"],
+            flush_lsn=Lsn(resj["flush_lsn"]),
+            timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
+            backup_lsn=Lsn(resj["backup_lsn"]),
+            remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
         )
 
-    def record_safekeeper_info(self, tenant_id: str, timeline_id: str, body):
+    def record_safekeeper_info(self, tenant_id: ZTenantId, timeline_id: ZTimelineId, body):
         res = self.post(
             f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
             json=body,
         )
         res.raise_for_status()
 
-    def timeline_delete_force(self, tenant_id: str, timeline_id: str) -> Dict[Any, Any]:
+    def timeline_delete_force(
+        self, tenant_id: ZTenantId, timeline_id: ZTimelineId
+    ) -> Dict[Any, Any]:
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
         )
@@ -2237,7 +2251,7 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def tenant_delete_force(self, tenant_id: str) -> Dict[Any, Any]:
+    def tenant_delete_force(self, tenant_id: ZTenantId) -> Dict[Any, Any]:
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         res.raise_for_status()
         res_json = res.json()
@@ -2258,13 +2272,17 @@ class SafekeeperHttpClient(requests.Session):
             all_metrics_text,
             re.MULTILINE,
         ):
-            metrics.flush_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
+            metrics.flush_lsn_inexact[
+                (ZTenantId(match.group(1)), ZTimelineId(match.group(2)))
+            ] = int(match.group(3))
         for match in re.finditer(
             r'^safekeeper_commit_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
             all_metrics_text,
             re.MULTILINE,
         ):
-            metrics.commit_lsn_inexact[(match.group(1), match.group(2))] = int(match.group(3))
+            metrics.commit_lsn_inexact[
+                (ZTenantId(match.group(1)), ZTimelineId(match.group(2)))
+            ] = int(match.group(3))
         return metrics
 
 
@@ -2437,7 +2455,7 @@ def list_files_to_compare(pgdata_dir: Path):
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Postgres):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = pg.safe_psql("SHOW neon.timeline_id")[0][0]
+    timeline = ZTimelineId(pg.safe_psql("SHOW neon.timeline_id")[0][0])
 
     # stop postgres to ensure that files won't change
     pg.stop()
@@ -2453,7 +2471,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {pg.tenant_id.hex} {timeline}'  \
+            -c 'basebackup {pg.tenant_id} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -2521,7 +2539,7 @@ def wait_until(number_of_iterations: int, interval: float, func):
 
 
 def assert_timeline_local(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
+    pageserver_http_client: NeonPageserverHttpClient, tenant: ZTenantId, timeline: ZTimelineId
 ):
     timeline_detail = pageserver_http_client.timeline_detail(
         tenant,
@@ -2535,33 +2553,33 @@ def assert_timeline_local(
 
 def assert_no_in_progress_downloads_for_tenant(
     pageserver_http_client: NeonPageserverHttpClient,
-    tenant: uuid.UUID,
+    tenant: ZTenantId,
 ):
     tenant_status = pageserver_http_client.tenant_status(tenant)
     assert tenant_status["has_in_progress_downloads"] is False, tenant_status
 
 
 def remote_consistent_lsn(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
-) -> int:
+    pageserver_http_client: NeonPageserverHttpClient, tenant: ZTenantId, timeline: ZTimelineId
+) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
     if detail["remote"] is None:
         # No remote information at all. This happens right after creating
         # a timeline, before any part of it has been uploaded to remote
         # storage yet.
-        return 0
+        return Lsn(0)
     else:
         lsn_str = detail["remote"]["remote_consistent_lsn"]
         assert isinstance(lsn_str, str)
-        return lsn_from_hex(lsn_str)
+        return Lsn(lsn_str)
 
 
 def wait_for_upload(
     pageserver_http_client: NeonPageserverHttpClient,
-    tenant: uuid.UUID,
-    timeline: uuid.UUID,
-    lsn: int,
+    tenant: ZTenantId,
+    timeline: ZTimelineId,
+    lsn: Lsn,
 ):
     """waits for local timeline upload up to specified lsn"""
     for i in range(20):
@@ -2570,32 +2588,32 @@ def wait_for_upload(
             return
         log.info(
             "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
-                lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1
+                lsn, current_lsn, i + 1
             )
         )
         time.sleep(1)
     raise Exception(
         "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn_to_hex(lsn), lsn_to_hex(current_lsn)
+            lsn, current_lsn
         )
     )
 
 
 def last_record_lsn(
-    pageserver_http_client: NeonPageserverHttpClient, tenant: uuid.UUID, timeline: uuid.UUID
-) -> int:
+    pageserver_http_client: NeonPageserverHttpClient, tenant: ZTenantId, timeline: ZTimelineId
+) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
     lsn_str = detail["local"]["last_record_lsn"]
     assert isinstance(lsn_str, str)
-    return lsn_from_hex(lsn_str)
+    return Lsn(lsn_str)
 
 
 def wait_for_last_record_lsn(
     pageserver_http_client: NeonPageserverHttpClient,
-    tenant: uuid.UUID,
-    timeline: uuid.UUID,
-    lsn: int,
+    tenant: ZTenantId,
+    timeline: ZTimelineId,
+    lsn: Lsn,
 ):
     """waits for pageserver to catch up to a certain lsn"""
     for i in range(10):
@@ -2604,20 +2622,18 @@ def wait_for_last_record_lsn(
             return
         log.info(
             "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                lsn_to_hex(lsn), lsn_to_hex(current_lsn), i + 1
+                lsn, current_lsn, i + 1
             )
         )
         time.sleep(1)
     raise Exception(
-        "timed out while waiting for last_record_lsn to reach {}, was {}".format(
-            lsn_to_hex(lsn), lsn_to_hex(current_lsn)
-        )
+        "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
     )
 
 
-def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: uuid.UUID, timeline: uuid.UUID):
+def wait_for_last_flush_lsn(env: NeonEnv, pg: Postgres, tenant: ZTenantId, timeline: ZTimelineId):
     """Wait for pageserver to catch up the latest flush LSN"""
-    last_flush_lsn = lsn_from_hex(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
@@ -2626,8 +2642,8 @@ def fork_at_current_lsn(
     pg: Postgres,
     new_branch_name: str,
     ancestor_branch_name: str,
-    tenant_id: Optional[uuid.UUID] = None,
-) -> uuid.UUID:
+    tenant_id: Optional[ZTenantId] = None,
+) -> ZTimelineId:
     """
     Create new branch at the last LSN of an existing branch.
     The "last LSN" is taken from the given Postgres instance. The pageserver will wait for all the

@@ -1,7 +1,6 @@
-from uuid import uuid4
-
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserverApiException, wait_until
+from fixtures.types import ZTenantId, ZTimelineId
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -11,15 +10,15 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # first try to delete non existing timeline
     # for existing tenant:
-    invalid_timeline_id = uuid4()
+    invalid_timeline_id = ZTimelineId.generate()
     with pytest.raises(NeonPageserverApiException, match="timeline not found"):
         ps_http.timeline_delete(tenant_id=env.initial_tenant, timeline_id=invalid_timeline_id)
 
     # for non existing tenant:
-    invalid_tenant_id = uuid4()
+    invalid_tenant_id = ZTenantId.generate()
     with pytest.raises(
         NeonPageserverApiException,
-        match=f"Tenant {invalid_tenant_id.hex} not found in local tenant state",
+        match=f"Tenant {invalid_tenant_id} not found in local tenant state",
     ):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
@@ -37,7 +36,11 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     ):
 
         timeline_path = (
-            env.repo_dir / "tenants" / env.initial_tenant.hex / "timelines" / parent_timeline_id.hex
+            env.repo_dir
+            / "tenants"
+            / str(env.initial_tenant)
+            / "timelines"
+            / str(parent_timeline_id)
         )
         assert timeline_path.exists()
 
@@ -46,7 +49,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         assert not timeline_path.exists()
 
     timeline_path = (
-        env.repo_dir / "tenants" / env.initial_tenant.hex / "timelines" / leaf_timeline_id.hex
+        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
     )
     assert timeline_path.exists()
 

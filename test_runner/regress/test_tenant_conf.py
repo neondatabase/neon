@@ -32,8 +32,8 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
     # it should match global configuration
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            log.info(f"show {env.initial_tenant.hex}")
-            pscur.execute(f"show {env.initial_tenant.hex}")
+            log.info(f"show {env.initial_tenant}")
+            pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
             assert all(
                 i in res.items()
@@ -52,7 +52,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
     # check the configuration of the new tenant
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant.hex}")
+            pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"res: {res}")
             assert all(
@@ -80,7 +80,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
 
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant.hex}")
+            pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after config res: {res}")
             assert all(
@@ -103,7 +103,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
 
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant.hex}")
+            pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
             assert all(

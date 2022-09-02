@@ -6,7 +6,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.utils import lsn_to_hex
+from fixtures.types import Lsn
 
 
 @pytest.mark.parametrize("with_safekeepers", [False, True])
@@ -84,22 +84,24 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     sk_metrics = all_metrics[1:]
 
     ttids = [
-        {"tenant_id": tenant_1.hex, "timeline_id": timeline_1.hex},
-        {"tenant_id": tenant_2.hex, "timeline_id": timeline_2.hex},
+        {"tenant_id": str(tenant_1), "timeline_id": str(timeline_1)},
+        {"tenant_id": str(tenant_2), "timeline_id": str(timeline_2)},
     ]
 
     # Test metrics per timeline
     for tt in ttids:
         log.info(f"Checking metrics for {tt}")
 
-        ps_lsn = int(ps_metrics.query_one("pageserver_last_record_lsn", filter=tt).value)
-        sk_lsns = [int(sk.query_one("safekeeper_commit_lsn", filter=tt).value) for sk in sk_metrics]
+        ps_lsn = Lsn(int(ps_metrics.query_one("pageserver_last_record_lsn", filter=tt).value))
+        sk_lsns = [
+            Lsn(int(sk.query_one("safekeeper_commit_lsn", filter=tt).value)) for sk in sk_metrics
+        ]
 
-        log.info(f"ps_lsn: {lsn_to_hex(ps_lsn)}")
-        log.info(f"sk_lsns: {list(map(lsn_to_hex, sk_lsns))}")
+        log.info(f"ps_lsn: {ps_lsn}")
+        log.info(f"sk_lsns: {sk_lsns}")
 
         assert ps_lsn <= max(sk_lsns)
-        assert ps_lsn > 0
+        assert ps_lsn > Lsn(0)
 
     # Test common metrics
     for metrics in all_metrics:

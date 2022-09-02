@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import (
     base_dir,
     pg_distrib_dir,
 )
+from fixtures.types import ZTenantId
 
 
 def test_wal_restore(
@@ -21,7 +22,7 @@ def test_wal_restore(
     env.neon_cli.create_branch("test_wal_restore")
     pg = env.postgres.create_start("test_wal_restore")
     pg.safe_psql("create table t as select generate_series(1,300000)")
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
+    tenant_id = ZTenantId(pg.safe_psql("show neon.tenant_id")[0][0])
     env.neon_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"

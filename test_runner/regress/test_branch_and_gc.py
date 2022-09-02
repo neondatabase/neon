@@ -4,7 +4,8 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import lsn_from_hex, query_scalar
+from fixtures.types import Lsn
+from fixtures.utils import query_scalar
 
 
 # Test the GC implementation when running with branching.
@@ -74,18 +75,16 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
         "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
     )
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
-    lsn1 = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    lsn1 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
     log.info(f"LSN1: {lsn1}")
 
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
-    lsn2 = query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()")
+    lsn2 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
     log.info(f"LSN2: {lsn2}")
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.
-    env.pageserver.safe_psql(
-        f"do_gc {tenant.hex} {timeline_main.hex} {lsn_from_hex(lsn2) - lsn_from_hex(lsn1) + 1024}"
-    )
+    env.pageserver.safe_psql(f"do_gc {tenant} {timeline_main} {lsn2 - lsn1 + 1024}")
 
     env.neon_cli.create_branch(
         "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
@@ -143,7 +142,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             "INSERT INTO t SELECT FROM generate_series(1, 100000)",
         ]
     )
-    lsn = res[2][0][0]
+    lsn = Lsn(res[2][0][0])
 
     # Use `failpoint=sleep` and `threading` to make the GC iteration triggers *before* the
     # branch creation task but the individual timeline GC iteration happens *after*
@@ -151,7 +150,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     env.pageserver.safe_psql("failpoints before-timeline-gc=sleep(2000)")
 
     def do_gc():
-        env.pageserver.safe_psql(f"do_gc {tenant.hex} {b0.hex} 0")
+        env.pageserver.safe_psql(f"do_gc {tenant} {b0} 0")
 
     thread = threading.Thread(target=do_gc, daemon=True)
     thread.start()

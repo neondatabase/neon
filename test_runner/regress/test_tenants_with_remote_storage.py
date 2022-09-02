@@ -8,7 +8,6 @@
 
 import asyncio
 from typing import List, Tuple
-from uuid import UUID
 
 import pytest
 from fixtures.neon_fixtures import (
@@ -20,16 +19,13 @@ from fixtures.neon_fixtures import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.utils import lsn_from_hex
+from fixtures.types import Lsn, ZTenantId, ZTimelineId
 
 
 async def tenant_workload(env: NeonEnv, pg: Postgres):
     await env.pageserver.connect_async()
 
     pg_conn = await pg.connect_async()
-
-    await pg_conn.fetchval("show neon.tenant_id")
-    await pg_conn.fetchval("show neon.timeline_id")
 
     await pg_conn.execute("CREATE TABLE t(key int primary key, value text)")
     for i in range(1, 100):
@@ -62,7 +58,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
 
     env = neon_env_builder.init_start()
 
-    tenants_pgs: List[Tuple[UUID, Postgres]] = []
+    tenants_pgs: List[Tuple[ZTenantId, Postgres]] = []
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
@@ -87,13 +83,13 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         res = pg.safe_psql_many(
             ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"]
         )
-        tenant_id = res[0][0][0]
-        timeline_id = res[1][0][0]
-        current_lsn = lsn_from_hex(res[2][0][0])
+        tenant_id = ZTenantId(res[0][0][0])
+        timeline_id = ZTimelineId(res[1][0][0])
+        current_lsn = Lsn(res[2][0][0])
 
         # wait until pageserver receives all the data
-        wait_for_last_record_lsn(pageserver_http, UUID(tenant_id), UUID(timeline_id), current_lsn)
+        wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
 
         # run final checkpoint manually to flush all the data to remote storage
         env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
-        wait_for_upload(pageserver_http, UUID(tenant_id), UUID(timeline_id), current_lsn)
+        wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)

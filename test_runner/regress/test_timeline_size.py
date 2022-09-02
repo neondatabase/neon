@@ -3,7 +3,6 @@ import random
 import re
 import time
 from contextlib import closing
-from uuid import UUID
 
 import psycopg2.errors
 import psycopg2.extras
@@ -15,6 +14,7 @@ from fixtures.neon_fixtures import (
     assert_timeline_local,
     wait_for_last_flush_lsn,
 )
+from fixtures.types import ZTenantId, ZTimelineId
 from fixtures.utils import get_timeline_dir_size
 
 
@@ -34,8 +34,6 @@ def test_timeline_size(neon_simple_env: NeonEnv):
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.timeline_id")
-
             cur.execute("CREATE TABLE foo (t text)")
             cur.execute(
                 """
@@ -77,8 +75,6 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
 
     with closing(pgmain.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SHOW neon.timeline_id")
-
             res = assert_timeline_local(client, env.initial_tenant, new_timeline_id)
             local_details = res["local"]
             assert (
@@ -254,7 +250,7 @@ def test_timeline_physical_size_post_checkpoint(neon_simple_env: NeonEnv):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -281,8 +277,8 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
-    env.pageserver.safe_psql(f"compact {env.initial_tenant.hex} {new_timeline_id.hex}")
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
+    env.pageserver.safe_psql(f"compact {env.initial_tenant} {new_timeline_id}")
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -307,7 +303,7 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
 
     pg.safe_psql(
         """
@@ -318,9 +314,9 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
 
-    env.pageserver.safe_psql(f"do_gc {env.initial_tenant.hex} {new_timeline_id.hex} 0")
+    env.pageserver.safe_psql(f"do_gc {env.initial_tenant} {new_timeline_id} 0")
 
     assert_physical_size(env, env.initial_tenant, new_timeline_id)
 
@@ -343,12 +339,12 @@ def test_timeline_size_metrics(neon_simple_env: NeonEnv):
     )
 
     wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
-    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant.hex} {new_timeline_id.hex}")
+    env.pageserver.safe_psql(f"checkpoint {env.initial_tenant} {new_timeline_id}")
 
     # get the metrics and parse the metric for the current timeline's physical size
     metrics = env.pageserver.http_client().get_metrics()
     matches = re.search(
-        f'^pageserver_current_physical_size{{tenant_id="{env.initial_tenant.hex}",timeline_id="{new_timeline_id.hex}"}} (\\S+)$',
+        f'^pageserver_current_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
         metrics,
         re.MULTILINE,
     )
@@ -361,7 +357,7 @@ def test_timeline_size_metrics(neon_simple_env: NeonEnv):
 
     # Check that the logical size metric is sane, and matches
     matches = re.search(
-        f'^pageserver_current_logical_size{{tenant_id="{env.initial_tenant.hex}",timeline_id="{new_timeline_id.hex}"}} (\\S+)$',
+        f'^pageserver_current_logical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
         metrics,
         re.MULTILINE,
     )
@@ -389,7 +385,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
 
     tenant, timeline = env.neon_cli.create_tenant()
 
-    def get_timeline_physical_size(timeline: UUID):
+    def get_timeline_physical_size(timeline: ZTimelineId):
         res = client.timeline_detail(tenant, timeline, include_non_incremental_physical_size=True)
         return res["local"]["current_physical_size_non_incremental"]
 
@@ -408,7 +404,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
         )
 
         wait_for_last_flush_lsn(env, pg, tenant, timeline)
-        env.pageserver.safe_psql(f"checkpoint {tenant.hex} {timeline.hex}")
+        env.pageserver.safe_psql(f"checkpoint {tenant} {timeline}")
 
         timeline_total_size += get_timeline_physical_size(timeline)
 
@@ -418,7 +414,7 @@ def test_tenant_physical_size(neon_simple_env: NeonEnv):
     assert tenant_physical_size == timeline_total_size
 
 
-def assert_physical_size(env: NeonEnv, tenant_id: UUID, timeline_id: UUID):
+def assert_physical_size(env: NeonEnv, tenant_id: ZTenantId, timeline_id: ZTimelineId):
     """Check the current physical size returned from timeline API
     matches the total physical size of the timeline on disk"""
     client = env.pageserver.http_client()

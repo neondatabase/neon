@@ -5,7 +5,6 @@ import json
 import os
 import re
 import timeit
-import uuid
 import warnings
 from contextlib import contextmanager
 from datetime import datetime
@@ -17,6 +16,7 @@ from typing import Iterator, Optional
 import pytest
 from _pytest.config import Config
 from _pytest.terminal import TerminalReporter
+from fixtures.types import ZTenantId, ZTimelineId
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -365,11 +365,11 @@ class NeonBenchmarker:
         assert matches
         return int(round(float(matches.group(1))))
 
-    def get_timeline_size(self, repo_dir: Path, tenantid: uuid.UUID, timelineid: str):
+    def get_timeline_size(self, repo_dir: Path, tenantid: ZTenantId, timelineid: ZTimelineId):
         """
         Calculate the on-disk size of a timeline
         """
-        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid.hex, timelineid)
+        path = "{}/tenants/{}/timelines/{}".format(repo_dir, tenantid, timelineid)
 
         totalbytes = 0
         for root, dirs, files in os.walk(path):

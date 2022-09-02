@@ -1,6 +1,7 @@
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.types import ZTimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -26,7 +27,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     cur = pg_conn.cursor()
 
     # Get the timeline ID of our branch. We need it for the 'do_gc' command
-    timeline = query_scalar(cur, "SHOW neon.timeline_id")
+    timeline = ZTimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
     psconn = env.pageserver.connect()
     pscur = psconn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -60,9 +61,9 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
     for i in range(10):
-        pscur.execute(f"do_gc {env.initial_tenant.hex} {timeline} 0")
-        row = pscur.fetchone()
-        print_gc_result(row)
+        pscur.execute(f"do_gc {env.initial_tenant} {timeline} 0")
+        gcrow = pscur.fetchone()
+        print_gc_result(gcrow)
 
         for j in range(100):
             cur.execute("UPDATE foo SET val = val + 1 WHERE id = 1;")
