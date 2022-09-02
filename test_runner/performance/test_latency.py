@@ -11,6 +11,7 @@ def start_write_workload(pg: Postgres, scale: int = 10):
     with pg.connect().cursor() as cur:
         cur.execute(f"create table big as select generate_series(1,{scale*100_000})")
 
+
 # Measure latency of reads on one table, while lots of writes are happening on another table.
 # The fine-grained tracking of last-written LSNs helps to keep the latency low. Without it, the reads would
 # often need to wait for the WAL records of the unrelated writes to be processed by the pageserver.
