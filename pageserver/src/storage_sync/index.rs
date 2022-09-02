@@ -278,8 +278,7 @@ pub struct IndexPart {
 }
 
 impl IndexPart {
-    pub const FILE_NAME: &'static str = "index_part";
-    pub const FILE_EXTENSION: &'static str = "json";
+    pub const FILE_NAME: &'static str = "index_part.json";
 
     #[cfg(test)]
     pub fn new(
