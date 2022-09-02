@@ -42,8 +42,7 @@ pub(super) async fn upload_index_part(
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
-        .with_file_name(IndexPart::FILE_NAME)
-        .with_extension(IndexPart::FILE_EXTENSION);
+        .with_file_name(IndexPart::FILE_NAME);
     storage
         .upload_storage_object(index_part_bytes, index_part_size, &index_part_path)
         .await
@@ -442,16 +441,9 @@ mod tests {
 
         let index_part_path = storage_files.first().unwrap();
         assert_eq!(
-            index_part_path.file_stem().and_then(|name| name.to_str()),
+            index_part_path.file_name().and_then(|name| name.to_str()),
             Some(IndexPart::FILE_NAME),
             "Remote index part should have the correct name"
-        );
-        assert_eq!(
-            index_part_path
-                .extension()
-                .and_then(|extension| extension.to_str()),
-            Some(IndexPart::FILE_EXTENSION),
-            "Remote index part should have the correct extension"
         );
 
         let remote_index_part: IndexPart =

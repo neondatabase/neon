@@ -141,8 +141,7 @@ async fn download_index_part(
     sync_id: ZTenantTimelineId,
 ) -> Result<IndexPart, DownloadError> {
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
-        .with_file_name(IndexPart::FILE_NAME)
-        .with_extension(IndexPart::FILE_EXTENSION);
+        .with_file_name(IndexPart::FILE_NAME);
     let mut index_part_download = storage
         .download_storage_object(None, &index_part_path)
         .await?;
@@ -663,8 +662,7 @@ mod tests {
 
         let local_index_part_path =
             metadata_path(harness.conf, sync_id.timeline_id, sync_id.tenant_id)
-                .with_file_name(IndexPart::FILE_NAME)
-                .with_extension(IndexPart::FILE_EXTENSION);
+                .with_file_name(IndexPart::FILE_NAME);
         let storage_path = local_storage.remote_object_id(&local_index_part_path)?;
         fs::create_dir_all(storage_path.parent().unwrap()).await?;
         fs::write(&storage_path, serde_json::to_vec(&index_part)?).await?;
