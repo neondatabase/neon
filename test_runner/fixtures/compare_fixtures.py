@@ -112,10 +112,10 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        self.pscur.execute(f"do_gc {self.env.initial_tenant.hex} {self.timeline} 0")
+        self.pscur.execute(f"do_gc {self.env.initial_tenant} {self.timeline} 0")
 
     def compact(self):
-        self.pscur.execute(f"compact {self.env.initial_tenant.hex} {self.timeline}")
+        self.pscur.execute(f"compact {self.env.initial_tenant} {self.timeline}")
 
     def report_peak_memory_use(self) -> None:
         self.zenbenchmark.record(
