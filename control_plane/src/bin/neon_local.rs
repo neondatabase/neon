@@ -1,3 +1,10 @@
+//!
+//! `neon_local` is an executable that can be used to create a local
+//! Neon environment, for testing purposes. The local environment is
+//! quite different from the cloud environment with Kubernetes, but it
+//! easier to work with locally. The python tests in `test_runner`
+//! rely on `neon_local` to set up the environment for each test.
+//!
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, AppSettings, Arg, ArgMatches};
 use control_plane::compute::ComputeControlPlane;
