@@ -1436,7 +1436,9 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 
 	/*
 	 * Truncate may affect several chunks of relations. So we should either update last written LSN for all of them,
-	 * either update LSN for "dummy" metadata block. Second approach seems to be more efficient.
+	 * or update LSN for "dummy" metadata block. Second approach seems more efficient. If the relation is extended
+	 * again later, the extension will update the last-written LSN for the extended pages, so there's no harm in
+	 * leaving behind obsolete entries for the truncated chunks.
 	 */
 	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forknum);
 
