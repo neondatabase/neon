@@ -432,14 +432,12 @@ impl LogicalSize {
                 .map(CurrentLogicalSize::Exact)
             }
             None => {
-                let non_negative_size_increment = size_increment.max(0);
-                u64::try_from(non_negative_size_increment)
-                    .with_context(|| {
-                        format!(
-                            "Failed to convert size increment {non_negative_size_increment} to u64"
-                        )
-                    })
-                    .map(CurrentLogicalSize::Approximate)
+                let non_negative_size_increment = if size_increment < 0 {
+                    0
+                } else {
+                    u64::try_from(size_increment).expect("not negative, cannot fail")
+                };
+                Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
             }
         }
     }
