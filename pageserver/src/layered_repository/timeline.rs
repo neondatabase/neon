@@ -98,7 +98,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // Metrics
-    metrics: Arc<TimelineMetrics>,
+    metrics: TimelineMetrics,
 
     /// If `true`, will backup its files that appear after each checkpointing to the remote storage.
     upload_layers: AtomicBool,
@@ -561,10 +561,7 @@ impl Timeline {
             ancestor_timeline: ancestor,
             ancestor_lsn: metadata.ancestor_lsn(),
 
-            metrics: Arc::new(TimelineMetrics::new(
-                &tenant_id.to_string(),
-                &timeline_id.to_string(),
-            )),
+            metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
 
             upload_layers: AtomicBool::new(upload_layers),
 
