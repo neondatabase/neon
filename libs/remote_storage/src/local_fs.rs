@@ -17,9 +17,15 @@ use tokio::{
 };
 use tracing::*;
 
-use crate::{path_with_suffix_extension, Download, DownloadError};
+use crate::{path_with_suffix_extension, Download, DownloadError, RemoteObjectName};
 
 use super::{strip_path_prefix, RemoteStorage, StorageMetadata};
+
+impl RemoteObjectName for PathBuf {
+    fn object_name(&self) -> Option<&str> {
+        self.file_stem().and_then(|n| n.to_str())
+    }
+}
 
 pub struct LocalFs {
     working_directory: PathBuf,

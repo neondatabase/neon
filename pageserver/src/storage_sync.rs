@@ -156,7 +156,7 @@ use std::{
 use anyhow::{anyhow, bail, Context};
 use futures::stream::{FuturesUnordered, StreamExt};
 use once_cell::sync::{Lazy, OnceCell};
-use remote_storage::GenericRemoteStorage;
+use remote_storage::RemoteStorage;
 use tokio::{
     fs,
     runtime::Runtime,
@@ -253,7 +253,7 @@ pub struct SyncStartupData {
 /// Along with that, scans tenant files local and remote (if the sync gets enabled) to check the initial timeline states.
 pub fn start_local_timeline_sync(
     config: &'static PageServerConf,
-    storage: Option<Arc<GenericRemoteStorage>>,
+    storage: Option<Arc<impl RemoteStorage>>,
 ) -> anyhow::Result<SyncStartupData> {
     let local_timeline_files = local_tenant_timeline_files(config)
         .context("Failed to collect local tenant timeline files")?;
@@ -797,7 +797,7 @@ pub fn schedule_layer_download(tenant_id: ZTenantId, timeline_id: ZTimelineId) {
 pub(super) fn spawn_storage_sync_thread(
     conf: &'static PageServerConf,
     local_timeline_files: HashMap<ZTenantTimelineId, (TimelineMetadata, HashSet<PathBuf>)>,
-    storage: Arc<GenericRemoteStorage>,
+    storage: Arc<impl RemoteStorage>,
     max_concurrent_timelines_sync: NonZeroUsize,
     max_sync_errors: NonZeroU32,
 ) -> anyhow::Result<SyncStartupData> {
@@ -817,7 +817,7 @@ pub(super) fn spawn_storage_sync_thread(
 
     let applicable_index_parts = runtime.block_on(download_index_parts(
         conf,
-        &storage,
+        storage.as_ref(),
         local_timeline_files.keys().copied().collect(),
     ));
 
@@ -856,7 +856,7 @@ pub(super) fn spawn_storage_sync_thread(
 fn storage_sync_loop(
     runtime: Runtime,
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (Arc<impl RemoteStorage>, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
 ) {
     info!("Starting remote storage sync loop");
@@ -963,7 +963,7 @@ enum UploadStatus {
 async fn process_batches(
     conf: &'static PageServerConf,
     max_sync_errors: NonZeroU32,
-    storage: Arc<GenericRemoteStorage>,
+    storage: Arc<impl RemoteStorage>,
     index: &RemoteIndex,
     batched_tasks: HashMap<ZTenantTimelineId, SyncTaskBatch>,
     sync_queue: &SyncQueue,
@@ -1005,7 +1005,7 @@ async fn process_batches(
 
 async fn process_sync_task_batch(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (Arc<GenericRemoteStorage>, RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (Arc<impl RemoteStorage>, RemoteIndex, &SyncQueue),
     max_sync_errors: NonZeroU32,
     sync_id: ZTenantTimelineId,
     batch: SyncTaskBatch,
@@ -1146,7 +1146,7 @@ async fn process_sync_task_batch(
 
 async fn download_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&impl RemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
     sync_id: ZTenantTimelineId,
     new_download_data: SyncData<LayersDownload>,
@@ -1265,7 +1265,7 @@ async fn update_local_metadata(
 
 async fn delete_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&impl RemoteStorage, &RemoteIndex, &SyncQueue),
     sync_id: ZTenantTimelineId,
     mut new_delete_data: SyncData<LayersDeletion>,
     sync_start: Instant,
@@ -1307,7 +1307,7 @@ async fn read_metadata_file(metadata_path: &Path) -> anyhow::Result<TimelineMeta
 
 async fn upload_timeline_data(
     conf: &'static PageServerConf,
-    (storage, index, sync_queue): (&GenericRemoteStorage, &RemoteIndex, &SyncQueue),
+    (storage, index, sync_queue): (&impl RemoteStorage, &RemoteIndex, &SyncQueue),
     current_remote_timeline: Option<&RemoteTimeline>,
     sync_id: ZTenantTimelineId,
     new_upload_data: SyncData<LayersUpload>,
@@ -1366,7 +1366,7 @@ enum RemoteDataUpdate<'a> {
 
 async fn update_remote_data(
     conf: &'static PageServerConf,
-    storage: &GenericRemoteStorage,
+    storage: &impl RemoteStorage,
     index: &RemoteIndex,
     sync_id: ZTenantTimelineId,
     update: RemoteDataUpdate<'_>,

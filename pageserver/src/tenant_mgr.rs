@@ -12,7 +12,7 @@ use crate::thread_mgr::ThreadKind;
 use crate::walredo::PostgresRedoManager;
 use crate::{thread_mgr, timelines, walreceiver};
 use anyhow::Context;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::RemoteStorage;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -134,10 +134,11 @@ impl fmt::Display for TenantState {
 /// are scheduled for download and added to the repository once download is completed.
 pub fn init_tenant_mgr(
     conf: &'static PageServerConf,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<Arc<impl RemoteStorage>>,
 ) -> anyhow::Result<RemoteIndex> {
     let (timeline_updates_sender, timeline_updates_receiver) =
         mpsc::unbounded_channel::<LocalTimelineUpdate>();
+
     tenants_state::set_timeline_update_sender(timeline_updates_sender)?;
     walreceiver::init_wal_receiver_main_thread(conf, timeline_updates_receiver)?;
 

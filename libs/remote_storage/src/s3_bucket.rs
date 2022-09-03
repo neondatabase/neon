@@ -19,7 +19,9 @@ use tokio::{io, sync::Semaphore};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
-use crate::{strip_path_prefix, Download, DownloadError, RemoteStorage, S3Config};
+use crate::{
+    strip_path_prefix, Download, DownloadError, RemoteObjectName, RemoteStorage, S3Config,
+};
 
 use super::StorageMetadata;
 
@@ -94,23 +96,6 @@ const S3_PREFIX_SEPARATOR: char = '/';
 pub struct S3ObjectKey(String);
 
 impl S3ObjectKey {
-    /// Turn a/b/c or a/b/c/ into c
-    pub fn object_name(&self) -> Option<&str> {
-        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
-        // see https://github.com/rust-lang/rust/issues/88674
-        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
-            return None;
-        }
-
-        if self.0.ends_with(S3_PREFIX_SEPARATOR) {
-            self.0.rsplit(S3_PREFIX_SEPARATOR).nth(1)
-        } else {
-            self.0
-                .rsplit_once(S3_PREFIX_SEPARATOR)
-                .map(|(_, last)| last)
-        }
-    }
-
     fn key(&self) -> &str {
         &self.0
     }
@@ -131,6 +116,25 @@ impl S3ObjectKey {
                 .split(S3_PREFIX_SEPARATOR)
                 .collect::<PathBuf>(),
         )
+    }
+}
+
+impl RemoteObjectName for S3ObjectKey {
+    /// Turn a/b/c or a/b/c/ into c
+    fn object_name(&self) -> Option<&str> {
+        // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
+        // see https://github.com/rust-lang/rust/issues/88674
+        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
+            return None;
+        }
+
+        if self.0.ends_with(S3_PREFIX_SEPARATOR) {
+            self.0.rsplit(S3_PREFIX_SEPARATOR).nth(1)
+        } else {
+            self.0
+                .rsplit_once(S3_PREFIX_SEPARATOR)
+                .map(|(_, last)| last)
+        }
     }
 }
 

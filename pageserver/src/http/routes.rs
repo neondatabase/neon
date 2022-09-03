@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
-use remote_storage::GenericRemoteStorage;
+use remote_storage::RemoteStorage;
 use tracing::*;
 
 use super::models::{LocalTimelineInfo, RemoteTimelineInfo, TimelineInfo};
@@ -30,20 +30,20 @@ use utils::{
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
 };
 
-struct State {
+struct State<S: RemoteStorage> {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
     allowlist_routes: Vec<Uri>,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<Arc<S>>,
 }
 
-impl State {
+impl<S: RemoteStorage> State<S> {
     fn new(
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_index: RemoteIndex,
-        remote_storage: Option<Arc<GenericRemoteStorage>>,
+        remote_storage: Option<Arc<S>>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -60,16 +60,16 @@ impl State {
 }
 
 #[inline(always)]
-fn get_state(request: &Request<Body>) -> &State {
+fn get_state<S: RemoteStorage>(request: &Request<Body>) -> &State<S> {
     request
-        .data::<Arc<State>>()
+        .data::<Arc<State<_>>>()
         .expect("unknown state type")
         .as_ref()
 }
 
 #[inline(always)]
-fn get_config(request: &Request<Body>) -> &'static PageServerConf {
-    get_state(request).conf
+fn get_config<S: RemoteStorage>(request: &Request<Body>) -> &'static PageServerConf {
+    get_state::<S>(request).conf
 }
 
 // Helper functions to construct a LocalTimelineInfo struct for a timeline
@@ -190,12 +190,16 @@ fn list_local_timelines(
 }
 
 // healthcheck handler
-async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let config = get_config(&request);
+async fn status_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let config = get_config::<S>(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
 
-async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_create_handler<S: RemoteStorage>(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
@@ -204,7 +208,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
 
         match timelines::create_timeline(
-            get_config(&request),
+            get_config::<S>(&request),
             tenant_id,
             request_data.new_timeline_id.map(ZTimelineId::from),
             request_data.ancestor_timeline_id.map(ZTimelineId::from),
@@ -233,7 +237,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     })
 }
 
-async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_list_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
@@ -258,7 +264,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
             tenant_id,
             timeline_id,
             local: Some(local_timeline_info),
-            remote: get_state(&request)
+            remote: get_state::<S>(&request)
                 .remote_index
                 .read()
                 .await
@@ -289,7 +295,9 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_detail_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size =
@@ -323,7 +331,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         .flatten();
 
         let remote_timeline_info = {
-            let remote_index_read = get_state(&request).remote_index.read().await;
+            let remote_index_read = get_state::<S>(&request).remote_index.read().await;
             remote_index_read
                 .timeline_entry(&ZTenantTimelineId {
                     tenant_id,
@@ -356,7 +364,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 }
 
 // TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
-async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_attach_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -371,7 +381,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     .await
     .map_err(ApiError::from_err)??;
 
-    let state = get_state(&request);
+    let state = get_state::<S>(&request);
     let remote_index = &state.remote_index;
 
     let mut index_accessor = remote_index.write().await;
@@ -435,13 +445,18 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
 
 /// Note: is expensive from s3 access perspective,
 /// for details see comment to `storage_sync::gather_tenant_timelines_index_parts`
-async fn gather_tenant_timelines_index_parts(
-    state: &State,
+async fn gather_tenant_timelines_index_parts<S: RemoteStorage>(
+    state: &State<S>,
     tenant_id: ZTenantId,
 ) -> anyhow::Result<Option<Vec<(ZTimelineId, RemoteTimeline)>>> {
     let index_parts = match state.remote_storage.as_ref() {
         Some(storage) => {
-            storage_sync::gather_tenant_timelines_index_parts(state.conf, storage, tenant_id).await
+            storage_sync::gather_tenant_timelines_index_parts(
+                state.conf,
+                storage.as_ref(),
+                tenant_id,
+            )
+            .await
         }
         None => return Ok(None),
     }
@@ -459,12 +474,14 @@ async fn gather_tenant_timelines_index_parts(
     Ok(Some(remote_timelines))
 }
 
-async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_delete_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: ZTimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let state = get_state(&request);
+    let state = get_state::<S>(&request);
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
         tenant_mgr::delete_timeline(tenant_id, timeline_id)
@@ -481,11 +498,13 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::OK, ())
 }
 
-async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_detach_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let state = get_state(&request);
+    let state = get_state::<S>(&request);
     let conf = state.conf;
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
@@ -500,10 +519,12 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, ())
 }
 
-async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_list_handler<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
-    let state = get_state(&request);
+    let state = get_state::<S>(&request);
     // clone to avoid holding the lock while awaiting for blocking task
     let remote_index = state.remote_index.read().await.clone();
 
@@ -517,7 +538,9 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::OK, response_data)
 }
 
-async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_status<S: RemoteStorage>(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: ZTenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -526,7 +549,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         .await
         .map_err(ApiError::from_err)?;
 
-    let state = get_state(&request);
+    let state = get_state::<S>(&request);
     let remote_index = &state.remote_index;
 
     let index_accessor = remote_index.read().await;
@@ -567,11 +590,13 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
     )
 }
 
-async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_create_handler<S: RemoteStorage>(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
-    let remote_index = get_state(&request).remote_index.clone();
+    let remote_index = get_state::<S>(&request).remote_index.clone();
 
     let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
@@ -620,7 +645,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let new_tenant_id = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_create", tenant = ?target_tenant_id).entered();
-        let conf = get_config(&request);
+        let conf = get_config::<S>(&request);
 
         tenant_mgr::create_tenant_repository(conf, tenant_conf, target_tenant_id, remote_index)
     })
@@ -694,17 +719,17 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
-pub fn make_router(
+pub fn make_router<S: RemoteStorage>(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     remote_index: RemoteIndex,
-    remote_storage: Option<Arc<GenericRemoteStorage>>,
+    remote_storage: Option<Arc<S>>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
     if auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
-            let state = get_state(request);
+            let state = get_state::<S>(request);
             if state.allowlist_routes.contains(request.uri()) {
                 None
             } else {
@@ -718,27 +743,30 @@ pub fn make_router(
             State::new(conf, auth, remote_index, remote_storage)
                 .context("Failed to initialize router state")?,
         ))
-        .get("/v1/status", status_handler)
-        .get("/v1/tenant", tenant_list_handler)
-        .post("/v1/tenant", tenant_create_handler)
-        .get("/v1/tenant/:tenant_id", tenant_status)
+        .get("/v1/status", status_handler::<S>)
+        .get("/v1/tenant", tenant_list_handler::<S>)
+        .post("/v1/tenant", tenant_create_handler::<S>)
+        .get("/v1/tenant/:tenant_id", tenant_status::<S>)
         .put("/v1/tenant/config", tenant_config_handler)
-        .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
-        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
-        .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
-        .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
+        .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler::<S>)
+        .post(
+            "/v1/tenant/:tenant_id/timeline",
+            timeline_create_handler::<S>,
+        )
+        .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler::<S>)
+        .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler::<S>)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_detail_handler,
+            timeline_detail_handler::<S>,
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_delete_handler,
+            timeline_delete_handler::<S>,
         )
         // for backward compatibility
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
-            timeline_delete_handler,
+            timeline_delete_handler::<S>,
         )
         .any(handler_404))
 }

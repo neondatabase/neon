@@ -1,7 +1,7 @@
 //! Main entry point for the Page Server executable.
 
-use remote_storage::GenericRemoteStorage;
-use std::{env, ops::ControlFlow, path::Path, str::FromStr, sync::Arc};
+use remote_storage::{LocalFs, RemoteStorage, RemoteStorageKind, S3Bucket};
+use std::{env, net::TcpListener, ops::ControlFlow, path::Path, str::FromStr, sync::Arc};
 use tracing::*;
 
 use anyhow::{bail, Context, Result};
@@ -233,6 +233,32 @@ fn initialize_config(
     })
 }
 
+fn setup_with_remote_storage(
+    conf: &'static PageServerConf,
+    remote_storage: Option<Arc<impl RemoteStorage>>,
+    http_listener: TcpListener,
+    auth: Option<Arc<JwtAuth>>,
+) -> Result<()> {
+    // TODO maybe parametrize whole start pageserver wih remote storage type. Maybe split the whole thing into several pieces
+    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.as_ref().map(Arc::clone))?;
+
+    // Spawn a new thread for the http endpoint
+    // bind before launching separate thread so the error reported before startup exits
+    let auth_cloned = auth.clone();
+    thread_mgr::spawn(
+        ThreadKind::HttpEndpointListener,
+        None,
+        None,
+        "http_endpoint_thread",
+        true,
+        move || {
+            let router = http::make_router(conf, auth_cloned, remote_index, remote_storage)?;
+            endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
+        },
+    )?;
+    Ok(())
+}
+
 fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()> {
     // Initialize logger
     let log_file = logging::init(LOG_FILE_NAME, daemonize)?;
@@ -299,29 +325,43 @@ fn start_pageserver(conf: &'static PageServerConf, daemonize: bool) -> Result<()
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    let remote_storage = conf
-        .remote_storage_config
-        .as_ref()
-        .map(|storage_config| GenericRemoteStorage::new(conf.workdir.clone(), storage_config))
-        .transpose()
-        .context("Failed to init generic remote storage")?
-        .map(Arc::new);
-    let remote_index = tenant_mgr::init_tenant_mgr(conf, remote_storage.as_ref().map(Arc::clone))?;
-
-    // Spawn a new thread for the http endpoint
-    // bind before launching separate thread so the error reported before startup exits
-    let auth_cloned = auth.clone();
-    thread_mgr::spawn(
-        ThreadKind::HttpEndpointListener,
-        None,
-        None,
-        "http_endpoint_thread",
-        true,
-        move || {
-            let router = http::make_router(conf, auth_cloned, remote_index, remote_storage)?;
-            endpoint::serve_thread_main(router, http_listener, thread_mgr::shutdown_watcher())
+    match &conf.remote_storage_config {
+        Some(c) => match &c.storage {
+            RemoteStorageKind::LocalFs(root) => {
+                info!("Using fs root '{}' as a remote storage", root.display());
+                let storage = LocalFs::new(root.to_owned(), conf.workdir.clone())?;
+                setup_with_remote_storage(
+                    conf,
+                    Some(Arc::new(storage)),
+                    http_listener,
+                    auth.clone(),
+                )?
+            }
+            RemoteStorageKind::AwsS3(s3_config) => {
+                info!(
+                        "Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
+                        s3_config.bucket_name,
+                        s3_config.bucket_region,
+                        s3_config.prefix_in_bucket,
+                        s3_config.endpoint,
+                    );
+                let storage = S3Bucket::new(&s3_config, conf.workdir.clone())?;
+                setup_with_remote_storage(
+                    conf,
+                    Some(Arc::new(storage)),
+                    http_listener,
+                    auth.clone(),
+                )?
+            }
         },
-    )?;
+        // Thats a hack :( cannot pass None without annotating type
+        None => setup_with_remote_storage(
+            conf,
+            Option::<Arc<LocalFs>>::None,
+            http_listener,
+            auth.clone(),
+        )?,
+    }
 
     // Spawn a thread to listen for libpq connections. It will spawn further threads
     // for each connection.

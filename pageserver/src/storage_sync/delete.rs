@@ -7,7 +7,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::{debug, error, info};
 
 use crate::storage_sync::{SyncQueue, SyncTask};
-use remote_storage::{GenericRemoteStorage, RemoteStorage};
+use remote_storage::RemoteStorage;
 use utils::zid::ZTenantTimelineId;
 
 use super::{LayersDeletion, SyncData};
@@ -15,7 +15,7 @@ use super::{LayersDeletion, SyncData};
 /// Attempts to remove the timleline layers from the remote storage.
 /// If the task had not adjusted the metadata before, the deletion will fail.
 pub(super) async fn delete_timeline_layers<'a>(
-    storage: &'a GenericRemoteStorage,
+    storage: &'a impl RemoteStorage,
     sync_queue: &SyncQueue,
     sync_id: ZTenantTimelineId,
     mut delete_data: SyncData<LayersDeletion>,
@@ -43,14 +43,7 @@ pub(super) async fn delete_timeline_layers<'a>(
     let mut delete_tasks = layers_to_delete
         .into_iter()
         .map(|local_layer_path| async {
-            match match storage {
-                GenericRemoteStorage::Local(storage) => {
-                    remove_storage_object(storage, &local_layer_path).await
-                }
-                GenericRemoteStorage::S3(storage) => {
-                    remove_storage_object(storage, &local_layer_path).await
-                }
-            } {
+            match remove_storage_object(storage, &local_layer_path).await {
                 Ok(()) => Ok(local_layer_path),
                 Err(e) => Err((e, local_layer_path)),
             }
@@ -132,13 +125,13 @@ mod tests {
         let harness = RepoHarness::create("delete_timeline_negative")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let local_storage = LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
-        )?);
+        )?;
 
         let deleted = delete_timeline_layers(
-            &storage,
+            &local_storage,
             &sync_queue,
             sync_id,
             SyncData {
@@ -167,12 +160,10 @@ mod tests {
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let layer_files = ["a", "b", "c", "d"];
-        let storage = GenericRemoteStorage::Local(LocalFs::new(
+        let local_storage = LocalFs::new(
             tempdir()?.path().to_path_buf(),
             harness.conf.workdir.clone(),
-        )?);
-
-        let local_storage = storage.as_local().unwrap();
+        )?;
 
         let current_retries = 3;
         let metadata = dummy_metadata(Lsn(0x30));
@@ -205,7 +196,7 @@ mod tests {
         );
 
         let deleted = delete_timeline_layers(
-            &storage,
+            &local_storage,
             &sync_queue,
             sync_id,
             SyncData {
