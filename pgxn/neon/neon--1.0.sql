@@ -15,3 +15,10 @@ RETURNS record
 AS 'MODULE_PATHNAME', 'backpressure_lsns'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
+
+CREATE FUNCTION backpressure_throttling_time()
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'backpressure_throttling_time'
+LANGUAGE C STRICT
+PARALLEL UNSAFE;
+
