@@ -5,6 +5,7 @@ use metrics::{
     IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use utils::zid::ZTenantId;
 
 /// Prometheus histogram buckets (in seconds) that capture the majority of
 /// latencies in the microsecond range but also extend far enough up to distinguish
@@ -413,6 +414,6 @@ impl Drop for TimelineMetrics {
     }
 }
 
-pub fn remove_tenant_metrics(tenant_id: &str) {
-    let _ = STORAGE_TIME.remove_label_values(&["gc", tenant_id, "-"]);
+pub fn remove_tenant_metrics(tenant_id: &ZTenantId) {
+    let _ = STORAGE_TIME.remove_label_values(&["gc", &tenant_id.to_string(), "-"]);
 }

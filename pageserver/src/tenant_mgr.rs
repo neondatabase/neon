@@ -448,8 +448,6 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
         )
     })?;
 
-    remove_tenant_metrics(&tenant_id.to_string());
-
     Ok(())
 }
 

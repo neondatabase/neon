@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
 use crate::config::PageServerConf;
+use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
@@ -859,6 +860,11 @@ impl Repository {
     }
 }
 
+impl Drop for Repository {
+    fn drop(&mut self) {
+        remove_tenant_metrics(&self.tenant_id);
+    }
+}
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     use std::os::unix::fs::FileExt;
