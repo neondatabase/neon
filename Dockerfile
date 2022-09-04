@@ -1,3 +1,4 @@
+# syntax = docker/dockerfile:1
 ### Creates a storage Docker image with postgres, pageserver, safekeeper and proxy binaries.
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
@@ -36,13 +37,21 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_SECRET_ACCESS_KEY
 
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY . .
+COPY --link . .
+
+USER root
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
-RUN set -e \
-&& mold -run cargo build --locked --release \
-    && cachepot -s
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/home/nonroot/target/release \
+    set -e \
+    && mold -run cargo build --locked --release \
+    && cachepot -s \
+    && cp -R /home/nonroot/target/release/pageserver /home/nonroot/pageserver \
+    && cp -R /home/nonroot/target/release/safekeeper /home/nonroot/safekeeper \
+    && cp -R /home/nonroot/target/release/proxy /home/nonroot/proxy
+
 
 # Build final image
 #
@@ -60,9 +69,9 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/proxy      /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/tmp_install/ /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
