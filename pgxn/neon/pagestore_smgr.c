@@ -558,7 +558,7 @@ zenith_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, 
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenPageLSN(lsn);
+	SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forknum, blocknum);
 }
 
 
@@ -603,7 +603,7 @@ zm_adjust_lsn(XLogRecPtr lsn)
  * Return LSN for requesting pages and number of blocks from page server
  */
 static XLogRecPtr
-zenith_get_request_lsn(bool *latest)
+zenith_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr	lsn;
 
@@ -630,9 +630,9 @@ zenith_get_request_lsn(bool *latest)
 		 * so our request cannot concern those.
 		 */
 		*latest = true;
-		lsn = GetLastWrittenPageLSN();
+		lsn = GetLastWrittenLSN(rnode, forknum, blkno);
 		Assert(lsn != InvalidXLogRecPtr);
-		elog(DEBUG1, "zenith_get_request_lsn GetLastWrittenPageLSN lsn %X/%X ",
+		elog(DEBUG1, "zenith_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
 		lsn = zm_adjust_lsn(lsn);
@@ -716,7 +716,7 @@ zenith_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		ZenithExistsRequest request = {
 			.req.tag = T_ZenithExistsRequest,
@@ -791,7 +791,7 @@ zenith_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	 *
 	 * FIXME: This is currently not just an optimization, but required for
 	 * correctness. Postgres can call smgrnblocks() on the newly-created
-	 * relation. Currently, we don't call SetLastWrittenPageLSN() when a new
+	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
 	 * relation created, so if we didn't remember the size in the relsize
 	 * cache, we might call smgrnblocks() on the newly-created relation before
 	 * the creation WAL record hass been received by the page server.
@@ -904,6 +904,8 @@ zenith_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (IS_LOCAL_REL(reln))
 		mdextend(reln, forkNum, blkno, buffer, skipFsync);
 #endif
+
+	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
 }
 
 /*
@@ -1079,7 +1081,7 @@ zenith_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
 	zenith_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
@@ -1284,7 +1286,7 @@ zenith_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		ZenithNblocksRequest request = {
 			.req.tag = T_ZenithNblocksRequest,
@@ -1343,8 +1345,9 @@ zenith_dbsize(Oid dbNode)
 	int64 db_size;
 	XLogRecPtr request_lsn;
 	bool		latest;
+	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
-	request_lsn = zenith_get_request_lsn(&latest);
+	request_lsn = zenith_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		ZenithDbSizeRequest request = {
 			.req.tag = T_ZenithDbSizeRequest,
@@ -1431,7 +1434,13 @@ zenith_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 */
 	XLogFlush(lsn);
 
-	SetLastWrittenPageLSN(lsn);
+	/*
+	 * Truncate may affect several chunks of relations. So we should either update last written LSN for all of them,
+	 * or update LSN for "dummy" metadata block. Second approach seems more efficient. If the relation is extended
+	 * again later, the extension will update the last-written LSN for the extended pages, so there's no harm in
+	 * leaving behind obsolete entries for the truncated chunks.
+	 */
+	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forknum);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
