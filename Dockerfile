@@ -37,7 +37,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_SECRET_ACCESS_KEY
 
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
-COPY --link . .
+COPY . .
 
 USER root
 
