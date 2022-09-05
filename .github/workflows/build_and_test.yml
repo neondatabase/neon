@@ -507,7 +507,7 @@ jobs:
         # compute-node uses postgres 14, which is default now
         # cloud repo depends on this image name, thus duplicating it
         # remove compute-node when cloud repo is updated
-        name: [ neon, compute-node, compute-node-v14 compute-tools ]
+        name: [ neon, compute-node, compute-node-v14, compute-tools ]
 
     steps:
       - name: Promote image to latest
