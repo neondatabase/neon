@@ -39,6 +39,10 @@
 #include "access/xact.h"
 #include "access/xlogdefs.h"
 #include "access/xlogutils.h"
+#include "access/xloginsert.h"
+#if PG_VERSION_NUM >= 150000
+#include "access/xlogrecovery.h"
+#endif
 #include "storage/latch.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -165,7 +169,10 @@ static bool backpressure_throttling_impl(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback;
 static shmem_startup_hook_type prev_shmem_startup_hook_type;
-
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static void walproposer_shmem_request(void);
+#endif
 
 
 void pg_init_walproposer(void)
@@ -221,18 +228,37 @@ static void nwp_register_gucs(void)
 		GUC_UNIT_MS,
 		NULL, NULL, NULL
 	);
-	
+
 }
 
 /* shmem handling */
 
 static void nwp_prepare_shmem(void)
 {
+#if PG_VERSION_NUM >= 150000
+		prev_shmem_request_hook = shmem_request_hook;
+		shmem_request_hook = walproposer_shmem_request;
+#else
 	RequestAddinShmemSpace(WalproposerShmemSize());
-
+#endif
 	prev_shmem_startup_hook_type = shmem_startup_hook;
 	shmem_startup_hook = nwp_shmem_startup_hook;
 }
+
+#if PG_VERSION_NUM >= 150000
+/*
+ * shmem_request hook: request additional shared resources.  We'll allocate or
+ * attach to the shared resources in nwp_shmem_startup_hook().
+ */
+static void
+walproposer_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(WalproposerShmemSize());
+}
+#endif
 
 static void nwp_shmem_startup_hook(void)
 {
@@ -248,6 +274,10 @@ static void nwp_shmem_startup_hook(void)
 void
 WalProposerMain(Datum main_arg)
 {
+#if PG_VERSION_NUM >= 150000
+	TimeLineID tli;
+#endif
+
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
@@ -255,9 +285,14 @@ WalProposerMain(Datum main_arg)
 
 	BackgroundWorkerUnblockSignals();
 
+#if PG_VERSION_NUM >= 150000
+	// FIXME pass proper tli to WalProposerInit ?
+	GetXLogReplayRecPtr(&tli);
+	WalProposerInit(GetFlushRecPtr(NULL), GetSystemIdentifier());
+#else
 	GetXLogReplayRecPtr(&ThisTimeLineID);
-
 	WalProposerInit(GetFlushRecPtr(), GetSystemIdentifier());
+#endif
 
 	last_reconnect_attempt = GetCurrentTimestamp();
 
@@ -468,7 +503,12 @@ WalProposerInitImpl(XLogRecPtr flushRecPtr, uint64 systemId)
 		!HexDecodeString(greetRequest.ztenantid, zenith_tenant_walproposer, 16))
 		elog(FATAL, "Could not parse neon.tenant_id, %s", zenith_tenant_walproposer);
 
+#if PG_VERSION_NUM >= 150000
+// FIXME don't use hardcoded timeline id
+	greetRequest.timeline = 1;
+#else
 	greetRequest.timeline = ThisTimeLineID;
+#endif
 	greetRequest.walSegSize = wal_segment_size;
 
 	InitEventSet();
@@ -1702,7 +1742,12 @@ SendAppendRequests(Safekeeper *sk)
 				 &sk->outbuf.data[sk->outbuf.len],
 				 req->beginLsn,
 				 req->endLsn - req->beginLsn,
+				 #if PG_VERSION_NUM >= 150000
+				 // FIXME don't use hardcoded timelineid here
+				 1,
+				 #else
 				 ThisTimeLineID,
+				 #endif
 				 &errinfo))
 		{
 			WALReadRaiseError(&errinfo);
@@ -2373,8 +2418,11 @@ backpressure_lag_impl(void)
 		XLogRecPtr writePtr;
 		XLogRecPtr flushPtr;
 		XLogRecPtr applyPtr;
+#if PG_VERSION_NUM >= 150000
+		XLogRecPtr myFlushLsn = GetFlushRecPtr(NULL);
+#else
 		XLogRecPtr myFlushLsn = GetFlushRecPtr();
-
+#endif
 		replication_feedback_get_lsns(&writePtr, &flushPtr, &applyPtr);
 #define MB ((XLogRecPtr)1024*1024)
 

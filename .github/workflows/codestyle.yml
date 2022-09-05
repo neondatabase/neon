@@ -27,8 +27,10 @@ jobs:
         # Rust toolchains (e.g. nightly or 1.37.0), add them here.
         rust_toolchain: [1.58]
         os: [ubuntu-latest, macos-latest]
+        # To support several Postgres versions, add them here.
+        postgres_version: [v14, v15]
     timeout-minutes: 60
-    name: run regression test suite
+    name: check codestyle rust and postgres
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -61,14 +63,14 @@ jobs:
 
       - name: Set pg revision for caching
         id: pg_ver
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-${{matrix.postgres_version}})
 
-      - name: Cache postgres build
+      - name: Cache postgres ${{matrix.postgres_version}} build
         id: cache_pg
         uses: actions/cache@v3
         with:
           path: |
-            tmp_install/
+            pg_install/${{matrix.postgres_version}}
           key: ${{ runner.os }}-pg-${{ steps.pg_ver.outputs.pg_rev }}
 
       - name: Set extra env for macOS
@@ -90,10 +92,10 @@ jobs:
         if: failure()
         continue-on-error: true
         run: |
-          echo '' && echo '=== config.log ===' && echo ''
-          cat tmp_install/build/config.log
-          echo '' && echo '=== configure.log ===' && echo ''
-          cat tmp_install/build/configure.log
+          echo '' && echo '=== Postgres ${{matrix.postgres_version}} config.log ===' && echo ''
+          cat pg_install/build/${{matrix.postgres_version}}/config.log
+          echo '' && echo '=== Postgres ${{matrix.postgres_version}} configure.log ===' && echo ''
+          cat pg_install/build/${{matrix.postgres_version}}/configure.log
 
       - name: Cache cargo deps
         id: cache_cargo

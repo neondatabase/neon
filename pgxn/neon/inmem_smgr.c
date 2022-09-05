@@ -29,6 +29,10 @@
 #include "storage/relfilenode.h"
 #include "storage/smgr.h"
 
+#if PG_VERSION_NUM >= 150000
+#include "access/xlogutils.h"
+#endif
+
 /* Size of the in-memory smgr */
 #define MAX_PAGES 64
 

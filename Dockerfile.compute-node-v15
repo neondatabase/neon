@@ -1,0 +1,172 @@
+#
+# This file is identical to the Dockerfile.compute-node-v14 file
+# except for the version of Postgres that is built.
+#
+
+ARG TAG=pinned
+# apparently, ARGs don't get replaced in RUN commands in kaniko
+# ARG POSTGIS_VERSION=3.3.0
+# ARG PLV8_VERSION=3.1.4
+# ARG PG_VERSION=v15
+
+#
+# Layer "build-deps"
+#
+FROM debian:bullseye-slim AS build-deps
+RUN apt update &&  \
+    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev zlib1g-dev libxml2-dev \
+    libcurl4-openssl-dev libossp-uuid-dev
+
+#
+# Layer "pg-build"
+# Build Postgres from the neon postgres repository.
+#
+FROM build-deps AS pg-build
+COPY vendor/postgres-v15 postgres
+RUN cd postgres && \
+    ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
+    # Install headers
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
+    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install
+
+#
+# Layer "postgis-build"
+# Build PostGIS from the upstream PostGIS mirror.
+#
+# PostGIS compiles against neon postgres sources without changes. Perhaps we
+# could even use the upstream binaries, compiled against vanilla Postgres, but
+# it would require some investigation to check that it works, and also keeps
+# working in the future. So for now, we compile our own binaries.
+FROM build-deps AS postgis-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+RUN apt update && \
+    apt install -y gdal-bin libgdal-dev libprotobuf-c-dev protobuf-c-compiler xsltproc wget
+
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.0.tar.gz && \
+    tar xvzf postgis-3.3.0.tar.gz && \
+    cd postgis-3.3.0 && \
+    ./autogen.sh && \
+    export PATH="/usr/local/pgsql/bin:$PATH" && \
+    ./configure && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    cd extensions/postgis && \
+    make clean && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_raster.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control
+
+#
+# Layer "plv8-build"
+# Build plv8
+#
+FROM build-deps AS plv8-build
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+RUN apt update && \
+    apt install -y git curl wget make ninja-build build-essential libncurses5 python3-dev pkg-config libc++-dev libc++abi-dev libglib2.0-dev
+
+# https://github.com/plv8/plv8/issues/475
+# Debian bullseye provides binutils 2.35 when >= 2.38 is necessary
+RUN echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
+    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    apt update && \
+    apt install -y --no-install-recommends -t testing binutils
+
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
+    tar xvzf v3.1.4.tar.gz && \
+    cd plv8-3.1.4 && \
+    export PATH="/usr/local/pgsql/bin:$PATH" && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    rm -rf /plv8-* && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control
+
+#
+# Layer "neon-pg-ext-build"
+# compile neon extensions
+#
+FROM build-deps AS neon-pg-ext-build
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY pgxn/ pgxn/
+
+RUN make -j $(getconf _NPROCESSORS_ONLN) \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon \
+        -s install
+
+# Compile and run the Neon-specific `compute_ctl` binary
+FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-lto
+
+#
+# Clean up postgres folder before inclusion
+#
+FROM neon-pg-ext-build AS postgres-cleanup-layer
+COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
+
+# Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
+RUN cd /usr/local/pgsql/bin && rm ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
+
+# Remove headers that we won't need anymore - we've completed installation of all extensions
+RUN rm -r /usr/local/pgsql/include
+
+# Remove now-useless PGXS src infrastructure
+RUN rm -r /usr/local/pgsql/lib/pgxs/src
+
+# Remove static postgresql libraries - all compilation is finished, so we
+# can now remove these files - they must be included in other binaries by now
+# if they were to be used by other libraries.
+RUN rm /usr/local/pgsql/lib/lib*.a
+
+#
+# Final layer
+# Put it all together into the final image
+#
+FROM debian:bullseye-slim
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+
+# TODO: Check if we can make the extension setup more modular versus a linear build
+# currently plv8-build copies the output /usr/local/pgsql from postgis-build, etc#
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+
+# Install:
+# libreadline8 for psql
+# libossp-uuid16 for extension ossp-uuid
+# libgeos, libgdal, libproj and libprotobuf-c1 for PostGIS
+# GLIBC 2.34 for plv8.
+#     Debian bullseye provides GLIBC 2.31, so we install the library from testing
+#
+# Lastly, link compute_ctl into zenith_ctl while we're at it,
+# so that we don't need to put this in another layer.
+RUN apt update &&  \
+    apt install --no-install-recommends -y \
+        libreadline8 \
+        libossp-uuid16 \
+        libgeos-c1v5 \
+        libgdal28 \
+        libproj19 \
+        libprotobuf-c1 && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    echo "Installing GLIBC 2.34" && \
+    echo "deb http://ftp.debian.org/debian testing main" >> /etc/apt/sources.list && \
+    echo "APT::Default-Release \"stable\";" > /etc/apt/apt.conf.d/default-release && \
+    apt update && \
+    apt install -y --no-install-recommends -t testing libc6 && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    ln /usr/local/bin/compute_ctl /usr/local/bin/zenith_ctl
+
+USER postgres
+ENTRYPOINT ["/usr/local/bin/compute_ctl"]

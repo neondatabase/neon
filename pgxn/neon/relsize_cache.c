@@ -24,6 +24,9 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
+#if PG_VERSION_NUM >= 150000
+#include "miscadmin.h"
+#endif
 
 typedef struct
 {
@@ -41,6 +44,10 @@ static HTAB *relsize_hash;
 static LWLockId relsize_lock;
 static int	relsize_hash_size;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static void relsize_shmem_request(void);
+#endif
 
 /*
  * Size of a cache entry is 20 bytes. So this default will take about 1.2 MB,
@@ -158,10 +165,31 @@ relsize_hash_init(void)
 
 	if (relsize_hash_size > 0)
 	{
+#if PG_VERSION_NUM >= 150000
+		prev_shmem_request_hook = shmem_request_hook;
+		shmem_request_hook = relsize_shmem_request;
+#else
 		RequestAddinShmemSpace(hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
 		RequestNamedLWLockTranche("neon_relsize", 1);
+#endif
 
 		prev_shmem_startup_hook = shmem_startup_hook;
 		shmem_startup_hook = zenith_smgr_shmem_startup;
 	}
 }
+
+#if PG_VERSION_NUM >= 150000
+/*
+ * shmem_request hook: request additional shared resources.  We'll allocate or
+ * attach to the shared resources in zenith_smgr_shmem_startup().
+ */
+static void
+relsize_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
+	RequestNamedLWLockTranche("neon_relsize", 1);
+}
+#endif

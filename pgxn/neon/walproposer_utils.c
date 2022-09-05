@@ -21,6 +21,11 @@
 #include <netinet/tcp.h>
 #include <unistd.h>
 
+#if PG_VERSION_NUM >= 150000
+#include "access/xlogutils.h"
+#include "access/xlogrecovery.h"
+#endif
+
 /*
  * These variables are used similarly to openLogFile/SegNo,
  * but for walproposer to write the XLOG during recovery. walpropFileTLI is the TimeLineID
@@ -85,7 +90,11 @@ static volatile sig_atomic_t replication_active = false;
 typedef void (*WalSndSendDataCallback) (void);
 static void WalSndLoop(WalSndSendDataCallback send_data);
 static void XLogSendPhysical(void);
+#if PG_VERSION_NUM >= 150000
+static XLogRecPtr GetStandbyFlushRecPtr(TimeLineID *tli);
+#else
 static XLogRecPtr GetStandbyFlushRecPtr(void);
+#endif
 
 static void WalSndSegmentOpen(XLogReaderState *state, XLogSegNo nextSegNo,
 							  TimeLineID *tli_p);
@@ -222,10 +231,10 @@ SafekeeperStateDesiredEvents(SafekeeperState state)
 			result = WL_SOCKET_READABLE;
 			break;
 
-		/* 
+		/*
 		 * Flush states require write-ready for flushing.
 		 * Active state does both reading and writing.
-		 * 
+		 *
 		 * TODO: SS_ACTIVE sometimes doesn't need to be write-ready. We should
 		 * 	check sk->flushWrite here to set WL_SOCKET_WRITEABLE.
 		 */
@@ -398,12 +407,21 @@ XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 
 		if (walpropFile < 0)
 		{
+			#if PG_VERSION_NUM >= 150000
+			// FIXME Is it ok to use hardcoded value here?
+			TimeLineID tli = 1;
+			#else
 			bool		use_existent = true;
-
+			#endif
 			/* Create/use new log file */
 			XLByteToSeg(recptr, walpropSegNo, wal_segment_size);
+			#if PG_VERSION_NUM >= 150000
+			walpropFile = XLogFileInit(walpropSegNo, tli);
+			walpropFileTLI = tli;
+			#else
 			walpropFile = XLogFileInit(walpropSegNo, &use_existent, false);
 			walpropFileTLI = ThisTimeLineID;
+			#endif
 		}
 
 		/* Calculate the start offset of the received logs */
@@ -488,11 +506,14 @@ void
 StartProposerReplication(StartReplicationCmd *cmd)
 {
 	XLogRecPtr	FlushPtr;
+	TimeLineID	currTLI;
 
+	#if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+	#endif
 
 	/* create xlogreader for physical replication */
 	xlogreader =
@@ -534,10 +555,19 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	 * Select the timeline. If it was given explicitly by the client, use
 	 * that. Otherwise use the timeline of the last replayed record, which is
 	 * kept in ThisTimeLineID.
-	 * 
+	 *
 	 * Neon doesn't currently use PG Timelines, but it may in the future, so
 	 * we keep this code around to lighten the load for when we need it.
 	 */
+#if PG_VERSION_NUM >= 150000
+	if (am_cascading_walsender)
+	{
+		/* this also updates ThisTimeLineID */
+		FlushPtr = GetStandbyFlushRecPtr(&currTLI);
+	}
+	else
+		FlushPtr = GetFlushRecPtr(&currTLI);
+#else
 	if (am_cascading_walsender)
 	{
 		/* this also updates ThisTimeLineID */
@@ -546,12 +576,16 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	else
 		FlushPtr = GetFlushRecPtr();
 
+	currTLI = ThisTimeLineID;
+#endif
+
+
 	if (cmd->timeline != 0)
 	{
 		XLogRecPtr	switchpoint;
 
 		sendTimeLine = cmd->timeline;
-		if (sendTimeLine == ThisTimeLineID)
+		if (sendTimeLine == currTLI)
 		{
 			sendTimeLineIsHistoric = false;
 			sendTimeLineValidUpto = InvalidXLogRecPtr;
@@ -566,7 +600,7 @@ StartProposerReplication(StartReplicationCmd *cmd)
 			 * Check that the timeline the client requested exists, and the
 			 * requested start location is on that timeline.
 			 */
-			timeLineHistory = readTimeLineHistory(ThisTimeLineID);
+			timeLineHistory = readTimeLineHistory(currTLI);
 			switchpoint = tliSwitchPoint(cmd->timeline, timeLineHistory,
 										 &sendTimeLineNextTLI);
 			list_free_deep(timeLineHistory);
@@ -605,7 +639,7 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	}
 	else
 	{
-		sendTimeLine = ThisTimeLineID;
+		sendTimeLine = currTLI;
 		sendTimeLineValidUpto = InvalidXLogRecPtr;
 		sendTimeLineIsHistoric = false;
 	}
@@ -710,6 +744,34 @@ StartProposerReplication(StartReplicationCmd *cmd)
 	EndReplicationCommand("START_STREAMING");
 }
 
+#if PG_VERSION_NUM >= 150000
+static XLogRecPtr
+GetStandbyFlushRecPtr(TimeLineID *tli)
+{
+	XLogRecPtr	replayPtr;
+	TimeLineID	replayTLI;
+	XLogRecPtr	receivePtr;
+	TimeLineID	receiveTLI;
+	XLogRecPtr	result;
+
+	/*
+	 * We can safely send what's already been replayed. Also, if walreceiver
+	 * is streaming WAL from the same timeline, we can send anything that it
+	 * has streamed, but hasn't been replayed yet.
+	 */
+
+	receivePtr = GetWalRcvFlushRecPtr(NULL, &receiveTLI);
+	replayPtr = GetXLogReplayRecPtr(&replayTLI);
+
+	*tli = replayTLI;
+
+	result = replayPtr;
+	if (receiveTLI == replayTLI && receivePtr > replayPtr)
+		result = receivePtr;
+
+	return result;
+}
+#else
 /*
  * Returns the latest point in WAL that has been safely flushed to disk, and
  * can be sent to the standby. This should only be called when in recovery,
@@ -744,6 +806,9 @@ GetStandbyFlushRecPtr(void)
 
 	return result;
 }
+#endif
+
+
 
 /* XLogReaderRoutine->segment_open callback */
 static void
@@ -878,6 +943,7 @@ XLogSendPhysical(void)
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
 	Size		nbytes PG_USED_FOR_ASSERTS_ONLY;
+	TimeLineID currTLI;
 
 	/* If requested switch the WAL sender to the stopping state. */
 	if (got_STOPPING)
@@ -919,9 +985,12 @@ XLogSendPhysical(void)
 		 * FlushPtr that was calculated before it became historic.
 		 */
 		bool		becameHistoric = false;
-
+#if PG_VERSION_NUM >= 150000
+		SendRqstPtr = GetStandbyFlushRecPtr(&currTLI);
+#else
 		SendRqstPtr = GetStandbyFlushRecPtr();
-
+		currTLI = ThisTimeLineID;
+#endif
 		if (!RecoveryInProgress())
 		{
 			/*
@@ -935,10 +1004,10 @@ XLogSendPhysical(void)
 		{
 			/*
 			 * Still a cascading standby. But is the timeline we're sending
-			 * still the one recovery is recovering from? ThisTimeLineID was
+			 * still the one recovery is recovering from? currTLI was
 			 * updated by the GetStandbyFlushRecPtr() call above.
 			 */
-			if (sendTimeLine != ThisTimeLineID)
+			if (sendTimeLine != currTLI)
 				becameHistoric = true;
 		}
 
@@ -951,7 +1020,7 @@ XLogSendPhysical(void)
 			 */
 			List	   *history;
 
-			history = readTimeLineHistory(ThisTimeLineID);
+			history = readTimeLineHistory(currTLI);
 			sendTimeLineValidUpto = tliSwitchPoint(sendTimeLine, history, &sendTimeLineNextTLI);
 
 			Assert(sendTimeLine < sendTimeLineNextTLI);
@@ -974,7 +1043,11 @@ XLogSendPhysical(void)
 		 * primary: if the primary subsequently crashes and restarts, standbys
 		 * must not have applied any WAL that got lost on the primary.
 		 */
+		#if PG_VERSION_NUM >= 150000
+		SendRqstPtr = GetFlushRecPtr(NULL);
+		#else
 		SendRqstPtr = GetFlushRecPtr();
+		#endif
 	}
 
 	/*

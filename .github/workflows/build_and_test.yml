@@ -78,8 +78,8 @@ jobs:
           fetch-depth: 1
 
       - name: Set pg revision for caching
-        id: pg_ver
-        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres)
+        id: pg_v14_rev
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v14)
         shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
@@ -124,12 +124,12 @@ jobs:
             v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-${{ hashFiles('Cargo.lock') }}
             v7-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ matrix.rust_toolchain }}-
 
-      - name: Cache postgres build
+      - name: Cache postgres v14 build
         id: cache_pg
         uses: actions/cache@v3
         with:
-          path: tmp_install/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_ver.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'
@@ -192,7 +192,7 @@ jobs:
         shell: bash -euxo pipefail {0}
 
       - name: Install postgres binaries
-        run: cp -a tmp_install /tmp/neon/pg_install
+        run: cp -a pg_install /tmp/neon/pg_install
         shell: bash -euxo pipefail {0}
 
       - name: Upload Neon artifact
@@ -447,7 +447,6 @@ jobs:
   compute-node-image:
     runs-on: dev
     container: gcr.io/kaniko-project/executor:v1.9.0-debug
-
     steps:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
@@ -458,18 +457,57 @@ jobs:
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
-      - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+        # compute-node uses postgres 14, which is default now
+        # cloud repo depends on this image name, thus duplicating it
+        # remove compute-node when cloud repo is updated
+      - name: Kaniko build compute node with extensions v14 (compatibility)
+        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+
+  compute-node-image-v14:
+    runs-on: dev
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build compute node with extensions v14
+        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:$GITHUB_RUN_ID
+
+
+  compute-node-image-v15:
+    runs-on: dev
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build compute node with extensions v15
+        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-node-image, compute-tools-image ]
+    needs: [ neon-image, compute-node-image, compute-node-image-v14, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
       fail-fast: false
       matrix:
-        name: [ neon, compute-node, compute-tools ]
+        # compute-node uses postgres 14, which is default now
+        # cloud repo depends on this image name, thus duplicating it
+        # remove compute-node when cloud repo is updated
+        name: [ neon, compute-node, compute-node-v14, compute-tools ]
 
     steps:
       - name: Promote image to latest
@@ -501,6 +539,9 @@ jobs:
       - name: Pull compute node image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:latest compute-node
 
+      - name: Pull compute node v14 image from ECR
+        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest compute-node-v14
+
       - name: Pull rust image from ECR
         run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
 
@@ -519,6 +560,9 @@ jobs:
       - name: Push compute node image to Docker Hub
         run: crane push compute-node neondatabase/compute-node:${{needs.tag.outputs.build-tag}}
 
+      - name: Push compute node v14 image to Docker Hub
+        run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
+
       - name: Push rust image to Docker Hub
         run: crane push rust neondatabase/rust:pinned
 
@@ -530,6 +574,7 @@ jobs:
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
 
   calculate-deploy-targets:
     runs-on: [ self-hosted, Linux, k8s-runner ]

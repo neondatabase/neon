@@ -157,7 +157,7 @@ for other files and for sockets for incoming connections.
 A directory with Postgres installation to use during pageserver activities.
 Inside that dir, a `bin/postgres` binary should be present.
 
-The default distrib dir is `./tmp_install/`.
+The default distrib dir is `./pg_install/`.
 
 #### workdir (-D)
 

@@ -13,6 +13,7 @@
 !pgxn/
 !proxy/
 !safekeeper/
-!vendor/postgres/
+!vendor/postgres-v14/
+!vendor/postgres-v15/
 !workspace_hack/
 !neon_local/

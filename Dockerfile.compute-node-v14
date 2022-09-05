@@ -2,6 +2,7 @@ ARG TAG=pinned
 # apparently, ARGs don't get replaced in RUN commands in kaniko
 # ARG POSTGIS_VERSION=3.3.0
 # ARG PLV8_VERSION=3.1.4
+# ARG PG_VERSION=v14
 
 #
 # Layer "build-deps"
@@ -16,7 +17,7 @@ RUN apt update &&  \
 # Build Postgres from the neon postgres repository.
 #
 FROM build-deps AS pg-build
-COPY vendor/postgres postgres
+COPY vendor/postgres-v14 postgres
 RUN cd postgres && \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
@@ -28,8 +29,8 @@ RUN cd postgres && \
 #
 # Layer "postgis-build"
 # Build PostGIS from the upstream PostGIS mirror.
-# 
-# PostGIS compiles against neon postgres sources without changes. Perhaps we 
+#
+# PostGIS compiles against neon postgres sources without changes. Perhaps we
 # could even use the upstream binaries, compiled against vanilla Postgres, but
 # it would require some investigation to check that it works, and also keeps
 # working in the future. So for now, we compile our own binaries.
