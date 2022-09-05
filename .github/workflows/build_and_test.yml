@@ -54,7 +54,11 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
+        # TODO this version is currently needed to make build statuses more informative
+        # and to clear cargo caches in a more transparent way.
+        # We should rather read this value from the file in the root of the repo, `rust-toolchain.toml` since it's
+        # truly setting what version of compiler the sources are built with
+        rust_toolchain: [ '1.60' ]
 
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
@@ -100,11 +104,11 @@ jobs:
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FEATURES=""
-            CARGO_FLAGS="--locked"
+            CARGO_FLAGS="--locked --timings"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FEATURES="--features profiling"
-            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --timings --release $CARGO_FEATURES"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -218,6 +222,17 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
           path: /tmp/neon
 
+      - name: Prepare cargo build timing stats for storing
+        run: |
+          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+        shell: bash -euxo pipefail {0}
+      - name: Upload cargo build stats
+        uses: ./.github/actions/upload
+        with:
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-build-stats
+          path: /tmp/neon/cargo-timings/
+
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
@@ -233,7 +248,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        rust_toolchain: [ 1.58 ]
+        rust_toolchain: [ '1.60' ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -269,7 +284,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ release ]
-        rust_toolchain: [ 1.58 ]
+        rust_toolchain: [ '1.60' ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -341,7 +356,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug ]
-        rust_toolchain: [ 1.58 ]
+        rust_toolchain: [ '1.60' ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3

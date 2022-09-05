@@ -1,5 +1,11 @@
 [toolchain]
-channel = "1.60"
+# We try to stick to a toolchain version that is widely available on popular distributions, so that most people
+# can use the toolchain that comes with their operating system. But if there's a feature we miss badly from a later
+# version, we can consider updating. As of this writing, 1.60 is available on Debian 'experimental' but not yet on
+# 'testing' or even 'unstable', which is a bit more cutting-edge than we'd like. Hopefully the 1.60 packages reach
+# 'testing' soon (and similarly for the other distributions).
+# See https://tracker.debian.org/pkg/rustc for more details on Debian rustc package.
+channel = "1.60" # do update CI matrix values when updating this
 profile = "default"
 # The default profile includes rustc, rust-std, cargo, rust-docs, rustfmt and clippy.
 # https://rust-lang.github.io/rustup/concepts/profiles.html

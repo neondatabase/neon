@@ -24,9 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # If we want to duplicate this job for different
-        # Rust toolchains (e.g. nightly or 1.37.0), add them here.
-        rust_toolchain: [1.58]
+        # TODO read from `rust-toolchain.toml` and do the same in the build and test workflow too.
+        rust_toolchain: ['1.60']
         os: [ubuntu-latest, macos-latest]
         # To support several Postgres versions, add them here.
         postgres_version: [v14, v15]

@@ -78,7 +78,7 @@ This file is automatically picked up by [`rustup`](https://rust-lang.github.io/r
 rustup users who want to build with another toolchain can use [`rustup override`](https://rust-lang.github.io/rustup/overrides.html#directory-overrides) command to set a specific toolchain for the project's directory.
 
 non-rustup users most probably are not getting the same toolchain automatically from the file, so are responsible to manually verify their toolchain matches the version in the file.
-Never rustc versions most probably will work fine, yet older ones might not be supported due to some new features used by the project or the crates.
+Newer rustc versions most probably will work fine, yet older ones might not be supported due to some new features used by the project or the crates.
 
 #### Building on Linux
 
@@ -90,8 +90,8 @@ git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
 # The preferred and default is to make a debug build. This will create a
-# demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`nproc`"
+# demonstrably slower build than a release build. For a release build,
+# use "BUILD_TYPE=release make -j`nproc`"
 
 make -j`nproc`
 ```
@@ -106,8 +106,8 @@ git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
 # The preferred and default is to make a debug build. This will create a
-# demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
+# demonstrably slower build than a release build. For a release build,
+# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
 
 make -j`sysctl -n hw.logicalcpu`
 ```
