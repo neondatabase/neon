@@ -42,6 +42,7 @@ COPY . .
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN --mount=type=cache,uid=1000,target=/usr/local/cargo/registry \
+    --mount=type=cache,uid=1000,sharing=locked,target=/usr/local/cargo/git/target \
     --mount=type=cache,uid=1000,sharing=locked,target=/home/nonroot/target/release \
     set -e \
     && mold -run cargo build --locked --release \
