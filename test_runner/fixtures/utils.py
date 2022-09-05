@@ -180,6 +180,9 @@ def allure_attach_from_dir(dir: Path):
             elif source.endswith(".svg"):
                 attachment_type = "image/svg+xml"
                 extension = "svg"
+            elif source.endswith(".html"):
+                attachment_type = "text/html"
+                extension = "html"
             else:
                 attachment_type = "text/plain"
                 extension = attachment.suffix.removeprefix(".")

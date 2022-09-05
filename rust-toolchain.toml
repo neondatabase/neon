@@ -1,5 +1,7 @@
 [toolchain]
-channel = "1.60"
+# We don't use the freshmost stable and update it after the corresponding
+# Debian experimental package gets a bump: https://tracker.debian.org/pkg/rustc
+channel = "1.60" # do update CI matrix values when updating this
 profile = "default"
 # The default profile includes rustc, rust-std, cargo, rust-docs, rustfmt and clippy.
 # https://rust-lang.github.io/rustup/concepts/profiles.html
