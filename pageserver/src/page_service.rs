@@ -696,7 +696,7 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn)?;
+        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
@@ -712,7 +712,7 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn)?;
+        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -728,7 +728,8 @@ impl PageServerHandler {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)?;
 
-        let total_blocks = timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn)?;
+        let total_blocks =
+            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
 
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -754,7 +755,7 @@ impl PageServerHandler {
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
         */
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn)?;
+        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,

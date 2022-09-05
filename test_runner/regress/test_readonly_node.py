@@ -1,6 +1,6 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, wait_for_last_record_lsn
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
@@ -101,3 +101,52 @@ def test_readonly_node(neon_simple_env: NeonEnv):
             node_name="test_readonly_node_preinitdb",
             lsn=Lsn("0/42"),
         )
+
+
+# Similar test, but with more data, and we force checkpoints
+def test_timetravel(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_timetravel", "empty")
+    pg = env.postgres.create_start("test_timetravel")
+
+    client = env.pageserver.http_client()
+
+    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+
+    lsns = []
+
+    with pg.cursor() as cur:
+        cur.execute(
+            """
+        CREATE TABLE testtab(id serial primary key, iteration int, data text);
+        INSERT INTO testtab (iteration, data) SELECT 0, 'data' FROM generate_series(1, 100000);
+        """
+        )
+        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    lsns.append((0, current_lsn))
+
+    for i in range(1, 5):
+        with pg.cursor() as cur:
+            cur.execute(f"UPDATE testtab SET iteration = {i}")
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+        lsns.append((i, current_lsn))
+
+        # wait until pageserver receives that data
+        wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+
+        # run checkpoint manually to force a new layer file
+        env.pageserver.safe_psql(f"checkpoint {tenant_id} {timeline_id}")
+
+    ##### Restart pageserver
+    env.postgres.stop_all()
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    for (i, lsn) in lsns:
+        pg_old = env.postgres.create_start(
+            branch_name="test_timetravel", node_name=f"test_old_lsn_{i}", lsn=lsn
+        )
+        with pg_old.cursor() as cur:
+            assert query_scalar(cur, f"select count(*) from testtab where iteration={i}") == 100000
+            assert query_scalar(cur, f"select count(*) from testtab where iteration<>{i}") == 0
