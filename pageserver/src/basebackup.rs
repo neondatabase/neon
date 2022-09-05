@@ -186,7 +186,7 @@ where
     }
 
     fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
-        let nblocks = self.timeline.get_rel_size(tag, self.lsn)?;
+        let nblocks = self.timeline.get_rel_size(tag, self.lsn, false)?;
 
         // Function that adds relation segment data to archive
         let mut add_file = |segment_index, data: &Vec<u8>| -> anyhow::Result<()> {
@@ -207,7 +207,9 @@ where
         for (seg, blocks) in chunks.into_iter().enumerate() {
             let mut segment_data: Vec<u8> = vec![];
             for blknum in blocks {
-                let img = self.timeline.get_rel_page_at_lsn(tag, blknum, self.lsn)?;
+                let img = self
+                    .timeline
+                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false)?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
