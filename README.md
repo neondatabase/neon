@@ -69,6 +69,17 @@ brew install libpq
 brew link --force libpq
 ```
 
+#### Rustc version
+
+The project uses [rust toolchain file](./rust-toolchain.toml) to define the version it's built with in CI for testing and local builds.
+
+This file is automatically picked up by [`rustup`](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file) that installs (if absent) and uses the toolchain version pinned in the file.
+
+rustup users who want to build with another toolchain can use [`rustup override`](https://rust-lang.github.io/rustup/overrides.html#directory-overrides) command to set a specific toolchain for the project's directory.
+
+non-rustup users most probably are not getting the same toolchain automatically from the file, so are responsible to manually verify their toolchain matches the version in the file.
+Never rustc versions most probably will work fine, yet older ones might not be supported due to some new features used by the project or the crates.
+
 #### Building on Linux
 
 1. Build neon and patched postgres
@@ -78,9 +89,9 @@ brew link --force libpq
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
-# The preferred and default is to make a debug build. This will create a 
+# The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`nproc`" 
+# build, utilize "BUILD_TYPE=release make -j`nproc`"
 
 make -j`nproc`
 ```
@@ -94,9 +105,9 @@ make -j`nproc`
 git clone --recursive https://github.com/neondatabase/neon.git
 cd neon
 
-# The preferred and default is to make a debug build. This will create a 
+# The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. If you want to use a release
-# build, utilize "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`" 
+# build, utilize "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
 
 make -j`sysctl -n hw.logicalcpu`
 ```
