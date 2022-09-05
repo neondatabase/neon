@@ -461,17 +461,44 @@ jobs:
         # cloud repo depends on this image name, thus duplicating it
         # remove compute-node when cloud repo is updated
       - name: Kaniko build compute node with extensions v14 (compatibility)
-        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID --cleanup
-        # Note: don't use cache for v14 and v15 images, because they are built from different Dockerfiles
-        # TODO use different cache directories, when we get rid of v14 (compatibility) image
+        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node:$GITHUB_RUN_ID
+
+  compute-node-image-v14:
+    runs-on: dev
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
       - name: Kaniko build compute node with extensions v14
-        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:$GITHUB_RUN_ID --cleanup
+        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --dockerfile Dockerfile.compute-node-v14 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:$GITHUB_RUN_ID
+
+
+  compute-node-image-v15:
+    runs-on: dev
+    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1 # v3 won't work with kaniko
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
       - name: Kaniko build compute node with extensions v15
-        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo  --context . --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:$GITHUB_RUN_ID --cleanup
+        run: /kaniko/executor --skip-unused-stages --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --dockerfile Dockerfile.compute-node-v15 --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:$GITHUB_RUN_ID
 
   promote-images:
     runs-on: dev
-    needs: [ neon-image, compute-node-image, compute-tools-image ]
+    needs: [ neon-image, compute-node-image, compute-node-image-v14, compute-tools-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
     strategy:
