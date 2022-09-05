@@ -13,7 +13,6 @@ members = [
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
 debug = true
-incremental = true
 
 [profile.release-line-debug]
 inherits = "release"

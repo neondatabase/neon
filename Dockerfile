@@ -39,13 +39,19 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
-# Show build caching stats to check if it was used in the end.
-# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
+
+# by default use incremental compilation.
+ARG CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-1}
+
+# mount cargo cache dependencies
 RUN --mount=type=cache,uid=1000,target=/usr/local/cargo/registry \
     --mount=type=cache,uid=1000,sharing=locked,target=/usr/local/cargo/git/target \
+# mount incremental build artifacts
     --mount=type=cache,uid=1000,sharing=locked,target=/home/nonroot/target/release \
     set -e \
-    && mold -run cargo build --locked --release \
+    && CARGO_INCREMENTAL=$CARGO_INCREMENTAL mold -run cargo build --locked --release \
+# Show build caching stats to check if it was used in the end.
+# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
     && cachepot -s \
     && mkdir /home/nonroot/build \
     && cp -R /home/nonroot/target/release/pageserver /home/nonroot/build/pageserver \
