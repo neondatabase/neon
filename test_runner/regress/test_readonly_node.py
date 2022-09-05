@@ -1,6 +1,3 @@
-import time
-from uuid import UUID
-
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_for_last_record_lsn
