@@ -39,12 +39,10 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 COPY --from=pg-build /home/nonroot/tmp_install/include/postgresql/server tmp_install/include/postgresql/server
 COPY . .
 
-USER root
-
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/home/nonroot/target/release \
+RUN --mount=type=cache,uid=1000,target=/usr/local/cargo/registry \
+    --mount=type=cache,uid=1000,target=/home/nonroot/target/release \
     set -e \
     && mold -run cargo build --locked --release \
     && cachepot -s \
