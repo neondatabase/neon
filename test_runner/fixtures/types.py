@@ -50,7 +50,7 @@ class ZId:
     """
     Datatype for a Neon tenant and timeline IDs. Internally it's a 16-byte array, and
     the string representation is in hex. This corresponds to the ZId / ZTenantId /
-    ZTimelineIds in in the Rust code.
+    ZTimelineIds in the Rust code.
     """
 
     def __init__(self, x: str):

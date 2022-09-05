@@ -2522,8 +2522,8 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, pg: Post
 
 def wait_until(number_of_iterations: int, interval: float, func):
     """
-    Wait until 'func' returns successfully, without exception. Returns the last return value
-    from the the function.
+    Wait until 'func' returns successfully, without exception. Returns the
+    last return value from the function.
     """
     last_exception = None
     for i in range(number_of_iterations):

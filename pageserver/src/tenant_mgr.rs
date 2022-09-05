@@ -435,10 +435,10 @@ pub fn detach_tenant(conf: &'static PageServerConf, tenant_id: ZTenantId) -> any
     tenants_state::write_tenants().remove(&tenant_id);
 
     // If removal fails there will be no way to successfully retry detach,
-    // because tenant no longer exists in in memory map. And it needs to be removed from it
-    // before we remove files because it contains references to repository
-    // which references ephemeral files which are deleted on drop. So if we keep these references
-    // code will attempt to remove files which no longer exist. This can be fixed by having shutdown
+    // because the tenant no longer exists in the in-memory map. And it needs to be removed from it
+    // before we remove files, because it contains references to repository
+    // which references ephemeral files which are deleted on drop. So if we keep these references,
+    // we will attempt to remove files which no longer exist. This can be fixed by having shutdown
     // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
     let local_tenant_directory = conf.tenant_path(&tenant_id);
     std::fs::remove_dir_all(&local_tenant_directory).with_context(|| {
