@@ -222,6 +222,17 @@ jobs:
           name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-artifact
           path: /tmp/neon
 
+      - name: Prepare cargo build timing stats for storing
+        run: |
+          mkdir -p "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+          cp -r ./target/cargo-timings/* "/tmp/neon/cargo-timings/$BUILD_TYPE/"
+        shell: bash -euxo pipefail {0}
+      - name: Upload cargo build stats
+        uses: ./.github/actions/upload
+        with:
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-${{ matrix.rust_toolchain }}-build-stats
+          path: /tmp/neon/cargo-timings/
+
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
