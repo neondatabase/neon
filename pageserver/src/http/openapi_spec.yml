@@ -257,51 +257,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/detach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: timeline_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-    post:
-      description: Deprecated, use DELETE /v1/tenant/{tenant_id}/timeline/{timeline_id} instead
-      deprecated: true
-      responses:
-        "200":
-          description: Ok
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
   /v1/tenant/{tenant_id}/detach:
     parameters:
       - name: tenant_id

@@ -696,10 +696,5 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_handler,
         )
-        // for backward compatibility
-        .post(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach",
-            timeline_delete_handler,
-        )
         .any(handler_404))
 }
