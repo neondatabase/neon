@@ -40,7 +40,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_SECRET_ACCESS_KEY
 
 ARG PG_VERSION=v14
-COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/include/v14/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
