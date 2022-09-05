@@ -5,20 +5,22 @@
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
 ARG TAG=pinned
-ARG PG_VERSION=v14
+# ARGs don't get replaced in RUN commands in Kaniko
+# so use hardcoded value below
+# ARG PG_VERSION=v14
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
 ARG PG_VERSION=v14
-COPY --chown=nonroot vendor/postgres-${PG_VERSION} vendor/postgres-${PG_VERSION}
+COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
 RUN set -e \
-    && mold -run make -j $(nproc) -s neon-pg-ext-${PG_VERSION} \
+    && mold -run make -j $(nproc) -s neon-pg-ext-v14 \
     && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
@@ -38,7 +40,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_SECRET_ACCESS_KEY
 
 ARG PG_VERSION=v14
-COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION}/include/postgresql/server pg_install/include/${PG_VERSION}/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/include/v14/postgresql/server
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
@@ -69,7 +71,7 @@ COPY --from=build --chown=zenith:zenith /home/nonroot/target/release/proxy      
 
 # v14 is default for now
 ARG PG_VERSION=v14
-COPY --from=pg-build /home/nonroot/pg_install/${PG_VERSION} /usr/local/
+COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
