@@ -21,8 +21,8 @@ COPY --chown=nonroot Makefile Makefile
 ENV BUILD_TYPE release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext-v14 \
-    && rm -rf pg_install/build \
-    && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
+    && rm -rf pg_install/v14/build \
+    && tar -C pg_install/v14 -czf /home/nonroot/postgres_install.tar.gz .
 
 # Build zenith binaries
 FROM $REPOSITORY/$IMAGE:$TAG AS build
