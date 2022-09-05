@@ -162,7 +162,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     check_permission(&request, Some(tenant_id))?;
 
     let new_timeline_info = tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("/timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
+        let _enter = info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, lsn=?request_data.ancestor_start_lsn).entered();
 
         match timelines::create_timeline(
             get_config(&request),
@@ -297,7 +297,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         };
         (local_timeline_info, remote_timeline_info)
     }
-    .instrument(info_span!("timeline_detail_handler", tenant = %tenant_id, timeline = %timeline_id))
+    .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
     .await;
 
     if local_timeline_info.is_none() && remote_timeline_info.is_none() {
@@ -427,7 +427,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
 
     let state = get_state(&request);
     tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        let _enter = info_span!("timeline_delete", tenant = %tenant_id).entered();
         tenant_mgr::delete_timeline(tenant_id, timeline_id)
     })
     .await
@@ -449,7 +449,7 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&request);
     let conf = state.conf;
     tokio::task::spawn_blocking(move || {
-        let _enter = info_span!("tenant_detach_handler", tenant = %tenant_id).entered();
+        let _enter = info_span!("tenant_detach", tenant = %tenant_id).entered();
         tenant_mgr::detach_tenant(conf, tenant_id)
     })
     .await
