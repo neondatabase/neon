@@ -97,7 +97,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
         env.postgres.create_start(
-            branch_name="test_readonly_node", node_name="test_readonly_node_preinitdb", lsn="0/42"
+            branch_name="test_readonly_node", node_name="test_readonly_node_preinitdb", lsn=Lsn("0/42")
         )
 
 
