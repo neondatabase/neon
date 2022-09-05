@@ -1,0 +1,7 @@
+[toolchain]
+channel = "1.60"
+profile = "default"
+# The default profile includes rustc, rust-std, cargo, rust-docs, rustfmt and clippy.
+# https://rust-lang.github.io/rustup/concepts/profiles.html
+# but we also need `llvm-tools-preview` for coverage data merges on CI
+components = ["llvm-tools-preview", "rustfmt", "clippy"]
