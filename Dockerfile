@@ -46,10 +46,10 @@ RUN --mount=type=cache,uid=1000,target=/usr/local/cargo/registry \
     set -e \
     && mold -run cargo build --locked --release \
     && cachepot -s \
-    && cp -R /home/nonroot/target/release/pageserver /home/nonroot/pageserver \
-    && cp -R /home/nonroot/target/release/safekeeper /home/nonroot/safekeeper \
-    && cp -R /home/nonroot/target/release/proxy /home/nonroot/proxy
-
+    && mkdir /home/nonroot/build \
+    && cp -R /home/nonroot/target/release/pageserver /home/nonroot/build/pageserver \
+    && cp -R /home/nonroot/target/release/safekeeper /home/nonroot/build/safekeeper \
+    && cp -R /home/nonroot/target/release/proxy /home/nonroot/build/proxy
 
 # Build final image
 #
@@ -67,9 +67,9 @@ RUN set -e \
     && useradd -d /data zenith \
     && chown -R zenith:zenith /data
 
-COPY --from=build --chown=zenith:zenith /home/nonroot/pageserver /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/safekeeper /usr/local/bin
-COPY --from=build --chown=zenith:zenith /home/nonroot/proxy      /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/build/pageserver /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/build/safekeeper /usr/local/bin
+COPY --from=build --chown=zenith:zenith /home/nonroot/build/proxy      /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/tmp_install/ /usr/local/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
