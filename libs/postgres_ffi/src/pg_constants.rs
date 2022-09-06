@@ -210,8 +210,6 @@ pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
-pub const PG_MAJORVERSION: &str = "14";
-
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c
 pub const PGDATA_SUBDIRS: [&str; 22] = [

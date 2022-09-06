@@ -419,6 +419,7 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::PG_MAJORVERSION;
     use super::*;
     use regex::Regex;
     use std::cmp::min;
@@ -437,12 +438,13 @@ mod tests {
 
     fn test_end_of_wal<C: wal_craft::Crafter>(test_name: &str) {
         use wal_craft::*;
+
         // Craft some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join("pg_install/v14"),
+            pg_distrib_dir: top_path.join(format!("pg_install/v{PG_MAJORVERSION}")),
             datadir: top_path.join(format!("test_output/{}", test_name)),
         };
         if cfg.datadir.exists() {

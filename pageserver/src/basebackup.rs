@@ -269,7 +269,7 @@ where
         };
 
         if spcnode == pg_constants::GLOBALTABLESPACE_OID {
-            let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+            let version_bytes = postgres_ffi::v14::PG_MAJORVERSION.as_bytes();
             let header = new_tar_header("PG_VERSION", version_bytes.len() as u64)?;
             self.ar.append(&header, version_bytes)?;
 
@@ -312,7 +312,7 @@ where
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
-                let version_bytes = pg_constants::PG_MAJORVERSION.as_bytes();
+                let version_bytes = postgres_ffi::v14::PG_MAJORVERSION.as_bytes();
                 let header = new_tar_header(&dst_path, version_bytes.len() as u64)?;
                 self.ar.append(&header, version_bytes)?;
 

@@ -33,6 +33,8 @@ macro_rules! postgres_ffi {
             pub mod waldecoder;
             pub mod xlog_utils;
 
+            pub const PG_MAJORVERSION: &str = stringify!($version);
+
             // Re-export some symbols from bindings
             pub use bindings::DBState_DB_SHUTDOWNED;
             pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
