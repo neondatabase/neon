@@ -77,9 +77,14 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Set pg revision for caching
+      - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v14)
+        shell: bash -euxo pipefail {0}
+
+      - name: Set pg 15 revision for caching
+        id: pg_v15_rev
+        run: echo ::set-output name=pg_rev::$(git rev-parse HEAD:vendor/postgres-v15)
         shell: bash -euxo pipefail {0}
 
       # Set some environment variables used by all the steps.
@@ -130,6 +135,13 @@ jobs:
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v14 build
+        id: cache_pg
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres
         if: steps.cache_pg.outputs.cache-hit != 'true'

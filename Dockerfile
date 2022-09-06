@@ -13,15 +13,16 @@ ARG TAG=pinned
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
-ARG PG_VERSION=v14
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
+COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 
 ENV BUILD_TYPE release
 RUN set -e \
-    && mold -run make -j $(nproc) -s neon-pg-ext-v14 \
+    && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf pg_install/v14/build \
+    && rm -rf pg_install/v15/build \
     && tar -C pg_install/v14 -czf /home/nonroot/postgres_install.tar.gz .
 
 # Build zenith binaries
@@ -41,6 +42,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 ARG PG_VERSION=v14
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY . .
 
 # Show build caching stats to check if it was used in the end.
