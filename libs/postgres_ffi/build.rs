@@ -49,26 +49,23 @@ fn main() {
     // Finding the location of C headers for the Postgres server:
     // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
     // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/v14/include/postgresql/server`
-    let mut pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR")
-    {
+    let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
         postgres_install_dir.into()
     } else {
         PathBuf::from("pg_install")
     };
-    // Currently, we only expect to find PostgreSQL v14 sources, in "pg_install/v14". In the
-    // future, we will run this for all supported PostgreSQL versions.
 
     for pg_version in vec!["v14", "v15"] {
-        pg_install_dir.push(pg_version);
-        if pg_install_dir.is_relative() {
+        let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
+        if pg_install_dir_versioned.is_relative() {
             let cwd = env::current_dir().unwrap();
-            pg_install_dir = cwd.join("..").join("..").join(pg_install_dir);
+            pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
         }
 
-        let pg_config_bin = pg_install_dir
+        let pg_config_bin = pg_install_dir_versioned
+            .join(pg_version)
             .join("bin")
-            .join("pg_config")
-            .join(pg_version);
+            .join("pg_config");
         let inc_server_path: String = if pg_config_bin.exists() {
             let output = Command::new(pg_config_bin)
                 .arg("--includedir-server")
@@ -81,7 +78,7 @@ fn main() {
 
             String::from_utf8(output.stdout).unwrap().trim_end().into()
         } else {
-            pg_install_dir
+            pg_install_dir_versioned
                 .join("include")
                 .join("postgresql")
                 .join("server")
@@ -139,15 +136,10 @@ fn main() {
 
         // Write the bindings to the $OUT_DIR/bindings_$pg_version.rs file.
         let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-        let filename = if pg_version == "v14" {
-            "bindings_v14.rs"
-        } else {
-            "bindings_v15.rs"
-        };
+        let filename = format!("bindings_{pg_version}.rs");
 
         bindings
             .write_to_file(out_path.join(filename))
             .expect("Couldn't write bindings!");
-        pg_install_dir.pop();
     }
 }
