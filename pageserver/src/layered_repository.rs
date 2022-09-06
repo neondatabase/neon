@@ -32,9 +32,11 @@ use std::time::{Duration, Instant};
 
 use self::metadata::{metadata_path, TimelineMetadata};
 use crate::config::PageServerConf;
+use crate::metrics::remove_tenant_metrics;
 use crate::storage_sync::index::RemoteIndex;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
+use crate::metrics::STORAGE_TIME;
 use crate::repository::GcResult;
 use crate::tenant_mgr::LocalTimelineUpdate;
 use crate::thread_mgr;
@@ -301,7 +303,7 @@ impl Repository {
             .map(|x| x.to_string())
             .unwrap_or_else(|| "-".to_string());
 
-        timeline::STORAGE_TIME
+        STORAGE_TIME
             .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
             .observe_closure_duration(|| {
                 self.gc_iteration_internal(target_timeline_id, horizon, pitr, checkpoint_before_gc)
@@ -858,6 +860,11 @@ impl Repository {
     }
 }
 
+impl Drop for Repository {
+    fn drop(&mut self) {
+        remove_tenant_metrics(&self.tenant_id);
+    }
+}
 /// Dump contents of a layer file to stdout.
 pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> Result<()> {
     use std::os::unix::fs::FileExt;

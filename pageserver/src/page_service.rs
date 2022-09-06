@@ -11,7 +11,6 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -32,6 +31,7 @@ use crate::basebackup;
 use crate::config::{PageServerConf, ProfilingConfig};
 use crate::import_datadir::{import_basebackup_from_tar, import_wal_from_tar};
 use crate::layered_repository::Timeline;
+use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::profiling::profpoint_start;
 use crate::reltag::RelTag;
@@ -39,7 +39,6 @@ use crate::tenant_mgr;
 use crate::thread_mgr;
 use crate::thread_mgr::ThreadKind;
 use crate::CheckpointConfig;
-use metrics::{register_histogram_vec, HistogramVec};
 use postgres_ffi::v14::xlog_utils::to_pg_timestamp;
 
 use postgres_ffi::v14::pg_constants::DEFAULTTABLESPACE_OID;
@@ -374,7 +373,7 @@ fn page_service_conn_main(
     // Immediately increment the gauge, then create a job to decrement it on thread exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
-    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
+    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
@@ -426,24 +425,6 @@ struct PageServerHandler {
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 }
-
-const TIME_BUCKETS: &[f64] = &[
-    0.00001, // 1/100000 s
-    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
-    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
-    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
-    0.1,  // 1/10 s
-];
-
-static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_smgr_query_seconds",
-        "Time spent on smgr query handling",
-        &["smgr_query_type", "tenant_id", "timeline_id"],
-        TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
 
 impl PageServerHandler {
     pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {

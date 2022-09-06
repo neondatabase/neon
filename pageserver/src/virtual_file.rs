@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use once_cell::sync::Lazy;
+use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -18,38 +18,6 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
-
-use metrics::{register_histogram_vec, register_int_gauge_vec, HistogramVec, IntGaugeVec};
-
-// Metrics collected on disk IO operations
-const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000001, // 1 usec
-    0.00001,  // 10 usec
-    0.0001,   // 100 usec
-    0.001,    // 1 msec
-    0.01,     // 10 msec
-    0.1,      // 100 msec
-    1.0,      // 1 sec
-];
-
-static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_io_operations_seconds",
-        "Time spent in IO operations",
-        &["operation", "tenant_id", "timeline_id"],
-        STORAGE_IO_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
-
-static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_io_operations_bytes_total",
-        "Total amount of bytes read/written in IO operations",
-        &["operation", "tenant_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -85,7 +53,6 @@ pub struct VirtualFile {
     pub path: PathBuf,
     open_options: OpenOptions,
 
-    /// For metrics
     tenantid: String,
     timelineid: String,
 }

@@ -4,6 +4,7 @@ pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
 pub mod layered_repository;
+pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
@@ -22,11 +23,9 @@ pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use once_cell::sync::Lazy;
 use tracing::info;
 
 use crate::thread_mgr::ThreadKind;
-use metrics::{register_int_gauge_vec, IntGaugeVec};
 
 /// Current storage format version
 ///
@@ -38,15 +37,6 @@ pub const STORAGE_FORMAT_VERSION: u16 = 3;
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
-
-static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_live_connections",
-        "Number of live network connections",
-        &["pageserver_connection_kind"]
-    )
-    .expect("failed to define a metric")
-});
 
 pub const LOG_FILE_NAME: &str = "pageserver.log";
 

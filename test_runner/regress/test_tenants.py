@@ -1,12 +1,14 @@
 import os
 from contextlib import closing
 from datetime import datetime
+from typing import List
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
+from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import Lsn
+from fixtures.types import Lsn, ZTenantId
+from prometheus_client.samples import Sample
 
 
 @pytest.mark.parametrize("with_safekeepers", [False, True])
@@ -122,3 +124,46 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         log.info(
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
+
+
+def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilder):
+    """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
+
+    neon_env_builder.num_safekeepers = 3
+
+    env = neon_env_builder.init_start()
+    tenant_1, _ = env.neon_cli.create_tenant()
+    tenant_2, _ = env.neon_cli.create_tenant()
+
+    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
+    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
+
+    pg_tenant1 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_1)
+    pg_tenant2 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_2)
+
+    for pg in [pg_tenant1, pg_tenant2]:
+        with closing(pg.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE t(key int primary key, value text)")
+                cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+                cur.execute("SELECT sum(key) FROM t")
+                assert cur.fetchone() == (5000050000,)
+
+    def get_ps_metric_samples_for_tenant(tenant_id: ZTenantId) -> List[Sample]:
+        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        samples = []
+        for metric_name in ps_metrics.metrics:
+            for sample in ps_metrics.query_all(
+                name=metric_name, filter={"tenant_id": str(tenant_id)}
+            ):
+                samples.append(sample)
+        return samples
+
+    for tenant in [tenant_1, tenant_2]:
+        pre_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
+        assert pre_detach_samples == set(PAGESERVER_PER_TENANT_METRICS)
+
+        env.pageserver.http_client().tenant_detach(tenant)
+
+        post_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
+        assert post_detach_samples == set()

@@ -4,8 +4,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
-use metrics::core::{AtomicU64, GenericCounter};
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
@@ -16,12 +15,6 @@ use std::sync::atomic::{self, AtomicBool, AtomicI64, Ordering as AtomicOrdering}
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
-
-use metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
-    register_uint_gauge_vec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, UIntGauge, UIntGaugeVec,
-};
 
 use crate::layered_repository::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
@@ -37,6 +30,7 @@ use crate::layered_repository::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::BlockNumber;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::reltag::RelTag;
@@ -57,182 +51,6 @@ use crate::walreceiver::IS_WAL_RECEIVER;
 use crate::walredo::WalRedoManager;
 use crate::CheckpointConfig;
 use crate::{page_cache, storage_sync};
-
-/// Prometheus histogram buckets (in seconds) that capture the majority of
-/// latencies in the microsecond range but also extend far enough up to distinguish
-/// "bad" from "really bad".
-fn get_buckets_for_critical_operations() -> Vec<f64> {
-    let buckets_per_digit = 5;
-    let min_exponent = -6;
-    let max_exponent = 2;
-
-    let mut buckets = vec![];
-    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
-    // because it's more numerically stable and doesn't result in numbers like 9.999999
-    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
-        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
-    }
-    buckets
-}
-
-// Metrics collected on operations on the storage repository.
-pub static STORAGE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_storage_operations_seconds",
-        "Time spent on storage operations",
-        &["operation", "tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
-    )
-    .expect("failed to define a metric")
-});
-
-// Metrics collected on operations on the storage repository.
-static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value",
-        &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
-    )
-    .expect("failed to define a metric")
-});
-
-static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_materialized_cache_hits_total",
-        "Number of cache hits from materialized page cache",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_wait_lsn_seconds",
-        "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
-    )
-    .expect("failed to define a metric")
-});
-
-static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_last_record_lsn",
-        "Last record LSN grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-// Metrics for determining timeline's physical size.
-// A layered timeline's physical is defined as the total size of
-// (delta/image) layer files on disk.
-static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_current_physical_size",
-        "Current physical size grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
-    register_uint_gauge_vec!(
-        "pageserver_current_logical_size",
-        "Current logical size grouped by timeline",
-        &["tenant_id", "timeline_id"]
-    )
-    .expect("failed to define current logical size metric")
-});
-
-// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
-// or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_created_persistent_files_total",
-        "Number of files created that are meant to be uploaded to cloud storage",
-    )
-    .expect("failed to define a metric")
-});
-
-static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_written_persistent_bytes_total",
-        "Total bytes written that are meant to be uploaded to cloud storage",
-    )
-    .expect("failed to define a metric")
-});
-
-struct TimelineMetrics {
-    pub reconstruct_time_histo: Histogram,
-    pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
-    pub flush_time_histo: Histogram,
-    pub compact_time_histo: Histogram,
-    pub create_images_time_histo: Histogram,
-    pub init_logical_size_histo: Histogram,
-    pub load_layer_map_histo: Histogram,
-    pub last_record_gauge: IntGauge,
-    pub wait_lsn_time_histo: Histogram,
-    pub current_physical_size_gauge: UIntGauge,
-    /// copy of LayeredTimeline.current_logical_size
-    pub current_logical_size_gauge: UIntGauge,
-}
-
-impl TimelineMetrics {
-    fn new(tenant_id: &ZTenantId, timeline_id: &ZTimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-
-        let reconstruct_time_histo = RECONSTRUCT_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let flush_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["layer flush", &tenant_id, &timeline_id])
-            .unwrap();
-        let compact_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["compact", &tenant_id, &timeline_id])
-            .unwrap();
-        let create_images_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["create images", &tenant_id, &timeline_id])
-            .unwrap();
-        let init_logical_size_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["init logical size", &tenant_id, &timeline_id])
-            .unwrap();
-        let load_layer_map_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["load layer map", &tenant_id, &timeline_id])
-            .unwrap();
-        let last_record_gauge = LAST_RECORD_LSN
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let wait_lsn_time_histo = WAIT_LSN_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let current_physical_size_gauge = CURRENT_PHYSICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-
-        TimelineMetrics {
-            reconstruct_time_histo,
-            materialized_page_cache_hit_counter,
-            flush_time_histo,
-            compact_time_histo,
-            create_images_time_histo,
-            init_logical_size_histo,
-            load_layer_map_histo,
-            last_record_gauge,
-            wait_lsn_time_histo,
-            current_physical_size_gauge,
-            current_logical_size_gauge,
-        }
-    }
-}
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -1494,8 +1312,8 @@ impl Timeline {
         let sz = new_delta_path.metadata()?.len();
         self.metrics.current_physical_size_gauge.add(sz);
         // update metrics
-        NUM_PERSISTENT_FILES_CREATED.inc_by(1);
-        PERSISTENT_BYTES_WRITTEN.inc_by(sz);
+        self.metrics.num_persistent_files_created.inc_by(1);
+        self.metrics.persistent_bytes_written.inc_by(sz);
 
         Ok(new_delta_path)
     }

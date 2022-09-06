@@ -21,7 +21,6 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -39,11 +38,13 @@ use tracing::*;
 use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
 
 use crate::config::PageServerConf;
+use crate::metrics::{
+    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
+};
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
-use metrics::{register_histogram, register_int_counter, Histogram, IntCounter};
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
@@ -82,70 +83,6 @@ pub trait WalRedoManager: Send + Sync {
         records: Vec<(Lsn, ZenithWalRecord)>,
     ) -> Result<Bytes, WalRedoError>;
 }
-
-// Metrics collected on WAL redo operations
-//
-// We collect the time spent in actual WAL redo ('redo'), and time waiting
-// for access to the postgres process ('wait') since there is only one for
-// each tenant.
-
-/// Time buckets are small because we want to be able to measure the
-/// smallest redo processing times. These buckets allow us to measure down
-/// to 5us, which equates to 200'000 pages/sec, which equates to 1.6GB/sec.
-/// This is much better than the previous 5ms aka 200 pages/sec aka 1.6MB/sec.
-macro_rules! redo_histogram_time_buckets {
-    () => {
-        vec![
-            0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
-            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000,
-        ]
-    };
-}
-
-/// While we're at it, also measure the amount of records replayed in each
-/// operation. We have a global 'total replayed' counter, but that's not
-/// as useful as 'what is the skew for how many records we replay in one
-/// operation'.
-macro_rules! redo_histogram_count_buckets {
-    () => {
-        vec![0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
-    };
-}
-
-static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_seconds",
-        "Time spent on WAL redo",
-        redo_histogram_time_buckets!()
-    )
-    .expect("failed to define a metric")
-});
-
-static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the WAL redo process",
-        redo_histogram_time_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
-static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_records_histogram",
-        "Histogram of number of records replayed per redo",
-        redo_histogram_count_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
-static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_replayed_wal_records_total",
-        "Number of WAL records replayed in WAL redo process"
-    )
-    .unwrap()
-});
 
 ///
 /// This is the real implementation that uses a Postgres process to

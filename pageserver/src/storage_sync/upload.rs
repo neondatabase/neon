@@ -4,7 +4,6 @@ use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
-use once_cell::sync::Lazy;
 use remote_storage::GenericRemoteStorage;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
@@ -15,19 +14,10 @@ use super::{
     index::{IndexPart, RemoteTimeline},
     LayersUpload, SyncData, SyncQueue,
 };
+use crate::metrics::NO_LAYERS_UPLOAD;
 use crate::{
     config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
 };
-use metrics::{register_int_counter_vec, IntCounterVec};
-
-static NO_LAYERS_UPLOAD: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_remote_storage_no_layers_uploads_total",
-        "Number of skipped uploads due to no layers",
-        &["tenant_id", "timeline_id"],
-    )
-    .expect("failed to register pageserver no layers upload vec")
-});
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part(

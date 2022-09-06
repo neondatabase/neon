@@ -19,6 +19,7 @@ use tokio_postgres::{replication::ReplicationStream, Client};
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 
 use super::TaskEvent;
+use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::{
     layered_repository::WalReceiverInfo, tenant_mgr, walingest::WalIngest,
     walrecord::DecodedWALRecord,
@@ -105,7 +106,7 @@ pub async fn handle_walreceiver_connection(
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
     // get called, even in presence of panics.
-    let gauge = crate::LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
+    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
     gauge.inc();
     scopeguard::defer! {
         gauge.dec();
