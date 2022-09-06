@@ -417,7 +417,8 @@ async fn fsync_path(path: impl AsRef<Path>) -> Result<(), io::Error> {
 mod tests {
     use std::{
         collections::{BTreeSet, HashSet},
-        num::NonZeroUsize, path::PathBuf,
+        num::NonZeroUsize,
+        path::PathBuf,
     };
 
     use remote_storage::{LocalFs, RemoteStorage};
@@ -629,7 +630,7 @@ mod tests {
         fs::write(&index_part_local_path, serde_json::to_vec(&index_part)?).await?;
 
         let downloaded_index_part = download_index_part(harness.conf, &storage, sync_id).await?;
-        
+
         assert_eq!(
             downloaded_index_part, index_part,
             "Downloaded index part should be the same as the one in storage"

@@ -21,7 +21,7 @@ use tracing::debug;
 
 use crate::{
     strip_path_prefix, Download, DownloadError, RemoteObjectId, RemoteStorage, S3Config,
-    S3_PREFIX_SEPARATOR,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use super::StorageMetadata;
@@ -108,7 +108,7 @@ fn download_destination(
 
     workdir.join(
         path_without_prefix
-            .split(S3_PREFIX_SEPARATOR)
+            .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
             .collect::<PathBuf>(),
     )
 }
@@ -172,12 +172,12 @@ impl S3Bucket {
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
             let mut prefix = prefix;
-            while prefix.starts_with(S3_PREFIX_SEPARATOR) {
+            while prefix.starts_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
                 prefix = &prefix[1..]
             }
 
             let mut prefix = prefix.to_string();
-            while prefix.ends_with(S3_PREFIX_SEPARATOR) {
+            while prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
                 prefix.pop();
             }
             prefix
@@ -232,7 +232,7 @@ impl RemoteStorage for S3Bucket {
         let relative_path = strip_path_prefix(&self.workdir, local_path)?;
         let mut key = self.prefix_in_bucket.clone().unwrap_or_default();
         for segment in relative_path {
-            key.push(S3_PREFIX_SEPARATOR);
+            key.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
             key.push_str(&segment.to_string_lossy());
         }
         Ok(RemoteObjectId(key))
@@ -302,8 +302,8 @@ impl RemoteStorage for S3Bucket {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(S3_PREFIX_SEPARATOR) {
-                    p.push(S3_PREFIX_SEPARATOR);
+                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
@@ -326,7 +326,7 @@ impl RemoteStorage for S3Bucket {
                     bucket: self.bucket_name.clone(),
                     prefix: list_prefix.clone(),
                     continuation_token,
-                    delimiter: Some(S3_PREFIX_SEPARATOR.to_string()),
+                    delimiter: Some(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()),
                     ..ListObjectsV2Request::default()
                 })
                 .await
@@ -455,12 +455,12 @@ mod tests {
 
         let key = RemoteObjectId(format!(
             "{}{}",
-            S3_PREFIX_SEPARATOR,
+            REMOTE_STORAGE_PREFIX_SEPARATOR,
             relative_path
                 .iter()
                 .map(|segment| segment.to_str().unwrap())
                 .collect::<Vec<_>>()
-                .join(&S3_PREFIX_SEPARATOR.to_string()),
+                .join(&REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()),
         ));
 
         assert_eq!(
@@ -483,7 +483,7 @@ mod tests {
         let storage = dummy_storage(workdir);
 
         let expected_key = RemoteObjectId(format!(
-            "{}{S3_PREFIX_SEPARATOR}{segment_1}{S3_PREFIX_SEPARATOR}{segment_2}",
+            "{}{REMOTE_STORAGE_PREFIX_SEPARATOR}{segment_1}{REMOTE_STORAGE_PREFIX_SEPARATOR}{segment_2}",
             storage.prefix_in_bucket.as_deref().unwrap_or_default(),
         ));
 
@@ -611,7 +611,7 @@ mod tests {
         RemoteObjectId(relative_file_path.iter().fold(
             prefix.unwrap_or_default().to_string(),
             |mut path_string, segment| {
-                path_string.push(S3_PREFIX_SEPARATOR);
+                path_string.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 path_string.push_str(segment.to_str().unwrap());
                 path_string
             },

@@ -34,7 +34,11 @@ pub(super) async fn upload_index_part(
     let index_part_path = metadata_path(conf, sync_id.timeline_id, sync_id.tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     storage
-        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &index_part_path)
+        .upload_storage_object(
+            Box::new(index_part_bytes),
+            index_part_size,
+            &index_part_path,
+        )
         .await
         .with_context(|| format!("Failed to upload index part for '{sync_id}'"))
 }
@@ -436,7 +440,7 @@ mod tests {
             "Remote index part should have the correct name"
         );
         let remote_index_part: IndexPart = serde_json::from_slice(
-            &fs::read(local_storage.resolve_in_storage(&index_part_path)?).await?,
+            &fs::read(local_storage.resolve_in_storage(index_part_path)?).await?,
         )?;
         assert_eq!(
             index_part, remote_index_part,

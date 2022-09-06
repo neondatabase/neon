@@ -41,7 +41,7 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 
-const S3_PREFIX_SEPARATOR: char = '/';
+const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RemoteObjectId(String);
@@ -51,7 +51,6 @@ impl From<RemoteObjectId> for String {
         id.0
     }
 }
-
 
 ///
 /// A key that refers to an object in remote storage. It works much like a Path,
@@ -65,15 +64,15 @@ impl RemoteObjectId {
     pub fn object_name(&self) -> Option<&str> {
         // corner case, char::to_string is not const, thats why this is more verbose than it needs to be
         // see https://github.com/rust-lang/rust/issues/88674
-        if self.0.len() == 1 && self.0.chars().next().unwrap() == S3_PREFIX_SEPARATOR {
+        if self.0.len() == 1 && self.0.chars().next().unwrap() == REMOTE_STORAGE_PREFIX_SEPARATOR {
             return None;
         }
 
-        if self.0.ends_with(S3_PREFIX_SEPARATOR) {
-            self.0.rsplit(S3_PREFIX_SEPARATOR).nth(1)
+        if self.0.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+            self.0.rsplit(REMOTE_STORAGE_PREFIX_SEPARATOR).nth(1)
         } else {
             self.0
-                .rsplit_once(S3_PREFIX_SEPARATOR)
+                .rsplit_once(REMOTE_STORAGE_PREFIX_SEPARATOR)
                 .map(|(_, last)| last)
         }
     }
@@ -213,7 +212,6 @@ impl GenericRemoteStorage {
         })
     }
 
-
     /// Takes storage object contents and its size and uploads to remote storage,
     /// mapping `from_path` to the corresponding remote object id in the storage.
     ///
@@ -232,8 +230,7 @@ impl GenericRemoteStorage {
             )
         })?;
 
-        self
-            .upload(from, from_size_bytes, &target_storage_path, None)
+        self.upload(from, from_size_bytes, &target_storage_path, None)
             .await
             .with_context(|| {
                 format!(
@@ -263,16 +260,13 @@ impl GenericRemoteStorage {
 
         match byte_range {
             Some((start, end)) => {
-                self
-                    .download_byte_range(&remote_object_path, start, end)
+                self.download_byte_range(&remote_object_path, start, end)
                     .await
             }
             None => self.download(&remote_object_path).await,
         }
     }
 }
-
-
 
 /// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
 /// Immutable, cannot be changed once the file is created.
