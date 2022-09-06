@@ -55,7 +55,7 @@ fn main() {
         PathBuf::from("pg_install")
     };
 
-    for pg_version in vec!["v14", "v15"] {
+    for pg_version in &["v14", "v15"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
         if pg_install_dir_versioned.is_relative() {
             let cwd = env::current_dir().unwrap();
