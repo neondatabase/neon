@@ -4,10 +4,10 @@
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use postgres_ffi::v14::pg_constants;
-use postgres_ffi::v14::xlog_utils::{TimestampTz, XLOG_SIZE_OF_XLOG_RECORD};
+use postgres_ffi::v14::xlog_utils::XLOG_SIZE_OF_XLOG_RECORD;
 use postgres_ffi::v14::XLogRecord;
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{BlockNumber, OffsetNumber};
+use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use tracing::*;

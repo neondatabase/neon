@@ -65,6 +65,7 @@ postgres_ffi!("v15");
 pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
+pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};

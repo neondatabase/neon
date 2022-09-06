@@ -14,9 +14,9 @@ use tokio::io::AsyncRead;
 
 use once_cell::sync::Lazy;
 use postgres_ffi::v14::xlog_utils::{
-    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName, XLogSegNo,
+    find_end_of_wal, IsPartialXLogFileName, IsXLogFileName, XLogFromFileName,
 };
-use postgres_ffi::PG_TLI;
+use postgres_ffi::{XLogSegNo, PG_TLI};
 use std::cmp::min;
 
 use std::fs::{self, remove_file, File, OpenOptions};

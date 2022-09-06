@@ -10,8 +10,8 @@
 use crc32c::crc32c_append;
 
 use super::bindings::{
-    CheckPoint, FullTransactionId, XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord,
-    XLOG_PAGE_MAGIC,
+    CheckPoint, FullTransactionId, TimeLineID, TimestampTz, XLogLongPageHeaderData,
+    XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
 use super::pg_constants;
 use crate::v14::waldecoder::WalStreamDecoder;
@@ -47,11 +47,6 @@ pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHe
 pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
-
-pub type XLogRecPtr = u64;
-pub type TimeLineID = u32;
-pub type TimestampTz = i64;
-pub type XLogSegNo = u64;
 
 /// Interval of checkpointing metadata file. We should store metadata file to enforce
 /// predicate that checkpoint.nextXid is larger than any XID in WAL.
