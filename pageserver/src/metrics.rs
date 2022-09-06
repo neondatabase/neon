@@ -107,7 +107,7 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
 static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
-    IntCounter::new(
+    register_int_counter!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
     )
@@ -115,7 +115,7 @@ static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounter> = Lazy::new(|| {
-    IntCounter::new(
+    register_int_counter!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
     )

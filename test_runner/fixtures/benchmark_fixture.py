@@ -362,7 +362,7 @@ class NeonBenchmarker:
         # and round to integer.
         all_metrics = pageserver.http_client().get_metrics()
         matches = re.search(rf"^{metric_name} (\S+)$", all_metrics, re.MULTILINE)
-        assert matches
+        assert matches, f"metric {metric_name} not found"
         return int(round(float(matches.group(1))))
 
     def get_timeline_size(self, repo_dir: Path, tenantid: ZTenantId, timelineid: ZTimelineId):
