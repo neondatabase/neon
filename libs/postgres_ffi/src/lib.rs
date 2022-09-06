@@ -77,6 +77,8 @@ pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
 pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 
+pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
+
 // PG timeline is always 1, changing it doesn't have any useful meaning in Neon.
 //
 // NOTE: this is not to be confused with Neon timelines; different concept!
