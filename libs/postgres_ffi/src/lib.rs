@@ -74,6 +74,7 @@ pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
 pub const BLCKSZ: u16 = 8192;
 pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
+pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 
 // PG timeline is always 1, changing it doesn't have any useful meaning in Neon.
 //

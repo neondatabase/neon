@@ -18,8 +18,8 @@ use crate::safekeeper::{
 };
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
 use crate::timeline::TimelineTools;
-use postgres_ffi::v14::pg_constants;
 use postgres_ffi::v14::xlog_utils;
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::{
     lsn::Lsn,
     postgres_backend::PostgresBackend,
@@ -100,7 +100,7 @@ fn prepare_safekeeper(spg: &mut SafekeeperPostgresHandler) -> Result<()> {
         ztli: spg.ztimelineid.unwrap(),
         tenant_id: spg.ztenantid.unwrap(),
         tli: 0,
-        wal_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
+        wal_seg_size: WAL_SEGMENT_SIZE as u32, // 16MB, default for tests
     });
 
     let response = spg.timeline.get().process_msg(&greeting_request)?;

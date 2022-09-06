@@ -14,10 +14,10 @@ use super::bindings::{
     XLOG_PAGE_MAGIC,
 };
 use super::pg_constants;
-use super::pg_constants::WAL_SEGMENT_SIZE;
 use crate::v14::waldecoder::WalStreamDecoder;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
+use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -37,7 +37,6 @@ use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
-pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
@@ -318,9 +317,9 @@ impl CheckPoint {
 // We need this segment to start compute node.
 //
 pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, SerializeError> {
-    let mut seg_buf = BytesMut::with_capacity(pg_constants::WAL_SEGMENT_SIZE as usize);
+    let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE as usize);
 
-    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, pg_constants::WAL_SEGMENT_SIZE);
+    let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
@@ -333,7 +332,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
             }
         },
         xlp_sysid: system_id,
-        xlp_seg_size: pg_constants::WAL_SEGMENT_SIZE as u32,
+        xlp_seg_size: WAL_SEGMENT_SIZE as u32,
         xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
     };
 
@@ -341,7 +340,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
     seg_buf.extend_from_slice(&hdr_bytes);
 
     //zero out the rest of the file
-    seg_buf.resize(pg_constants::WAL_SEGMENT_SIZE, 0);
+    seg_buf.resize(WAL_SEGMENT_SIZE, 0);
     Ok(seg_buf.freeze())
 }
 

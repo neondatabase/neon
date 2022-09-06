@@ -9,8 +9,8 @@
 //! for that is in pageserver/src/walrecord.rs
 //!
 use super::bindings::{XLogLongPageHeaderData, XLogPageHeaderData, XLogRecord, XLOG_PAGE_MAGIC};
-use super::pg_constants;
 use super::xlog_utils::*;
+use crate::WAL_SEGMENT_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
 use log::*;
@@ -133,7 +133,7 @@ impl WalStreamDecoder {
             // However, we may have to skip some page headers if we're processing the XLOG_SWITCH record or skipping padding for whatever reason.
             match self.state {
                 State::WaitingForRecord | State::ReassemblingRecord { .. } => {
-                    if self.lsn.segment_offset(pg_constants::WAL_SEGMENT_SIZE) == 0 {
+                    if self.lsn.segment_offset(WAL_SEGMENT_SIZE) == 0 {
                         // parse long header
 
                         if self.inputbuf.remaining() < XLOG_SIZE_OF_XLOG_LONG_PHD {
@@ -265,7 +265,7 @@ impl WalStreamDecoder {
         // to the next WAL segment.
         let next_lsn = if xlogrec.is_xlog_switch_record() {
             trace!("saw xlog switch record at {}", self.lsn);
-            self.lsn + self.lsn.calc_padding(pg_constants::WAL_SEGMENT_SIZE as u64)
+            self.lsn + self.lsn.calc_padding(WAL_SEGMENT_SIZE as u64)
         } else {
             // Pad to an 8-byte boundary
             self.lsn.align()
