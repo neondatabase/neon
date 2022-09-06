@@ -7,7 +7,7 @@
 //! comments on them.
 //!
 
-use super::bindings::PageHeaderData;
+use super::bindings::{PageHeaderData, XLogRecord};
 use crate::BLCKSZ;
 
 //
@@ -176,7 +176,7 @@ pub const XLOG_DBASE_DROP: u8 = 0x10;
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
-pub const SIZEOF_XLOGRECORD: u32 = 24;
+pub const SIZEOF_XLOGRECORD: u32 = std::mem::size_of::<XLogRecord>() as u32;
 
 //
 // from xlogrecord.h

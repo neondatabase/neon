@@ -14,7 +14,7 @@ use super::bindings::{
     XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
 use super::pg_constants;
-use crate::v14::waldecoder::WalStreamDecoder;
+use super::waldecoder::WalStreamDecoder;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
 use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -428,10 +428,9 @@ mod tests {
     use utils::const_assert;
 
     fn init_logging() {
-        let _ = env_logger::Builder::from_env(
-            env_logger::Env::default()
-                .default_filter_or("wal_craft=info,postgres_ffi::xlog_utils=trace"),
-        )
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+            format!("wal_craft=info,postgres_ffi::{PG_MAJORVERSION}::xlog_utils=trace"),
+        ))
         .is_test(true)
         .try_init();
     }
@@ -444,8 +443,8 @@ mod tests {
             .join("..")
             .join("..");
         let cfg = Conf {
-            pg_distrib_dir: top_path.join(format!("pg_install/v{PG_MAJORVERSION}")),
-            datadir: top_path.join(format!("test_output/{}", test_name)),
+            pg_distrib_dir: top_path.join(format!("pg_install/{PG_MAJORVERSION}")),
+            datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
         };
         if cfg.datadir.exists() {
             fs::remove_dir_all(&cfg.datadir).unwrap();
