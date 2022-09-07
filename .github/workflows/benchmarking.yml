@@ -131,11 +131,12 @@ jobs:
       POSTGRES_DISTRIB_DIR: /usr
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
+      SAVE_PERF_REPORT: true
 
     strategy:
       fail-fast: false
       matrix:
-        connstr: [ BENCHMARK_CAPTEST_CONNSTR, BENCHMARK_RDS_CONNSTR ]
+        platform: [ neon-captest, rds-aurora ]
 
     runs-on: dev
     container:
@@ -147,26 +148,40 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    - name: Calculate platform
-      id: calculate-platform
-      env:
-        CONNSTR: ${{ matrix.connstr }}
-      run: |
-        if [ "${CONNSTR}" = "BENCHMARK_CAPTEST_CONNSTR" ]; then
-          PLATFORM=neon-captest
-        elif [ "${CONNSTR}" = "BENCHMARK_RDS_CONNSTR" ]; then
-          PLATFORM=rds-aurora
-        else
-          echo 2>&1 "Unknown CONNSTR=${CONNSTR}. Allowed are BENCHMARK_CAPTEST_CONNSTR, and BENCHMARK_RDS_CONNSTR only"
-          exit 1
-        fi
-
-        echo "::set-output name=PLATFORM::${PLATFORM}"
-
     - name: Install Deps
       run: |
         sudo apt -y update
         sudo apt install -y postgresql-14
+
+    - name: Create Neon Project
+      if: matrix.platform == 'neon-captest'
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        environment: dev
+        api_key: ${{ secrets.NEON_CAPTEST_API_KEY }}
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        case "${PLATFORM}" in
+          neon-captest)
+            CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
+            ;;
+          rds-aurora)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_CONNSTR }}
+            ;;
+          *)
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest' or 'rds-aurora'"
+            exit 1
+            ;;
+        esac
+
+        echo "::set-output name=connstr::${CONNSTR}"
+
+        psql ${CONNSTR} -c "SELECT version();"
+      env:
+        PLATFORM: ${{ matrix.platform }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -174,11 +189,11 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
         test_selection: performance
         run_in_parallel: false
-        save_perf_report: true
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
       env:
-        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
-        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        PLATFORM: ${{ matrix.platform }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
@@ -188,25 +203,25 @@ jobs:
         build_type: ${{ env.BUILD_TYPE }}
         test_selection: performance
         run_in_parallel: false
-        save_perf_report: true
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
       env:
-        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
-        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        PLATFORM: ${{ matrix.platform }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
-    - name: Benchmark simple-update
+    - name: Benchmark select-only
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
         test_selection: performance
         run_in_parallel: false
-        save_perf_report: true
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
       env:
-        PLATFORM: ${{ steps.calculate-platform.outputs.PLATFORM }}
-        BENCHMARK_CONNSTR: ${{ secrets[matrix.connstr] }}
+        PLATFORM: ${{ matrix.platform }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
@@ -215,6 +230,14 @@ jobs:
       with:
         action: generate
         build_type: ${{ env.BUILD_TYPE }}
+
+    - name: Delete Neon Project
+      if: ${{ matrix.platform == 'neon-captest' && always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        environment: dev
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_CAPTEST_API_KEY }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
