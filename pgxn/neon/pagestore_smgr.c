@@ -959,7 +959,15 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (IS_LOCAL_REL(reln))
 		mdextend(reln, forkNum, blkno, buffer, skipFsync);
 #endif
-
+	/* smgr_extend is usually called for zeroed page, so lsn==InvalidXLogRecPtr.
+	 * And as far as we are not updating lat written lsn for the relation metadata in smgr_write,
+	 * it will not be set when page is wal-logged and written to the disk.
+	 * So use current LSN to associate with relation metadata.
+	 */
+	#if 0
+	if (lsn == InvalidXLogRecPtr)
+		lsn = GetXLogInsertRecPtr();
+	#endif
 	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
 }
 
