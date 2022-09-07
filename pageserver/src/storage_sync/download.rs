@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
+    TEMP_FILE_SUFFIX,
 };
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
 
@@ -25,8 +26,6 @@ use super::{
     index::{IndexPart, RemoteTimeline},
     LayersDownload, SyncData, SyncQueue,
 };
-
-pub const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
 // We collect timelines remotely available for each tenant
 // in case we failed to gather all index parts (due to an error)
@@ -251,7 +250,7 @@ pub(super) async fn download_timeline_layers<'a>(
                 // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
                 // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
                 let temp_file_path =
-                    path_with_suffix_extension(&layer_destination_path, TEMP_DOWNLOAD_EXTENSION);
+                    path_with_suffix_extension(&layer_destination_path, TEMP_FILE_SUFFIX);
 
                 let mut destination_file =
                     fs::File::create(&temp_file_path).await.with_context(|| {

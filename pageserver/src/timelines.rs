@@ -3,6 +3,7 @@
 //
 
 use anyhow::{bail, ensure, Context, Result};
+use remote_storage::path_with_suffix_extension;
 
 use std::{
     fs,
@@ -18,12 +19,12 @@ use utils::{
     zid::{ZTenantId, ZTimelineId},
 };
 
-use crate::import_datadir;
 use crate::tenant_mgr;
 use crate::CheckpointConfig;
 use crate::{
     config::PageServerConf, storage_sync::index::RemoteIndex, tenant_config::TenantConfOpt,
 };
+use crate::{import_datadir, TEMP_FILE_SUFFIX};
 use crate::{
     layered_repository::{Repository, Timeline},
     walredo::WalRedoManager,
@@ -105,13 +106,17 @@ fn run_initdb(conf: &'static PageServerConf, initdbpath: &Path) -> Result<()> {
 //
 fn bootstrap_timeline(
     conf: &'static PageServerConf,
-    tenantid: ZTenantId,
-    tli: ZTimelineId,
+    tenant_id: ZTenantId,
+    timeline_id: ZTimelineId,
     repo: &Repository,
 ) -> Result<Arc<Timeline>> {
-    let initdb_path = conf
-        .tenant_path(&tenantid)
-        .join(format!("tmp-timeline-{}", tli));
+    // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+    // temporary directory for basebackup files for the given timeline.
+    let initdb_path = path_with_suffix_extension(
+        conf.timelines_path(&tenant_id)
+            .join(format!("basebackup-{timeline_id}")),
+        TEMP_FILE_SUFFIX,
+    );
 
     // Init temporarily repo to get bootstrap data
     run_initdb(conf, &initdb_path)?;
@@ -123,7 +128,7 @@ fn bootstrap_timeline(
     // LSN, and any WAL after that.
     // Initdb lsn will be equal to last_record_lsn which will be set after import.
     // Because we know it upfront avoid having an option or dummy zero value by passing it to create_empty_timeline.
-    let timeline = repo.create_empty_timeline(tli, lsn)?;
+    let timeline = repo.create_empty_timeline(timeline_id, lsn)?;
     import_datadir::import_timeline_from_postgres_datadir(&pgdata_path, &*timeline, lsn)?;
 
     fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -134,7 +139,7 @@ fn bootstrap_timeline(
 
     info!(
         "created root timeline {} timeline.lsn {}",
-        tli,
+        timeline_id,
         timeline.get_last_record_lsn()
     );
 

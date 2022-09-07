@@ -34,7 +34,7 @@ use crate::layered_repository::storage_layer::{
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::virtual_file::VirtualFile;
-use crate::walrecord;
+use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use rand::{distributions::Alphanumeric, Rng};
@@ -447,11 +447,12 @@ impl DeltaLayer {
             .collect();
 
         conf.timeline_path(&timelineid, &tenantid).join(format!(
-            "{}-XXX__{:016X}-{:016X}.{}.temp",
+            "{}-XXX__{:016X}-{:016X}.{}.{}",
             key_start,
             u64::from(lsn_range.start),
             u64::from(lsn_range.end),
-            rand_string
+            rand_string,
+            TEMP_FILE_SUFFIX,
         ))
     }
 

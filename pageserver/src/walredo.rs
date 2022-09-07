@@ -21,6 +21,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use remote_storage::path_with_suffix_extension;
 use serde::Serialize;
 use std::fs;
 use std::fs::OpenOptions;
@@ -37,7 +38,6 @@ use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock, zid::ZTenantId};
 
-use crate::config::PageServerConf;
 use crate::metrics::{
     WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
 };
@@ -45,6 +45,7 @@ use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::reltag::{RelTag, SlruKind};
 use crate::repository::Key;
 use crate::walrecord::ZenithWalRecord;
+use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
@@ -569,20 +570,24 @@ impl PostgresRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    fn launch(conf: &PageServerConf, tenantid: &ZTenantId) -> Result<PostgresRedoProcess, Error> {
+    fn launch(conf: &PageServerConf, tenant_id: &ZTenantId) -> Result<PostgresRedoProcess, Error> {
         // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
         // just create one with constant name. That fails if you try to launch more than
         // one WAL redo manager concurrently.
-        let datadir = conf.tenant_path(tenantid).join("wal-redo-datadir");
+        let datadir = path_with_suffix_extension(
+            conf.tenant_path(tenant_id).join("wal-redo-datadir"),
+            TEMP_FILE_SUFFIX,
+        );
 
         // Create empty data directory for wal-redo postgres, deleting old one first.
         if datadir.exists() {
-            info!("directory {:?} exists, removing", &datadir);
-            if let Err(e) = fs::remove_dir_all(&datadir) {
-                error!("could not remove old wal-redo-datadir: {:#}", e);
-            }
+            info!(
+                "old temporary datadir {} exists, removing",
+                datadir.display()
+            );
+            fs::remove_dir_all(&datadir)?;
         }
-        info!("running initdb in {:?}", datadir.display());
+        info!("running initdb in {}", datadir.display());
         let initdb = Command::new(conf.pg_bin_dir().join("initdb"))
             .args(&["-D", &datadir.to_string_lossy()])
             .arg("-N")
@@ -591,7 +596,7 @@ impl PostgresRedoProcess {
             .env("DYLD_LIBRARY_PATH", conf.pg_lib_dir())
             .close_fds()
             .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {}", e)))?;
+            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
 
         if !initdb.status.success() {
             return Err(Error::new(
@@ -645,7 +650,7 @@ impl PostgresRedoProcess {
             })?;
 
         info!(
-            "launched WAL redo postgres process on {:?}",
+            "launched WAL redo postgres process on {}",
             datadir.display()
         );
 

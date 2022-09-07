@@ -470,7 +470,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     let response_data = tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_list").entered();
-        crate::tenant_mgr::list_tenants(&remote_index)
+        crate::tenant_mgr::list_tenant_info(&remote_index)
     })
     .await
     .map_err(ApiError::from_err)?;
@@ -640,7 +640,8 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     tokio::task::spawn_blocking(move || {
         let _enter = info_span!("tenant_config", tenant = ?tenant_id).entered();
 
-        tenant_mgr::update_tenant_config(tenant_conf, tenant_id)
+        let state = get_state(&request);
+        tenant_mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
     })
     .await
     .map_err(ApiError::from_err)??;
