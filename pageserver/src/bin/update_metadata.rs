@@ -3,7 +3,7 @@
 //! A handy tool for debugging, that's all.
 use anyhow::Result;
 use clap::{App, Arg};
-use pageserver::layered_repository::metadata::TimelineMetadata;
+use pageserver::tenant::metadata::TimelineMetadata;
 use std::path::PathBuf;
 use std::str::FromStr;
 use utils::{lsn::Lsn, project_git_version};

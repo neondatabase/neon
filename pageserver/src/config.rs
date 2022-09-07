@@ -19,7 +19,7 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
-use crate::layered_repository::TIMELINES_SEGMENT_NAME;
+use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::tenant_config::{TenantConf, TenantConfOpt};
 
 pub mod defaults {

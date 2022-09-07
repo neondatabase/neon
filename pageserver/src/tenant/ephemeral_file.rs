@@ -2,11 +2,11 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
-use crate::layered_repository::blob_io::BlobWriter;
-use crate::layered_repository::block_io::BlockReader;
 use crate::page_cache;
 use crate::page_cache::PAGE_SZ;
 use crate::page_cache::{ReadBufResult, WriteBufResult};
+use crate::tenant::blob_io::BlobWriter;
+use crate::tenant::block_io::BlockReader;
 use crate::virtual_file::VirtualFile;
 use once_cell::sync::Lazy;
 use std::cmp::min;
@@ -330,13 +330,13 @@ fn to_io_error(e: anyhow::Error, context: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
-    use crate::layered_repository::block_io::BlockCursor;
+    use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+    use crate::tenant::block_io::BlockCursor;
     use rand::{seq::SliceRandom, thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
 
-    fn repo_harness(
+    fn harness(
         test_name: &str,
     ) -> Result<(&'static PageServerConf, ZTenantId, ZTimelineId), io::Error> {
         let repo_dir = PageServerConf::test_repo_dir(test_name);
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_ephemeral_files() -> Result<(), io::Error> {
-        let (conf, tenantid, timelineid) = repo_harness("ephemeral_files")?;
+        let (conf, tenantid, timelineid) = harness("ephemeral_files")?;
 
         let file_a = EphemeralFile::create(conf, tenantid, timelineid)?;
 
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_ephemeral_blobs() -> Result<(), io::Error> {
-        let (conf, tenantid, timelineid) = repo_harness("ephemeral_blobs")?;
+        let (conf, tenantid, timelineid) = harness("ephemeral_blobs")?;
 
         let mut file = EphemeralFile::create(conf, tenantid, timelineid)?;
 

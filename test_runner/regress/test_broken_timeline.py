@@ -71,7 +71,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     # First timeline would not get loaded into pageserver due to corrupt metadata file
     with pytest.raises(
-        Exception, match=f"Could not get timeline {timeline1} in tenant {tenant1}"
+        Exception, match=f"Timeline {timeline1} was not found for tenant {tenant1}"
     ) as err:
         pg1.start()
     log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")
@@ -80,7 +80,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # We don't have the remote storage enabled, which means timeline is in an incorrect state,
     # it's not loaded at all
     with pytest.raises(
-        Exception, match=f"Could not get timeline {timeline2} in tenant {tenant2}"
+        Exception, match=f"Timeline {timeline2} was not found for tenant {tenant2}"
     ) as err:
         pg2.start()
     log.info(f"compute startup failed eagerly for timeline with corrupt metadata: {err}")

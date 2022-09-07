@@ -543,13 +543,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
     match tenant_match.subcommand() {
         Some(("list", _)) => {
             for t in pageserver.tenant_list()? {
-                println!(
-                    "{} {}",
-                    t.id,
-                    t.state
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| String::from(""))
-                );
+                println!("{} {:?}", t.id, t.state);
             }
         }
         Some(("create", create_match)) => {

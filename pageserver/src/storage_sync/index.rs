@@ -15,7 +15,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::RwLock;
 use tracing::log::warn;
 
-use crate::{config::PageServerConf, layered_repository::metadata::TimelineMetadata};
+use crate::{config::PageServerConf, tenant::metadata::TimelineMetadata};
 use utils::{
     lsn::Lsn,
     zid::{ZTenantId, ZTenantTimelineId, ZTimelineId},
@@ -340,11 +340,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
 
     #[test]
     fn index_part_conversion() {
-        let harness = RepoHarness::create("index_part_conversion").unwrap();
+        let harness = TenantHarness::create("index_part_conversion").unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         let metadata =
             TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn index_part_conversion_negatives() {
-        let harness = RepoHarness::create("index_part_conversion_negatives").unwrap();
+        let harness = TenantHarness::create("index_part_conversion_negatives").unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
         let metadata =
             TimelineMetadata::new(Lsn(5).align(), Some(Lsn(4)), None, Lsn(3), Lsn(2), Lsn(1));

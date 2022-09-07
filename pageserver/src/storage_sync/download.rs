@@ -17,7 +17,7 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::PageServerConf, layered_repository::metadata::metadata_path, storage_sync::SyncTask,
+    config::PageServerConf, storage_sync::SyncTask, tenant::metadata::metadata_path,
     TEMP_FILE_SUFFIX,
 };
 use utils::zid::{ZTenantId, ZTenantTimelineId, ZTimelineId};
@@ -425,18 +425,18 @@ mod tests {
     use utils::lsn::Lsn;
 
     use crate::{
-        layered_repository::repo_harness::{RepoHarness, TIMELINE_ID},
         storage_sync::{
             index::RelativePath,
             test_utils::{create_local_timeline, dummy_metadata},
         },
+        tenant::harness::{TenantHarness, TIMELINE_ID},
     };
 
     use super::*;
 
     #[tokio::test]
     async fn download_timeline() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline")?;
+        let harness = TenantHarness::create("download_timeline")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
 
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
@@ -537,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_timeline_negatives() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("download_timeline_negatives")?;
+        let harness = TenantHarness::create("download_timeline_negatives")?;
         let sync_queue = SyncQueue::new(NonZeroUsize::new(100).unwrap());
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
         let storage = GenericRemoteStorage::new(LocalFs::new(
@@ -596,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_index_part() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("test_download_index_part")?;
+        let harness = TenantHarness::create("test_download_index_part")?;
         let sync_id = ZTenantTimelineId::new(harness.tenant_id, TIMELINE_ID);
 
         let storage = GenericRemoteStorage::new(LocalFs::new(

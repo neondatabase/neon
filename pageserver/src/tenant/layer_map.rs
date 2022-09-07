@@ -10,11 +10,11 @@
 //! corresponding files are written to disk.
 //!
 
-use crate::layered_repository::inmemory_layer::InMemoryLayer;
-use crate::layered_repository::storage_layer::Layer;
-use crate::layered_repository::storage_layer::{range_eq, range_overlaps};
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
+use crate::tenant::inmemory_layer::InMemoryLayer;
+use crate::tenant::storage_layer::Layer;
+use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;

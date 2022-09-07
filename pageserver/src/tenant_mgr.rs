@@ -1,25 +1,30 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use crate::config::PageServerConf;
-use crate::http::models::TenantInfo;
-use crate::layered_repository::ephemeral_file::is_ephemeral_file;
-use crate::layered_repository::metadata::{TimelineMetadata, METADATA_FILE_NAME};
-use crate::layered_repository::Repository;
-use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
-use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
-use crate::task_mgr::{self, TaskKind};
-use crate::tenant_config::{TenantConf, TenantConfOpt};
-use crate::walredo::{PostgresRedoManager, WalRedoManager};
-use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
-use anyhow::Context;
-use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use anyhow::Context;
 use tracing::*;
+
+use remote_storage::{path_with_suffix_extension, GenericRemoteStorage};
+
+use crate::config::PageServerConf;
+use crate::http::models::TenantInfo;
+use crate::storage_sync::index::{RemoteIndex, RemoteTimelineIndex};
+use crate::storage_sync::{self, LocalTimelineInitStatus, SyncStartupData};
+use crate::task_mgr::{self, TaskKind};
+use crate::tenant::{
+    ephemeral_file::is_ephemeral_file,
+    metadata::{TimelineMetadata, METADATA_FILE_NAME},
+    Tenant, TenantState,
+};
+use crate::tenant_config::{TenantConf, TenantConfOpt};
+use crate::walredo::PostgresRedoManager;
+use crate::{TenantTimelineValues, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe_dir;
 use utils::zid::{ZTenantId, ZTimelineId};
@@ -28,64 +33,31 @@ mod tenants_state {
     use once_cell::sync::Lazy;
     use std::{
         collections::HashMap,
-        sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+        sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     };
     use utils::zid::ZTenantId;
 
-    use crate::tenant_mgr::Tenant;
+    use crate::tenant::Tenant;
 
-    static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Tenant>>> =
+    static TENANTS: Lazy<RwLock<HashMap<ZTenantId, Arc<Tenant>>>> =
         Lazy::new(|| RwLock::new(HashMap::new()));
 
-    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Tenant>> {
+    pub(super) fn read_tenants() -> RwLockReadGuard<'static, HashMap<ZTenantId, Arc<Tenant>>> {
         TENANTS
             .read()
             .expect("Failed to read() tenants lock, it got poisoned")
     }
 
-    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Tenant>> {
+    pub(super) fn write_tenants() -> RwLockWriteGuard<'static, HashMap<ZTenantId, Arc<Tenant>>> {
         TENANTS
             .write()
             .expect("Failed to write() tenants lock, it got poisoned")
     }
 }
 
-struct Tenant {
-    state: TenantState,
-    /// Contains in-memory state, including the timeline that might not yet flushed on disk or loaded form disk.
-    repo: Arc<Repository>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum TenantState {
-    // This tenant exists on local disk, and the layer map has been loaded into memory.
-    // The local disk might have some newer files that don't exist in cloud storage yet.
-    Active,
-    // Tenant is active, but there is no walreceiver connection.
-    Idle,
-    // This tenant exists on local disk, and the layer map has been loaded into memory.
-    // The local disk might have some newer files that don't exist in cloud storage yet.
-    // The tenant cannot be accessed anymore for any reason, but graceful shutdown.
-    Stopping,
-
-    // Something went wrong loading the tenant state
-    Broken,
-}
-
-impl std::fmt::Display for TenantState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Active => f.write_str("Active"),
-            Self::Idle => f.write_str("Idle"),
-            Self::Stopping => f.write_str("Stopping"),
-            Self::Broken => f.write_str("Broken"),
-        }
-    }
-}
-
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
-/// are scheduled for download and added to the repository once download is completed.
+/// are scheduled for download and added to the tenant once download is completed.
 pub fn init_tenant_mgr(
     conf: &'static PageServerConf,
     remote_storage: Option<GenericRemoteStorage>,
@@ -128,7 +100,7 @@ pub fn init_tenant_mgr(
         )
     };
 
-    attach_local_tenants(conf, &remote_index, tenants_to_attach)?;
+    attach_local_tenants(conf, &remote_index, tenants_to_attach);
 
     Ok(remote_index)
 }
@@ -141,7 +113,7 @@ pub fn attach_local_tenants(
     conf: &'static PageServerConf,
     remote_index: &RemoteIndex,
     tenants_to_attach: TenantTimelineValues<TimelineMetadata>,
-) -> anyhow::Result<()> {
+) {
     let _entered = info_span!("attach_local_tenants").entered();
     let number_of_tenants = tenants_to_attach.0.len();
 
@@ -152,104 +124,109 @@ pub fn attach_local_tenants(
         );
         debug!("Timelines to attach: {local_timelines:?}");
 
-        let repository = load_local_repo(conf, tenant_id, remote_index)
-            .context("Failed to load repository for tenant")?;
-
-        let repo = Arc::clone(&repository);
+        let tenant = load_local_tenant(conf, tenant_id, remote_index);
         {
             match tenants_state::write_tenants().entry(tenant_id) {
                 hash_map::Entry::Occupied(_) => {
-                    anyhow::bail!("Cannot attach tenant {tenant_id}: there's already an entry in the tenant state");
+                    error!("Cannot attach tenant {tenant_id}: there's already an entry in the tenant state");
+                    continue;
                 }
                 hash_map::Entry::Vacant(v) => {
-                    v.insert(Tenant {
-                        state: TenantState::Idle,
-                        repo,
-                    });
+                    v.insert(Arc::clone(&tenant));
                 }
             }
         }
-        // XXX: current timeline init enables walreceiver that looks for tenant in the state, so insert the tenant entry before
-        repository
-            .init_attach_timelines(local_timelines)
-            .context("Failed to attach timelines for tenant")?;
+
+        if tenant.current_state() == TenantState::Broken {
+            warn!("Skipping timeline load for broken tenant {tenant_id}")
+        } else {
+            let has_timelines = !local_timelines.is_empty();
+            match tenant.init_attach_timelines(local_timelines) {
+                Ok(()) => {
+                    info!("successfully loaded local timelines for tenant {tenant_id}");
+                    tenant.activate(has_timelines);
+                }
+                Err(e) => {
+                    error!("Failed to attach tenant timelines: {e:?}");
+                    tenant.set_state(TenantState::Broken);
+                }
+            }
+        }
     }
 
-    info!("Processed {number_of_tenants} local tenants during attach");
-    Ok(())
+    info!("Processed {number_of_tenants} local tenants during attach")
 }
 
-fn load_local_repo(
+fn load_local_tenant(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
     remote_index: &RemoteIndex,
-) -> anyhow::Result<Arc<Repository>> {
-    let repository = Repository::new(
+) -> Arc<Tenant> {
+    let tenant = Arc::new(Tenant::new(
         conf,
         TenantConfOpt::default(),
         Arc::new(PostgresRedoManager::new(conf, tenant_id)),
         tenant_id,
         remote_index.clone(),
         conf.remote_storage_config.is_some(),
-    );
-    let tenant_conf = Repository::load_tenant_config(conf, tenant_id)?;
-    repository.update_tenant_config(tenant_conf);
-
-    Ok(Arc::new(repository))
+    ));
+    match Tenant::load_tenant_config(conf, tenant_id) {
+        Ok(tenant_conf) => {
+            tenant.update_tenant_config(tenant_conf);
+            tenant.activate(false);
+        }
+        Err(e) => {
+            error!("Failed to read config for tenant {tenant_id}, disabling tenant: {e:?}");
+            tenant.set_state(TenantState::Broken);
+        }
+    }
+    tenant
 }
 
 ///
 /// Shut down all tenants. This runs as part of pageserver shutdown.
 ///
 pub async fn shutdown_all_tenants() {
-    let tenantids = {
+    let tenants_to_shut_down = {
         let mut m = tenants_state::write_tenants();
-        let mut tenantids = Vec::new();
-        for (tenantid, tenant) in m.iter_mut() {
-            match tenant.state {
-                TenantState::Active | TenantState::Idle | TenantState::Stopping => {
-                    tenant.state = TenantState::Stopping;
-                    tenantids.push(*tenantid)
-                }
-                TenantState::Broken => {}
+        let mut tenants_to_shut_down = Vec::with_capacity(m.len());
+        for (_, tenant) in m.drain() {
+            if tenant.is_active() {
+                // updates tenant state, forbidding new GC and compaction iterations from starting
+                tenant.set_state(TenantState::Paused);
+                tenants_to_shut_down.push(tenant)
             }
         }
         drop(m);
-        tenantids
+        tenants_to_shut_down
     };
 
+    // Shut down all existing walreceiver connections and stop accepting the new ones.
     task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
 
     // Ok, no background tasks running anymore. Flush any remaining data in
     // memory to disk.
     //
     // We assume that any incoming connections that might request pages from
-    // the repository have already been terminated by the caller, so there
+    // the tenant have already been terminated by the caller, so there
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
-    for tenant_id in tenantids {
+    for tenant in tenants_to_shut_down {
+        let tenant_id = tenant.tenant_id();
         debug!("shutdown tenant {tenant_id}");
-        match get_repository_for_tenant(tenant_id) {
-            Ok(repo) => {
-                if let Err(err) = repo.checkpoint() {
-                    error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
-                }
-            }
-            Err(err) => {
-                error!("Could not get repository for tenant {tenant_id} during shutdown: {err:?}");
-            }
+
+        if let Err(err) = tenant.checkpoint() {
+            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
         }
     }
 }
 
-fn create_repo(
+fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: ZTenantId,
-    wal_redo_manager: Arc<dyn WalRedoManager + Send + Sync>,
-    remote_index: RemoteIndex,
-) -> anyhow::Result<Arc<Repository>> {
+) -> anyhow::Result<()> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
         !target_tenant_directory.exists(),
@@ -282,7 +259,7 @@ fn create_repo(
         )
     })?;
     // first, create a config in the top-level temp directory, fsync the file
-    Repository::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
+    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true)?;
     // then, create a subdirectory in the top-level temp directory, fsynced
     crashsafe_dir::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
@@ -312,18 +289,11 @@ fn create_repo(
     fs::File::open(target_dir_parent)?.sync_all()?;
 
     info!(
-        "created directory structure in {}",
+        "created tenant directory structure in {}",
         target_tenant_directory.display()
     );
 
-    Ok(Arc::new(Repository::new(
-        conf,
-        tenant_conf,
-        wal_redo_manager,
-        tenant_id,
-        remote_index,
-        conf.remote_storage_config.is_some(),
-    )))
+    Ok(())
 }
 
 fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
@@ -350,12 +320,17 @@ pub fn create_tenant(
         }
         hash_map::Entry::Vacant(v) => {
             let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
-            let repo = create_repo(conf, tenant_conf, tenant_id, wal_redo_manager, remote_index)?;
-            v.insert(Tenant {
-                state: TenantState::Active,
-                repo,
-            });
-            crate::tenant_tasks::start_background_loops(tenant_id);
+            create_tenant_files(conf, tenant_conf, tenant_id)?;
+            let tenant = Arc::new(Tenant::new(
+                conf,
+                tenant_conf,
+                wal_redo_manager,
+                tenant_id,
+                remote_index,
+                conf.remote_storage_config.is_some(),
+            ));
+            tenant.activate(false);
+            v.insert(tenant);
             Ok(Some(tenant_id))
         }
     }
@@ -367,70 +342,23 @@ pub fn update_tenant_config(
     tenant_id: ZTenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
-    get_repository_for_tenant(tenant_id)?.update_tenant_config(tenant_conf);
-
-    Repository::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
+    get_tenant(tenant_id, true)?.update_tenant_config(tenant_conf);
+    Tenant::persist_tenant_config(&TenantConf::path(conf, tenant_id), tenant_conf, false)?;
     Ok(())
 }
 
-pub fn get_tenant_state(tenantid: ZTenantId) -> Option<TenantState> {
-    Some(tenants_state::read_tenants().get(&tenantid)?.state)
-}
-
-pub fn set_tenant_state(tenant_id: ZTenantId, new_state: TenantState) -> anyhow::Result<()> {
-    let old_state = {
-        let mut m = tenants_state::write_tenants();
-        let tenant = m
-            .get_mut(&tenant_id)
-            .with_context(|| format!("Tenant not found for id {tenant_id}"))?;
-        let old_state = tenant.state;
-        tenant.state = new_state;
-        old_state
-    };
-
-    match (old_state, new_state) {
-        (TenantState::Broken, TenantState::Broken)
-        | (TenantState::Active, TenantState::Active)
-        | (TenantState::Idle, TenantState::Idle)
-        | (TenantState::Stopping, TenantState::Stopping) => {
-            debug!("tenant {tenant_id} already in state {new_state}");
-        }
-        (TenantState::Broken, ignored) => {
-            debug!("Ignoring {ignored} since tenant {tenant_id} is in broken state");
-        }
-        (_, TenantState::Broken) => {
-            debug!("Setting tenant {tenant_id} status to broken");
-        }
-        (TenantState::Stopping, ignored) => {
-            debug!("Ignoring {ignored} since tenant {tenant_id} is in stopping state");
-        }
-        (TenantState::Idle, TenantState::Active) => {
-            info!("activating tenant {tenant_id}");
-
-            // Spawn gc and compaction loops. The loops will shut themselves
-            // down when they notice that the tenant is inactive.
-            crate::tenant_tasks::start_background_loops(tenant_id);
-        }
-        (TenantState::Idle, TenantState::Stopping) => {
-            info!("stopping idle tenant {tenant_id}");
-        }
-        (TenantState::Active, TenantState::Stopping | TenantState::Idle) => {
-            info!("stopping tenant {tenant_id} tasks due to new state {new_state}");
-
-            // Note: The caller is responsible for waiting for any tasks to finish.
-        }
-    }
-
-    Ok(())
-}
-
-pub fn get_repository_for_tenant(tenant_id: ZTenantId) -> anyhow::Result<Arc<Repository>> {
+/// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
+/// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
+pub fn get_tenant(tenant_id: ZTenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
     let m = tenants_state::read_tenants();
     let tenant = m
         .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found"))?;
-
-    Ok(Arc::clone(&tenant.repo))
+        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+    if active_only && !tenant.is_active() {
+        anyhow::bail!("Tenant {tenant_id} is not active")
+    } else {
+        Ok(Arc::clone(tenant))
+    }
 }
 
 pub async fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> anyhow::Result<()> {
@@ -455,9 +383,14 @@ pub async fn delete_timeline(tenant_id: ZTenantId, timeline_id: ZTimelineId) -> 
     info!("waiting for timeline tasks to shutdown");
     task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
     info!("timeline task shutdown completed");
-    match tenants_state::read_tenants().get(&tenant_id) {
-        Some(tenant) => tenant.repo.delete_timeline(timeline_id)?,
-        None => anyhow::bail!("Tenant {tenant_id} not found in local tenant state"),
+    match get_tenant(tenant_id, true) {
+        Ok(tenant) => {
+            tenant.delete_timeline(timeline_id)?;
+            if tenant.list_timelines().is_empty() {
+                tenant.activate(false);
+            }
+        }
+        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
     }
 
     Ok(())
@@ -467,21 +400,24 @@ pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: ZTenantId,
 ) -> anyhow::Result<()> {
-    set_tenant_state(tenant_id, TenantState::Stopping)?;
+    let tenant = match {
+        let mut tenants_accessor = tenants_state::write_tenants();
+        tenants_accessor.remove(&tenant_id)
+    } {
+        Some(tenant) => tenant,
+        None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+    };
+
+    tenant.set_state(TenantState::Paused);
     // shutdown all tenant and timeline tasks: gc, compaction, page service)
     task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
-    {
-        let mut tenants_accessor = tenants_state::write_tenants();
-        tenants_accessor.remove(&tenant_id);
-    }
-
     // If removal fails there will be no way to successfully retry detach,
     // because the tenant no longer exists in the in-memory map. And it needs to be removed from it
-    // before we remove files, because it contains references to repository
+    // before we remove files, because it contains references to tenant
     // which references ephemeral files which are deleted on drop. So if we keep these references,
     // we will attempt to remove files which no longer exist. This can be fixed by having shutdown
-    // mechanism for repository that will clean temporary data to avoid any references to ephemeral files
+    // mechanism for tenant that will clean temporary data to avoid any references to ephemeral files
     let local_tenant_directory = conf.tenant_path(&tenant_id);
     fs::remove_dir_all(&local_tenant_directory).with_context(|| {
         format!(
@@ -512,7 +448,7 @@ pub fn list_tenant_info(remote_index: &RemoteTimelineIndex) -> Vec<TenantInfo> {
 
             TenantInfo {
                 id: *id,
-                state: Some(tenant.state),
+                state: tenant.current_state(),
                 current_physical_size: None,
                 has_in_progress_downloads,
             }

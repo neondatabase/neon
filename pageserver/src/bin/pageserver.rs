@@ -182,7 +182,7 @@ fn initialize_config(
             cfg_file_path.display()
         );
     } else {
-        // We're initializing the repo, so there's no config file yet
+        // We're initializing the tenant, so there's no config file yet
         (
             DEFAULT_CONFIG_FILE
                 .parse::<toml_edit::Document>()

@@ -3,7 +3,6 @@ pub mod config;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
-pub mod layered_repository;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
@@ -13,6 +12,7 @@ pub mod reltag;
 pub mod repository;
 pub mod storage_sync;
 pub mod task_mgr;
+pub mod tenant;
 pub mod tenant_config;
 pub mod tenant_mgr;
 pub mod tenant_tasks;
@@ -181,7 +181,7 @@ mod backoff_defaults_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::layered_repository::repo_harness::TIMELINE_ID;
+    use crate::tenant::harness::TIMELINE_ID;
 
     use super::*;
 

@@ -5,14 +5,12 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
-use crate::layered_repository::blob_io::{BlobCursor, BlobWriter};
-use crate::layered_repository::block_io::BlockReader;
-use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
-use crate::layered_repository::ephemeral_file::EphemeralFile;
-use crate::layered_repository::storage_layer::{
-    Layer, ValueReconstructResult, ValueReconstructState,
-};
 use crate::repository::{Key, Value};
+use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+use crate::tenant::block_io::BlockReader;
+use crate::tenant::delta_layer::{DeltaLayer, DeltaLayerWriter};
+use crate::tenant::ephemeral_file::EphemeralFile;
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{bail, ensure, Result};
 use std::cell::RefCell;

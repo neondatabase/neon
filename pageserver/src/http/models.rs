@@ -7,8 +7,7 @@ use utils::{
     zid::{NodeId, ZTenantId, ZTimelineId},
 };
 
-// These enums are used in the API response fields.
-use crate::tenant_mgr::TenantState;
+use crate::tenant::TenantState;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -108,7 +107,7 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: ZTenantId,
-    pub state: Option<TenantState>,
+    pub state: TenantState,
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub has_in_progress_downloads: Option<bool>,
 }

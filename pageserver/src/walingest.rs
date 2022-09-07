@@ -30,9 +30,9 @@ use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
-use crate::layered_repository::Timeline;
 use crate::pgdatadir_mapping::*;
 use crate::reltag::{RelTag, SlruKind};
+use crate::tenant::Timeline;
 use crate::walrecord::*;
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::v14::pg_constants;
@@ -1022,16 +1022,13 @@ impl<'a> WalIngest<'a> {
     }
 }
 
-///
-/// Tests that should work the same with any Repository/Timeline implementation.
-///
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::*;
-    use crate::layered_repository::Timeline;
     use crate::pgdatadir_mapping::create_test_timeline;
+    use crate::tenant::harness::*;
+    use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
@@ -1061,8 +1058,8 @@ mod tests {
 
     #[test]
     fn test_relsize() -> Result<()> {
-        let repo = RepoHarness::create("test_relsize")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_relsize")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1189,8 +1186,8 @@ mod tests {
     // and then created it again within the same layer.
     #[test]
     fn test_drop_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_drop_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_drop_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1229,8 +1226,8 @@ mod tests {
     // and then extended it again within the same layer.
     #[test]
     fn test_truncate_extend() -> Result<()> {
-        let repo = RepoHarness::create("test_truncate_extend")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_truncate_extend")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1317,8 +1314,8 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[test]
     fn test_large_rel() -> Result<()> {
-        let repo = RepoHarness::create("test_large_rel")?.load();
-        let tline = create_test_timeline(&repo, TIMELINE_ID)?;
+        let tenant = TenantHarness::create("test_large_rel")?.load();
+        let tline = create_test_timeline(&tenant, TIMELINE_ID)?;
         let mut walingest = init_walingest_test(&*tline)?;
 
         let mut lsn = 0x10;

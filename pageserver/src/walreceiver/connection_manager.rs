@@ -16,10 +16,10 @@ use std::{
     time::Duration,
 };
 
-use crate::layered_repository::Timeline;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::tenant::Timeline;
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use etcd_broker::{
@@ -767,11 +767,11 @@ fn wal_stream_connection_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered_repository::repo_harness::{RepoHarness, TIMELINE_ID};
+    use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
 
     #[test]
     fn no_connection_no_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("no_connection_no_candidate")?;
+        let harness = TenantHarness::create("no_connection_no_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -857,7 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_no_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("connection_no_candidate")?;
+        let harness = TenantHarness::create("connection_no_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn no_connection_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("no_connection_candidate")?;
+        let harness = TenantHarness::create("no_connection_candidate")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_with_many_connection_failures() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("candidate_with_many_connection_failures")?;
+        let harness = TenantHarness::create("candidate_with_many_connection_failures")?;
         let mut state = dummy_state(&harness);
         let now = Utc::now().naive_utc();
 
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("lsn_wal_over_threshcurrent_candidate")?;
+        let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_connection_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("timeout_connection_threshhold_current_candidate")?;
+        let harness = TenantHarness::create("timeout_connection_threshhold_current_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = RepoHarness::create("timeout_wal_over_threshhold_current_candidate")?;
+        let harness = TenantHarness::create("timeout_wal_over_threshhold_current_candidate")?;
         let mut state = dummy_state(&harness);
         let current_lsn = Lsn(100_000).align();
         let new_lsn = Lsn(100_100).align();
@@ -1353,7 +1353,7 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_CONNSTR: &str = "safekeeper_connstr";
 
-    fn dummy_state(harness: &RepoHarness) -> WalreceiverState {
+    fn dummy_state(harness: &TenantHarness) -> WalreceiverState {
         WalreceiverState {
             id: ZTenantTimelineId {
                 tenant_id: harness.tenant_id,
