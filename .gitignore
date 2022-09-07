@@ -15,3 +15,6 @@ test_output/
 
 *.key
 *.crt
+*.o
+*.so
+*.Po
