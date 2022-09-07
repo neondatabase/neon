@@ -61,6 +61,7 @@ jobs:
           # Minimal build on macOS.
           - runs-on: macos-latest
             build_type: debug
+            rust_toolchain: 1.58
             install_rust_toolchain: true
             upload: false
 
